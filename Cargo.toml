@@ -12,3 +12,6 @@ which = "4.3"
 glob = "0.3"
 
 [dependencies]
+lazy_static = "1.4"
+object = "0.29"
+regex = "1.6"
