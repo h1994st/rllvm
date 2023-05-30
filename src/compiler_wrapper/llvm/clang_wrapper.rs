@@ -1,6 +1,8 @@
 //! Clang compiler wrapper
 
-use crate::common::*;
+use std::path::Path;
+
+use crate::{arg_parser::CompilerArgsInfo, compiler_wrapper::*, error::Error};
 
 #[derive(Debug, Default)]
 pub struct ClangWrapper {
@@ -9,12 +11,16 @@ pub struct ClangWrapper {
     wrapped_cxx: String,
     is_silent: bool,
 
-    parse_args_called: bool,
+    is_parse_args_called: bool,
 
     args: CompilerArgsInfo,
 }
 
 impl CompilerWrapper for ClangWrapper {
+    fn program_filepath(&self) -> &Path {
+        todo!()
+    }
+
     fn parse_args<S>(&mut self, args: &[S]) -> Result<&'_ mut Self, Error>
     where
         S: AsRef<str>,
@@ -26,12 +32,12 @@ impl CompilerWrapper for ClangWrapper {
             ));
         }
 
-        if self.parse_args_called {
+        if self.is_parse_args_called {
             return Err(Error::Unknown(
                 "parse_args() cannot be called twice on the same instance".to_string(),
             ));
         }
-        self.parse_args_called = true;
+        self.is_parse_args_called = true;
 
         self.name = args[0].as_ref().to_string();
 
@@ -39,7 +45,7 @@ impl CompilerWrapper for ClangWrapper {
             .parse_args(args)
             .expect("Failed to parse arguments!");
 
-        todo!()
+        Ok(self)
     }
 
     fn args(&self) -> &CompilerArgsInfo {
@@ -48,10 +54,6 @@ impl CompilerWrapper for ClangWrapper {
 
     fn args_mut(&mut self) -> &mut CompilerArgsInfo {
         &mut self.args
-    }
-
-    fn command(&mut self) -> Result<Vec<String>, Error> {
-        todo!()
     }
 
     fn silence(&mut self, value: bool) -> &'_ mut Self {

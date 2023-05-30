@@ -1,33 +1,46 @@
-//! Command-line argument information
+//! Command-line argument parser
+
+use std::{fs, path::PathBuf};
 
 use lazy_static::lazy_static;
 use regex::Regex;
 
-use crate::common::{
+use crate::{
     constants::{ARG_EXACT_MATCH_MAP, ARG_PATTERNS},
+    error::Error,
     utils::*,
-    Error,
 };
+
+/// Compile mode
+#[derive(Debug)]
+pub enum CompileMode {
+    /// Compiling mode
+    Compiling,
+    /// Linking mode
+    Linking,
+    /// Link Time Optimization mode
+    LTO,
+}
 
 /// Compiler argument information
 #[derive(Debug, Default)]
 pub struct CompilerArgsInfo {
-    pub input_list: Vec<String>,
-    pub input_files: Vec<String>,
-    pub object_files: Vec<String>,
-    pub output_filename: String,
-    pub compile_args: Vec<String>,
-    pub link_args: Vec<String>,
-    pub forbidden_flags: Vec<String>,
-    pub is_verbose: bool,
-    pub is_dependency_only: bool,
-    pub is_preprocess_only: bool,
-    pub is_assemble_only: bool,
-    pub is_assembly: bool,
-    pub is_compile_only: bool,
-    pub is_emit_llvm: bool,
-    pub is_lto: bool,
-    pub is_print_only: bool,
+    input_args: Vec<String>,
+    input_files: Vec<String>,
+    object_files: Vec<String>,
+    output_filename: String,
+    compile_args: Vec<String>,
+    link_args: Vec<String>,
+    forbidden_flags: Vec<String>,
+    is_verbose: bool,
+    is_dependency_only: bool,
+    is_preprocess_only: bool,
+    is_assemble_only: bool,
+    is_assembly: bool,
+    is_compile_only: bool,
+    is_emit_llvm: bool,
+    is_lto: bool,
+    is_print_only: bool,
 }
 
 pub type CallbackFn<S> = for<'a> fn(&'a mut CompilerArgsInfo, S, &[S]) -> &'a mut CompilerArgsInfo;
@@ -288,7 +301,7 @@ impl CompilerArgsInfo {
         S: AsRef<str>,
     {
         let args: Vec<String> = args.iter().map(|x| x.as_ref().to_string()).collect();
-        self.input_list = args.clone();
+        self.input_args = args.clone();
 
         let mut i = 0;
         while i < args.len() {
@@ -345,5 +358,149 @@ impl CompilerArgsInfo {
         }
 
         Ok(self)
+    }
+}
+
+impl CompilerArgsInfo {
+    pub fn input_args(&self) -> &Vec<String> {
+        self.input_args.as_ref()
+    }
+
+    pub fn input_files(&self) -> &Vec<String> {
+        self.input_files.as_ref()
+    }
+
+    pub fn object_files(&self) -> &Vec<String> {
+        self.object_files.as_ref()
+    }
+
+    pub fn output_filename(&self) -> &str {
+        self.output_filename.as_ref()
+    }
+
+    pub fn compile_args(&self) -> &Vec<String> {
+        self.compile_args.as_ref()
+    }
+
+    pub fn link_args(&self) -> &Vec<String> {
+        self.link_args.as_ref()
+    }
+
+    pub fn forbidden_flags(&self) -> &Vec<String> {
+        self.forbidden_flags.as_ref()
+    }
+
+    pub fn is_verbose(&self) -> bool {
+        self.is_verbose
+    }
+
+    pub fn is_dependency_only(&self) -> bool {
+        self.is_dependency_only
+    }
+
+    pub fn is_preprocess_only(&self) -> bool {
+        self.is_preprocess_only
+    }
+
+    pub fn is_assemble_only(&self) -> bool {
+        self.is_assemble_only
+    }
+
+    pub fn is_assembly(&self) -> bool {
+        self.is_assembly
+    }
+
+    pub fn is_compile_only(&self) -> bool {
+        self.is_compile_only
+    }
+
+    pub fn is_emit_llvm(&self) -> bool {
+        self.is_emit_llvm
+    }
+
+    pub fn is_lto(&self) -> bool {
+        self.is_lto
+    }
+
+    pub fn is_print_only(&self) -> bool {
+        self.is_print_only
+    }
+
+    pub fn is_bitcode_generation_skipped(&self) -> bool {
+        let mut is_skipped = false;
+        let mut message = "no reason";
+
+        let conditions = [
+            (
+                self.input_files.is_empty(),
+                "the list of input files is empty",
+            ),
+            (
+                self.is_emit_llvm,
+                "the compiler will generate bitcode in emit-llvm mode",
+            ),
+            (
+                self.is_lto,
+                "the compiler will generate bitcode during the link-time optimization",
+            ),
+            (
+                self.is_assembly,
+                "the input file(s) are written in assembly",
+            ),
+            (
+                self.is_assemble_only,
+                "we are only assembling, so cannot embed the path of the bitcode",
+            ),
+            (
+                self.is_dependency_only && !self.is_compile_only,
+                "we are only computing dependencies",
+            ),
+            (self.is_preprocess_only, "we are only preprocessing"),
+            (
+                self.is_print_only,
+                "we are in print-only mode, so cannot embed the path of the bitcode",
+            ),
+        ];
+
+        for (condition, reason) in conditions {
+            if condition {
+                is_skipped = true;
+                message = reason;
+            }
+        }
+
+        if is_skipped {
+            log::warn!("Skip bitcode generation: {}", message);
+        }
+
+        is_skipped
+    }
+
+    pub fn mode(&self) -> CompileMode {
+        let mut mode = CompileMode::Compiling;
+        if self.input_files().is_empty() && self.link_args().len() > 0 {
+            mode = CompileMode::Linking;
+            if self.is_lto() {
+                mode = CompileMode::LTO;
+            }
+        }
+
+        mode
+    }
+
+    pub fn artifact_filepaths(&self) -> Result<Vec<(PathBuf, PathBuf)>, Error> {
+        let mut artifacts = vec![];
+        for src_file in &self.input_files {
+            // Obtain the absolute filepath
+            let src_filepath = fs::canonicalize(src_file)?;
+
+            // Add artifacts
+            artifacts.push(derive_object_and_bitcode_filepath(
+                src_filepath,
+                self.is_compile_only,
+            )?);
+        }
+
+        Ok(artifacts)
     }
 }

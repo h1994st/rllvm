@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use rllvm::common::CompilerArgsInfo;
+    use rllvm::arg_parser::CompilerArgsInfo;
 
     fn test_parsing_lto_internal(input: &str) {
         let mut args_info = CompilerArgsInfo::default();
@@ -8,7 +8,7 @@ mod tests {
         let ret = args_info.parse_args(&args);
         assert!(ret.is_ok());
         let ret = ret.unwrap();
-        assert!(ret.is_lto);
+        assert!(ret.is_lto());
     }
 
     #[test]
@@ -26,7 +26,7 @@ mod tests {
         let ret = args_info.parse_args(&args);
         assert!(ret.is_ok());
         let ret = ret.unwrap();
-        assert_eq!(ret.link_args.len(), expected);
+        assert_eq!(ret.link_args().len(), expected);
     }
 
     #[test]

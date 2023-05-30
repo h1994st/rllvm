@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use lazy_static::lazy_static;
 
-use crate::common::{ArgInfo, ArgPatternInfo, CompilerArgsInfo};
+use crate::arg_parser::{ArgInfo, ArgPatternInfo, CompilerArgsInfo};
 
 type CallbackMap = HashMap<&'static str, ArgInfo<String>>;
 type PatternCallbackVec = Vec<ArgPatternInfo<String>>;
