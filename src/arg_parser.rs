@@ -20,6 +20,8 @@ pub enum CompileMode {
     Linking,
     /// Link Time Optimization mode
     LTO,
+    /// Bitcode Generation mode
+    BitcodeGeneration,
 }
 
 /// Compiler argument information
