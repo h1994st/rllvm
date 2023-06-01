@@ -6,6 +6,8 @@ pub enum Error {
     InvalidArguments(String),
     /// Io error occurred
     Io(std::io::Error),
+    /// Execution failure
+    ExecutionFailure(String),
     /// Something else happened
     Unknown(String),
 }
