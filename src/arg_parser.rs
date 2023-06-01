@@ -346,7 +346,7 @@ impl CompilerArgsInfo {
                     }
                 }
                 if !matched {
-                    let handler = if is_object_file(arg) {
+                    let handler = if is_object_file(arg)? {
                         CompilerArgsInfo::object_file
                     } else {
                         // Failed to recognize the compiler flag

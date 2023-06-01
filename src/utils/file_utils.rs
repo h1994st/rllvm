@@ -2,7 +2,7 @@
 
 use std::{fs, path::Path};
 
-use object::{Object, ObjectKind};
+use object::{Object, ObjectKind, ObjectSection};
 
 use crate::error::Error;
 
@@ -20,20 +20,20 @@ where
     }
 }
 
-pub fn is_object_file<P>(file: P) -> bool
+pub fn is_object_file<P>(file: P) -> Result<bool, Error>
 where
     P: AsRef<Path>,
 {
     let file = file.as_ref();
 
     if !is_plain_file(file) {
-        return false;
+        return Ok(false);
     }
 
-    let data = fs::read(file).expect("Failed to read file");
-    let obj_file = object::File::parse(&*data).expect("Failed to parse the object file");
+    let data = fs::read(file)?;
+    let object_file = object::File::parse(&*data)?;
 
-    obj_file.kind() == ObjectKind::Relocatable
+    Ok(object_file.kind() == ObjectKind::Relocatable)
 }
 
 /// Embed the path of the bitcode to the corresponding object file
@@ -44,5 +44,17 @@ pub fn embed_bitcode_filepath_to_object_file<P>(
 where
     P: AsRef<Path>,
 {
-    todo!()
+    let bitcode_filepath = bitcode_filepath.as_ref();
+    let object_filepath = object_filepath.as_ref();
+
+    let data = fs::read(object_filepath)?;
+    let object_file = object::File::parse(&*data)?;
+
+    if let Some(section) = object_file.section_by_name(".boot") {
+        println!("{:#x?}", section.data()?);
+    } else {
+        eprintln!("section not available");
+    }
+
+    Ok(())
 }
