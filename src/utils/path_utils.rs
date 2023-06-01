@@ -1,3 +1,5 @@
+//! Filepath-related utility functions
+
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;

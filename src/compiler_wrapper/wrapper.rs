@@ -1,10 +1,17 @@
 //! Genera interfaces for the compiler wrapper
 
-use std::{collections::HashSet, ffi::OsStr, path::Path, process::Command, vec};
+use std::{
+    collections::HashSet,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::Command,
+    vec,
+};
 
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
     error::Error,
+    utils::embed_bitcode_filepath_to_object_file,
 };
 
 /// A general interface that wraps different compilers
@@ -34,6 +41,7 @@ pub trait CompilerWrapper {
             // Linking
             if args_info.is_lto() {
                 // TODO: add LTO LDFLAGS
+                todo!();
             }
         }
 
@@ -60,7 +68,7 @@ pub trait CompilerWrapper {
     fn is_silent(&self) -> bool;
 
     /// Run the compiler
-    fn run(&mut self) -> Result<Option<i32>, Error> {
+    fn run(&mut self) -> Result<(), Error> {
         if self.args().is_bitcode_generation_skipped() {
             return self.build_target();
         }
@@ -68,7 +76,7 @@ pub trait CompilerWrapper {
         todo!()
     }
 
-    fn execute_command<S>(&self, args: &[S], mode: CompileMode) -> Result<Option<i32>, Error>
+    fn execute_command<S>(&self, args: &[S], mode: CompileMode) -> Result<(), Error>
     where
         S: AsRef<OsStr> + std::fmt::Debug,
     {
@@ -84,11 +92,19 @@ pub trait CompilerWrapper {
         if !self.is_silent() {
             log::debug!("[{:?}] Exit status: {}", mode, status);
         }
-        Ok(status.code())
+
+        if !status.success() {
+            return Err(Error::ExecutionFailure(format!(
+                "Failed to execute the command: {}",
+                status
+            )));
+        }
+
+        Ok(())
     }
 
     /// Execute the given command and build the target
-    fn build_target(&self) -> Result<Option<i32>, Error> {
+    fn build_target(&self) -> Result<(), Error> {
         let args = self.command()?;
         let mode = self.args().mode();
 
@@ -96,16 +112,41 @@ pub trait CompilerWrapper {
     }
 
     /// Generate bitcodes for all input files
-    fn generate_bitcodes(&self) {
-        todo!()
+    fn generate_bitcodes_and_embed_filepaths(&self) -> Result<(), Error> {
+        let is_compile_only = self.args().is_compile_only();
+        let artifact_filepaths = self.args().artifact_filepaths()?;
+        let mut object_filepaths = vec![];
+        for (src_filepath, object_filepath, bitcode_filepath) in artifact_filepaths {
+            if !is_compile_only {
+                // We need to explicitly build the intermediate object file
+                self.build_object_file(&src_filepath, &object_filepath)?;
+
+                // Collect all intermediate object files
+                object_filepaths.push(object_filepath.clone());
+            }
+
+            let src_bitcode_filepath = if src_filepath.extension().map_or(false, |x| x == "bc") {
+                // The source file is a bitcode; therefore, we do not need to
+                // generate the bitcode and directly use the source file
+                src_filepath
+            } else {
+                // Generate the bitcode
+                self.generate_bitcode(&src_filepath, &bitcode_filepath)?;
+                bitcode_filepath
+            };
+
+            // Embed the path of the bitcode to the corresponding object file
+            embed_bitcode_filepath_to_object_file(&src_bitcode_filepath, &object_filepath)?;
+        }
+
+        let output_filepath = PathBuf::from(self.args().output_filename()).canonicalize()?;
+        self.link_object_files(&object_filepaths, output_filepath)?;
+
+        Ok(())
     }
 
     /// Generate bitcode for one input file
-    fn generate_bitcode<P>(
-        &self,
-        src_filepath: P,
-        bitcode_filepath: P,
-    ) -> Result<Option<i32>, Error>
+    fn generate_bitcode<P>(&self, src_filepath: P, bitcode_filepath: P) -> Result<(), Error>
     where
         P: AsRef<Path>,
     {
@@ -130,11 +171,7 @@ pub trait CompilerWrapper {
     }
 
     /// Execute the command and build the object file
-    fn build_object_file<P>(
-        &self,
-        src_filepath: P,
-        object_filepath: P,
-    ) -> Result<Option<i32>, Error>
+    fn build_object_file<P>(&self, src_filepath: P, object_filepath: P) -> Result<(), Error>
     where
         P: AsRef<Path>,
     {
@@ -153,6 +190,38 @@ pub trait CompilerWrapper {
         ]);
 
         let mode = CompileMode::Compiling;
+
+        self.execute_command(&args, mode)
+    }
+
+    fn link_object_files<P>(&self, object_filepaths: &[P], output_filepath: P) -> Result<(), Error>
+    where
+        P: AsRef<Path>,
+    {
+        let output_filepath = output_filepath.as_ref();
+        let program_filepath = self.program_filepath();
+
+        let mut args = vec![String::from(program_filepath.to_string_lossy())];
+        if self.args().is_lto() {
+            // TODO: add LTO LDFLAGS
+            todo!()
+        }
+        // Link arguments
+        args.extend(self.args().link_args().iter().cloned());
+        // Output
+        args.extend_from_slice(&[
+            "-o".to_string(),
+            String::from(output_filepath.to_string_lossy()),
+        ]);
+        // Input object files
+        args.extend(
+            object_filepaths
+                .iter()
+                .map(|x| String::from(x.as_ref().to_string_lossy())),
+        );
+
+        // Mode
+        let mode = CompileMode::Linking;
 
         self.execute_command(&args, mode)
     }

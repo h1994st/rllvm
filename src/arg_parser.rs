@@ -1,6 +1,6 @@
 //! Command-line argument parser
 
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use lazy_static::lazy_static;
 use regex::Regex;
@@ -490,17 +490,16 @@ impl CompilerArgsInfo {
         mode
     }
 
-    pub fn artifact_filepaths(&self) -> Result<Vec<(PathBuf, PathBuf)>, Error> {
+    pub fn artifact_filepaths(&self) -> Result<Vec<(PathBuf, PathBuf, PathBuf)>, Error> {
         let mut artifacts = vec![];
         for src_file in &self.input_files {
             // Obtain the absolute filepath
-            let src_filepath = fs::canonicalize(src_file)?;
+            let src_filepath = PathBuf::from(src_file).canonicalize()?;
 
             // Add artifacts
-            artifacts.push(derive_object_and_bitcode_filepath(
-                src_filepath,
-                self.is_compile_only,
-            )?);
+            let (object_filepath, bitcode_filepath) =
+                derive_object_and_bitcode_filepath(&src_filepath, self.is_compile_only)?;
+            artifacts.push((src_filepath, object_filepath, bitcode_filepath));
         }
 
         Ok(artifacts)
