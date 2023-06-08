@@ -136,7 +136,7 @@ pub trait CompilerWrapper {
             };
 
             // Embed the path of the bitcode to the corresponding object file
-            embed_bitcode_filepath_to_object_file(&src_bitcode_filepath, &object_filepath)?;
+            embed_bitcode_filepath_to_object_file(&src_bitcode_filepath, &object_filepath, None)?;
         }
 
         let output_filepath = PathBuf::from(self.args().output_filename()).canonicalize()?;
