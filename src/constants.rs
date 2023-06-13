@@ -9,6 +9,10 @@ use crate::arg_parser::{ArgInfo, ArgPatternInfo, CompilerArgsInfo};
 type CallbackMap = HashMap<&'static str, ArgInfo<String>>;
 type PatternCallbackVec = Vec<ArgPatternInfo<String>>;
 
+pub static DARWIN_SEGMENT_NAME: &str = "__RLLVM";
+pub static DARWIN_SECTION_NAME: &str = "__llvm_bc";
+pub static ELF_SECTION_NAME: &str = ".llvm_bc";
+
 lazy_static! {
     pub static ref ARG_EXACT_MATCH_MAP: CallbackMap = {
         let mut m = HashMap::new();

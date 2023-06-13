@@ -4,11 +4,14 @@ use std::{collections::HashMap, fs, path::Path};
 
 use object::{
     write::{self},
-    File, Object, ObjectComdat, ObjectKind, ObjectSection, ObjectSymbol, RelocationTarget,
-    SectionKind, SymbolFlags, SymbolKind, SymbolSection,
+    BinaryFormat, File, Object, ObjectComdat, ObjectKind, ObjectSection, ObjectSymbol,
+    RelocationTarget, SectionFlags, SectionKind, SymbolFlags, SymbolKind, SymbolSection,
 };
 
-use crate::error::Error;
+use crate::{
+    constants::{DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME},
+    error::Error,
+};
 
 pub fn is_plain_file<P>(file: P) -> bool
 where
@@ -54,17 +57,35 @@ where
 
     let data = fs::read(object_filepath)?;
     let object_file = object::File::parse(&*data)?;
+    let object_binary_format = object_file.format();
+
+    // Platform-dependent properties
+    let (segment_name, section_name, flags) = match object_binary_format {
+        BinaryFormat::Elf => (
+            vec![],
+            ELF_SECTION_NAME.as_bytes().to_vec(),
+            SectionFlags::Elf { sh_flags: 0 },
+        ),
+        BinaryFormat::MachO => (
+            DARWIN_SEGMENT_NAME.as_bytes().to_vec(),
+            DARWIN_SECTION_NAME.as_bytes().to_vec(),
+            SectionFlags::MachO { flags: 0 },
+        ),
+        _ => unimplemented!(),
+    };
 
     // Copy the input object file into a new mutable object file
     let mut new_object_file = copy_object_file(object_file)?;
 
     // Add a section
-    let section_id =
-        new_object_file.add_section(vec![], ".llvm_bc".as_bytes().to_vec(), SectionKind::Unknown);
+    let section_id = new_object_file.add_section(segment_name, section_name, SectionKind::Unknown);
     let new_section = new_object_file.section_mut(section_id);
     let bitcode_filepath_string = bitcode_filepath.to_string_lossy();
     new_section.set_data(bitcode_filepath_string.as_bytes(), 1);
-    // TODO: update flags?
+    // NOTE: we have to explicitly set flags; otherwise, the flags will be
+    // inferred based on the section kind, but `Section::Unknown` is not
+    // supported for auto inferring flags
+    new_section.flags = flags;
 
     let output_data = new_object_file.write().unwrap();
     if let Some(output_object_filepath) = output_object_filepath {
