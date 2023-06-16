@@ -1,13 +1,13 @@
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, str};
+    use std::{fs, path::Path};
 
     use object::{Object, ObjectSection};
     use rllvm::utils::embed_bitcode_filepath_to_object_file;
 
     #[test]
     fn test_path_injection() {
-        let bitcode_filepath = Path::new("hello.bc");
+        let bitcode_filepath = Path::new("tests/data/hello.bc");
         let object_filepath = Path::new("tests/data/hello.o");
 
         let output_object_filepath = Path::new("tests/data/hello.new.o");
@@ -29,9 +29,16 @@ mod tests {
             .expect("Unable to obtain the section");
 
         let section_data = section.data().expect("Failed to obtain the section data");
-        let embedded_path =
-            Path::new(str::from_utf8(section_data).expect("Failed to convert data to string"));
-        assert_eq!(embedded_path, bitcode_filepath);
+        let embedded_filepath_string = String::from_utf8_lossy(section_data);
+
+        let expected_filepath_string = format!(
+            "{}\n",
+            bitcode_filepath
+                .canonicalize()
+                .expect("Failed to obtain the absolute path")
+                .to_string_lossy()
+        );
+        assert_eq!(embedded_filepath_string, expected_filepath_string);
 
         // Clean
         fs::remove_file(output_object_filepath).expect("Failed to delete the output object file");
