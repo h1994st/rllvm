@@ -1,10 +1,14 @@
 //! File-related, especially object-file-related, utility functions
 
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    str,
+};
 
 use object::{
-    write::{self},
-    BinaryFormat, File, Object, ObjectComdat, ObjectKind, ObjectSection, ObjectSymbol,
+    write, BinaryFormat, File, Object, ObjectComdat, ObjectKind, ObjectSection, ObjectSymbol,
     RelocationTarget, SectionFlags, SectionKind, SymbolFlags, SymbolKind, SymbolSection,
 };
 
@@ -267,4 +271,39 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     }
 
     Ok(out_object)
+}
+
+/// Extract the path of the bitcode from the corresponding object file
+pub fn extract_bitcode_filepath_from_object_file<P>(
+    object_filepath: P,
+) -> Result<Option<Vec<PathBuf>>, Error>
+where
+    P: AsRef<Path>,
+{
+    let object_filepath = object_filepath.as_ref();
+
+    let data = fs::read(object_filepath)?;
+    let object_file = object::File::parse(&*data)?;
+    let object_binary_format = object_file.format();
+
+    let section_name = match object_binary_format {
+        BinaryFormat::Elf => ELF_SECTION_NAME.as_bytes(),
+        BinaryFormat::MachO => DARWIN_SECTION_NAME.as_bytes(),
+        _ => unimplemented!(),
+    };
+
+    match object_file.section_by_name_bytes(section_name) {
+        Some(section) => {
+            let section_data = section.data()?;
+            let embedded_filepath_string = str::from_utf8(section_data)?.trim();
+
+            let embedded_filepaths = embedded_filepath_string
+                .split('\n')
+                .map(|x| PathBuf::from(x))
+                .collect();
+
+            Ok(Some(embedded_filepaths))
+        }
+        None => Ok(None),
+    }
 }

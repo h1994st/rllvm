@@ -2,8 +2,7 @@
 mod tests {
     use std::{fs, path::Path};
 
-    use object::{Object, ObjectSection};
-    use rllvm::utils::embed_bitcode_filepath_to_object_file;
+    use rllvm::utils::*;
 
     #[test]
     fn test_path_injection() {
@@ -19,26 +18,16 @@ mod tests {
         )
         .expect("Failed to embed bitcode filepath");
 
-        let output_object_data =
-            fs::read(output_object_filepath).expect("Failed to read the new object file");
-        let output_object_file =
-            object::File::parse(&*output_object_data).expect("Failed to parse the new object file");
+        let embedded_filepaths = extract_bitcode_filepath_from_object_file(output_object_filepath)
+            .expect("Failed to extract embedded filepaths")
+            .expect("Failed to find at least one filepath");
 
-        let section = output_object_file
-            .section_by_name_bytes("__llvm_bc".as_bytes())
-            .expect("Unable to obtain the section");
-
-        let section_data = section.data().expect("Failed to obtain the section data");
-        let embedded_filepath_string = String::from_utf8_lossy(section_data);
-
-        let expected_filepath_string = format!(
-            "{}\n",
-            bitcode_filepath
-                .canonicalize()
-                .expect("Failed to obtain the absolute path")
-                .to_string_lossy()
-        );
-        assert_eq!(embedded_filepath_string, expected_filepath_string);
+        let embedded_filepath = embedded_filepaths[0].clone();
+        let expected_filepath = bitcode_filepath
+            .canonicalize()
+            .expect("Failed to obtain the absolute filepath");
+        println!("{:?}", embedded_filepath);
+        assert_eq!(embedded_filepath, expected_filepath);
 
         // Clean
         fs::remove_file(output_object_filepath).expect("Failed to delete the output object file");
