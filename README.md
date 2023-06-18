@@ -1,10 +1,5 @@
-# Whole Program LLVM in Rust
+# Whole Program LLVM in Rust (rllvm)
 
 - rllvm
 - rllvm++
-- get-bc
-
-wrapper:
-
-- parse command-line arguments
-- inject the path into the generated object files
+- get-bc (To be finished)
