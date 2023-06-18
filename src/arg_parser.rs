@@ -6,6 +6,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 
 use crate::{
+    config::RLLVM_CONFIG,
     constants::{ARG_EXACT_MATCH_MAP, ARG_PATTERNS},
     error::Error,
     utils::*,
@@ -433,6 +434,10 @@ impl CompilerArgsInfo {
         let mut message = "no reason";
 
         let conditions = [
+            (
+                RLLVM_CONFIG.is_configure_only(),
+                "we are in configure-only mode",
+            ),
             (
                 self.input_files.is_empty(),
                 "the list of input files is empty",

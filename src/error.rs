@@ -1,6 +1,6 @@
 //! rllvm error Type
 
-use std::str::Utf8Error;
+use std::{str::Utf8Error, string::FromUtf8Error};
 
 #[derive(Debug)]
 pub enum Error {
@@ -8,7 +8,7 @@ pub enum Error {
     InvalidArguments(String),
     /// Io error occurred
     Io(std::io::Error),
-    /// Execution failure
+    /// Command execution failure
     ExecutionFailure(String),
     /// Object file error
     ObjectReadError(object::read::Error),
@@ -39,6 +39,12 @@ impl From<object::write::Error> for Error {
 
 impl From<Utf8Error> for Error {
     fn from(value: Utf8Error) -> Self {
+        Self::StringError(format!("{}", value))
+    }
+}
+
+impl From<FromUtf8Error> for Error {
+    fn from(value: FromUtf8Error) -> Self {
         Self::StringError(format!("{}", value))
     }
 }

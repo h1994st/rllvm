@@ -1,14 +1,16 @@
 //! Clang compiler wrapper
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use crate::{arg_parser::CompilerArgsInfo, compiler_wrapper::*, error::Error};
+use crate::{
+    arg_parser::CompilerArgsInfo, compiler_wrapper::*, config::RLLVM_CONFIG, error::Error,
+};
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ClangWrapper {
     name: String,
-    wrapped_cc: String,
-    wrapped_cxx: String,
+    wrapped_compiler: PathBuf,
+    compiler_kind: CompilerKind,
     is_silent: bool,
 
     is_parse_args_called: bool,
@@ -16,9 +18,36 @@ pub struct ClangWrapper {
     args: CompilerArgsInfo,
 }
 
+impl ClangWrapper {
+    pub fn new(name: &str, compiler_kind: CompilerKind) -> Self {
+        // Obtain the compiler path from the configuration
+        let compiler_path = match compiler_kind {
+            CompilerKind::Clang => RLLVM_CONFIG.clang_filepath(),
+            CompilerKind::ClangXX => RLLVM_CONFIG.clangxx_filepath(),
+        };
+
+        Self {
+            name: name.to_string(),
+            wrapped_compiler: compiler_path.clone(),
+            compiler_kind,
+            is_silent: false,
+            is_parse_args_called: false,
+            args: CompilerArgsInfo::default(),
+        }
+    }
+}
+
 impl CompilerWrapper for ClangWrapper {
-    fn program_filepath(&self) -> &Path {
-        todo!()
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn wrapped_compiler(&self) -> &Path {
+        &self.wrapped_compiler
+    }
+
+    fn compiler_kind(&self) -> &CompilerKind {
+        &self.compiler_kind
     }
 
     fn parse_args<S>(&mut self, args: &[S]) -> Result<&'_ mut Self, Error>
@@ -26,9 +55,9 @@ impl CompilerWrapper for ClangWrapper {
         S: AsRef<str>,
     {
         // Empty argument list is not allowed
-        if args.len() <= 1 {
+        if args.is_empty() {
             return Err(Error::InvalidArguments(
-                "The number of arguments cannot be empty".to_string(),
+                "The give argument list cannot be empty".to_string(),
             ));
         }
 
@@ -39,21 +68,13 @@ impl CompilerWrapper for ClangWrapper {
         }
         self.is_parse_args_called = true;
 
-        self.name = args[0].as_ref().to_string();
-
-        self.args
-            .parse_args(args)
-            .expect("Failed to parse arguments!");
+        self.args.parse_args(args)?;
 
         Ok(self)
     }
 
     fn args(&self) -> &CompilerArgsInfo {
         &self.args
-    }
-
-    fn args_mut(&mut self) -> &mut CompilerArgsInfo {
-        &mut self.args
     }
 
     fn silence(&mut self, value: bool) -> &'_ mut Self {

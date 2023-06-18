@@ -9,9 +9,20 @@ use crate::arg_parser::{ArgInfo, ArgPatternInfo, CompilerArgsInfo};
 type CallbackMap = HashMap<&'static str, ArgInfo<String>>;
 type PatternCallbackVec = Vec<ArgPatternInfo<String>>;
 
-pub static DARWIN_SEGMENT_NAME: &str = "__RLLVM";
-pub static DARWIN_SECTION_NAME: &str = "__llvm_bc";
-pub static ELF_SECTION_NAME: &str = ".llvm_bc";
+pub const DARWIN_SEGMENT_NAME: &str = "__RLLVM";
+pub const DARWIN_SECTION_NAME: &str = "__llvm_bc";
+pub const ELF_SECTION_NAME: &str = ".llvm_bc";
+
+/// The default filepath of the configuration file
+pub const DEFAULT_CONF_FILEPATH_UNDER_HOME: &str = ".rllvm/config.toml";
+
+/// The max version of `LLVM` we're looking for
+#[cfg(not(target_vendor = "apple"))]
+pub const LLVM_VERSION_MAX: u32 = 33;
+
+/// The min version of `LLVM` we're looking for
+#[cfg(not(target_vendor = "apple"))]
+pub const LLVM_VERSION_MIN: u32 = 6;
 
 lazy_static! {
     pub static ref ARG_EXACT_MATCH_MAP: CallbackMap = {

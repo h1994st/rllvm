@@ -3,6 +3,9 @@
 /// Command-line argument parser for compilers
 pub mod arg_parser;
 
+/// Configurations of RLLVM
+pub mod config;
+
 /// Compiler wrapper
 pub mod compiler_wrapper;
 
