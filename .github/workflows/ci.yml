@@ -18,7 +18,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
     - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
+      uses: actions-rs/toolchain@v2.0.0
       with:
         profile: minimal
         toolchain: stable
@@ -31,7 +31,7 @@ jobs:
       run: command -v llvm-config && clang -v
 
     - name: Checkout sources
-      uses: actions/checkout@v3
+      uses: actions/checkout@v3.5.3
       with:
         fetch-depth: 0
 
@@ -42,7 +42,7 @@ jobs:
         args: --verbose
 
     - name: Run tests
-      uses: actions-rs/cargo@v1
+      uses: actions-rs/cargo@v1.0.1
       with:
         command: test
         args: --all --verbose
@@ -52,7 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1
+      uses: actions-rs/toolchain@v2.0.0
       with:
         profile: minimal
         toolchain: stable
@@ -60,12 +60,12 @@ jobs:
         components: rustfmt
 
     - name: Checkout sources
-      uses: actions/checkout@v3
+      uses: actions/checkout@v3.5.3
       with:
         fetch-depth: 0
 
     - name: Run cargo fmt
-      uses: actions-rs/cargo@v1
+      uses: actions-rs/cargo@v1.0.1
       with:
         command: fmt
         args: --all --check --verbose
