@@ -1,0 +1,71 @@
+name: rllvm CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build and Test
+    strategy:
+      matrix:
+        os: [ubuntu-18.04, ubuntu-20.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Install LLVM/Clang
+      run: sudo apt install -y llvm llvm-dev clang libclang-dev
+
+    - name: Check clang version
+      run: command -v llvm-config && clang -v
+
+    - name: Checkout sources
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Build
+      uses: actions-rs/cargo@v1.0.1
+      with:
+        command: build
+        args: --verbose
+
+    - name: Run tests
+      uses: actions-rs/cargo@v1
+      with:
+        command: test
+        args: --all --verbose
+
+  fmt-check:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+    - name: Install stable toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+        components: rustfmt
+
+    - name: Checkout sources
+      uses: actions/checkout@v3
+      with:
+        fetch-depth: 0
+
+    - name: Run cargo fmt
+      uses: actions-rs/cargo@v1
+      with:
+        command: fmt
+        args: --all --check --verbose
