@@ -2,8 +2,7 @@ use std::{
     env,
     ffi::OsStr,
     path::{Path, PathBuf},
-    process::Command,
-    str,
+    process::ExitStatus,
 };
 
 #[cfg(target_vendor = "apple")]
@@ -12,16 +11,31 @@ use which::which;
 
 #[cfg(not(target_vendor = "apple"))]
 use crate::constants::{LLVM_VERSION_MAX, LLVM_VERSION_MIN};
-use crate::error::Error;
+use crate::utils::{execute_command_for_status, execute_command_for_stdout_string};
+use crate::{config::RLLVM_CONFIG, error::Error};
+
+pub fn execute_llvm_ar<P, S>(llvm_ar_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
+where
+    P: AsRef<Path>,
+    S: AsRef<OsStr>,
+{
+    execute_command_for_status(llvm_ar_filepath, args)
+}
+
+pub fn execute_llvm_link<P, S>(llvm_link_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
+where
+    P: AsRef<Path>,
+    S: AsRef<OsStr>,
+{
+    execute_command_for_status(llvm_link_filepath, args)
+}
 
 pub fn execute_llvm_config<P, S>(llvm_config_filepath: P, args: &[S]) -> Result<String, Error>
 where
     P: AsRef<Path>,
     S: AsRef<OsStr>,
 {
-    let llvm_config_filepath = llvm_config_filepath.as_ref();
-    let output = Command::new(llvm_config_filepath).args(args).output()?;
-    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+    execute_command_for_stdout_string(llvm_config_filepath, args)
 }
 
 /// Heuristically searching for `llvm-config` in Homebrew (for macOS)
@@ -29,8 +43,7 @@ where
 /// NOTE: this function is borrowed from `AFLplusplus/LibAFL`
 #[cfg(target_vendor = "apple")]
 fn find_llvm_config_brew() -> Result<PathBuf, Error> {
-    let output = Command::new("brew").arg("--cellar").output()?;
-    let brew_cellar_path = str::from_utf8(&output.stdout).unwrap_or_default().trim();
+    let brew_cellar_path = execute_command_for_stdout_string("brew", &["--cellar"])?;
     if brew_cellar_path.is_empty() {
         return Err(Error::ExecutionFailure(
             "Empty return from `brew --cellar`".to_string(),
@@ -84,4 +97,33 @@ pub fn find_llvm_config() -> Result<PathBuf, Error> {
 
         Err(Error::Unknown("Failed to find `llvm-config`".to_string()))
     }
+}
+
+pub fn link_bitcode_files<P>(
+    bitcode_filepaths: &[P],
+    output_filepath: P,
+) -> Result<Option<i32>, Error>
+where
+    P: AsRef<Path>,
+{
+    let output_filepath = output_filepath.as_ref();
+
+    let mut args = vec![];
+    // Link arguments
+    if let Some(llvm_link_flags) = RLLVM_CONFIG.llvm_link_flags() {
+        args.extend(llvm_link_flags.iter().cloned());
+    }
+    // Output
+    args.extend_from_slice(&[
+        "-o".to_string(),
+        String::from(output_filepath.to_string_lossy()),
+    ]);
+    // Input bitcode files
+    args.extend(
+        bitcode_filepaths
+            .iter()
+            .map(|x| String::from(x.as_ref().to_string_lossy())),
+    );
+
+    execute_command_for_status(RLLVM_CONFIG.llvm_link_filepath(), &args).map(|status| status.code())
 }

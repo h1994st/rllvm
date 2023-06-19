@@ -1,5 +1,9 @@
 //! Utility functions
 
+/// Command execution utility functions
+mod command_utils;
+pub use command_utils::*;
+
 /// File-related, especially object-file-related, utility functions
 mod file_utils;
 pub use file_utils::*;

@@ -15,6 +15,10 @@ pub enum Error {
     ObjectWriteError(object::write::Error),
     /// String error
     StringError(String),
+    /// Logger error
+    LoggerError(String),
+    /// Missing file
+    MissingFile(String),
     /// Something else happened
     Unknown(String),
 }

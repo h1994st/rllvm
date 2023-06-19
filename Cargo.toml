@@ -5,12 +5,14 @@ name = "rllvm"
 version = "0.1.0"
 
 [dependencies]
+clap = {version = "~4.3.4", features = ["derive"]}
 confy = "~0.5"
 lazy_static = "~1.4"
 log = "~0.4.18"
 object = {version = "~0.31", features = ["all"]}
 regex = "~1.8"
 serde = {version = "~1.0.164", features = ["derive"]}
+simple_logger = "~4.2.0"
 which = "~4.4.0"
 
 [target.'cfg(target_vendor = "apple")'.dependencies]

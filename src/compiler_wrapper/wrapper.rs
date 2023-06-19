@@ -4,15 +4,13 @@ use std::{
     collections::HashSet,
     ffi::OsStr,
     path::{Path, PathBuf},
-    process::Command,
-    vec,
 };
 
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
     config::RLLVM_CONFIG,
     error::Error,
-    utils::embed_bitcode_filepath_to_object_file,
+    utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
 };
 
 /// Compiler type
@@ -94,7 +92,7 @@ pub trait CompilerWrapper {
             return Ok(Some(0));
         }
 
-        self.generate_bitcodes_and_embed_filepaths()
+        self.generate_bitcode_files_and_embed_filepaths()
     }
 
     fn execute_command<S>(&self, args: &[S], mode: CompileMode) -> Result<Option<i32>, Error>
@@ -102,21 +100,21 @@ pub trait CompilerWrapper {
         S: AsRef<OsStr> + std::fmt::Debug,
     {
         if !self.is_silent() {
-            log::debug!("[{:?}] Arguments: {:?}", mode, args);
+            log::debug!("[{:?}] args={:?}", mode, args);
         }
         if args.is_empty() {
             return Err(Error::InvalidArguments(
                 "The number of arguments cannot be 0".into(),
             ));
         }
-        let status = Command::new(args[0].as_ref()).args(&args[1..]).status()?;
+        let status = execute_command_for_status(args[0].as_ref(), &args[1..])?;
         if !self.is_silent() {
-            log::debug!("[{:?}] Exit status: {}", mode, status);
+            log::debug!("[{:?}] exit_status={}", mode, status);
         }
 
         if !status.success() {
             return Err(Error::ExecutionFailure(format!(
-                "Failed to execute the command: args={:?}, status={}",
+                "Failed to execute the command: args={:?}, exit_status={}",
                 args, status
             )));
         }
@@ -132,8 +130,8 @@ pub trait CompilerWrapper {
         self.execute_command(&args, mode)
     }
 
-    /// Generate bitcodes for all input files
-    fn generate_bitcodes_and_embed_filepaths(&self) -> Result<Option<i32>, Error> {
+    /// Generate bitcode files for all input files
+    fn generate_bitcode_files_and_embed_filepaths(&self) -> Result<Option<i32>, Error> {
         let is_compile_only = self.args().is_compile_only();
         let artifact_filepaths = self.args().artifact_filepaths()?;
         let mut object_filepaths = vec![];
@@ -152,7 +150,7 @@ pub trait CompilerWrapper {
                 src_filepath
             } else {
                 // Generate the bitcode
-                if let Some(code) = self.generate_bitcode(&src_filepath, &bitcode_filepath)? {
+                if let Some(code) = self.generate_bitcode_file(&src_filepath, &bitcode_filepath)? {
                     if code != 0 {
                         return Ok(Some(code));
                     }
@@ -168,8 +166,8 @@ pub trait CompilerWrapper {
         self.link_object_files(&object_filepaths, output_filepath)
     }
 
-    /// Generate bitcode for one input file
-    fn generate_bitcode<P>(
+    /// Generate bitcode file for one input file
+    fn generate_bitcode_file<P>(
         &self,
         src_filepath: P,
         bitcode_filepath: P,

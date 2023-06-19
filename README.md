@@ -1,5 +1,5 @@
 # Whole Program LLVM in Rust (rllvm)
 
-- rllvm
-- rllvm++
-- get-bc (To be finished)
+- rllvm_cc
+- rllvm_cxx
+- rllvm_get_bc

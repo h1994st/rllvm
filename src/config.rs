@@ -5,6 +5,7 @@ use std::{
 };
 
 use lazy_static::lazy_static;
+use log::Level;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -39,6 +40,9 @@ pub struct RLLVMConfig {
     /// The path of the directory that stores intermediate bitcode files
     bitcode_store_path: Option<String>,
 
+    /// Extra linking flags for `llvm-link`
+    llvm_link_flags: Option<Vec<String>>,
+
     /// Extra linking flags for link time optimization
     lto_ldflags: Option<Vec<String>>,
 
@@ -47,6 +51,9 @@ pub struct RLLVMConfig {
 
     /// The configure only mode
     is_configure_only: bool,
+
+    /// Log level
+    log_level: u8,
 }
 
 impl RLLVMConfig {
@@ -78,6 +85,10 @@ impl RLLVMConfig {
         self.bitcode_store_path.as_ref()
     }
 
+    pub fn llvm_link_flags(&self) -> Option<&Vec<String>> {
+        self.llvm_link_flags.as_ref()
+    }
+
     pub fn lto_ldflags(&self) -> Option<&Vec<String>> {
         self.lto_ldflags.as_ref()
     }
@@ -88,6 +99,12 @@ impl RLLVMConfig {
 
     pub fn is_configure_only(&self) -> bool {
         self.is_configure_only
+    }
+
+    pub fn log_level(&self) -> Level {
+        Level::iter()
+            .nth(self.log_level as usize)
+            .unwrap_or(Level::max())
     }
 }
 
@@ -120,8 +137,10 @@ impl Default for RLLVMConfig {
         log::info!("Infer rllvm configurations ...");
 
         // Find `llvm-config`
-        let llvm_config_filepath = find_llvm_config()
-            .unwrap_or_else(|err| panic!("Failed to find `llvm-config`: {:?}", err));
+        let llvm_config_filepath = find_llvm_config().unwrap_or_else(|err| {
+            log::error!("Failed to find `llvm-config`: err={:?}", err);
+            std::process::exit(-1);
+        });
         log::info!("- llvm-config: {:?}", llvm_config_filepath);
 
         // Obtain LLVM version
@@ -131,7 +150,10 @@ impl Default for RLLVMConfig {
         }
 
         let llvm_bindir = execute_llvm_config(&llvm_config_filepath, &["--bindir"]).map_or_else(
-            |err| panic!("Failed to execute `llvm-config --bindir`: {:?}", err),
+            |err| {
+                log::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
+                std::process::exit(-1);
+            },
             |x| PathBuf::from(x),
         );
 
@@ -157,7 +179,8 @@ impl Default for RLLVMConfig {
         ];
         for llvm_bin_filepath in llvm_bin_filepaths {
             if !llvm_bin_filepath.exists() {
-                panic!("Failed to find `{:?}`", llvm_bin_filepath);
+                log::error!("Failed to find `{:?}`", llvm_bin_filepath);
+                std::process::exit(-1);
             }
         }
 
@@ -169,9 +192,11 @@ impl Default for RLLVMConfig {
             llvm_link_filepath,
             llvm_objcopy_filepath,
             bitcode_store_path: None,
+            llvm_link_flags: None,
             lto_ldflags: None,
             bitcode_generation_flags: None,
             is_configure_only: false,
+            log_level: 0,
         }
     }
 }

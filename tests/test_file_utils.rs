@@ -18,9 +18,9 @@ mod tests {
         )
         .expect("Failed to embed bitcode filepath");
 
-        let embedded_filepaths = extract_bitcode_filepath_from_object_file(output_object_filepath)
-            .expect("Failed to extract embedded filepaths")
-            .expect("Failed to find at least one filepath");
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(output_object_filepath)
+            .expect("Failed to extract embedded filepaths");
+        assert!(!embedded_filepaths.is_empty());
 
         let embedded_filepath = embedded_filepaths[0].clone();
         let expected_filepath = bitcode_filepath

@@ -107,7 +107,7 @@ where
 fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     if in_object.kind() != ObjectKind::Relocatable {
         return Err(Error::InvalidArguments(format!(
-            "Unsupported object kink: {:?}",
+            "Unsupported object kind: {:?}",
             in_object.kind()
         )));
     }
@@ -273,23 +273,16 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     Ok(out_object)
 }
 
-/// Extract the path of the bitcode from the corresponding object file
-pub fn extract_bitcode_filepath_from_object_file<P>(
-    object_filepath: P,
-) -> Result<Option<Vec<PathBuf>>, Error>
-where
-    P: AsRef<Path>,
-{
-    let object_filepath = object_filepath.as_ref();
-
-    let data = fs::read(object_filepath)?;
-    let object_file = object::File::parse(&*data)?;
+/// Extract the path of the bitcode from the parsed object
+pub fn extract_bitcode_filepaths_from_parsed_object(
+    object_file: &object::File,
+) -> Result<Vec<PathBuf>, Error> {
     let object_binary_format = object_file.format();
 
     let section_name = match object_binary_format {
         BinaryFormat::Elf => ELF_SECTION_NAME.as_bytes(),
         BinaryFormat::MachO => DARWIN_SECTION_NAME.as_bytes(),
-        _ => unimplemented!(),
+        _ => unimplemented!("unsupported binary format: {:?}", object_binary_format),
     };
 
     match object_file.section_by_name_bytes(section_name) {
@@ -302,8 +295,40 @@ where
                 .map(|x| PathBuf::from(x))
                 .collect();
 
-            Ok(Some(embedded_filepaths))
+            Ok(embedded_filepaths)
         }
-        None => Ok(None),
+        None => Ok(vec![]),
     }
+}
+
+/// Extract the path of the bitcode from the corresponding object file
+pub fn extract_bitcode_filepaths_from_object_file<P>(
+    object_filepath: P,
+) -> Result<Vec<PathBuf>, Error>
+where
+    P: AsRef<Path>,
+{
+    let object_filepath = object_filepath.as_ref();
+
+    let data = fs::read(object_filepath)?;
+    let object_file = object::File::parse(&*data)?;
+
+    extract_bitcode_filepaths_from_parsed_object(&object_file)
+}
+
+pub fn extract_bitcode_filepaths_from_parsed_objects(
+    object_files: &[object::File],
+) -> Result<Vec<PathBuf>, Error> {
+    let mut bitcode_filepaths = vec![];
+    for object_file in object_files {
+        bitcode_filepaths.extend(extract_bitcode_filepaths_from_parsed_object(object_file)?);
+    }
+
+    // Deduplicate
+    bitcode_filepaths.dedup();
+
+    // Sort
+    bitcode_filepaths.sort();
+
+    Ok(bitcode_filepaths)
 }
