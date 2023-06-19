@@ -12,10 +12,7 @@ env:
 jobs:
   test:
     name: Build and Test
-    strategy:
-      matrix:
-        os: [ubuntu-18.04, ubuntu-20.04]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-20.04
     steps:
     - name: Install stable toolchain
       uses: actions-rs/toolchain@v1.0.6
