@@ -100,6 +100,9 @@ pub fn find_llvm_config() -> Result<PathBuf, Error> {
 }
 
 /// Link given bitcode files into one bitcode file
+///
+/// TODO: do we need to link bitcode files incrementally in case the command
+/// execeeds the limitation of `getconf ARG_MAX`?
 pub fn link_bitcode_files<P>(
     bitcode_filepaths: &[P],
     output_filepath: P,
@@ -130,6 +133,10 @@ where
 }
 
 /// Archive given bitcode files into one archive file
+///
+/// TODO:
+/// 1. do we need to archive files incrementally?
+/// 2. do we need to avoid absolute paths in the generated archive?
 pub fn archive_bitcode_files<P>(
     bitcode_filepaths: &[P],
     output_filepath: P,
