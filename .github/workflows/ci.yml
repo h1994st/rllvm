@@ -34,14 +34,14 @@ jobs:
 
       - name: Install LLVM/Clang (Linux)
         if: ${{ runner.os == 'Linux' }}
-        run: sudo apt install -y llvm llvm-dev clang libclang-dev
+        run: |
+          sudo apt install -y llvm llvm-dev clang libclang-dev
+          command -v llvm-config && clang -v
 
       - name: Install LLVM/Clang (macOS)
         if: ${{ runner.os == 'macOS' }}
-        run: brew install llvm
-
-      - name: Check Clang version
-        run: command -v llvm-config && clang -v
+        run: |
+          brew install llvm
 
       - name: Checkout sources
         uses: actions/checkout@v3.5.3
