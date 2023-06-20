@@ -324,11 +324,11 @@ pub fn extract_bitcode_filepaths_from_parsed_objects(
         bitcode_filepaths.extend(extract_bitcode_filepaths_from_parsed_object(object_file)?);
     }
 
-    // Deduplicate
-    bitcode_filepaths.dedup();
-
     // Sort
     bitcode_filepaths.sort();
+
+    // Deduplicate
+    bitcode_filepaths.dedup();
 
     Ok(bitcode_filepaths)
 }

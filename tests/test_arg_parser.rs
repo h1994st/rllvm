@@ -2,13 +2,19 @@
 mod tests {
     use rllvm::arg_parser::CompilerArgsInfo;
 
-    fn test_parsing_lto_internal(input: &str) {
+    fn test_parsing<F>(input: &str, check_func: F)
+    where
+        F: Fn(&CompilerArgsInfo) -> bool,
+    {
         let mut args_info = CompilerArgsInfo::default();
         let args: Vec<&str> = input.split_ascii_whitespace().collect();
         let ret = args_info.parse_args(&args);
         assert!(ret.is_ok());
-        let ret = ret.unwrap();
-        assert!(ret.is_lto());
+        assert!(check_func(ret.unwrap()));
+    }
+
+    fn test_parsing_lto_internal(input: &str) {
+        test_parsing(input, |args| args.is_lto());
     }
 
     #[test]
@@ -21,12 +27,7 @@ mod tests {
     }
 
     fn test_parsing_link_args_internal(input: &str, expected: usize) {
-        let mut args_info = CompilerArgsInfo::default();
-        let args: Vec<&str> = input.split_ascii_whitespace().collect();
-        let ret = args_info.parse_args(&args);
-        assert!(ret.is_ok());
-        let ret = ret.unwrap();
-        assert_eq!(ret.link_args().len(), expected);
+        test_parsing(input, |args| args.link_args().len() == expected);
     }
 
     #[test]
