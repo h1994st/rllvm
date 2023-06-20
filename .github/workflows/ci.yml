@@ -20,7 +20,10 @@ env:
 jobs:
   test:
     name: Build and Test
-    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macOS-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Install stable toolchain
         uses: actions-rs/toolchain@v1.0.6
@@ -29,10 +32,15 @@ jobs:
           toolchain: stable
           override: true
 
-      - name: Install LLVM/Clang
+      - name: Install LLVM/Clang (Linux)
+        if: ${{ runner.os == 'Linux' }}
         run: sudo apt install -y llvm llvm-dev clang libclang-dev
 
-      - name: Check clang version
+      - name: Install LLVM/Clang (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        run: brew install llvm
+
+      - name: Check Clang version
         run: command -v llvm-config && clang -v
 
       - name: Checkout sources
