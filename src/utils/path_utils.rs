@@ -1,6 +1,10 @@
 //! Filepath-related utility functions
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+    path::{Path, PathBuf},
+};
 
 use crate::error::Error;
 
@@ -63,4 +67,15 @@ where
     let bitcode_filepath = parent_dir.join(bitcode_file_name);
 
     Ok((object_filepath, bitcode_filepath))
+}
+
+pub fn calculate_filepath_hash<P>(filepath: P) -> u64
+where
+    P: AsRef<Path>,
+{
+    let filepath = filepath.as_ref();
+
+    let mut hasher = DefaultHasher::new();
+    filepath.hash(&mut hasher);
+    hasher.finish()
 }

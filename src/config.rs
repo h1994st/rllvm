@@ -1,6 +1,5 @@
-use core::panic;
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -37,8 +36,8 @@ pub struct RLLVMConfig {
     /// The filepath of `llvm-objcopy`
     llvm_objcopy_filepath: PathBuf,
 
-    /// The path of the directory that stores intermediate bitcode files
-    bitcode_store_path: Option<String>,
+    /// The absolute path of the directory that stores intermediate bitcode files
+    bitcode_store_path: Option<PathBuf>,
 
     /// Extra linking flags for `llvm-link`
     llvm_link_flags: Option<Vec<String>>,
@@ -81,7 +80,7 @@ impl RLLVMConfig {
         &self.llvm_objcopy_filepath
     }
 
-    pub fn bitcode_store_path(&self) -> Option<&String> {
+    pub fn bitcode_store_path(&self) -> Option<&PathBuf> {
         self.bitcode_store_path.as_ref()
     }
 
@@ -115,18 +114,60 @@ impl RLLVMConfig {
         Self::load_path(config_filepath)
     }
 
-    pub fn load_path<P>(config_filepath: P) -> Self
+    fn load_path<P>(config_filepath: P) -> Self
     where
         P: AsRef<Path> + std::fmt::Debug,
     {
         let config_filepath = config_filepath.as_ref();
-        match confy::load_path(config_filepath) {
-            Ok(config) => config,
+        match confy::load_path::<RLLVMConfig>(config_filepath) {
+            Ok(mut config) => {
+                if let Some(bitcode_store_path) = &config.bitcode_store_path {
+                    // Check if the bitcode store path is absolute or not
+                    if !bitcode_store_path.is_absolute() {
+                        // Not absolute
+                        log::warn!(
+                            "Ignore the bitcode store path, as it is not absolute: {:?}",
+                            bitcode_store_path
+                        );
+                        config.bitcode_store_path = None;
+                    } else {
+                        // Further check if the directory exists
+                        if !bitcode_store_path.exists() {
+                            // Not exist, then create it
+                            log::info!(
+                                "Create the directory for the bitcode store: {:?}",
+                                bitcode_store_path
+                            );
+                            if let Err(err) = fs::create_dir_all(bitcode_store_path) {
+                                log::error!(
+                                    "Failed to create the bitcode store directory: err={}",
+                                    err
+                                );
+                                std::process::exit(-1);
+                            }
+                        } else {
+                            // Finally, check if this is a directory
+                            if !bitcode_store_path.is_dir() {
+                                // Not a directory
+                                log::warn!(
+                                    "Ignore the bitcode store path, as it is not a directory: {:?}",
+                                    bitcode_store_path
+                                );
+                                config.bitcode_store_path = None;
+                            }
+                        }
+                    }
+                }
+
+                config
+            }
             Err(err) => {
-                panic!(
+                log::error!(
                     "Failed to load configuration: config_filepath={:?}, err={}",
-                    config_filepath, err
-                )
+                    config_filepath,
+                    err
+                );
+                std::process::exit(-1);
             }
         }
     }
@@ -173,6 +214,8 @@ impl Default for RLLVMConfig {
         let llvm_objcopy_filepath = llvm_bindir.join("llvm-objcopy");
 
         let llvm_bin_filepaths = [
+            &clang_filepath,
+            &clangxx_filepath,
             &llvm_ar_filepath,
             &llvm_link_filepath,
             &llvm_objcopy_filepath,

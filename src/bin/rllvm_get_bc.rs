@@ -3,16 +3,13 @@ use std::{fs, path::PathBuf};
 use clap::Parser;
 use log::LevelFilter;
 use object::Object;
-use rllvm::{
-    error::Error,
-    utils::{extract_bitcode_filepaths_from_parsed_objects, link_bitcode_files},
-};
+use rllvm::{error::Error, utils::*};
 use simple_logger::SimpleLogger;
 
 /// Extraction arguments
 #[derive(Parser, Debug)]
 #[command(
-    name = "rllvm get-bc",
+    name = "rllvm-get-bc",
     about = "Extract a single bitcode file for the given input",
     author = "Shengtuo Hu <h1994st@gmail.com>",
     version
@@ -57,6 +54,7 @@ pub fn main() -> Result<(), Error> {
         log::error!("{}", error_message);
         return Err(Error::MissingFile(error_message));
     }
+    log::info!("Input file: {:?}", input_filepath);
 
     // Parse object file(s)
     let input_data = fs::read(&input_filepath)?;
@@ -85,7 +83,7 @@ pub fn main() -> Result<(), Error> {
     };
 
     // Obtain the output filepath
-    let input_filename = input_filepath.file_name().unwrap().to_string_lossy();
+    let input_filename = input_filepath.file_stem().unwrap().to_string_lossy();
     let output_filepath = args.output.unwrap_or(PathBuf::from(format!(
         "{}.{}",
         input_filename, output_file_ext
@@ -94,10 +92,19 @@ pub fn main() -> Result<(), Error> {
     // Extract bitcode filepaths
     let bitcode_filepaths = extract_bitcode_filepaths_from_parsed_objects(&object_files)?;
 
-    // Link bitcode files
-    if let Some(code) = link_bitcode_files(&bitcode_filepaths, output_filepath)? {
-        std::process::exit(code);
+    // Link or archive bitcode files
+    if args.build_bitcode_module {
+        log::info!("Link bitcode files");
+        if let Some(code) = link_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
+            std::process::exit(code);
+        }
+    } else {
+        log::info!("Archive bitcode files");
+        if let Some(code) = archive_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
+            std::process::exit(code);
+        }
     }
+    log::info!("Output file: {:?}", output_filepath);
 
     Ok(())
 }

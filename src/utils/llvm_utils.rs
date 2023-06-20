@@ -99,6 +99,7 @@ pub fn find_llvm_config() -> Result<PathBuf, Error> {
     }
 }
 
+/// Link given bitcode files into one bitcode file
 pub fn link_bitcode_files<P>(
     bitcode_filepaths: &[P],
     output_filepath: P,
@@ -126,4 +127,28 @@ where
     );
 
     execute_command_for_status(RLLVM_CONFIG.llvm_link_filepath(), &args).map(|status| status.code())
+}
+
+/// Archive given bitcode files into one archive file
+pub fn archive_bitcode_files<P>(
+    bitcode_filepaths: &[P],
+    output_filepath: P,
+) -> Result<Option<i32>, Error>
+where
+    P: AsRef<Path>,
+{
+    let output_filepath = output_filepath.as_ref();
+
+    let mut args = vec![
+        "rs".to_string(),
+        String::from(output_filepath.to_string_lossy()),
+    ];
+    // Input bitcode files
+    args.extend(
+        bitcode_filepaths
+            .iter()
+            .map(|x| String::from(x.as_ref().to_string_lossy())),
+    );
+
+    execute_command_for_status(RLLVM_CONFIG.llvm_ar_filepath(), &args).map(|status| status.code())
 }

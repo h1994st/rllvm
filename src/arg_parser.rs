@@ -501,9 +501,35 @@ impl CompilerArgsInfo {
             // Obtain the absolute filepath
             let src_filepath = PathBuf::from(src_file).canonicalize()?;
 
-            // Add artifacts
-            let (object_filepath, bitcode_filepath) =
+            // Derive filepaths of artifacts
+            let (object_filepath, mut bitcode_filepath) =
                 derive_object_and_bitcode_filepath(&src_filepath, self.is_compile_only)?;
+
+            // Update the bitcode filepath, if the bitcode store path is provided
+            if let Some(bitcode_store_path) = RLLVM_CONFIG.bitcode_store_path() {
+                if bitcode_store_path.exists() {
+                    // Obtain a new bitcode filename based on the hash of the source filepath
+                    if bitcode_filepath.file_name().is_some() {
+                        let src_filepath_hash = calculate_filepath_hash(&src_filepath);
+                        let bitcode_file_stem =
+                            bitcode_filepath.file_stem().unwrap().to_string_lossy();
+                        let bitcode_file_ext =
+                            bitcode_filepath.extension().unwrap().to_string_lossy();
+
+                        let new_bitcode_filename =
+                            format!("{bitcode_file_stem}_{src_filepath_hash}.{bitcode_file_ext}");
+
+                        bitcode_filepath = bitcode_store_path.join(new_bitcode_filename);
+                    } else {
+                        log::warn!("Cannot obtain the bitcode filename: {:?}", bitcode_filepath);
+                    }
+                } else {
+                    log::warn!(
+                        "Ignore the bitcode store path, as it does not exist: {:?}",
+                        bitcode_store_path
+                    );
+                }
+            }
             artifacts.push((src_filepath, object_filepath, bitcode_filepath));
         }
 
