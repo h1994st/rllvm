@@ -290,10 +290,16 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
             let section_data = section.data()?;
             let embedded_filepath_string = str::from_utf8(section_data)?.trim();
 
-            let embedded_filepaths = embedded_filepath_string
+            let mut embedded_filepaths: Vec<_> = embedded_filepath_string
                 .split('\n')
                 .map(|x| PathBuf::from(x))
                 .collect();
+
+            // Sort
+            embedded_filepaths.sort();
+
+            // Deduplicate
+            embedded_filepaths.dedup();
 
             Ok(embedded_filepaths)
         }
