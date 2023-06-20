@@ -3,6 +3,10 @@ authors = ["Shengtuo Hu <h1994st@gmail.com>"]
 categories = ["command-line-utilities", "development-tools", "development-tools:build-utils"]
 description = "A tool to build whole-program LLVM bitcode files"
 edition = "2021"
+exclude = [
+  "tests/*",
+  ".github/*"
+]
 keywords = ["llvm", "wllvm", "gllvm", "rllvm", "bitcode", "LLVM IR", "clang"]
 license-file = "LICENSE"
 name = "rllvm"
