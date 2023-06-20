@@ -3,8 +3,14 @@ name: rllvm CI
 on:
   push:
     branches: [ "main" ]
+    paths-ignore:
+      - "README.md"
+      - ".gitignore"
   pull_request:
     branches: [ "main" ]
+    paths-ignore:
+      - "README.md"
+      - ".gitignore"
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,55 +20,55 @@ jobs:
     name: Build and Test
     runs-on: ubuntu-20.04
     steps:
-    - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1.0.6
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1.0.6
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
 
-    - name: Install LLVM/Clang
-      run: sudo apt install -y llvm llvm-dev clang libclang-dev
+      - name: Install LLVM/Clang
+        run: sudo apt install -y llvm llvm-dev clang libclang-dev
 
-    - name: Check clang version
-      run: command -v llvm-config && clang -v
+      - name: Check clang version
+        run: command -v llvm-config && clang -v
 
-    - name: Checkout sources
-      uses: actions/checkout@v3.5.3
-      with:
-        fetch-depth: 0
+      - name: Checkout sources
+        uses: actions/checkout@v3.5.3
+        with:
+          fetch-depth: 0
 
-    - name: Build
-      uses: actions-rs/cargo@v1.0.1
-      with:
-        command: build
-        args: --verbose
+      - name: Build
+        uses: actions-rs/cargo@v1.0.1
+        with:
+          command: build
+          args: --verbose
 
-    - name: Run tests
-      uses: actions-rs/cargo@v1.0.1
-      with:
-        command: test
-        args: --all --verbose
+      - name: Run tests
+        uses: actions-rs/cargo@v1.0.1
+        with:
+          command: test
+          args: --all --verbose
 
   fmt-check:
     name: Format Check
     runs-on: ubuntu-latest
     steps:
-    - name: Install stable toolchain
-      uses: actions-rs/toolchain@v1.0.6
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
-        components: rustfmt
+      - name: Install stable toolchain
+        uses: actions-rs/toolchain@v1.0.6
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt
 
-    - name: Checkout sources
-      uses: actions/checkout@v3.5.3
-      with:
-        fetch-depth: 0
+      - name: Checkout sources
+        uses: actions/checkout@v3.5.3
+        with:
+          fetch-depth: 0
 
-    - name: Run cargo fmt
-      uses: actions-rs/cargo@v1.0.1
-      with:
-        command: fmt
-        args: --all --check --verbose
+      - name: Run cargo fmt
+        uses: actions-rs/cargo@v1.0.1
+        with:
+          command: fmt
+          args: --all --check --verbose
