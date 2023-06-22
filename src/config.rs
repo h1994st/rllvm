@@ -18,41 +18,41 @@ lazy_static! {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RLLVMConfig {
-    /// The filepath of `llvm-config`
+    /// The absolute filepath of `llvm-config`
     llvm_config_filepath: PathBuf,
 
-    /// The filepath of `clang`
+    /// The absolute filepath of `clang`
     clang_filepath: PathBuf,
 
-    /// The filepath of `clang++`
+    /// The absolute filepath of `clang++`
     clangxx_filepath: PathBuf,
 
-    /// The filepath of `llvm-ar`
+    /// The absolute filepath of `llvm-ar`
     llvm_ar_filepath: PathBuf,
 
-    /// The filepath of `llvm-link`
+    /// The absolute filepath of `llvm-link`
     llvm_link_filepath: PathBuf,
 
-    /// The filepath of `llvm-objcopy`
+    /// The absolute filepath of `llvm-objcopy`
     llvm_objcopy_filepath: PathBuf,
 
     /// The absolute path of the directory that stores intermediate bitcode files
     bitcode_store_path: Option<PathBuf>,
 
-    /// Extra linking flags for `llvm-link`
+    /// Extra user-provided linking flags for `llvm-link`
     llvm_link_flags: Option<Vec<String>>,
 
-    /// Extra linking flags for link time optimization
+    /// Extra user-provided linking flags for link time optimization
     lto_ldflags: Option<Vec<String>>,
 
-    /// Extra flags for bitcode generation, e.g., "-flto -fwhole-program-vtables"
+    /// Extra user-provided flags for bitcode generation, e.g., "-flto -fwhole-program-vtables"
     bitcode_generation_flags: Option<Vec<String>>,
 
-    /// The configure only mode
-    is_configure_only: bool,
+    /// The configure only mode, which skips the bitcode generation (Default: false)
+    is_configure_only: Option<bool>,
 
-    /// Log level
-    log_level: u8,
+    /// Log level (Default: 0, print nothing)
+    log_level: Option<u8>,
 }
 
 impl RLLVMConfig {
@@ -97,12 +97,12 @@ impl RLLVMConfig {
     }
 
     pub fn is_configure_only(&self) -> bool {
-        self.is_configure_only
+        self.is_configure_only.unwrap_or_default()
     }
 
     pub fn log_level(&self) -> Level {
         Level::iter()
-            .nth(self.log_level as usize)
+            .nth(self.log_level.unwrap_or_default() as usize)
             .unwrap_or(Level::max())
     }
 }
@@ -238,8 +238,8 @@ impl Default for RLLVMConfig {
             llvm_link_flags: None,
             lto_ldflags: None,
             bitcode_generation_flags: None,
-            is_configure_only: false,
-            log_level: 0,
+            is_configure_only: None,
+            log_level: None,
         }
     }
 }
