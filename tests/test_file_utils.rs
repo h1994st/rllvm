@@ -9,7 +9,7 @@ mod tests {
 
     #[test]
     fn test_path_injection_and_extraction() {
-        let bitcode_filepath = Path::new("tests/data/hello.bc");
+        let bitcode_filepath = Path::new("/tmp/hello.bc");
         let object_filepath = Path::new("tests/data/hello.o");
 
         let output_object_filepath = Path::new("/tmp/hello.new.o");
@@ -28,9 +28,7 @@ mod tests {
         assert!(!embedded_filepaths.is_empty());
 
         let embedded_filepath = embedded_filepaths[0].clone();
-        let expected_filepath = bitcode_filepath
-            .canonicalize()
-            .expect("Failed to obtain the absolute filepath");
+        let expected_filepath = PathBuf::from(bitcode_filepath);
         println!("{:?}", embedded_filepath);
         assert_eq!(embedded_filepath, expected_filepath);
 

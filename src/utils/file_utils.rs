@@ -84,8 +84,12 @@ where
     // Add a section
     let section_id = new_object_file.add_section(segment_name, section_name, SectionKind::Unknown);
     let new_section = new_object_file.section_mut(section_id);
-    let bitcode_filepath_string =
-        format!("{}\n", bitcode_filepath.canonicalize()?.to_string_lossy());
+
+    let bitcode_filepath_string = if bitcode_filepath.is_absolute() {
+        bitcode_filepath.to_string_lossy().to_string()
+    } else {
+        format!("{}\n", bitcode_filepath.canonicalize()?.to_string_lossy())
+    };
     new_section.set_data(bitcode_filepath_string.as_bytes(), 1);
     // NOTE: we have to explicitly set flags; otherwise, the flags will be
     // inferred based on the section kind, but `Section::Unknown` is not
