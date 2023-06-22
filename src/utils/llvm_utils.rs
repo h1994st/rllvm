@@ -95,7 +95,9 @@ pub fn find_llvm_config() -> Result<PathBuf, Error> {
             }
         }
 
-        Err(Error::Unknown("Failed to find `llvm-config`".to_string()))
+        Err(Error::MissingFile(
+            "Failed to find `llvm-config`".to_string(),
+        ))
     }
 }
 

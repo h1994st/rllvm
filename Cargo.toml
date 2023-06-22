@@ -5,7 +5,8 @@ description = "A tool to build whole-program LLVM bitcode files"
 edition = "2021"
 exclude = [
   "tests/*",
-  ".github/*"
+  ".github/*",
+  "Cargo.lock",
 ]
 keywords = ["llvm", "wllvm", "gllvm", "rllvm", "bitcode", "LLVM IR", "clang"]
 license-file = "LICENSE"

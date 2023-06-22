@@ -143,7 +143,7 @@ impl RLLVMConfig {
                                     "Failed to create the bitcode store directory: err={}",
                                     err
                                 );
-                                std::process::exit(-1);
+                                std::process::exit(1);
                             }
                         } else {
                             // Finally, check if this is a directory
@@ -167,7 +167,7 @@ impl RLLVMConfig {
                     config_filepath,
                     err
                 );
-                std::process::exit(-1);
+                std::process::exit(1);
             }
         }
     }
@@ -180,7 +180,7 @@ impl Default for RLLVMConfig {
         // Find `llvm-config`
         let llvm_config_filepath = find_llvm_config().unwrap_or_else(|err| {
             log::error!("Failed to find `llvm-config`: err={:?}", err);
-            std::process::exit(-1);
+            std::process::exit(1);
         });
         log::info!("- llvm-config: {:?}", llvm_config_filepath);
 
@@ -193,7 +193,7 @@ impl Default for RLLVMConfig {
         let llvm_bindir = execute_llvm_config(&llvm_config_filepath, &["--bindir"]).map_or_else(
             |err| {
                 log::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
-                std::process::exit(-1);
+                std::process::exit(1);
             },
             |x| PathBuf::from(x),
         );
@@ -223,7 +223,7 @@ impl Default for RLLVMConfig {
         for llvm_bin_filepath in llvm_bin_filepaths {
             if !llvm_bin_filepath.exists() {
                 log::error!("Failed to find `{:?}`", llvm_bin_filepath);
-                std::process::exit(-1);
+                std::process::exit(1);
             }
         }
 
