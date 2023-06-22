@@ -8,7 +8,7 @@ exclude = [
   ".github/*",
   "Cargo.lock",
 ]
-keywords = ["llvm", "wllvm", "gllvm", "rllvm", "bitcode", "LLVM IR", "clang"]
+keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
 license-file = "LICENSE"
 name = "rllvm"
 readme = "README.md"
