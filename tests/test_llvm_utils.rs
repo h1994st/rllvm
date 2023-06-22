@@ -31,7 +31,7 @@ mod tests {
         assert!(
             link_bitcode_files(&bitcode_filepaths, output_filepath).map_or_else(
                 |err| {
-                    eprintln!("Failed to link bitcode files: {:?}", err);
+                    println!("Failed to link bitcode files: {:?}", err);
                     false
                 },
                 |code| { code.map_or(false, |code| code == 0) }
@@ -58,7 +58,7 @@ mod tests {
         assert!(
             archive_bitcode_files(&bitcode_filepaths, output_filepath).map_or_else(
                 |err| {
-                    eprintln!("Failed to link bitcode files: {:?}", err);
+                    println!("Failed to link bitcode files: {:?}", err);
                     false
                 },
                 |code| { code.map_or(false, |code| code == 0) }
