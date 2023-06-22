@@ -22,9 +22,9 @@ struct ExtractionArgs {
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
 
-    /// Build bitcode module
+    /// Build bitcode archive (only used for archive files, e.g., *.a)
     #[arg(short = 'b', long)]
-    build_bitcode_module: bool,
+    build_bitcode_archive: bool,
 
     /// Save manifest of all filepaths of underlying bitcode files
     #[arg(short = 'm', long)]
@@ -60,6 +60,7 @@ pub fn main() -> Result<(), Error> {
     let input_data = fs::read(&input_filepath)?;
     let mut object_files = vec![];
     let mut output_file_ext = "bc";
+    let mut build_bitcode_archive = false;
     if let Ok(input_object_file) = object::File::parse(&*input_data) {
         log::info!("Input object file kind: {:?}", input_object_file.kind());
         object_files = vec![input_object_file];
@@ -73,11 +74,12 @@ pub fn main() -> Result<(), Error> {
             object_files.push(object_file)
         }
 
-        if args.build_bitcode_module {
-            output_file_ext = "a.bc";
-        } else {
+        if args.build_bitcode_archive {
             output_file_ext = "bca";
+        } else {
+            output_file_ext = "a.bc";
         }
+        build_bitcode_archive = args.build_bitcode_archive;
     } else {
         return Err(Error::Unknown("Unsupported file format".to_string()));
     };
@@ -93,14 +95,14 @@ pub fn main() -> Result<(), Error> {
     let bitcode_filepaths = extract_bitcode_filepaths_from_parsed_objects(&object_files)?;
 
     // Link or archive bitcode files
-    if args.build_bitcode_module {
-        log::info!("Link bitcode files");
-        if let Some(code) = link_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
+    if build_bitcode_archive {
+        log::info!("Archive bitcode files");
+        if let Some(code) = archive_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
             std::process::exit(code);
         }
     } else {
-        log::info!("Archive bitcode files");
-        if let Some(code) = archive_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
+        log::info!("Link bitcode files");
+        if let Some(code) = link_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
             std::process::exit(code);
         }
     }
