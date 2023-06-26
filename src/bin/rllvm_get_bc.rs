@@ -93,17 +93,36 @@ pub fn main() -> Result<(), Error> {
 
     // Extract bitcode filepaths
     let bitcode_filepaths = extract_bitcode_filepaths_from_parsed_objects(&object_files)?;
+    if args.save_manifest {
+        // Write bitcode filepaths into the manifest file
+        let input_parent_dir = input_filepath.parent().unwrap();
+        let output_filename = output_filepath.file_name().unwrap();
+        let manifest_filepath =
+            input_parent_dir.join(format!("{}.manifest", output_filename.to_string_lossy()));
+
+        let manifest_contents = bitcode_filepaths
+            .iter()
+            .map(|bitcode_filepath| bitcode_filepath.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&manifest_filepath, manifest_contents)?;
+        log::info!("Save manifest: {:?}", manifest_filepath);
+    }
 
     // Link or archive bitcode files
     if build_bitcode_archive {
         log::info!("Archive bitcode files");
         if let Some(code) = archive_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
-            std::process::exit(code);
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
     } else {
         log::info!("Link bitcode files");
         if let Some(code) = link_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
-            std::process::exit(code);
+            if code != 0 {
+                std::process::exit(code);
+            }
         }
     }
     log::info!("Output file: {:?}", output_filepath);
