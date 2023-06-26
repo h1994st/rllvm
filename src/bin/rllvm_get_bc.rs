@@ -42,13 +42,22 @@ pub fn main() -> Result<(), Error> {
     let log_level = LevelFilter::iter()
         .nth(1 + args.verbose as usize)
         .unwrap_or(LevelFilter::max());
-    SimpleLogger::new()
-        .with_level(log_level)
-        .init()
-        .map_err(|err| Error::LoggerError(err.to_string()))?;
+    if let Err(err) = SimpleLogger::new().with_level(log_level).init() {
+        let error_message = format!("Failed to set the logger: err={}", err);
+        log::error!("{}", error_message);
+        return Err(Error::LoggerError(error_message));
+    }
 
     // Check if the input file exists
-    let input_filepath = args.input.canonicalize()?;
+    let input = &args.input;
+    let input_filepath = input.canonicalize().map_err(|err| {
+        log::error!(
+            "Failed to obtain the absolute filepath of the input: input={:?}, err={}",
+            input,
+            err
+        );
+        err
+    })?;
     if !input_filepath.exists() {
         let error_message = format!("Input file does not exist: {:?}", input_filepath);
         log::error!("{}", error_message);
@@ -57,7 +66,14 @@ pub fn main() -> Result<(), Error> {
     log::info!("Input file: {:?}", input_filepath);
 
     // Parse object file(s)
-    let input_data = fs::read(&input_filepath)?;
+    let input_data = fs::read(&input_filepath).map_err(|err| {
+        log::error!(
+            "Failed to read the input file: input_filepath={:?}, err={}",
+            input_filepath,
+            err
+        );
+        err
+    })?;
     let mut object_files = vec![];
     let mut output_file_ext = "bc";
     let mut build_bitcode_archive = false;
@@ -68,9 +84,28 @@ pub fn main() -> Result<(), Error> {
         log::info!("Input archive file kind: {:?}", input_archive_file.kind());
 
         for member in input_archive_file.members() {
-            let member = member?;
-            log::info!("{}", String::from_utf8_lossy(member.name()));
-            let object_file = object::File::parse(member.data(&*input_data)?)?;
+            let member = member.map_err(|err| {
+                log::error!("Failed to obtain the archive member: err={}", err);
+                err
+            })?;
+            let member_name = String::from_utf8_lossy(member.name());
+            log::info!("{}", member_name);
+            let member_object_data = member.data(&*input_data).map_err(|err| {
+                log::error!(
+                    "Failed to read the object data of the archive member: member={}, err={}",
+                    member_name,
+                    err
+                );
+                err
+            })?;
+            let object_file = object::File::parse(member_object_data).map_err(|err| {
+                log::error!(
+                    "Failed to parse the object data of the archive member: member={}, err={}",
+                    member_name,
+                    err
+                );
+                err
+            })?;
             object_files.push(object_file)
         }
 
@@ -92,7 +127,15 @@ pub fn main() -> Result<(), Error> {
     )));
 
     // Extract bitcode filepaths
-    let bitcode_filepaths = extract_bitcode_filepaths_from_parsed_objects(&object_files)?;
+    let bitcode_filepaths =
+        extract_bitcode_filepaths_from_parsed_objects(&object_files).map_err(|err| {
+            log::error!(
+                "Failed to extract bitcode filepaths: object_files={:?}, err={:?}",
+                object_files,
+                err
+            );
+            err
+        })?;
     if args.save_manifest {
         // Write bitcode filepaths into the manifest file
         let input_parent_dir = input_filepath.parent().unwrap();
@@ -105,24 +148,43 @@ pub fn main() -> Result<(), Error> {
             .map(|bitcode_filepath| bitcode_filepath.to_string_lossy())
             .collect::<Vec<_>>()
             .join("\n");
-        fs::write(&manifest_filepath, manifest_contents)?;
+        fs::write(&manifest_filepath, manifest_contents).map_err(|err| {
+            log::error!(
+                "Failed to save the manifest file: manifest_filepath={:?}, err={}",
+                manifest_filepath,
+                err
+            );
+            err
+        })?;
         log::info!("Save manifest: {:?}", manifest_filepath);
     }
 
     // Link or archive bitcode files
-    if build_bitcode_archive {
+    let merge_bitcode_func = if build_bitcode_archive {
         log::info!("Archive bitcode files");
-        if let Some(code) = archive_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
-            if code != 0 {
-                std::process::exit(code);
-            }
-        }
+        archive_bitcode_files
     } else {
         log::info!("Link bitcode files");
-        if let Some(code) = link_bitcode_files(&bitcode_filepaths, output_filepath.clone())? {
-            if code != 0 {
-                std::process::exit(code);
-            }
+        link_bitcode_files
+    };
+    if let Some(code) =
+        merge_bitcode_func(&bitcode_filepaths, output_filepath.clone()).map_err(|err| {
+            let merge_action = if build_bitcode_archive {
+                "archive"
+            } else {
+                "link"
+            };
+            log::error!(
+                "Failed to {} bitcode files: bitcode_filepaths={:?}, err={:?}",
+                merge_action,
+                bitcode_filepaths,
+                err
+            );
+            err
+        })?
+    {
+        if code != 0 {
+            std::process::exit(code);
         }
     }
     log::info!("Output file: {:?}", output_filepath);
