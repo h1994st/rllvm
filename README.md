@@ -22,7 +22,13 @@ llvm-dis hello.bc  # Obtain readable `hello.ll` file
 
 ### Configuration
 
-The default configuration file `~/.rllvm/config.toml` will be automatically created, if it does not exist, with the following entries:
+Users can specify the configuration file by setting the environment variable `RLLVM_CONFIG`.
+
+```bash
+export RLLVM_CONFIG=/absolute/path/to/config/file.toml
+```
+
+Otherwise, the default configuration file `~/.rllvm/config.toml` will be used. The configuration file will be automatically created, if it does not exist, with the following entries:
 
 | Configuration Key          | Required? | Notes                                                                                   |
 | -------------------------- | --------- | --------------------------------------------------------------------------------------- |

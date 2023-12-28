@@ -8,7 +8,9 @@ use log::Level;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    constants::DEFAULT_CONF_FILEPATH_UNDER_HOME,
+    constants::{
+        DEFAULT_CONF_FILEPATH_UNDER_HOME, DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
+    },
     utils::{execute_llvm_config, find_llvm_config},
 };
 
@@ -109,8 +111,17 @@ impl RLLVMConfig {
 
 impl RLLVMConfig {
     pub fn new() -> Self {
-        let config_filepath = PathBuf::from(env::var("HOME").unwrap_or("".into()))
-            .join(DEFAULT_CONF_FILEPATH_UNDER_HOME);
+        let config_filepath = env::var(DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME).map_or_else(
+            |_| {
+                // Default config file
+                PathBuf::from(env::var(HOME_ENV_NAME).unwrap_or("".into()))
+                    .join(DEFAULT_CONF_FILEPATH_UNDER_HOME)
+            },
+            |x| {
+                // User-defined config file
+                PathBuf::from(x)
+            },
+        );
         Self::load_path(config_filepath)
     }
 
