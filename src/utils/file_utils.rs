@@ -9,7 +9,7 @@ use std::{
 
 use object::{
     write, BinaryFormat, File, Object, ObjectComdat, ObjectKind, ObjectSection, ObjectSymbol,
-    RelocationTarget, SectionFlags, SectionKind, SymbolFlags, SymbolKind, SymbolSection,
+    RelocationTarget, SectionFlags, SectionKind, SymbolFlags, SymbolSection,
 };
 
 use crate::{
@@ -150,10 +150,6 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     // Symbols
     let mut out_symbols = HashMap::new();
     for in_symbol in in_object.symbols() {
-        if in_symbol.kind() == SymbolKind::Null {
-            continue;
-        }
-
         let (section, value) = match in_symbol.section() {
             SymbolSection::None => (write::SymbolSection::None, in_symbol.address()),
             SymbolSection::Undefined => (write::SymbolSection::Undefined, in_symbol.address()),
@@ -250,11 +246,9 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
             };
             let out_relocation = write::Relocation {
                 offset,
-                size: in_relocation.size(),
-                kind: in_relocation.kind(),
-                encoding: in_relocation.encoding(),
                 symbol,
                 addend: in_relocation.addend(),
+                flags: in_relocation.flags(),
             };
             out_object.add_relocation(out_section, out_relocation)?;
         }
@@ -341,4 +335,60 @@ pub fn extract_bitcode_filepaths_from_parsed_objects(
     bitcode_filepaths.dedup();
 
     Ok(bitcode_filepaths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::test_case;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    #[test]
+    fn test_path_injection_and_extraction() {
+        let bitcode_filepath = Path::new("/tmp/hello.bc");
+        let object_filepath = Path::new(test_case!("hello.o"));
+
+        let output_object_filepath = Path::new("/tmp/hello.new.o");
+
+        // Embed bitcode filepath
+        let ret = embed_bitcode_filepath_to_object_file(
+            bitcode_filepath,
+            object_filepath,
+            Some(output_object_filepath),
+        );
+        assert!(ret.is_ok());
+
+        // Extract embedded filepaths
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(output_object_filepath)
+            .expect("Failed to extract embedded filepaths");
+        assert!(!embedded_filepaths.is_empty());
+
+        let embedded_filepath = embedded_filepaths[0].clone();
+        let expected_filepath = PathBuf::from(bitcode_filepath);
+        println!("{:?}", embedded_filepath);
+        assert_eq!(embedded_filepath, expected_filepath);
+
+        // Clean
+        fs::remove_file(output_object_filepath).expect("Failed to delete the output object file");
+    }
+
+    #[test]
+    fn test_paths_extraction() {
+        let object_filepath = Path::new(test_case!("foo_bar_baz.dylib"));
+
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(object_filepath)
+            .expect("Failed to extract embedded filepaths");
+        assert_eq!(embedded_filepaths.len(), 3);
+
+        let expected_filepaths = vec![
+            PathBuf::from("/tmp/bar.bc"),
+            PathBuf::from("/tmp/baz.bc"),
+            PathBuf::from("/tmp/foo.bc"),
+        ];
+        println!("{:?}", embedded_filepaths);
+        assert_eq!(embedded_filepaths, expected_filepaths)
+    }
 }

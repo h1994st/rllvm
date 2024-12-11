@@ -12,7 +12,7 @@ use which::which;
 #[cfg(not(target_vendor = "apple"))]
 use crate::constants::{LLVM_VERSION_MAX, LLVM_VERSION_MIN};
 use crate::utils::{execute_command_for_status, execute_command_for_stdout_string};
-use crate::{config::RLLVM_CONFIG, error::Error};
+use crate::{config::rllvm_config, error::Error};
 
 pub fn execute_llvm_ar<P, S>(llvm_ar_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
 where
@@ -116,7 +116,7 @@ where
 
     let mut args = vec![];
     // Link arguments
-    if let Some(llvm_link_flags) = RLLVM_CONFIG.llvm_link_flags() {
+    if let Some(llvm_link_flags) = rllvm_config().llvm_link_flags() {
         args.extend(llvm_link_flags.iter().cloned());
     }
     // Output
@@ -131,7 +131,8 @@ where
             .map(|x| String::from(x.as_ref().to_string_lossy())),
     );
 
-    execute_command_for_status(RLLVM_CONFIG.llvm_link_filepath(), &args).map(|status| status.code())
+    execute_command_for_status(rllvm_config().llvm_link_filepath(), &args)
+        .map(|status| status.code())
 }
 
 /// Archive given bitcode files into one archive file
@@ -159,5 +160,154 @@ where
             .map(|x| String::from(x.as_ref().to_string_lossy())),
     );
 
-    execute_command_for_status(RLLVM_CONFIG.llvm_ar_filepath(), &args).map(|status| status.code())
+    execute_command_for_status(rllvm_config().llvm_ar_filepath(), &args).map(|status| status.code())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        compiler_wrapper::{llvm::ClangWrapper, CompilerKind, CompilerWrapper},
+        utils::test_case,
+    };
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    #[test]
+    fn test_find_llvm_config() {
+        assert!(find_llvm_config().map_or(false, |llvm_config_path| {
+            println!("llvm_config_path={:?}", llvm_config_path);
+            llvm_config_path.exists()
+                && llvm_config_path.is_file()
+                && llvm_config_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("llvm-config")
+        }));
+    }
+
+    fn build_bitcode_files(label: &str) -> bool {
+        let bitcode_filepaths = [
+            PathBuf::from(format!("/tmp/{}_bar.bc", label)),
+            PathBuf::from(format!("/tmp/{}_baz.bc", label)),
+            PathBuf::from(format!("/tmp/{}_foo.bc", label)),
+        ];
+
+        let input_args = [
+            [
+                "-c",
+                "-emit-llvm",
+                "-o",
+                bitcode_filepaths[0].to_str().unwrap(),
+                test_case!("bar.c"),
+            ],
+            [
+                "-c",
+                "-emit-llvm",
+                "-o",
+                bitcode_filepaths[1].to_str().unwrap(),
+                test_case!("baz.c"),
+            ],
+            [
+                "-c",
+                "-emit-llvm",
+                "-o",
+                bitcode_filepaths[2].to_str().unwrap(),
+                test_case!("foo.c"),
+            ],
+        ];
+
+        input_args.iter().all(|args| {
+            let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang);
+            cc.parse_args(args)
+                .unwrap()
+                .run()
+                .unwrap()
+                .map_or(false, |code| code == 0)
+        })
+    }
+
+    #[test]
+    fn test_link_bitcode_files() {
+        // Prepare input bitcode files
+        assert!(build_bitcode_files("link"));
+
+        let bitcode_filepaths = [
+            Path::new("/tmp/link_bar.bc"),
+            Path::new("/tmp/link_baz.bc"),
+            Path::new("/tmp/link_foo.bc"),
+        ];
+
+        let output_filepath = Path::new("/tmp/foo_bar_baz.bc");
+
+        assert!(
+            link_bitcode_files(&bitcode_filepaths, output_filepath).map_or_else(
+                |err| {
+                    println!("Failed to link bitcode files: {:?}", err);
+                    false
+                },
+                |code| { code.map_or(false, |code| code == 0) }
+            )
+        );
+
+        // Check if the output file is successfully created
+        assert!(output_filepath.exists() && output_filepath.is_file());
+
+        // Clean
+        fs::remove_file(output_filepath).expect("Failed to delete the output bitcode file");
+        bitcode_filepaths.iter().for_each(|&bitcode_filepath| {
+            fs::remove_file(bitcode_filepath).expect("Failed to delete the input bitcode file")
+        });
+    }
+
+    #[test]
+    fn test_archive_bitcode_files() {
+        // Prepare input bitcode files
+        assert!(build_bitcode_files("archive"));
+
+        let bitcode_filepaths = [
+            Path::new("/tmp/archive_bar.bc"),
+            Path::new("/tmp/archive_baz.bc"),
+            Path::new("/tmp/archive_foo.bc"),
+        ];
+
+        let output_filepath = Path::new("/tmp/foo_bar_baz.bca");
+
+        assert!(
+            archive_bitcode_files(&bitcode_filepaths, output_filepath).map_or_else(
+                |err| {
+                    println!("Failed to archive bitcode files: {:?}", err);
+                    false
+                },
+                |code| { code.map_or(false, |code| code == 0) }
+            )
+        );
+
+        // Check if the output file is successfully created
+        assert!(output_filepath.exists() && output_filepath.is_file());
+
+        // Check the type of the output archive
+        let output_data = fs::read(&output_filepath).expect("Failed to read the output file");
+        assert!(
+            object::read::archive::ArchiveFile::parse(&*output_data).map_or_else(
+                |err| {
+                    println!("Failed to parse the output file: {:?}", err);
+                    false
+                },
+                |output_archive_file| {
+                    println!("Output archive file kind: {:?}", output_archive_file.kind());
+                    true
+                },
+            )
+        );
+
+        // Clean
+        fs::remove_file(output_filepath).expect("Failed to delete the output bitcode file");
+        bitcode_filepaths.iter().for_each(|&bitcode_filepath| {
+            fs::remove_file(bitcode_filepath).expect("Failed to delete the input bitcode file")
+        });
+    }
 }

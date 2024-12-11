@@ -1,9 +1,9 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
-use lazy_static::lazy_static;
 use log::Level;
 use serde::{Deserialize, Serialize};
 
@@ -14,8 +14,16 @@ use crate::{
     utils::{execute_llvm_config, find_llvm_config},
 };
 
-lazy_static! {
-    pub static ref RLLVM_CONFIG: RLLVMConfig = RLLVMConfig::new();
+#[cfg(not(test))]
+pub fn rllvm_config() -> &'static RLLVMConfig {
+    static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
+    RLLVM_CONFIG.get_or_init(|| RLLVMConfig::new())
+}
+
+#[cfg(test)]
+pub fn rllvm_config() -> &'static RLLVMConfig {
+    static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
+    RLLVM_CONFIG.get_or_init(|| RLLVMConfig::default())
 }
 
 #[derive(Serialize, Deserialize, Debug)]

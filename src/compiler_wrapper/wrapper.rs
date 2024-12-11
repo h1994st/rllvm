@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
-    config::RLLVM_CONFIG,
+    config::rllvm_config,
     error::Error,
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
 };
@@ -53,7 +53,7 @@ pub trait CompilerWrapper {
             // Linking
             if args_info.is_lto() {
                 // Add LTO LDFLAGS
-                if let Some(lto_ldflags) = RLLVM_CONFIG.lto_ldflags() {
+                if let Some(lto_ldflags) = rllvm_config().lto_ldflags() {
                     args.extend(lto_ldflags.iter().cloned());
                 }
             }
@@ -182,7 +182,7 @@ pub trait CompilerWrapper {
         let mut args = vec![String::from(compiler_filepath.to_string_lossy())];
         args.extend(self.args().compile_args().iter().cloned());
         // Add bitcode generation flags
-        if let Some(bitcode_generation_flags) = RLLVM_CONFIG.bitcode_generation_flags() {
+        if let Some(bitcode_generation_flags) = rllvm_config().bitcode_generation_flags() {
             args.extend(bitcode_generation_flags.iter().cloned());
         }
         args.extend_from_slice(&[
@@ -239,7 +239,7 @@ pub trait CompilerWrapper {
         let mut args = vec![String::from(wrapped_compiler.to_string_lossy())];
         if self.args().is_lto() {
             // Add LTO LDFLAGS
-            if let Some(lto_ldflags) = RLLVM_CONFIG.lto_ldflags() {
+            if let Some(lto_ldflags) = rllvm_config().lto_ldflags() {
                 args.extend(lto_ldflags.iter().cloned());
             }
         }

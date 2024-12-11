@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    arg_parser::CompilerArgsInfo, compiler_wrapper::*, config::RLLVM_CONFIG, error::Error,
+    arg_parser::CompilerArgsInfo, compiler_wrapper::*, config::rllvm_config, error::Error,
 };
 
 #[derive(Debug)]
@@ -22,8 +22,8 @@ impl ClangWrapper {
     pub fn new(name: &str, compiler_kind: CompilerKind) -> Self {
         // Obtain the compiler path from the configuration
         let compiler_path = match compiler_kind {
-            CompilerKind::Clang => RLLVM_CONFIG.clang_filepath(),
-            CompilerKind::ClangXX => RLLVM_CONFIG.clangxx_filepath(),
+            CompilerKind::Clang => rllvm_config().clang_filepath(),
+            CompilerKind::ClangXX => rllvm_config().clangxx_filepath(),
         };
 
         Self {

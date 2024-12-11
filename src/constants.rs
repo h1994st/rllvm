@@ -1,8 +1,6 @@
 //! Constants used by the argument parser
 
-use std::collections::HashMap;
-
-use lazy_static::lazy_static;
+use std::{collections::HashMap, sync::OnceLock};
 
 use crate::arg_parser::{ArgInfo, ArgPatternInfo, CompilerArgsInfo};
 
@@ -28,8 +26,10 @@ pub const LLVM_VERSION_MAX: u32 = 33;
 #[cfg(not(target_vendor = "apple"))]
 pub const LLVM_VERSION_MIN: u32 = 6;
 
-lazy_static! {
-    pub static ref ARG_EXACT_MATCH_MAP: CallbackMap = {
+pub fn arg_exact_match_map() -> &'static CallbackMap {
+    static ARG_EXACT_MATCH_MAP: OnceLock<CallbackMap> = OnceLock::new();
+
+    ARG_EXACT_MATCH_MAP.get_or_init(|| {
         let mut m = HashMap::new();
 
         m.insert("/dev/null", ArgInfo::new(0, CompilerArgsInfo::input_file));
@@ -416,71 +416,77 @@ lazy_static! {
         );
 
         m
-    };
-    pub static ref ARG_PATTERNS: PatternCallbackVec = vec![
-        ArgPatternInfo::new(r"^-MF.*$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-MJ.*$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-MQ.*$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-MT.*$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-Wl,.+$", 0, CompilerArgsInfo::link_unary),
-        ArgPatternInfo::new(r"^-W[^l].*$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-W[l][^,].*$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-(l|L).+$", 0, CompilerArgsInfo::link_unary),
-        ArgPatternInfo::new(r"^-I.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-D.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-B.+$", 0, CompilerArgsInfo::compile_link_unary),
-        ArgPatternInfo::new(r"^-isystem.+$", 0, CompilerArgsInfo::compile_link_unary),
-        ArgPatternInfo::new(r"^-U.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-fsanitize=.+$", 0, CompilerArgsInfo::compile_link_unary),
-        ArgPatternInfo::new(r"^-fuse-ld=.+$", 0, CompilerArgsInfo::link_unary),
-        ArgPatternInfo::new(r"^-flto=.+$", 0, CompilerArgsInfo::lto),
-        ArgPatternInfo::new(r"^-f.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-rtlib=.+$", 0, CompilerArgsInfo::link_unary),
-        ArgPatternInfo::new(r"^-std=.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-stdlib=.+$", 0, CompilerArgsInfo::compile_link_unary),
-        ArgPatternInfo::new(r"^-mtune=.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^--sysroot=.+$", 0, CompilerArgsInfo::compile_link_unary),
-        ArgPatternInfo::new(r"^-print-.*$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(
-            r"^-mmacosx-version-min=.+$",
-            0,
-            CompilerArgsInfo::compile_link_unary
-        ),
-        ArgPatternInfo::new(
-            r"^-mstack-alignment=.+$",
-            0,
-            CompilerArgsInfo::compile_unary
-        ),
-        ArgPatternInfo::new(r"^-march=.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-mregparm=.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(r"^-mcmodel=.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(
-            r"^-mpreferred-stack-boundary=.+$",
-            0,
-            CompilerArgsInfo::compile_unary
-        ),
-        ArgPatternInfo::new(
-            r"^-mindirect-branch=.+$",
-            0,
-            CompilerArgsInfo::compile_unary
-        ),
-        ArgPatternInfo::new(r"^--param=.+$", 0, CompilerArgsInfo::compile_unary),
-        ArgPatternInfo::new(
-            r"^.+\.(c|cc|cpp|C|cxx|i|s|S|bc)$",
-            0,
-            CompilerArgsInfo::input_file
-        ),
-        ArgPatternInfo::new(
-            r"^.+\.([fF](|[0-9][0-9]|or|OR|pp|PP))$",
-            0,
-            CompilerArgsInfo::input_file
-        ),
-        ArgPatternInfo::new(
-            r"^.+\.(o|lo|So|so|po|a|dylib|pico|nossppico)$",
-            0,
-            CompilerArgsInfo::object_file
-        ),
-        ArgPatternInfo::new(r"^.+\.dylib(\.\d)+$", 0, CompilerArgsInfo::object_file),
-        ArgPatternInfo::new(r"^.+\.(So|so)(\.\d)+$", 0, CompilerArgsInfo::object_file),
-    ];
+    })
+}
+
+pub fn arg_patterns() -> &'static PatternCallbackVec {
+    static ARG_PATTERNS: OnceLock<PatternCallbackVec> = OnceLock::new();
+    ARG_PATTERNS.get_or_init(|| {
+        vec![
+            ArgPatternInfo::new(r"^-MF.*$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-MJ.*$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-MQ.*$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-MT.*$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-Wl,.+$", 0, CompilerArgsInfo::link_unary),
+            ArgPatternInfo::new(r"^-W[^l].*$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-W[l][^,].*$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-(l|L).+$", 0, CompilerArgsInfo::link_unary),
+            ArgPatternInfo::new(r"^-I.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-D.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-B.+$", 0, CompilerArgsInfo::compile_link_unary),
+            ArgPatternInfo::new(r"^-isystem.+$", 0, CompilerArgsInfo::compile_link_unary),
+            ArgPatternInfo::new(r"^-U.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-fsanitize=.+$", 0, CompilerArgsInfo::compile_link_unary),
+            ArgPatternInfo::new(r"^-fuse-ld=.+$", 0, CompilerArgsInfo::link_unary),
+            ArgPatternInfo::new(r"^-flto=.+$", 0, CompilerArgsInfo::lto),
+            ArgPatternInfo::new(r"^-f.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-rtlib=.+$", 0, CompilerArgsInfo::link_unary),
+            ArgPatternInfo::new(r"^-std=.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-stdlib=.+$", 0, CompilerArgsInfo::compile_link_unary),
+            ArgPatternInfo::new(r"^-mtune=.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^--sysroot=.+$", 0, CompilerArgsInfo::compile_link_unary),
+            ArgPatternInfo::new(r"^-print-.*$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(
+                r"^-mmacosx-version-min=.+$",
+                0,
+                CompilerArgsInfo::compile_link_unary,
+            ),
+            ArgPatternInfo::new(
+                r"^-mstack-alignment=.+$",
+                0,
+                CompilerArgsInfo::compile_unary,
+            ),
+            ArgPatternInfo::new(r"^-march=.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-mregparm=.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(r"^-mcmodel=.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(
+                r"^-mpreferred-stack-boundary=.+$",
+                0,
+                CompilerArgsInfo::compile_unary,
+            ),
+            ArgPatternInfo::new(
+                r"^-mindirect-branch=.+$",
+                0,
+                CompilerArgsInfo::compile_unary,
+            ),
+            ArgPatternInfo::new(r"^--param=.+$", 0, CompilerArgsInfo::compile_unary),
+            ArgPatternInfo::new(
+                r"^.+\.(c|cc|cpp|C|cxx|i|s|S|bc)$",
+                0,
+                CompilerArgsInfo::input_file,
+            ),
+            ArgPatternInfo::new(
+                r"^.+\.([fF](|[0-9][0-9]|or|OR|pp|PP))$",
+                0,
+                CompilerArgsInfo::input_file,
+            ),
+            ArgPatternInfo::new(
+                r"^.+\.(o|lo|So|so|po|a|dylib|pico|nossppico)$",
+                0,
+                CompilerArgsInfo::object_file,
+            ),
+            ArgPatternInfo::new(r"^.+\.dylib(\.\d)+$", 0, CompilerArgsInfo::object_file),
+            ArgPatternInfo::new(r"^.+\.(So|so)(\.\d)+$", 0, CompilerArgsInfo::object_file),
+        ]
+    })
 }
