@@ -1,6 +1,7 @@
 # Whole Program LLVM in Rust (rllvm)
 
 [![rllvm CI](https://github.com/h1994st/rllvm/actions/workflows/ci.yml/badge.svg)](https://github.com/h1994st/rllvm/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/github/h1994st/rllvm/graph/badge.svg?token=PWKZ6H64BS)](https://codecov.io/github/h1994st/rllvm)
 
 `rllvm` is a Rust port of [`gllvm`](https://github.com/SRI-CSL/gllvm) and provides compiler wrappers to build whole-program LLVM bitcode files for projects with source codes.
 
