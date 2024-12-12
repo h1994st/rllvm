@@ -26,11 +26,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1.0.6
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+        run: rustup update stable
 
       - name: Install LLVM/Clang (Linux)
         if: ${{ runner.os == 'Linux' }}
@@ -44,7 +40,7 @@ jobs:
           brew install llvm
 
       - name: Checkout sources
-        uses: actions/checkout@v3.5.3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -65,15 +61,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install stable toolchain
-        uses: actions-rs/toolchain@v1.0.6
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          components: rustfmt
+        run: rustup update stable
 
       - name: Checkout sources
-        uses: actions/checkout@v3.5.3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -82,3 +73,26 @@ jobs:
         with:
           command: fmt
           args: --all --check --verbose
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install stable toolchain
+        run: rustup update stable
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate code coverage
+        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
