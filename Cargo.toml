@@ -1,6 +1,6 @@
 [package]
 authors = ["Shengtuo Hu <h1994st@gmail.com>"]
-categories = ["command-line-utilities", "development-tools", "development-tools:build-utils"]
+categories = ["command-line-utilities", "development-tools", "development-tools::build-utils"]
 description = "A tool to build whole-program LLVM bitcode files"
 edition = "2021"
 exclude = [
