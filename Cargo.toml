@@ -39,3 +39,7 @@ path = "src/bin/rllvm_cxx.rs"
 [[bin]]
 name = "rllvm-get-bc"
 path = "src/bin/rllvm_get_bc.rs"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
