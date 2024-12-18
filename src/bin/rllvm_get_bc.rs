@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use clap::Parser;
 use log::LevelFilter;
 use object::Object;
-use rllvm::{error::Error, utils::*};
+use rllvm::{config::rllvm_config, error::Error, utils::*};
 use simple_logger::SimpleLogger;
 
 /// Extraction arguments
@@ -39,9 +39,14 @@ pub fn main() -> Result<(), Error> {
     let args = ExtractionArgs::parse();
 
     // Set log level
-    let log_level = LevelFilter::iter()
-        .nth(1 + args.verbose as usize)
-        .unwrap_or(LevelFilter::max());
+    // The verbose flag will override the configured log level
+    let log_level = if args.verbose == 0 {
+        rllvm_config().log_level().to_level_filter()
+    } else {
+        LevelFilter::iter()
+            .nth(1 + args.verbose as usize)
+            .unwrap_or(LevelFilter::max())
+    };
     if let Err(err) = SimpleLogger::new().with_level(log_level).init() {
         let error_message = format!("Failed to set the logger: err={}", err);
         log::error!("{}", error_message);
@@ -136,6 +141,7 @@ pub fn main() -> Result<(), Error> {
             );
             err
         })?;
+    log::debug!("Bitcode filepaths: {:?}", bitcode_filepaths);
     if args.save_manifest {
         // Write bitcode filepaths into the manifest file
         let input_parent_dir = input_filepath.parent().unwrap();
