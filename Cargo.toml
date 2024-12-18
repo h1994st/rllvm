@@ -9,6 +9,7 @@ exclude = [
   "Cargo.lock",
 ]
 keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
+license = "GPL-3.0"
 license-file = "LICENSE"
 name = "rllvm"
 readme = "README.md"
