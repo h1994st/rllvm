@@ -16,9 +16,15 @@ cargo install rllvm
 ## Get Started
 
 ```bash
-rllvm-cxx -o hello tests/data/hello.cc
-rllvm-get-bc hello  # Extract the bitcode file `hello.bc`
-llvm-dis hello.bc  # Obtain readable `hello.ll` file
+# Compile the source file. `--` is needed. Arguments after it will be
+# passed to the wrapped compiler
+rllvm-cxx -- -o hello tests/data/hello.cc
+
+# Extract the bitcode file `hello.bc`
+rllvm-get-bc hello
+
+# Obtain readable `hello.ll` file
+llvm-dis hello.bc
 ```
 
 ### Configuration
@@ -57,4 +63,12 @@ llvm_link_filepath = '/usr/local/Cellar/llvm/16.0.4/bin/llvm-link'
 llvm_objcopy_filepath = '/usr/local/Cellar/llvm/16.0.4/bin/llvm-objcopy'
 bitcode_store_path = '/tmp/bitcode_store'
 log_level = 3
+```
+
+Furthermore, we can override configurations by providing extra arguments before `--`.
+Currently, we only support override the compiler path and the log level, which is useful to sepcify relative paths while working with Bazel.
+
+```bash
+# Override the wrapped compiler path and show all logs
+rllvm-cxx -c /path/to/compiler -vvvvv -- -o hello tests/data/hello.cc
 ```
