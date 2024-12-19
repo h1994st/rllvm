@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Compiler type
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CompilerKind {
     /// Clang
     #[default]
@@ -35,6 +35,7 @@ pub trait CompilerWrapper {
     fn compiler_kind(&self) -> &CompilerKind;
 
     /// Set the wrapper arguments parsing a command line set of arguments
+    #[must_use]
     fn parse_args<S>(&mut self, args: &[S]) -> Result<&'_ mut Self, Error>
     where
         S: AsRef<str>;
@@ -262,4 +263,28 @@ pub trait CompilerWrapper {
 
         self.execute_command(&args, mode)
     }
+}
+
+/// A general interface for the compiler wrapper builder
+pub trait CompilerWrapperBuilder {
+    type OutputType;
+
+    /// Build the compiler wrapper
+    fn build(&self) -> Self::OutputType;
+
+    /// Set the compiler name
+    #[must_use]
+    fn name(self, name: &str) -> Self;
+
+    /// Set the compiler kind
+    #[must_use]
+    fn compiler_kind(self, compiler_kind: CompilerKind) -> Self;
+
+    /// Set the wrapped compiler path
+    fn wrapped_compiler<P>(self, wrapped_compiler: P) -> Self
+    where
+        P: AsRef<Path>;
+
+    /// Set the silence flag
+    fn silence(self, value: bool) -> Self;
 }
