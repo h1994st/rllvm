@@ -167,7 +167,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        compiler_wrapper::{llvm::ClangWrapper, CompilerKind, CompilerWrapper},
+        compiler_wrapper::{CompilerKind, CompilerWrapper, llvm::ClangWrapper},
         utils::test_case,
     };
     use std::{

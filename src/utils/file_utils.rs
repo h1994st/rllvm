@@ -8,8 +8,8 @@ use std::{
 };
 
 use object::{
-    write, BinaryFormat, File, Object, ObjectComdat, ObjectKind, ObjectSection, ObjectSymbol,
-    RelocationTarget, SectionFlags, SectionKind, SymbolFlags, SymbolSection,
+    BinaryFormat, File, Object, ObjectComdat, ObjectKind, ObjectSection, ObjectSymbol,
+    RelocationTarget, SectionFlags, SectionKind, SymbolFlags, SymbolSection, write,
 };
 
 use crate::{
@@ -170,7 +170,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
                 return Err(Error::InvalidArguments(format!(
                     "Unknown symbol section: {:?}",
                     in_symbol
-                )))
+                )));
             }
         };
         let flags = match in_symbol.flags() {
@@ -207,7 +207,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
                 return Err(Error::InvalidArguments(format!(
                     "Unknown symbol flags: {:?}",
                     in_symbol
-                )))
+                )));
             }
         };
         let out_symbol = write::Symbol {
@@ -241,7 +241,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
                     return Err(Error::InvalidArguments(format!(
                         "Unknown relocation target: {:?}",
                         in_relocation
-                    )))
+                    )));
                 }
             };
             let out_relocation = write::Relocation {

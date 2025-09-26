@@ -4,7 +4,7 @@ use clap::Parser;
 use log::LevelFilter;
 use rllvm::{
     compiler_wrapper::{
-        llvm::ClangWrapperBuilder, CompilerKind, CompilerWrapper, CompilerWrapperBuilder,
+        CompilerKind, CompilerWrapper, CompilerWrapperBuilder, llvm::ClangWrapperBuilder,
     },
     config::rllvm_config,
     error::Error,
