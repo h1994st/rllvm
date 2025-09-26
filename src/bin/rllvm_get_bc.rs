@@ -141,6 +141,14 @@ pub fn main() -> Result<(), Error> {
             );
             err
         })?;
+    if bitcode_filepaths.is_empty() {
+        let error_message = format!(
+            "No bitcode filepaths found in the input file: {:?}",
+            input_filepath
+        );
+        log::error!("{}", error_message);
+        return Err(Error::MissingFile(error_message));
+    }
     log::debug!("Bitcode filepaths: {:?}", bitcode_filepaths);
     if args.save_manifest {
         // Write bitcode filepaths into the manifest file
