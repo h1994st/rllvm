@@ -26,6 +26,7 @@ regex = "~1.11.3"
 serde = {version = "~1.0.227", features = ["derive"]}
 tracing = "~0.1"
 tracing-subscriber = {version = "~0.3", features = ["env-filter"]}
+owo-colors = "~4.1"
 thiserror = "~2.0"
 which = "~8.0.0"
 

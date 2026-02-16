@@ -18,6 +18,7 @@ use crate::{
     constants::{
         DEFAULT_CONF_FILEPATH_UNDER_HOME, DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
     },
+    diagnostics::{check_version_compatibility, print_missing_tool_error},
     error::Error,
     utils::{execute_llvm_config, find_llvm_config},
 };
@@ -249,7 +250,7 @@ impl Default for RLLVMConfig {
 }
 
 impl RLLVMConfig {
-    /// Checks that configured tool paths exist on disk, logging a warning for each missing tool.
+    /// Checks that configured tool paths exist on disk, printing colored errors for each missing tool.
     fn validate_tool_paths(&self) {
         let tools: &[(&str, &Path)] = &[
             ("llvm-config", &self.llvm_config_filepath),
@@ -262,8 +263,13 @@ impl RLLVMConfig {
 
         for (name, path) in tools {
             if !path.exists() {
-                tracing::warn!("Configured path for `{}` does not exist: {:?}", name, path);
+                print_missing_tool_error(name, Some(path));
             }
+        }
+
+        // Check version compatibility between clang and LLVM tools
+        if self.clang_filepath.exists() && self.llvm_config_filepath.exists() {
+            check_version_compatibility(&self.clang_filepath, &self.llvm_config_filepath);
         }
     }
 
@@ -275,9 +281,8 @@ impl RLLVMConfig {
         tracing::info!("Infer rllvm configurations ...");
 
         // Find `llvm-config`
-        let llvm_config_filepath = find_llvm_config().map_err(|err| {
-            tracing::error!("Failed to find `llvm-config`: err={:?}", err);
-            err
+        let llvm_config_filepath = find_llvm_config().inspect_err(|_| {
+            print_missing_tool_error("llvm-config", None);
         })?;
         tracing::info!("- llvm-config: {:?}", llvm_config_filepath);
 
@@ -309,19 +314,22 @@ impl RLLVMConfig {
         // Find `llvm-objcopy`
         let llvm_objcopy_filepath = llvm_bindir.join("llvm-objcopy");
 
-        let llvm_bin_filepaths = [
-            &clang_filepath,
-            &clangxx_filepath,
-            &llvm_ar_filepath,
-            &llvm_link_filepath,
-            &llvm_objcopy_filepath,
+        let llvm_bin_tools: &[(&str, &PathBuf)] = &[
+            ("clang", &clang_filepath),
+            ("clang++", &clangxx_filepath),
+            ("llvm-ar", &llvm_ar_filepath),
+            ("llvm-link", &llvm_link_filepath),
+            ("llvm-objcopy", &llvm_objcopy_filepath),
         ];
-        for llvm_bin_filepath in llvm_bin_filepaths {
-            if !llvm_bin_filepath.exists() {
-                tracing::error!("Failed to find `{:?}`", llvm_bin_filepath);
-                return Err(Error::MissingFile(format!("{llvm_bin_filepath:?}")));
+        for (name, filepath) in llvm_bin_tools {
+            if !filepath.exists() {
+                print_missing_tool_error(name, Some(filepath));
+                return Err(Error::MissingFile(format!("{filepath:?}")));
             }
         }
+
+        // Check version compatibility between clang and LLVM tools
+        check_version_compatibility(&clang_filepath, &llvm_config_filepath);
 
         Ok(Self {
             llvm_config_filepath,
