@@ -48,6 +48,8 @@ path = "src/bin/rllvm_get_bc.rs"
 [[bin]]
 name = "rllvm-init"
 path = "src/bin/rllvm_init.rs"
+
+[[bin]]
 name = "rllvm-completions"
 path = "src/bin/rllvm_completions.rs"
 

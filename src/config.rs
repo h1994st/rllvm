@@ -91,6 +91,13 @@ pub struct RLLVMConfig {
 
     /// Log level (Default: 0, print nothing)
     log_level: Option<u8>,
+
+    /// Enable incremental bitcode caching (Default: false).
+    /// Can also be enabled via `RLLVM_CACHE=1` environment variable.
+    cache_enabled: Option<bool>,
+
+    /// Custom cache directory path (Default: `~/.rllvm/cache/`)
+    cache_dir: Option<PathBuf>,
 }
 
 impl RLLVMConfig {
@@ -158,6 +165,16 @@ impl RLLVMConfig {
             3 => Level::DEBUG,
             _ => Level::TRACE,
         }
+    }
+
+    /// Returns whether caching is enabled in the config.
+    pub fn cache_enabled(&self) -> bool {
+        self.cache_enabled.unwrap_or_default()
+    }
+
+    /// Returns the optional custom cache directory path.
+    pub fn cache_dir(&self) -> Option<&PathBuf> {
+        self.cache_dir.as_ref()
     }
 }
 
@@ -344,6 +361,8 @@ impl RLLVMConfig {
             bitcode_generation_flags: None,
             is_configure_only: None,
             log_level: None,
+            cache_enabled: None,
+            cache_dir: None,
         })
     }
 }

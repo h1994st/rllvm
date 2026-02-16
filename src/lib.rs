@@ -18,6 +18,9 @@
 /// Command-line argument parsing for compiler flag classification.
 pub mod arg_parser;
 
+/// Incremental bitcode cache for skipping recompilation of unchanged files.
+pub mod cache;
+
 /// Diagnostic utilities for version checking, install hints, and colored output.
 pub mod diagnostics;
 
