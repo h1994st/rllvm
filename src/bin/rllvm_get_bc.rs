@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use clap::Parser;
 use object::Object;
-use rllvm::{config::rllvm_config, error::Error, utils::*};
+use rllvm::{config::rllvm_config, error::Error, merge::MergeStrategy, utils::*};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -22,9 +22,14 @@ struct ExtractionArgs {
     #[arg(short = 'o', long)]
     output: Option<PathBuf>,
 
-    /// Build bitcode archive (only used for archive files, e.g., *.a)
+    /// Build bitcode archive (only used for archive files, e.g., *.a).
+    /// Equivalent to --merge-strategy=archive. Deprecated in favor of --merge-strategy.
     #[arg(short = 'b', long)]
     build_bitcode_archive: bool,
+
+    /// Bitcode merge strategy: full (llvm-link all), partial (group by dir then link), archive (llvm-ar)
+    #[arg(long, value_enum)]
+    merge_strategy: Option<MergeStrategy>,
 
     /// Save manifest of all filepaths of underlying bitcode files
     #[arg(short = 'm', long)]
@@ -79,8 +84,18 @@ pub fn main() -> Result<(), Error> {
         err
     })?;
     let mut object_files = vec![];
-    let mut output_file_ext = "bc";
-    let mut build_bitcode_archive = false;
+    // Resolve merge strategy: --merge-strategy takes precedence, then -b flag, then default (Full).
+    let strategy = match args.merge_strategy {
+        Some(s) => s,
+        None if args.build_bitcode_archive => MergeStrategy::Archive,
+        None => MergeStrategy::Full,
+    };
+
+    let mut output_file_ext = match strategy {
+        MergeStrategy::Archive => "bca",
+        _ => "bc",
+    };
+
     if let Ok(input_object_file) = object::File::parse(&*input_data) {
         tracing::info!("Input object file kind: {:?}", input_object_file.kind());
         object_files = vec![input_object_file];
@@ -110,12 +125,10 @@ pub fn main() -> Result<(), Error> {
             object_files.push(object_file)
         }
 
-        if args.build_bitcode_archive {
-            output_file_ext = "bca";
-        } else {
+        // For archive inputs, adjust extension unless already set to bca by Archive strategy.
+        if strategy != MergeStrategy::Archive {
             output_file_ext = "a.bc";
         }
-        build_bitcode_archive = args.build_bitcode_archive;
     } else {
         return Err(Error::Unknown("Unsupported file format".to_string()));
     };
@@ -169,29 +182,21 @@ pub fn main() -> Result<(), Error> {
         tracing::info!("Save manifest: {:?}", manifest_filepath);
     }
 
-    // Link or archive bitcode files
-    let merge_bitcode_func = if build_bitcode_archive {
-        tracing::info!("Archive bitcode files");
-        archive_bitcode_files
-    } else {
-        tracing::info!("Link bitcode files");
-        link_bitcode_files
-    };
-    if let Some(code) =
-        merge_bitcode_func(&bitcode_filepaths, output_filepath.clone()).map_err(|err| {
-            let merge_action = if build_bitcode_archive {
-                "archive"
-            } else {
-                "link"
-            };
-            tracing::error!(
-                "Failed to {} bitcode files: bitcode_filepaths={:?}, err={:?}",
-                merge_action,
-                bitcode_filepaths,
-                err
-            );
+    // Merge bitcode files using the selected strategy
+    if let Some(code) = rllvm::merge::merge_bitcode_files(
+        strategy,
+        &bitcode_filepaths,
+        output_filepath.clone(),
+    )
+    .map_err(|err| {
+        tracing::error!(
+            "Failed to merge ({}) bitcode files: bitcode_filepaths={:?}, err={:?}",
+            strategy,
+            bitcode_filepaths,
             err
-        })?
+        );
+        err
+    })?
         && code != 0
     {
         std::process::exit(code);
