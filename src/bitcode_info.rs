@@ -16,20 +16,30 @@ use crate::{
 /// Information about a single function in the bitcode module.
 #[derive(Debug)]
 pub struct FunctionInfo {
+    /// Function name as it appears in the LLVM IR.
     pub name: String,
+    /// Number of basic blocks in the function.
     pub basic_block_count: usize,
+    /// Number of instructions in the function.
     pub instruction_count: usize,
 }
 
 /// Aggregated analysis of an LLVM bitcode file.
 #[derive(Debug)]
 pub struct BitcodeInfo {
+    /// Path to the analyzed bitcode file.
     pub file_path: PathBuf,
+    /// Size of the bitcode file in bytes.
     pub file_size: u64,
+    /// Target triple from the module metadata, if present.
     pub target_triple: Option<String>,
+    /// Data layout string from the module metadata, if present.
     pub data_layout: Option<String>,
+    /// Per-function analysis results.
     pub functions: Vec<FunctionInfo>,
+    /// Total basic block count across all functions.
     pub total_basic_blocks: usize,
+    /// Total instruction count across all functions.
     pub total_instructions: usize,
 }
 

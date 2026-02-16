@@ -17,6 +17,7 @@ use crate::{
     error::Error,
 };
 
+/// Returns `true` if the path exists and is not a directory.
 pub fn is_plain_file<P>(file: P) -> bool
 where
     P: AsRef<Path>,
@@ -25,6 +26,7 @@ where
     file.exists() && !file.is_dir()
 }
 
+/// Returns `true` if the file is a relocatable object file.
 pub fn is_object_file<P>(file: P) -> Result<bool, Error>
 where
     P: AsRef<Path>,
@@ -275,7 +277,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     Ok(out_object)
 }
 
-/// Extract the path of the bitcode from the parsed object
+/// Extract bitcode filepaths embedded in a parsed object file.
 pub fn extract_bitcode_filepaths_from_parsed_object(
     object_file: &object::File,
 ) -> Result<Vec<PathBuf>, Error> {
@@ -315,7 +317,7 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
     }
 }
 
-/// Extract the path of the bitcode from the corresponding object file
+/// Extract bitcode filepaths from an object file on disk.
 pub fn extract_bitcode_filepaths_from_object_file<P>(
     object_filepath: P,
 ) -> Result<Vec<PathBuf>, Error>
@@ -330,6 +332,7 @@ where
     extract_bitcode_filepaths_from_parsed_object(&object_file)
 }
 
+/// Extract and deduplicate bitcode filepaths from multiple parsed object files.
 pub fn extract_bitcode_filepaths_from_parsed_objects(
     object_files: &[object::File],
 ) -> Result<Vec<PathBuf>, Error> {

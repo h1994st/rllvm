@@ -8,6 +8,7 @@ use std::{
 
 use crate::error::Error;
 
+/// Derive the object file and bitcode file paths from a source file path.
 pub fn derive_object_and_bitcode_filepath<P>(
     src_filepath: P,
     is_compile_only: bool,
@@ -79,6 +80,7 @@ where
     Ok((object_filepath, bitcode_filepath))
 }
 
+/// Compute a hash of the given file path for use in unique naming.
 pub fn calculate_filepath_hash<P>(filepath: P) -> u64
 where
     P: AsRef<Path>,
