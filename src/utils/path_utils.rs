@@ -24,21 +24,44 @@ where
     }
 
     // Parent directory
-    let parent_dir = src_filepath
-        .parent()
-        .unwrap_or_else(|| panic!("Failed to obtain the parent directory: {:?}", src_filepath));
+    let parent_dir = src_filepath.parent().ok_or_else(|| {
+        Error::InvalidArguments(format!(
+            "Failed to obtain the parent directory: {:?}",
+            src_filepath
+        ))
+    })?;
     // With extension
     let file_name = src_filepath
         .file_name()
-        .unwrap_or_else(|| panic!("Failed to obtain the file name: {:?}", src_filepath))
+        .ok_or_else(|| {
+            Error::InvalidArguments(format!(
+                "Failed to obtain the file name: {:?}",
+                src_filepath
+            ))
+        })?
         .to_str()
-        .unwrap_or_else(|| panic!("Failed to convert OsStr to str: {:?}", src_filepath));
+        .ok_or_else(|| {
+            Error::InvalidArguments(format!(
+                "Failed to convert OsStr to str: {:?}",
+                src_filepath
+            ))
+        })?;
     // Without extension
     let file_stem = src_filepath
         .file_stem()
-        .unwrap_or_else(|| panic!("Failed to obtain the file stem: {:?}", src_filepath))
+        .ok_or_else(|| {
+            Error::InvalidArguments(format!(
+                "Failed to obtain the file stem: {:?}",
+                src_filepath
+            ))
+        })?
         .to_str()
-        .unwrap_or_else(|| panic!("Failed to convert OsStr to str: {:?}", src_filepath));
+        .ok_or_else(|| {
+            Error::InvalidArguments(format!(
+                "Failed to convert OsStr to str: {:?}",
+                src_filepath
+            ))
+        })?;
 
     let object_file_name = if is_compile_only {
         // Compile only. We need to explicitly generate the object file
