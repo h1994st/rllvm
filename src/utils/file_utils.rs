@@ -85,7 +85,7 @@ where
     let new_section = new_object_file.section_mut(section_id);
 
     let bitcode_filepath_string = if bitcode_filepath.is_absolute() {
-        bitcode_filepath.to_string_lossy().to_string()
+        bitcode_filepath.to_string_lossy().into_owned()
     } else {
         format!("{}\n", bitcode_filepath.canonicalize()?.to_string_lossy())
     };
@@ -370,10 +370,9 @@ mod tests {
             .expect("Failed to extract embedded filepaths");
         assert!(!embedded_filepaths.is_empty());
 
-        let embedded_filepath = embedded_filepaths[0].clone();
         let expected_filepath = PathBuf::from(bitcode_filepath);
-        println!("{:?}", embedded_filepath);
-        assert_eq!(embedded_filepath, expected_filepath);
+        println!("{:?}", embedded_filepaths[0]);
+        assert_eq!(embedded_filepaths[0], expected_filepath);
 
         // Clean
         fs::remove_file(output_object_filepath).expect("Failed to delete the output object file");

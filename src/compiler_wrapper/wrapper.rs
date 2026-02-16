@@ -46,7 +46,7 @@ pub trait CompilerWrapper {
     fn command(&self) -> Result<Vec<String>, Error> {
         let args_info = self.args();
         let compiler_filepath = self.wrapped_compiler();
-        let mut args = vec![String::from(compiler_filepath.to_string_lossy())];
+        let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
 
         // Append LTO LDFLAGS
         if args_info.input_files().is_empty() && !args_info.link_args().is_empty() {
@@ -176,7 +176,7 @@ pub trait CompilerWrapper {
         let bitcode_filepath = bitcode_filepath.as_ref();
         let compiler_filepath = self.wrapped_compiler();
 
-        let mut args = vec![String::from(compiler_filepath.to_string_lossy())];
+        let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
         args.extend(self.args().compile_args().iter().cloned());
         // Add bitcode generation flags
         if let Some(bitcode_generation_flags) = rllvm_config().bitcode_generation_flags() {
@@ -186,8 +186,8 @@ pub trait CompilerWrapper {
             "-emit-llvm".to_string(),
             "-c".to_string(),
             "-o".to_string(),
-            String::from(bitcode_filepath.to_string_lossy()),
-            String::from(src_filepath.to_string_lossy()),
+            bitcode_filepath.to_string_lossy().into_owned(),
+            src_filepath.to_string_lossy().into_owned(),
         ]);
 
         let mode = CompileMode::BitcodeGeneration;
@@ -208,13 +208,13 @@ pub trait CompilerWrapper {
         let object_filepath = object_filepath.as_ref();
         let wrapped_compiler = self.wrapped_compiler();
 
-        let mut args = vec![String::from(wrapped_compiler.to_string_lossy())];
+        let mut args = vec![wrapped_compiler.to_string_lossy().into_owned()];
         args.extend(self.args().compile_args().iter().cloned());
         args.extend_from_slice(&[
             "-c".to_string(),
             "-o".to_string(),
-            String::from(object_filepath.to_string_lossy()),
-            String::from(src_filepath.to_string_lossy()),
+            object_filepath.to_string_lossy().into_owned(),
+            src_filepath.to_string_lossy().into_owned(),
         ]);
 
         let mode = CompileMode::Compiling;
@@ -233,7 +233,7 @@ pub trait CompilerWrapper {
         let output_filepath = output_filepath.as_ref();
         let wrapped_compiler = self.wrapped_compiler();
 
-        let mut args = vec![String::from(wrapped_compiler.to_string_lossy())];
+        let mut args = vec![wrapped_compiler.to_string_lossy().into_owned()];
         if self.args().is_lto() {
             // Add LTO LDFLAGS
             if let Some(lto_ldflags) = rllvm_config().lto_ldflags() {
@@ -245,13 +245,13 @@ pub trait CompilerWrapper {
         // Output
         args.extend_from_slice(&[
             "-o".to_string(),
-            String::from(output_filepath.to_string_lossy()),
+            output_filepath.to_string_lossy().into_owned(),
         ]);
         // Input object files
         args.extend(
             object_filepaths
                 .iter()
-                .map(|x| String::from(x.as_ref().to_string_lossy())),
+                .map(|x| x.as_ref().to_string_lossy().into_owned()),
         );
 
         // Mode
