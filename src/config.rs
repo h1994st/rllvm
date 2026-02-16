@@ -192,6 +192,8 @@ impl RLLVMConfig {
             ))
         })?;
 
+        config.validate_tool_paths();
+
         if let Some(bitcode_store_path) = &config.bitcode_store_path {
             // Check if the bitcode store path is absolute or not
             if !bitcode_store_path.is_absolute() {
@@ -240,6 +242,24 @@ impl Default for RLLVMConfig {
 }
 
 impl RLLVMConfig {
+    /// Checks that configured tool paths exist on disk, logging a warning for each missing tool.
+    fn validate_tool_paths(&self) {
+        let tools: &[(&str, &Path)] = &[
+            ("llvm-config", &self.llvm_config_filepath),
+            ("clang", &self.clang_filepath),
+            ("clang++", &self.clangxx_filepath),
+            ("llvm-ar", &self.llvm_ar_filepath),
+            ("llvm-link", &self.llvm_link_filepath),
+            ("llvm-objcopy", &self.llvm_objcopy_filepath),
+        ];
+
+        for (name, path) in tools {
+            if !path.exists() {
+                log::warn!("Configured path for `{}` does not exist: {:?}", name, path);
+            }
+        }
+    }
+
     /// Infers configuration by discovering LLVM tools on the system.
     ///
     /// Uses [`find_llvm_config`](crate::utils::find_llvm_config) to locate
