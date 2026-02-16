@@ -53,6 +53,10 @@ path = "src/bin/rllvm_init.rs"
 name = "rllvm-completions"
 path = "src/bin/rllvm_completions.rs"
 
+[[bin]]
+name = "rllvm-rustc"
+path = "src/bin/rllvm_rustc.rs"
+
 [dev-dependencies]
 tempfile = "3"
 
