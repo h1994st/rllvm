@@ -1,10 +1,10 @@
 use std::{fs, path::PathBuf};
 
 use clap::Parser;
-use log::LevelFilter;
 use object::Object;
 use rllvm::{config::rllvm_config, error::Error, utils::*};
-use simple_logger::SimpleLogger;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 /// Extraction arguments
 #[derive(Parser, Debug)]
@@ -41,22 +41,21 @@ pub fn main() -> Result<(), Error> {
     // Set log level
     // The verbose flag will override the configured log level
     let log_level = if args.verbose == 0 {
-        rllvm_config().log_level().to_level_filter()
+        rllvm_config().log_level()
     } else {
-        LevelFilter::iter()
-            .nth(1 + args.verbose as usize)
-            .unwrap_or(LevelFilter::max())
+        match args.verbose {
+            1 => Level::WARN,
+            2 => Level::INFO,
+            3 => Level::DEBUG,
+            _ => Level::TRACE,
+        }
     };
-    if let Err(err) = SimpleLogger::new().with_level(log_level).init() {
-        let error_message = format!("Failed to set the logger: err={}", err);
-        log::error!("{}", error_message);
-        return Err(Error::LoggerError(error_message));
-    }
+    FmtSubscriber::builder().with_max_level(log_level).init();
 
     // Check if the input file exists
     let input = &args.input;
     let input_filepath = input.canonicalize().map_err(|err| {
-        log::error!(
+        tracing::error!(
             "Failed to obtain the absolute filepath of the input: input={:?}, err={}",
             input,
             err
@@ -65,14 +64,14 @@ pub fn main() -> Result<(), Error> {
     })?;
     if !input_filepath.exists() {
         let error_message = format!("Input file does not exist: {:?}", input_filepath);
-        log::error!("{}", error_message);
+        tracing::error!("{}", error_message);
         return Err(Error::MissingFile(error_message));
     }
-    log::info!("Input file: {:?}", input_filepath);
+    tracing::info!("Input file: {:?}", input_filepath);
 
     // Parse object file(s)
     let input_data = fs::read(&input_filepath).map_err(|err| {
-        log::error!(
+        tracing::error!(
             "Failed to read the input file: input_filepath={:?}, err={}",
             input_filepath,
             err
@@ -83,26 +82,26 @@ pub fn main() -> Result<(), Error> {
     let mut output_file_ext = "bc";
     let mut build_bitcode_archive = false;
     if let Ok(input_object_file) = object::File::parse(&*input_data) {
-        log::info!("Input object file kind: {:?}", input_object_file.kind());
+        tracing::info!("Input object file kind: {:?}", input_object_file.kind());
         object_files = vec![input_object_file];
     } else if let Ok(input_archive_file) = object::read::archive::ArchiveFile::parse(&*input_data) {
-        log::info!("Input archive file kind: {:?}", input_archive_file.kind());
+        tracing::info!("Input archive file kind: {:?}", input_archive_file.kind());
 
         for member in input_archive_file.members() {
             let member = member.inspect_err(|err| {
-                log::error!("Failed to obtain the archive member: err={}", err);
+                tracing::error!("Failed to obtain the archive member: err={}", err);
             })?;
             let member_name = String::from_utf8_lossy(member.name());
-            log::info!("{}", member_name);
+            tracing::info!("{}", member_name);
             let member_object_data = member.data(&*input_data).inspect_err(|err| {
-                log::error!(
+                tracing::error!(
                     "Failed to read the object data of the archive member: member={}, err={}",
                     member_name,
                     err
                 );
             })?;
             let object_file = object::File::parse(member_object_data).inspect_err(|err| {
-                log::error!(
+                tracing::error!(
                     "Failed to parse the object data of the archive member: member={}, err={}",
                     member_name,
                     err
@@ -131,7 +130,7 @@ pub fn main() -> Result<(), Error> {
     // Extract bitcode filepaths
     let bitcode_filepaths =
         extract_bitcode_filepaths_from_parsed_objects(&object_files).map_err(|err| {
-            log::error!(
+            tracing::error!(
                 "Failed to extract bitcode filepaths: object_files={:?}, err={:?}",
                 object_files,
                 err
@@ -143,10 +142,10 @@ pub fn main() -> Result<(), Error> {
             "No bitcode filepaths found in the input file: {:?}",
             input_filepath
         );
-        log::error!("{}", error_message);
+        tracing::error!("{}", error_message);
         return Err(Error::MissingFile(error_message));
     }
-    log::debug!("Bitcode filepaths: {:?}", bitcode_filepaths);
+    tracing::debug!("Bitcode filepaths: {:?}", bitcode_filepaths);
     if args.save_manifest {
         // Write bitcode filepaths into the manifest file
         let input_parent_dir = input_filepath.parent().unwrap();
@@ -160,22 +159,22 @@ pub fn main() -> Result<(), Error> {
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(&manifest_filepath, manifest_contents).map_err(|err| {
-            log::error!(
+            tracing::error!(
                 "Failed to save the manifest file: manifest_filepath={:?}, err={}",
                 manifest_filepath,
                 err
             );
             err
         })?;
-        log::info!("Save manifest: {:?}", manifest_filepath);
+        tracing::info!("Save manifest: {:?}", manifest_filepath);
     }
 
     // Link or archive bitcode files
     let merge_bitcode_func = if build_bitcode_archive {
-        log::info!("Archive bitcode files");
+        tracing::info!("Archive bitcode files");
         archive_bitcode_files
     } else {
-        log::info!("Link bitcode files");
+        tracing::info!("Link bitcode files");
         link_bitcode_files
     };
     if let Some(code) =
@@ -185,7 +184,7 @@ pub fn main() -> Result<(), Error> {
             } else {
                 "link"
             };
-            log::error!(
+            tracing::error!(
                 "Failed to {} bitcode files: bitcode_filepaths={:?}, err={:?}",
                 merge_action,
                 bitcode_filepaths,
@@ -197,7 +196,7 @@ pub fn main() -> Result<(), Error> {
     {
         std::process::exit(code);
     }
-    log::info!("Output file: {:?}", output_filepath);
+    tracing::info!("Output file: {:?}", output_filepath);
 
     Ok(())
 }

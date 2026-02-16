@@ -11,8 +11,8 @@ use std::{
     sync::OnceLock,
 };
 
-use log::Level;
 use serde::{Deserialize, Serialize};
+use tracing::Level;
 
 use crate::{
     constants::{
@@ -150,9 +150,13 @@ impl RLLVMConfig {
 
     /// Returns the configured log level.
     pub fn log_level(&self) -> Level {
-        Level::iter()
-            .nth(self.log_level.unwrap_or_default() as usize)
-            .unwrap_or(Level::max())
+        match self.log_level.unwrap_or_default() {
+            0 => Level::ERROR,
+            1 => Level::WARN,
+            2 => Level::INFO,
+            3 => Level::DEBUG,
+            _ => Level::TRACE,
+        }
     }
 }
 
@@ -182,7 +186,7 @@ impl RLLVMConfig {
     {
         let config_filepath = config_filepath.as_ref();
         let mut config = confy::load_path::<RLLVMConfig>(config_filepath).map_err(|err| {
-            log::error!(
+            tracing::error!(
                 "Failed to load configuration: config_filepath={:?}, err={}",
                 config_filepath,
                 err
@@ -198,7 +202,7 @@ impl RLLVMConfig {
             // Check if the bitcode store path is absolute or not
             if !bitcode_store_path.is_absolute() {
                 // Not absolute
-                log::warn!(
+                tracing::warn!(
                     "Ignore the bitcode store path, as it is not absolute: {:?}",
                     bitcode_store_path
                 );
@@ -207,19 +211,22 @@ impl RLLVMConfig {
                 // Further check if the directory exists
                 if !bitcode_store_path.exists() {
                     // Not exist, then create it
-                    log::info!(
+                    tracing::info!(
                         "Create the directory for the bitcode store: {:?}",
                         bitcode_store_path
                     );
                     fs::create_dir_all(bitcode_store_path).map_err(|err| {
-                        log::error!("Failed to create the bitcode store directory: err={}", err);
+                        tracing::error!(
+                            "Failed to create the bitcode store directory: err={}",
+                            err
+                        );
                         err
                     })?;
                 } else {
                     // Finally, check if this is a directory
                     if !bitcode_store_path.is_dir() {
                         // Not a directory
-                        log::warn!(
+                        tracing::warn!(
                             "Ignore the bitcode store path, as it is not a directory: {:?}",
                             bitcode_store_path
                         );
@@ -255,7 +262,7 @@ impl RLLVMConfig {
 
         for (name, path) in tools {
             if !path.exists() {
-                log::warn!("Configured path for `{}` does not exist: {:?}", name, path);
+                tracing::warn!("Configured path for `{}` does not exist: {:?}", name, path);
             }
         }
     }
@@ -265,24 +272,24 @@ impl RLLVMConfig {
     /// Uses [`find_llvm_config`](crate::utils::find_llvm_config) to locate
     /// `llvm-config`, then derives all other tool paths from `llvm-config --bindir`.
     pub fn try_default() -> Result<Self, Error> {
-        log::info!("Infer rllvm configurations ...");
+        tracing::info!("Infer rllvm configurations ...");
 
         // Find `llvm-config`
         let llvm_config_filepath = find_llvm_config().map_err(|err| {
-            log::error!("Failed to find `llvm-config`: err={:?}", err);
+            tracing::error!("Failed to find `llvm-config`: err={:?}", err);
             err
         })?;
-        log::info!("- llvm-config: {:?}", llvm_config_filepath);
+        tracing::info!("- llvm-config: {:?}", llvm_config_filepath);
 
         // Obtain LLVM version
         match execute_llvm_config(&llvm_config_filepath, &["--version"]) {
-            Ok(llvm_version) => log::info!("- LLVM version: {}", llvm_version),
-            Err(err) => log::warn!("- LLVM version: (unknown, err={:?})", err),
+            Ok(llvm_version) => tracing::info!("- LLVM version: {}", llvm_version),
+            Err(err) => tracing::warn!("- LLVM version: (unknown, err={:?})", err),
         }
 
         let llvm_bindir = PathBuf::from(
             execute_llvm_config(&llvm_config_filepath, &["--bindir"]).map_err(|err| {
-                log::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
+                tracing::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
                 err
             })?,
         );
@@ -311,7 +318,7 @@ impl RLLVMConfig {
         ];
         for llvm_bin_filepath in llvm_bin_filepaths {
             if !llvm_bin_filepath.exists() {
-                log::error!("Failed to find `{:?}`", llvm_bin_filepath);
+                tracing::error!("Failed to find `{:?}`", llvm_bin_filepath);
                 return Err(Error::MissingFile(format!("{llvm_bin_filepath:?}")));
             }
         }
