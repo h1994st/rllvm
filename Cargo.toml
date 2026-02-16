@@ -56,11 +56,21 @@ path = "src/bin/rllvm_completions.rs"
 [[bin]]
 name = "rllvm-rustc"
 path = "src/bin/rllvm_rustc.rs"
+
+[[bin]]
 name = "rllvm-info"
 path = "src/bin/rllvm_info.rs"
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 tempfile = "3"
+
+[[bench]]
+name = "rllvm_benchmarks"
+harness = false
+
+[profile.bench]
+debug = true
 
 [profile.dist]
 inherits = "release"
