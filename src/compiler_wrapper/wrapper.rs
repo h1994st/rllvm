@@ -97,7 +97,7 @@ pub trait CompilerWrapper {
         S: AsRef<OsStr> + std::fmt::Debug,
     {
         if !self.is_silent() {
-            log::debug!("[{:?}] args={:?}", mode, args);
+            tracing::debug!("[{:?}] args={:?}", mode, args);
         }
         if args.is_empty() {
             return Err(Error::InvalidArguments(
@@ -106,7 +106,7 @@ pub trait CompilerWrapper {
         }
         let status = execute_command_for_status(args[0].as_ref(), &args[1..])?;
         if !self.is_silent() {
-            log::debug!("[{:?}] exit_status={}", mode, status);
+            tracing::debug!("[{:?}] exit_status={}", mode, status);
         }
 
         if !status.success() {

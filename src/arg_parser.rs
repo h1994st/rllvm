@@ -464,7 +464,7 @@ impl CompilerArgsInfo {
 
         for (condition, reason) in conditions {
             if condition {
-                log::warn!("Skip bitcode generation: {}", reason);
+                tracing::warn!("Skip bitcode generation: {}", reason);
                 return true;
             }
         }
@@ -510,10 +510,13 @@ impl CompilerArgsInfo {
 
                         bitcode_filepath = bitcode_store_path.join(new_bitcode_filename);
                     } else {
-                        log::warn!("Cannot obtain the bitcode filename: {:?}", bitcode_filepath);
+                        tracing::warn!(
+                            "Cannot obtain the bitcode filename: {:?}",
+                            bitcode_filepath
+                        );
                     }
                 } else {
-                    log::warn!(
+                    tracing::warn!(
                         "Ignore the bitcode store path, as it does not exist: {:?}",
                         bitcode_store_path
                     );

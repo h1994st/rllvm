@@ -20,11 +20,11 @@ version = "0.1.6"
 [dependencies]
 clap = {version = "~4.5.48", features = ["derive"]}
 confy = "~1.0.0"
-log = "~0.4.28"
 object = {version = "~0.37.3", features = ["all"]}
 regex = "~1.11.3"
 serde = {version = "~1.0.227", features = ["derive"]}
-simple_logger = "~5.0.0"
+tracing = "~0.1"
+tracing-subscriber = {version = "~0.3", features = ["env-filter"]}
 thiserror = "~2.0"
 which = "~8.0.0"
 

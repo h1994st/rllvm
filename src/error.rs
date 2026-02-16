@@ -26,9 +26,6 @@ pub enum Error {
     /// String error
     #[error("String error: {0}")]
     StringError(String),
-    /// Logger error
-    #[error("Logger error: {0}")]
-    LoggerError(String),
     /// Unsupported binary format
     #[error("Unsupported binary format: {0}")]
     UnsupportedBinaryFormat(String),
