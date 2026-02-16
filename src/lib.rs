@@ -18,6 +18,9 @@
 /// Command-line argument parsing for compiler flag classification.
 pub mod arg_parser;
 
+/// Diagnostic utilities for version checking, install hints, and colored output.
+pub mod diagnostics;
+
 /// TOML-based configuration and LLVM tool path resolution.
 pub mod config;
 

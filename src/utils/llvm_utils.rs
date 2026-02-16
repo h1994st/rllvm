@@ -95,9 +95,9 @@ pub fn find_llvm_config() -> Result<PathBuf, Error> {
             }
         }
 
-        Err(Error::MissingFile(
-            "Failed to find `llvm-config`".to_string(),
-        ))
+        Err(Error::MissingFile(format!(
+            "Failed to find `llvm-config` (searched PATH and versioned names llvm-config-{{{LLVM_VERSION_MIN}..{LLVM_VERSION_MAX}}})"
+        )))
     }
 }
 
