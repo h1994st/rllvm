@@ -50,7 +50,7 @@ pub trait CompilerWrapper {
         let mut args = vec![String::from(compiler_filepath.to_string_lossy())];
 
         // Append LTO LDFLAGS
-        if args_info.input_files().is_empty() && args_info.link_args().len() > 0 {
+        if args_info.input_files().is_empty() && !args_info.link_args().is_empty() {
             // Linking
             if args_info.is_lto() {
                 // Add LTO LDFLAGS
@@ -64,7 +64,7 @@ pub trait CompilerWrapper {
         args.extend(args_info.input_args().iter().cloned());
 
         // Remove forbidden flags
-        if args_info.forbidden_flags().len() > 0 {
+        if !args_info.forbidden_flags().is_empty() {
             let forbidden_flags_set: HashSet<String> =
                 HashSet::from_iter(args_info.forbidden_flags().iter().cloned());
             args = args

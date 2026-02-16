@@ -21,14 +21,7 @@ pub fn is_plain_file<P>(file: P) -> bool
 where
     P: AsRef<Path>,
 {
-    let file = file.as_ref();
-    if !file.exists() {
-        false
-    } else if file.is_dir() {
-        false
-    } else {
-        true
-    }
+    file.as_ref().is_file()
 }
 
 pub fn is_object_file<P>(file: P) -> Result<bool, Error>

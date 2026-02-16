@@ -361,32 +361,32 @@ impl CompilerArgsInfo {
 }
 
 impl CompilerArgsInfo {
-    pub fn input_args(&self) -> &Vec<String> {
-        self.input_args.as_ref()
+    pub fn input_args(&self) -> &[String] {
+        &self.input_args
     }
 
-    pub fn input_files(&self) -> &Vec<String> {
-        self.input_files.as_ref()
+    pub fn input_files(&self) -> &[String] {
+        &self.input_files
     }
 
-    pub fn object_files(&self) -> &Vec<String> {
-        self.object_files.as_ref()
+    pub fn object_files(&self) -> &[String] {
+        &self.object_files
     }
 
     pub fn output_filename(&self) -> &str {
-        self.output_filename.as_ref()
+        &self.output_filename
     }
 
-    pub fn compile_args(&self) -> &Vec<String> {
-        self.compile_args.as_ref()
+    pub fn compile_args(&self) -> &[String] {
+        &self.compile_args
     }
 
-    pub fn link_args(&self) -> &Vec<String> {
-        self.link_args.as_ref()
+    pub fn link_args(&self) -> &[String] {
+        &self.link_args
     }
 
-    pub fn forbidden_flags(&self) -> &Vec<String> {
-        self.forbidden_flags.as_ref()
+    pub fn forbidden_flags(&self) -> &[String] {
+        &self.forbidden_flags
     }
 
     pub fn is_verbose(&self) -> bool {
@@ -481,7 +481,7 @@ impl CompilerArgsInfo {
 
     pub fn mode(&self) -> CompileMode {
         let mut mode = CompileMode::Compiling;
-        if self.input_files().is_empty() && self.link_args().len() > 0 {
+        if self.input_files().is_empty() && !self.link_args().is_empty() {
             mode = CompileMode::Linking;
             if self.is_lto() {
                 mode = CompileMode::LTO;
