@@ -69,7 +69,12 @@ where
             DARWIN_SECTION_NAME.as_bytes().to_vec(),
             SectionFlags::MachO { flags: 0 },
         ),
-        _ => unimplemented!(),
+        _ => {
+            return Err(Error::UnsupportedBinaryFormat(format!(
+                "{:?}",
+                object_binary_format
+            )));
+        }
     };
 
     // Copy the input object file into a new mutable object file
@@ -90,7 +95,7 @@ where
     // supported for auto inferring flags
     new_section.flags = flags;
 
-    let output_data = new_object_file.write().unwrap();
+    let output_data = new_object_file.write()?;
     if let Some(output_object_filepath) = output_object_filepath {
         // Save the new object file
         fs::write(output_object_filepath, output_data)?;
@@ -274,7 +279,12 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
     let section_name = match object_binary_format {
         BinaryFormat::Elf => ELF_SECTION_NAME.as_bytes(),
         BinaryFormat::MachO => DARWIN_SECTION_NAME.as_bytes(),
-        _ => unimplemented!("unsupported binary format: {:?}", object_binary_format),
+        _ => {
+            return Err(Error::UnsupportedBinaryFormat(format!(
+                "{:?}",
+                object_binary_format
+            )));
+        }
     };
 
     match object_file.section_by_name_bytes(section_name) {
