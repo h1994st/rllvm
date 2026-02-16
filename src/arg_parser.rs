@@ -505,12 +505,12 @@ impl CompilerArgsInfo {
             if let Some(bitcode_store_path) = rllvm_config().bitcode_store_path() {
                 if bitcode_store_path.exists() {
                     // Obtain a new bitcode filename based on the hash of the source filepath
-                    if bitcode_filepath.file_name().is_some() {
+                    if let (Some(stem), Some(ext)) =
+                        (bitcode_filepath.file_stem(), bitcode_filepath.extension())
+                    {
                         let src_filepath_hash = calculate_filepath_hash(&src_filepath);
-                        let bitcode_file_stem =
-                            bitcode_filepath.file_stem().unwrap().to_string_lossy();
-                        let bitcode_file_ext =
-                            bitcode_filepath.extension().unwrap().to_string_lossy();
+                        let bitcode_file_stem = stem.to_string_lossy();
+                        let bitcode_file_ext = ext.to_string_lossy();
 
                         let new_bitcode_filename =
                             format!("{bitcode_file_stem}_{src_filepath_hash}.{bitcode_file_ext}");

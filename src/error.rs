@@ -28,6 +28,9 @@ pub enum Error {
     /// Missing file
     #[error("Missing file: {0}")]
     MissingFile(String),
+    /// Unsupported binary format
+    #[error("Unsupported format: {0}")]
+    UnsupportedFormat(String),
     /// Something else happened
     #[error("Unknown error: {0}")]
     Unknown(String),
