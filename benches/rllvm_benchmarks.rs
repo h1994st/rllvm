@@ -24,11 +24,7 @@ fn create_minimal_macho_object(path: &Path) {
         object::Architecture::Aarch64,
         object::Endianness::Little,
     );
-    let section_id = obj.add_section(
-        b"__TEXT".to_vec(),
-        b"__text".to_vec(),
-        SectionKind::Text,
-    );
+    let section_id = obj.add_section(b"__TEXT".to_vec(), b"__text".to_vec(), SectionKind::Text);
     let section = obj.section_mut(section_id);
     // ARM64 `ret` instruction
     section.set_data(&[0xc0, 0x03, 0x5f, 0xd6], 4);
@@ -187,12 +183,10 @@ fn bench_cache_key(c: &mut Criterion) {
         .collect();
     fs::write(&large_src, &large_content).unwrap();
 
-    let args: Vec<String> = vec![
-        "-O2", "-Wall", "-Wextra", "-std=c11", "-fPIC", "-DNDEBUG",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect();
+    let args: Vec<String> = vec!["-O2", "-Wall", "-Wextra", "-std=c11", "-fPIC", "-DNDEBUG"]
+        .into_iter()
+        .map(String::from)
+        .collect();
 
     group.bench_function("small_file", |b| {
         b.iter(|| {
@@ -308,7 +302,8 @@ fn bench_arg_parsing(c: &mut Criterion) {
     group.bench_function("simple_compile", |b| {
         b.iter(|| {
             let mut info = CompilerArgsInfo::default();
-            info.parse_args(black_box(&simple_args)).expect("parse failed");
+            info.parse_args(black_box(&simple_args))
+                .expect("parse failed");
         });
     });
 
@@ -365,7 +360,12 @@ fn bench_arg_parsing(c: &mut Criterion) {
     // Many flags (stress test)
     let many_flags: Vec<String> = (0..100)
         .flat_map(|i| vec![format!("-I/path/to/include/{i}"), format!("-DFLAG_{i}=1")])
-        .chain(vec!["-c".to_string(), "test.c".to_string(), "-o".to_string(), "test.o".to_string()])
+        .chain(vec![
+            "-c".to_string(),
+            "test.c".to_string(),
+            "-o".to_string(),
+            "test.o".to_string(),
+        ])
         .collect();
     let many_flags_ref: Vec<&str> = many_flags.iter().map(|s| s.as_str()).collect();
     group.bench_function("many_flags_200_args", |b| {
