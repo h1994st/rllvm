@@ -43,6 +43,9 @@ path = "src/bin/rllvm_cxx.rs"
 name = "rllvm-get-bc"
 path = "src/bin/rllvm_get_bc.rs"
 
+[dev-dependencies]
+tempfile = "3"
+
 [profile.dist]
 inherits = "release"
 lto = "thin"
