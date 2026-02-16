@@ -14,6 +14,7 @@ use crate::constants::{LLVM_VERSION_MAX, LLVM_VERSION_MIN};
 use crate::utils::{execute_command_for_status, execute_command_for_stdout_string};
 use crate::{config::rllvm_config, error::Error};
 
+/// Execute `llvm-ar` with the given arguments.
 pub fn execute_llvm_ar<P, S>(llvm_ar_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
 where
     P: AsRef<Path>,
@@ -22,6 +23,7 @@ where
     execute_command_for_status(llvm_ar_filepath, args)
 }
 
+/// Execute `llvm-link` with the given arguments.
 pub fn execute_llvm_link<P, S>(llvm_link_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
 where
     P: AsRef<Path>,
@@ -30,6 +32,7 @@ where
     execute_command_for_status(llvm_link_filepath, args)
 }
 
+/// Execute `llvm-config` with the given arguments and return stdout.
 pub fn execute_llvm_config<P, S>(llvm_config_filepath: P, args: &[S]) -> Result<String, Error>
 where
     P: AsRef<Path>,

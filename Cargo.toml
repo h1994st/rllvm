@@ -10,6 +10,7 @@ exclude = [
   "Cargo.lock",
 ]
 keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
+homepage = "https://github.com/h1994st/rllvm"
 license = "GPL-3.0"
 license-file = "LICENSE"
 name = "rllvm"
