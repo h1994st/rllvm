@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
+    cache,
     config::rllvm_config,
     error::Error,
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
@@ -129,8 +130,24 @@ pub trait CompilerWrapper {
 
     /// Generate bitcode files for all input files
     fn generate_bitcode_files_and_embed_filepaths(&self) -> Result<Option<i32>, Error> {
+        let config = rllvm_config();
         let is_compile_only = self.args().is_compile_only();
         let artifact_filepaths = self.args().artifact_filepaths()?;
+
+        // Determine if caching is enabled
+        let caching_enabled = cache::is_cache_enabled(config.cache_enabled());
+        let cache_directory = if caching_enabled {
+            match cache::cache_dir(config.cache_dir().map(|p| p.as_path())) {
+                Ok(dir) => Some(dir),
+                Err(err) => {
+                    tracing::warn!("Failed to initialize cache directory, caching disabled: {}", err);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut object_filepaths = vec![];
         for (src_filepath, object_filepath, bitcode_filepath) in artifact_filepaths {
             if !is_compile_only {
@@ -145,8 +162,38 @@ pub trait CompilerWrapper {
                 // The source file is a bitcode; therefore, we do not need to
                 // generate the bitcode and directly use the source file
                 src_filepath
+            } else if let Some(ref cache_dir) = cache_directory {
+                // Caching is enabled — check for a cache hit
+                let cache_key = cache::compute_cache_key(
+                    &src_filepath,
+                    self.args().compile_args(),
+                    config.bitcode_generation_flags(),
+                )?;
+
+                if let Some(cached_path) = cache::cache_lookup(cache_dir, &src_filepath, cache_key) {
+                    // Cache hit — copy cached bitcode to expected output location
+                    std::fs::copy(&cached_path, &bitcode_filepath).map_err(|err| {
+                        tracing::error!(
+                            "Failed to copy cached bitcode {:?} to {:?}: {}",
+                            cached_path, bitcode_filepath, err
+                        );
+                        err
+                    })?;
+                    bitcode_filepath
+                } else {
+                    // Cache miss — generate bitcode and store in cache
+                    if let Some(code) = self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
+                        && code != 0
+                    {
+                        return Ok(Some(code));
+                    }
+                    if let Err(err) = cache::cache_store(cache_dir, &src_filepath, cache_key, &bitcode_filepath) {
+                        tracing::warn!("Failed to store bitcode in cache: {}", err);
+                    }
+                    bitcode_filepath
+                }
             } else {
-                // Generate the bitcode
+                // No caching — generate the bitcode
                 if let Some(code) = self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
                     && code != 0
                 {
@@ -157,6 +204,11 @@ pub trait CompilerWrapper {
 
             // Embed the path of the bitcode to the corresponding object file
             embed_bitcode_filepath_to_object_file(&src_bitcode_filepath, &object_filepath, None)?;
+        }
+
+        // Log cache statistics if caching was used
+        if cache_directory.is_some() {
+            cache::log_cache_stats();
         }
 
         let output_filepath = PathBuf::from(self.args().output_filename()).canonicalize()?;
