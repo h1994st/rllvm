@@ -69,7 +69,12 @@ where
             DARWIN_SECTION_NAME.as_bytes().to_vec(),
             SectionFlags::MachO { flags: 0 },
         ),
-        _ => unimplemented!(),
+        _ => {
+            return Err(Error::UnsupportedFormat(format!(
+                "unsupported binary format: {:?}",
+                object_binary_format
+            )));
+        }
     };
 
     // Copy the input object file into a new mutable object file
@@ -90,7 +95,7 @@ where
     // supported for auto inferring flags
     new_section.flags = flags;
 
-    let output_data = new_object_file.write().unwrap();
+    let output_data = new_object_file.write()?;
     if let Some(output_object_filepath) = output_object_filepath {
         // Save the new object file
         fs::write(output_object_filepath, output_data)?;
@@ -175,8 +180,16 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
                 selection,
                 associative_section,
             } => {
-                let associative_section =
-                    associative_section.map(|index| *out_sections.get(&index).unwrap());
+                let associative_section = associative_section
+                    .map(|index| {
+                        out_sections.get(&index).copied().ok_or_else(|| {
+                            Error::InvalidArguments(format!(
+                                "Missing section index in COFF symbol: {:?}",
+                                index
+                            ))
+                        })
+                    })
+                    .transpose()?;
                 SymbolFlags::CoffSection {
                     selection,
                     associative_section,
@@ -188,8 +201,16 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
                 x_smclas,
                 containing_csect,
             } => {
-                let containing_csect =
-                    containing_csect.map(|index| *out_symbols.get(&index).unwrap());
+                let containing_csect = containing_csect
+                    .map(|index| {
+                        out_symbols.get(&index).copied().ok_or_else(|| {
+                            Error::InvalidArguments(format!(
+                                "Missing symbol index in XCOFF symbol: {:?}",
+                                index
+                            ))
+                        })
+                    })
+                    .transpose()?;
                 SymbolFlags::Xcoff {
                     n_sclass,
                     x_smtyp,
@@ -224,12 +245,25 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
             continue;
         }
 
-        let out_section = *out_sections.get(&in_section.index()).unwrap();
+        let out_section = *out_sections.get(&in_section.index()).ok_or_else(|| {
+            Error::InvalidArguments(format!(
+                "Missing section index for relocation: {:?}",
+                in_section.index()
+            ))
+        })?;
         for (offset, in_relocation) in in_section.relocations() {
             let symbol = match in_relocation.target() {
-                RelocationTarget::Symbol(symbol) => *out_symbols.get(&symbol).unwrap(),
+                RelocationTarget::Symbol(symbol) => *out_symbols.get(&symbol).ok_or_else(|| {
+                    Error::InvalidArguments(format!("Missing symbol for relocation: {:?}", symbol))
+                })?,
                 RelocationTarget::Section(section) => {
-                    out_object.section_symbol(*out_sections.get(&section).unwrap())
+                    let sec = *out_sections.get(&section).ok_or_else(|| {
+                        Error::InvalidArguments(format!(
+                            "Missing section for relocation: {:?}",
+                            section
+                        ))
+                    })?;
+                    out_object.section_symbol(sec)
                 }
                 _ => {
                     return Err(Error::InvalidArguments(format!(
@@ -252,11 +286,22 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     for in_comdat in in_object.comdats() {
         let mut sections = vec![];
         for in_section in in_comdat.sections() {
-            sections.push(*out_sections.get(&in_section).unwrap());
+            sections.push(*out_sections.get(&in_section).ok_or_else(|| {
+                Error::InvalidArguments(format!(
+                    "Missing section index in comdat: {:?}",
+                    in_section
+                ))
+            })?);
         }
+        let symbol = *out_symbols.get(&in_comdat.symbol()).ok_or_else(|| {
+            Error::InvalidArguments(format!(
+                "Missing symbol in comdat: {:?}",
+                in_comdat.symbol()
+            ))
+        })?;
         let out_comdat = write::Comdat {
             kind: in_comdat.kind(),
-            symbol: *out_symbols.get(&in_comdat.symbol()).unwrap(),
+            symbol,
             sections,
         };
         out_object.add_comdat(out_comdat);
@@ -274,7 +319,12 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
     let section_name = match object_binary_format {
         BinaryFormat::Elf => ELF_SECTION_NAME.as_bytes(),
         BinaryFormat::MachO => DARWIN_SECTION_NAME.as_bytes(),
-        _ => unimplemented!("unsupported binary format: {:?}", object_binary_format),
+        _ => {
+            return Err(Error::UnsupportedFormat(format!(
+                "unsupported binary format: {:?}",
+                object_binary_format
+            )));
+        }
     };
 
     match object_file.section_by_name_bytes(section_name) {

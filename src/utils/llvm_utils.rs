@@ -56,13 +56,20 @@ fn find_llvm_config_brew() -> Result<PathBuf, Error> {
         // location for current release brew formula
         format!("{brew_cellar_path}/llvm/{llvm_config_filepath_suffix}"),
     ];
-    let glob_results = llvm_config_glob_patterns.iter().flat_map(|pattern| {
-        glob(pattern).unwrap_or_else(|err| {
-            panic!("Could not read glob pattern: pattern={pattern}, err={err}");
-        })
-    });
-    match glob_results.last() {
-        Some(llvm_config_filepath) => Ok(llvm_config_filepath.unwrap()),
+    let mut last_match = None;
+    for pattern in &llvm_config_glob_patterns {
+        let paths = glob(pattern).map_err(|err| {
+            Error::Unknown(format!(
+                "Could not read glob pattern: pattern={pattern}, err={err}"
+            ))
+        })?;
+        for entry in paths {
+            let path = entry.map_err(|err| Error::Io(err.into_error()))?;
+            last_match = Some(path);
+        }
+    }
+    match last_match {
+        Some(llvm_config_filepath) => Ok(llvm_config_filepath),
         None => Err(Error::Unknown(format!(
             "Failed to find `llvm-config` in brew cellar with glob patterns: {}",
             llvm_config_glob_patterns.join(" ")
