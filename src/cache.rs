@@ -271,20 +271,20 @@ mod tests {
     #[test]
     fn test_is_cache_enabled_default() {
         // Without env var, should follow config
-        env::remove_var(RLLVM_CACHE_ENV);
+        unsafe { env::remove_var(RLLVM_CACHE_ENV) };
         assert!(!is_cache_enabled(false));
         assert!(is_cache_enabled(true));
     }
 
     #[test]
     fn test_is_cache_enabled_env_override() {
-        env::set_var(RLLVM_CACHE_ENV, "1");
+        unsafe { env::set_var(RLLVM_CACHE_ENV, "1") };
         assert!(is_cache_enabled(false));
 
-        env::set_var(RLLVM_CACHE_ENV, "0");
+        unsafe { env::set_var(RLLVM_CACHE_ENV, "0") };
         assert!(!is_cache_enabled(false));
 
-        env::remove_var(RLLVM_CACHE_ENV);
+        unsafe { env::remove_var(RLLVM_CACHE_ENV) };
     }
 
     #[test]

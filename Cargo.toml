@@ -54,6 +54,8 @@ name = "rllvm-completions"
 path = "src/bin/rllvm_completions.rs"
 
 [[bin]]
+name = "rllvm-rustc"
+path = "src/bin/rllvm_rustc.rs"
 name = "rllvm-info"
 path = "src/bin/rllvm_info.rs"
 
