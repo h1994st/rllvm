@@ -35,7 +35,6 @@ pub trait CompilerWrapper {
     fn compiler_kind(&self) -> &CompilerKind;
 
     /// Set the wrapper arguments parsing a command line set of arguments
-    #[must_use]
     fn parse_args<S>(&mut self, args: &[S]) -> Result<&'_ mut Self, Error>
     where
         S: AsRef<str>;
@@ -50,7 +49,7 @@ pub trait CompilerWrapper {
         let mut args = vec![String::from(compiler_filepath.to_string_lossy())];
 
         // Append LTO LDFLAGS
-        if args_info.input_files().is_empty() && args_info.link_args().len() > 0 {
+        if args_info.input_files().is_empty() && !args_info.link_args().is_empty() {
             // Linking
             if args_info.is_lto() {
                 // Add LTO LDFLAGS
@@ -64,13 +63,10 @@ pub trait CompilerWrapper {
         args.extend(args_info.input_args().iter().cloned());
 
         // Remove forbidden flags
-        if args_info.forbidden_flags().len() > 0 {
+        if !args_info.forbidden_flags().is_empty() {
             let forbidden_flags_set: HashSet<String> =
                 HashSet::from_iter(args_info.forbidden_flags().iter().cloned());
-            args = args
-                .into_iter()
-                .filter(|x| !forbidden_flags_set.contains(x))
-                .collect();
+            args.retain(|x| !forbidden_flags_set.contains(x));
         }
 
         Ok(args)
@@ -84,10 +80,10 @@ pub trait CompilerWrapper {
 
     /// Run the compiler
     fn run(&mut self) -> Result<Option<i32>, Error> {
-        if let Some(code) = self.build_target()? {
-            if code != 0 {
-                return Ok(Some(code));
-            }
+        if let Some(code) = self.build_target()?
+            && code != 0
+        {
+            return Ok(Some(code));
         }
         if self.args().is_bitcode_generation_skipped() {
             return Ok(Some(0));
@@ -145,16 +141,16 @@ pub trait CompilerWrapper {
                 object_filepaths.push(object_filepath.clone());
             }
 
-            let src_bitcode_filepath = if src_filepath.extension().map_or(false, |x| x == "bc") {
+            let src_bitcode_filepath = if src_filepath.extension().is_some_and(|x| x == "bc") {
                 // The source file is a bitcode; therefore, we do not need to
                 // generate the bitcode and directly use the source file
                 src_filepath
             } else {
                 // Generate the bitcode
-                if let Some(code) = self.generate_bitcode_file(&src_filepath, &bitcode_filepath)? {
-                    if code != 0 {
-                        return Ok(Some(code));
-                    }
+                if let Some(code) = self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
+                    && code != 0
+                {
+                    return Ok(Some(code));
                 }
                 bitcode_filepath
             };

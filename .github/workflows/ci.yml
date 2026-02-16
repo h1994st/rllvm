@@ -20,7 +20,7 @@ env:
 jobs:
   test:
     name: Build and Test
-    needs: fmt-check
+    needs: [fmt-check, clippy]
     strategy:
       matrix:
         os: [ubuntu-latest, macOS-latest]
@@ -46,16 +46,10 @@ jobs:
           fetch-depth: 0
 
       - name: Build
-        uses: actions-rs/cargo@v1.0.1
-        with:
-          command: build
-          args: --verbose
+        run: cargo build --verbose
 
       - name: Run tests
-        uses: actions-rs/cargo@v1.0.1
-        with:
-          command: test
-          args: --all --verbose
+        run: cargo test --all --verbose
 
   fmt-check:
     name: Format Check
@@ -70,10 +64,36 @@ jobs:
           fetch-depth: 0
 
       - name: Run cargo fmt
-        uses: actions-rs/cargo@v1.0.1
+        run: cargo fmt --all --check --verbose
+
+  clippy:
+    name: Clippy Check
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macOS-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install stable toolchain
+        run: rustup update stable
+
+      - name: Install LLVM/Clang (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt install -y llvm llvm-dev clang libclang-dev
+          command -v llvm-config && clang -v
+
+      - name: Install LLVM/Clang (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          brew install llvm
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
         with:
-          command: fmt
-          args: --all --check --verbose
+          fetch-depth: 0
+
+      - name: Run clippy
+        run: cargo clippy --all-targets -- -D warnings
 
   coverage:
     runs-on: ubuntu-latest

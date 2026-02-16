@@ -50,7 +50,7 @@ fn find_llvm_config_brew() -> Result<PathBuf, Error> {
         ));
     }
     let llvm_config_filepath_suffix = "*/bin/llvm-config";
-    let llvm_config_glob_patterns = vec![
+    let llvm_config_glob_patterns = [
         // location for explicitly versioned brew formula
         format!("{brew_cellar_path}/llvm@*/{llvm_config_filepath_suffix}"),
         // location for current release brew formula
@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_find_llvm_config() {
-        assert!(find_llvm_config().map_or(false, |llvm_config_path| {
+        assert!(find_llvm_config().is_ok_and(|llvm_config_path| {
             println!("llvm_config_path={:?}", llvm_config_path);
             llvm_config_path.exists()
                 && llvm_config_path.is_file()
@@ -222,11 +222,7 @@ mod tests {
 
         input_args.iter().all(|args| {
             let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang);
-            cc.parse_args(args)
-                .unwrap()
-                .run()
-                .unwrap()
-                .map_or(false, |code| code == 0)
+            cc.parse_args(args).unwrap().run().unwrap() == Some(0)
         })
     }
 
@@ -249,7 +245,7 @@ mod tests {
                     println!("Failed to link bitcode files: {:?}", err);
                     false
                 },
-                |code| { code.map_or(false, |code| code == 0) }
+                |code| { code == Some(0) }
             )
         );
 
@@ -282,7 +278,7 @@ mod tests {
                     println!("Failed to archive bitcode files: {:?}", err);
                     false
                 },
-                |code| { code.map_or(false, |code| code == 0) }
+                |code| { code == Some(0) }
             )
         );
 
@@ -290,7 +286,7 @@ mod tests {
         assert!(output_filepath.exists() && output_filepath.is_file());
 
         // Check the type of the output archive
-        let output_data = fs::read(&output_filepath).expect("Failed to read the output file");
+        let output_data = fs::read(output_filepath).expect("Failed to read the output file");
         assert!(
             object::read::archive::ArchiveFile::parse(&*output_data).map_or_else(
                 |err| {

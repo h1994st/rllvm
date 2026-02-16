@@ -89,27 +89,24 @@ pub fn main() -> Result<(), Error> {
         log::info!("Input archive file kind: {:?}", input_archive_file.kind());
 
         for member in input_archive_file.members() {
-            let member = member.map_err(|err| {
+            let member = member.inspect_err(|err| {
                 log::error!("Failed to obtain the archive member: err={}", err);
-                err
             })?;
             let member_name = String::from_utf8_lossy(member.name());
             log::info!("{}", member_name);
-            let member_object_data = member.data(&*input_data).map_err(|err| {
+            let member_object_data = member.data(&*input_data).inspect_err(|err| {
                 log::error!(
                     "Failed to read the object data of the archive member: member={}, err={}",
                     member_name,
                     err
                 );
-                err
             })?;
-            let object_file = object::File::parse(member_object_data).map_err(|err| {
+            let object_file = object::File::parse(member_object_data).inspect_err(|err| {
                 log::error!(
                     "Failed to parse the object data of the archive member: member={}, err={}",
                     member_name,
                     err
                 );
-                err
             })?;
             object_files.push(object_file)
         }
@@ -196,10 +193,9 @@ pub fn main() -> Result<(), Error> {
             );
             err
         })?
+        && code != 0
     {
-        if code != 0 {
-            std::process::exit(code);
-        }
+        std::process::exit(code);
     }
     log::info!("Output file: {:?}", output_filepath);
 
