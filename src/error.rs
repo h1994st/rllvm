@@ -28,6 +28,9 @@ pub enum Error {
     /// Missing file
     #[error("Missing file: {0}")]
     MissingFile(String),
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
     /// Something else happened
     #[error("Unknown error: {0}")]
     Unknown(String),

@@ -11,19 +11,28 @@ use crate::{
     constants::{
         DEFAULT_CONF_FILEPATH_UNDER_HOME, DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
     },
+    error::Error,
     utils::{execute_llvm_config, find_llvm_config},
 };
 
 #[cfg(not(test))]
 pub fn rllvm_config() -> &'static RLLVMConfig {
     static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
-    RLLVM_CONFIG.get_or_init(RLLVMConfig::new)
+    RLLVM_CONFIG.get_or_init(|| {
+        RLLVMConfig::new().unwrap_or_else(|err| {
+            panic!("Failed to load rllvm configuration: {err}");
+        })
+    })
 }
 
 #[cfg(test)]
 pub fn rllvm_config() -> &'static RLLVMConfig {
     static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
-    RLLVM_CONFIG.get_or_init(RLLVMConfig::default)
+    RLLVM_CONFIG.get_or_init(|| {
+        RLLVMConfig::try_default().unwrap_or_else(|err| {
+            panic!("Failed to infer rllvm configuration: {err}");
+        })
+    })
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -118,7 +127,7 @@ impl RLLVMConfig {
 }
 
 impl RLLVMConfig {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, Error> {
         let config_filepath = env::var(DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME).map_or_else(
             |_| {
                 // Default config file
@@ -133,74 +142,78 @@ impl RLLVMConfig {
         Self::load_path(config_filepath)
     }
 
-    fn load_path<P>(config_filepath: P) -> Self
+    fn load_path<P>(config_filepath: P) -> Result<Self, Error>
     where
         P: AsRef<Path> + std::fmt::Debug,
     {
         let config_filepath = config_filepath.as_ref();
-        match confy::load_path::<RLLVMConfig>(config_filepath) {
-            Ok(mut config) => {
-                if let Some(bitcode_store_path) = &config.bitcode_store_path {
-                    // Check if the bitcode store path is absolute or not
-                    if !bitcode_store_path.is_absolute() {
-                        // Not absolute
+        let mut config = confy::load_path::<RLLVMConfig>(config_filepath).map_err(|err| {
+            log::error!(
+                "Failed to load configuration: config_filepath={:?}, err={}",
+                config_filepath,
+                err
+            );
+            Error::ConfigError(format!(
+                "Failed to load configuration from {config_filepath:?}: {err}"
+            ))
+        })?;
+
+        if let Some(bitcode_store_path) = &config.bitcode_store_path {
+            // Check if the bitcode store path is absolute or not
+            if !bitcode_store_path.is_absolute() {
+                // Not absolute
+                log::warn!(
+                    "Ignore the bitcode store path, as it is not absolute: {:?}",
+                    bitcode_store_path
+                );
+                config.bitcode_store_path = None;
+            } else {
+                // Further check if the directory exists
+                if !bitcode_store_path.exists() {
+                    // Not exist, then create it
+                    log::info!(
+                        "Create the directory for the bitcode store: {:?}",
+                        bitcode_store_path
+                    );
+                    fs::create_dir_all(bitcode_store_path).map_err(|err| {
+                        log::error!("Failed to create the bitcode store directory: err={}", err);
+                        err
+                    })?;
+                } else {
+                    // Finally, check if this is a directory
+                    if !bitcode_store_path.is_dir() {
+                        // Not a directory
                         log::warn!(
-                            "Ignore the bitcode store path, as it is not absolute: {:?}",
+                            "Ignore the bitcode store path, as it is not a directory: {:?}",
                             bitcode_store_path
                         );
                         config.bitcode_store_path = None;
-                    } else {
-                        // Further check if the directory exists
-                        if !bitcode_store_path.exists() {
-                            // Not exist, then create it
-                            log::info!(
-                                "Create the directory for the bitcode store: {:?}",
-                                bitcode_store_path
-                            );
-                            if let Err(err) = fs::create_dir_all(bitcode_store_path) {
-                                log::error!(
-                                    "Failed to create the bitcode store directory: err={}",
-                                    err
-                                );
-                                std::process::exit(1);
-                            }
-                        } else {
-                            // Finally, check if this is a directory
-                            if !bitcode_store_path.is_dir() {
-                                // Not a directory
-                                log::warn!(
-                                    "Ignore the bitcode store path, as it is not a directory: {:?}",
-                                    bitcode_store_path
-                                );
-                                config.bitcode_store_path = None;
-                            }
-                        }
                     }
                 }
-
-                config
-            }
-            Err(err) => {
-                log::error!(
-                    "Failed to load configuration: config_filepath={:?}, err={}",
-                    config_filepath,
-                    err
-                );
-                std::process::exit(1);
             }
         }
+
+        Ok(config)
     }
 }
 
 impl Default for RLLVMConfig {
     fn default() -> Self {
+        Self::try_default().unwrap_or_else(|err| {
+            panic!("Failed to infer rllvm configuration: {err}");
+        })
+    }
+}
+
+impl RLLVMConfig {
+    pub fn try_default() -> Result<Self, Error> {
         log::info!("Infer rllvm configurations ...");
 
         // Find `llvm-config`
-        let llvm_config_filepath = find_llvm_config().unwrap_or_else(|err| {
+        let llvm_config_filepath = find_llvm_config().map_err(|err| {
             log::error!("Failed to find `llvm-config`: err={:?}", err);
-            std::process::exit(1);
-        });
+            err
+        })?;
         log::info!("- llvm-config: {:?}", llvm_config_filepath);
 
         // Obtain LLVM version
@@ -209,12 +222,11 @@ impl Default for RLLVMConfig {
             Err(err) => log::warn!("- LLVM version: (unknown, err={:?})", err),
         }
 
-        let llvm_bindir = execute_llvm_config(&llvm_config_filepath, &["--bindir"]).map_or_else(
-            |err| {
+        let llvm_bindir = PathBuf::from(
+            execute_llvm_config(&llvm_config_filepath, &["--bindir"]).map_err(|err| {
                 log::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
-                std::process::exit(1);
-            },
-            PathBuf::from,
+                err
+            })?,
         );
 
         // Find `clang`
@@ -242,11 +254,11 @@ impl Default for RLLVMConfig {
         for llvm_bin_filepath in llvm_bin_filepaths {
             if !llvm_bin_filepath.exists() {
                 log::error!("Failed to find `{:?}`", llvm_bin_filepath);
-                std::process::exit(1);
+                return Err(Error::MissingFile(format!("{llvm_bin_filepath:?}")));
             }
         }
 
-        Self {
+        Ok(Self {
             llvm_config_filepath,
             clang_filepath,
             clangxx_filepath,
@@ -259,6 +271,6 @@ impl Default for RLLVMConfig {
             bitcode_generation_flags: None,
             is_configure_only: None,
             log_level: None,
-        }
+        })
     }
 }
