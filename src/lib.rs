@@ -36,6 +36,9 @@ pub mod bitcode_info;
 /// Error types used throughout the crate.
 pub mod error;
 
+/// Bitcode merge strategies (full link, partial link, archive).
+pub mod merge;
+
 /// Utility functions for command execution, file manipulation, and LLVM tools.
 pub mod utils;
 
