@@ -61,7 +61,10 @@ fn find_llvm_config_with_prefix(prefix: &Path) -> Result<PathBuf, Error> {
 fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
     // Step 1: Find llvm-config
     let llvm_config = if let Some(prefix) = llvm_prefix {
-        eprintln!("Searching for LLVM in user-specified prefix: {}", prefix.display());
+        eprintln!(
+            "Searching for LLVM in user-specified prefix: {}",
+            prefix.display()
+        );
         find_llvm_config_with_prefix(prefix)?
     } else {
         eprintln!("Auto-detecting LLVM installation...");
@@ -85,10 +88,7 @@ fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
 
     // Step 4: Check version consistency by querying clang --version
     if clang.exists() {
-        match std::process::Command::new(&clang)
-            .arg("--version")
-            .output()
-        {
+        match std::process::Command::new(&clang).arg("--version").output() {
             Ok(output) => {
                 let clang_version_output = String::from_utf8_lossy(&output.stdout);
                 if let Some(first_line) = clang_version_output.lines().next() {

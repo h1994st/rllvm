@@ -45,9 +45,8 @@ pub fn cache_dir(config_cache_dir: Option<&Path>) -> Result<PathBuf, Error> {
     let dir = if let Some(d) = config_cache_dir {
         d.to_path_buf()
     } else {
-        let home = env::var("HOME").map_err(|_| {
-            Error::ConfigError("HOME environment variable not set".into())
-        })?;
+        let home = env::var("HOME")
+            .map_err(|_| Error::ConfigError("HOME environment variable not set".into()))?;
         PathBuf::from(home).join(DEFAULT_CACHE_DIR)
     };
 
@@ -107,11 +106,7 @@ pub fn cached_bitcode_path(cache_dir: &Path, src_filepath: &Path, cache_key: u64
 }
 
 /// Looks up a cached bitcode file. Returns `Some(path)` if a valid cache entry exists.
-pub fn cache_lookup(
-    cache_dir: &Path,
-    src_filepath: &Path,
-    cache_key: u64,
-) -> Option<PathBuf> {
+pub fn cache_lookup(cache_dir: &Path, src_filepath: &Path, cache_key: u64) -> Option<PathBuf> {
     let cached_path = cached_bitcode_path(cache_dir, src_filepath, cache_key);
     if cached_path.exists() {
         CACHE_HITS.fetch_add(1, Ordering::Relaxed);
