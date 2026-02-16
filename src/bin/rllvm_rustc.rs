@@ -22,9 +22,7 @@ fn main() -> Result<(), Error> {
         // RUSTC mode: find rustc ourselves
         let rustc = env::var("RLLVM_REAL_RUSTC")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                which::which("rustc").unwrap_or_else(|_| PathBuf::from("rustc"))
-            });
+            .unwrap_or_else(|_| which::which("rustc").unwrap_or_else(|_| PathBuf::from("rustc")));
         (rustc, raw_args[1..].to_vec())
     };
 
@@ -44,7 +42,11 @@ fn main() -> Result<(), Error> {
         .with_max_level(log_level)
         .try_init();
 
-    tracing::debug!("rllvm-rustc: rustc_path={:?}, args={:?}", rustc_path, rustc_args);
+    tracing::debug!(
+        "rllvm-rustc: rustc_path={:?}, args={:?}",
+        rustc_path,
+        rustc_args
+    );
 
     let wrapper = RustcWrapper::new(rustc_path);
     if let Some(code) = wrapper.run(&rustc_args)? {

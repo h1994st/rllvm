@@ -90,11 +90,9 @@ impl RustcWrapper {
 
         // Step 5: Embed the bitcode path into the object file
         if output_path.exists() && bitcode_path.exists() {
-            if let Err(err) = embed_bitcode_filepath_to_object_file::<&Path>(
-                &bitcode_path,
-                &output_path,
-                None,
-            ) {
+            if let Err(err) =
+                embed_bitcode_filepath_to_object_file::<&Path>(&bitcode_path, &output_path, None)
+            {
                 tracing::warn!("Failed to embed bitcode path into object file: {}", err);
             }
         }
@@ -190,9 +188,10 @@ fn should_skip_bitcode(args: &[&str]) -> bool {
         .collect();
 
     if !emit_values.is_empty() {
-        let emits_obj = emit_values
-            .iter()
-            .any(|v| v.split(',').any(|e| e == "obj" || e == "link" || e == "metadata,link"));
+        let emits_obj = emit_values.iter().any(|v| {
+            v.split(',')
+                .any(|e| e == "obj" || e == "link" || e == "metadata,link")
+        });
         if !emits_obj {
             tracing::debug!("Skipping bitcode: --emit does not include obj or link");
             return true;
@@ -200,10 +199,9 @@ fn should_skip_bitcode(args: &[&str]) -> bool {
     }
 
     // Skip if this is a proc-macro crate (produces dylib, not useful for bitcode)
-    if args
-        .iter()
-        .any(|a| a.starts_with("--crate-type=proc-macro") || a.starts_with("--crate-type=proc_macro"))
-    {
+    if args.iter().any(|a| {
+        a.starts_with("--crate-type=proc-macro") || a.starts_with("--crate-type=proc_macro")
+    }) {
         tracing::debug!("Skipping bitcode: proc-macro crate");
         return true;
     }
@@ -296,10 +294,7 @@ mod tests {
             find_output_path(&["src/main.rs", "-o", "/tmp/output"]),
             Some("/tmp/output")
         );
-        assert_eq!(
-            find_output_path(&["src/main.rs", "--crate-type=bin"]),
-            None
-        );
+        assert_eq!(find_output_path(&["src/main.rs", "--crate-type=bin"]), None);
     }
 
     #[test]
