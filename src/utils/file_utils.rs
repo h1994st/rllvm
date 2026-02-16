@@ -13,7 +13,7 @@ use object::{
 };
 
 use crate::{
-    constants::{DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME},
+    constants::{COFF_SECTION_NAME, DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME},
     error::Error,
 };
 
@@ -68,6 +68,11 @@ where
             DARWIN_SEGMENT_NAME.as_bytes().to_vec(),
             DARWIN_SECTION_NAME.as_bytes().to_vec(),
             SectionFlags::MachO { flags: 0 },
+        ),
+        BinaryFormat::Coff => (
+            vec![],
+            COFF_SECTION_NAME.as_bytes().to_vec(),
+            SectionFlags::Coff { characteristics: 0 },
         ),
         _ => {
             return Err(Error::UnsupportedBinaryFormat(format!(
@@ -279,6 +284,7 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
     let section_name = match object_binary_format {
         BinaryFormat::Elf => ELF_SECTION_NAME.as_bytes(),
         BinaryFormat::MachO => DARWIN_SECTION_NAME.as_bytes(),
+        BinaryFormat::Coff => COFF_SECTION_NAME.as_bytes(),
         _ => {
             return Err(Error::UnsupportedBinaryFormat(format!(
                 "{:?}",
@@ -393,5 +399,77 @@ mod tests {
         ];
         println!("{:?}", embedded_filepaths);
         assert_eq!(embedded_filepaths, expected_filepaths)
+    }
+
+    /// Create a minimal COFF object file using the `object` crate's write API.
+    fn create_minimal_coff_object(path: &Path) {
+        use object::Architecture;
+
+        let mut obj = write::Object::new(
+            BinaryFormat::Coff,
+            Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        let section_id = obj.add_section(vec![], b".text".to_vec(), SectionKind::Text);
+        let section = obj.section_mut(section_id);
+        // A single `ret` instruction
+        section.set_data(&[0xc3], 1);
+
+        let data = obj.write().expect("Failed to write COFF object");
+        fs::write(path, data).expect("Failed to write COFF file");
+    }
+
+    #[test]
+    fn test_coff_path_injection_and_extraction() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let coff_obj_path = dir.path().join("test.obj");
+        let output_path = dir.path().join("test.out.obj");
+
+        create_minimal_coff_object(&coff_obj_path);
+
+        let bitcode_filepath = Path::new("/tmp/hello.bc");
+
+        // Embed bitcode filepath
+        embed_bitcode_filepath_to_object_file(bitcode_filepath, &coff_obj_path, Some(&output_path))
+            .expect("Failed to embed bitcode filepath into COFF object");
+
+        // Extract embedded filepaths
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&output_path)
+            .expect("Failed to extract embedded filepaths from COFF object");
+        assert_eq!(embedded_filepaths.len(), 1);
+        assert_eq!(embedded_filepaths[0], PathBuf::from("/tmp/hello.bc"));
+    }
+
+    #[test]
+    fn test_coff_overwrite_in_place() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let coff_obj_path = dir.path().join("test.obj");
+
+        create_minimal_coff_object(&coff_obj_path);
+
+        let bitcode_filepath = Path::new("/tmp/inplace.bc");
+
+        // Embed bitcode filepath in place (no output path)
+        embed_bitcode_filepath_to_object_file::<&Path>(bitcode_filepath, &coff_obj_path, None)
+            .expect("Failed to embed bitcode filepath into COFF object in place");
+
+        // Extract
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&coff_obj_path)
+            .expect("Failed to extract embedded filepaths from COFF object");
+        assert_eq!(embedded_filepaths.len(), 1);
+        assert_eq!(embedded_filepaths[0], PathBuf::from("/tmp/inplace.bc"));
+    }
+
+    #[test]
+    fn test_coff_no_bitcode_section_returns_empty() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let coff_obj_path = dir.path().join("test.obj");
+
+        create_minimal_coff_object(&coff_obj_path);
+
+        // Extract from object with no bitcode section
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&coff_obj_path)
+            .expect("Failed to extract from COFF object without bitcode section");
+        assert!(embedded_filepaths.is_empty());
     }
 }

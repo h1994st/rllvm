@@ -10,6 +10,7 @@ type PatternCallbackVec = Vec<ArgPatternInfo<String>>;
 pub const DARWIN_SEGMENT_NAME: &str = "__RLLVM";
 pub const DARWIN_SECTION_NAME: &str = "__llvm_bc";
 pub const ELF_SECTION_NAME: &str = ".llvm_bc";
+pub const COFF_SECTION_NAME: &str = ".llvmbc";
 
 /// Environment variables
 pub const DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME: &str = "RLLVM_CONFIG";

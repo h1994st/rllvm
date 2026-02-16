@@ -23,10 +23,7 @@ fn fixture(name: &str) -> PathBuf {
 fn find_llvm_dis() -> Option<PathBuf> {
     // Try to get the LLVM bin directory from llvm-config
     let llvm_config = find_llvm_config()?;
-    let output = Command::new(&llvm_config)
-        .arg("--bindir")
-        .output()
-        .ok()?;
+    let output = Command::new(&llvm_config).arg("--bindir").output().ok()?;
     if output.status.success() {
         let bindir = String::from_utf8(output.stdout).ok()?.trim().to_string();
         let llvm_dis = PathBuf::from(&bindir).join("llvm-dis");
@@ -79,10 +76,7 @@ fn find_llvm_config() -> Option<PathBuf> {
 }
 
 fn which(name: &str) -> Result<PathBuf, ()> {
-    let output = Command::new("which")
-        .arg(name)
-        .output()
-        .map_err(|_| ())?;
+    let output = Command::new("which").arg(name).output().map_err(|_| ())?;
     if output.status.success() {
         let path = String::from_utf8(output.stdout)
             .map_err(|_| ())?
@@ -422,10 +416,7 @@ fn compile_to_static_archive_and_extract() {
         .arg(&bitcode_path)
         .status()
         .expect("Failed to run rllvm-get-bc");
-    assert!(
-        status.success(),
-        "rllvm-get-bc failed on static archive"
-    );
+    assert!(status.success(), "rllvm-get-bc failed on static archive");
 
     assert_valid_bitcode(&bitcode_path);
 }
