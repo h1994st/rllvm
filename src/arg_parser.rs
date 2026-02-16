@@ -426,9 +426,6 @@ impl CompilerArgsInfo {
     }
 
     pub fn is_bitcode_generation_skipped(&self) -> bool {
-        let mut is_skipped = false;
-        let mut message = "no reason";
-
         let conditions = [
             (
                 rllvm_config().is_configure_only(),
@@ -467,16 +464,12 @@ impl CompilerArgsInfo {
 
         for (condition, reason) in conditions {
             if condition {
-                is_skipped = true;
-                message = reason;
+                log::warn!("Skip bitcode generation: {}", reason);
+                return true;
             }
         }
 
-        if is_skipped {
-            log::warn!("Skip bitcode generation: {}", message);
-        }
-
-        is_skipped
+        false
     }
 
     pub fn mode(&self) -> CompileMode {
