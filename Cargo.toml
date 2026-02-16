@@ -19,6 +19,7 @@ version = "0.1.6"
 
 [dependencies]
 clap = {version = "~4.5.48", features = ["derive"]}
+clap_complete = "~4.5"
 confy = "~1.0.0"
 object = {version = "~0.37.3", features = ["all"]}
 regex = "~1.11.3"
@@ -46,6 +47,8 @@ path = "src/bin/rllvm_get_bc.rs"
 [[bin]]
 name = "rllvm-init"
 path = "src/bin/rllvm_init.rs"
+name = "rllvm-completions"
+path = "src/bin/rllvm_completions.rs"
 
 [dev-dependencies]
 tempfile = "3"
