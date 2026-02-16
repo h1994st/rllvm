@@ -3,6 +3,7 @@ authors = ["Shengtuo Hu <h1994st@gmail.com>"]
 categories = ["command-line-utilities", "development-tools", "development-tools::build-utils"]
 description = "A tool to build whole-program LLVM bitcode files"
 edition = "2024"
+rust-version = "1.85"
 exclude = [
   "tests/*",
   ".github/*",
