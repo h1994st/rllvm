@@ -1,3 +1,10 @@
+//! TOML-based configuration for rllvm.
+//!
+//! Configuration is loaded from `~/.rllvm/config.toml` by default, or from a path
+//! specified via the `RLLVM_CONFIG` environment variable. The configuration stores
+//! paths to LLVM tools (`clang`, `llvm-link`, etc.) and optional flags for bitcode
+//! generation and linking.
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -15,6 +22,10 @@ use crate::{
     utils::{execute_llvm_config, find_llvm_config},
 };
 
+/// Returns a reference to the global [`RLLVMConfig`] singleton.
+///
+/// In production, the configuration is loaded from the config file.
+/// In tests, it is inferred by discovering LLVM tools on the system.
 #[cfg(not(test))]
 pub fn rllvm_config() -> &'static RLLVMConfig {
     static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
@@ -25,6 +36,9 @@ pub fn rllvm_config() -> &'static RLLVMConfig {
     })
 }
 
+/// Returns a reference to the global [`RLLVMConfig`] singleton (test variant).
+///
+/// Uses [`RLLVMConfig::try_default`] to infer configuration from the system.
 #[cfg(test)]
 pub fn rllvm_config() -> &'static RLLVMConfig {
     static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
@@ -35,6 +49,10 @@ pub fn rllvm_config() -> &'static RLLVMConfig {
     })
 }
 
+/// Configuration for rllvm, specifying LLVM tool paths and optional flags.
+///
+/// Typically loaded from `~/.rllvm/config.toml` via [`rllvm_config`], or
+/// inferred from the system using [`RLLVMConfig::try_default`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RLLVMConfig {
     /// The absolute filepath of `llvm-config`
@@ -75,50 +93,62 @@ pub struct RLLVMConfig {
 }
 
 impl RLLVMConfig {
+    /// Returns the path to `llvm-config`.
     pub fn llvm_config_filepath(&self) -> &PathBuf {
         &self.llvm_config_filepath
     }
 
+    /// Returns the path to `clang`.
     pub fn clang_filepath(&self) -> &PathBuf {
         &self.clang_filepath
     }
 
+    /// Returns the path to `clang++`.
     pub fn clangxx_filepath(&self) -> &PathBuf {
         &self.clangxx_filepath
     }
 
+    /// Returns the path to `llvm-ar`.
     pub fn llvm_ar_filepath(&self) -> &PathBuf {
         &self.llvm_ar_filepath
     }
 
+    /// Returns the path to `llvm-link`.
     pub fn llvm_link_filepath(&self) -> &PathBuf {
         &self.llvm_link_filepath
     }
 
+    /// Returns the path to `llvm-objcopy`.
     pub fn llvm_objcopy_filepath(&self) -> &PathBuf {
         &self.llvm_objcopy_filepath
     }
 
+    /// Returns the optional bitcode store directory path.
     pub fn bitcode_store_path(&self) -> Option<&PathBuf> {
         self.bitcode_store_path.as_ref()
     }
 
+    /// Returns the optional extra flags for `llvm-link`.
     pub fn llvm_link_flags(&self) -> Option<&Vec<String>> {
         self.llvm_link_flags.as_ref()
     }
 
+    /// Returns the optional LTO link flags.
     pub fn lto_ldflags(&self) -> Option<&Vec<String>> {
         self.lto_ldflags.as_ref()
     }
 
+    /// Returns the optional bitcode generation flags.
     pub fn bitcode_generation_flags(&self) -> Option<&Vec<String>> {
         self.bitcode_generation_flags.as_ref()
     }
 
+    /// Returns whether configure-only mode is enabled (skips bitcode generation).
     pub fn is_configure_only(&self) -> bool {
         self.is_configure_only.unwrap_or_default()
     }
 
+    /// Returns the configured log level.
     pub fn log_level(&self) -> Level {
         Level::iter()
             .nth(self.log_level.unwrap_or_default() as usize)
@@ -127,6 +157,10 @@ impl RLLVMConfig {
 }
 
 impl RLLVMConfig {
+    /// Loads configuration from the config file.
+    ///
+    /// The file path is determined by the `RLLVM_CONFIG` environment variable,
+    /// falling back to `~/.rllvm/config.toml`.
     pub fn new() -> Result<Self, Error> {
         let config_filepath = env::var(DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME).map_or_else(
             |_| {
@@ -206,6 +240,10 @@ impl Default for RLLVMConfig {
 }
 
 impl RLLVMConfig {
+    /// Infers configuration by discovering LLVM tools on the system.
+    ///
+    /// Uses [`find_llvm_config`](crate::utils::find_llvm_config) to locate
+    /// `llvm-config`, then derives all other tool paths from `llvm-config --bindir`.
     pub fn try_default() -> Result<Self, Error> {
         log::info!("Infer rllvm configurations ...");
 
