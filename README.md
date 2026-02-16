@@ -99,6 +99,20 @@ cmake -B build && cmake --build build
 rllvm-get-bc build/my_program
 ```
 
+### CMake toolchain file
+
+rllvm ships a CMake toolchain file for a more integrated approach:
+
+```bash
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=path/to/rllvm/cmake/rllvm-toolchain.cmake
+cmake --build build
+
+# Extract bitcode
+rllvm-get-bc build/my_program
+```
+
+See [`examples/cmake/`](examples/cmake/) for a complete example.
+
 ### Wrapper flags
 
 ```
