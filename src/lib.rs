@@ -30,6 +30,9 @@ pub mod config;
 /// Compiler wrapper traits and LLVM/Clang implementation.
 pub mod compiler_wrapper;
 
+/// Bitcode file analysis via `llvm-dis`.
+pub mod bitcode_info;
+
 /// Error types used throughout the crate.
 pub mod error;
 

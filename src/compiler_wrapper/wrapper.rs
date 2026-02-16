@@ -140,7 +140,10 @@ pub trait CompilerWrapper {
             match cache::cache_dir(config.cache_dir().map(|p| p.as_path())) {
                 Ok(dir) => Some(dir),
                 Err(err) => {
-                    tracing::warn!("Failed to initialize cache directory, caching disabled: {}", err);
+                    tracing::warn!(
+                        "Failed to initialize cache directory, caching disabled: {}",
+                        err
+                    );
                     None
                 }
             }
@@ -170,24 +173,30 @@ pub trait CompilerWrapper {
                     config.bitcode_generation_flags(),
                 )?;
 
-                if let Some(cached_path) = cache::cache_lookup(cache_dir, &src_filepath, cache_key) {
+                if let Some(cached_path) = cache::cache_lookup(cache_dir, &src_filepath, cache_key)
+                {
                     // Cache hit — copy cached bitcode to expected output location
                     std::fs::copy(&cached_path, &bitcode_filepath).map_err(|err| {
                         tracing::error!(
                             "Failed to copy cached bitcode {:?} to {:?}: {}",
-                            cached_path, bitcode_filepath, err
+                            cached_path,
+                            bitcode_filepath,
+                            err
                         );
                         err
                     })?;
                     bitcode_filepath
                 } else {
                     // Cache miss — generate bitcode and store in cache
-                    if let Some(code) = self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
+                    if let Some(code) =
+                        self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
                         && code != 0
                     {
                         return Ok(Some(code));
                     }
-                    if let Err(err) = cache::cache_store(cache_dir, &src_filepath, cache_key, &bitcode_filepath) {
+                    if let Err(err) =
+                        cache::cache_store(cache_dir, &src_filepath, cache_key, &bitcode_filepath)
+                    {
                         tracing::warn!("Failed to store bitcode in cache: {}", err);
                     }
                     bitcode_filepath
