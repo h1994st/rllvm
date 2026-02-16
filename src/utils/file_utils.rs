@@ -22,13 +22,7 @@ where
     P: AsRef<Path>,
 {
     let file = file.as_ref();
-    if !file.exists() {
-        false
-    } else if file.is_dir() {
-        false
-    } else {
-        true
-    }
+    file.exists() && !file.is_dir()
 }
 
 pub fn is_object_file<P>(file: P) -> Result<bool, Error>
@@ -290,7 +284,7 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
 
             let mut embedded_filepaths: Vec<_> = embedded_filepath_string
                 .split('\n')
-                .map(|x| PathBuf::from(x))
+                .map(PathBuf::from)
                 .collect();
 
             // Sort

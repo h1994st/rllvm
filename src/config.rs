@@ -17,13 +17,13 @@ use crate::{
 #[cfg(not(test))]
 pub fn rllvm_config() -> &'static RLLVMConfig {
     static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
-    RLLVM_CONFIG.get_or_init(|| RLLVMConfig::new())
+    RLLVM_CONFIG.get_or_init(RLLVMConfig::new)
 }
 
 #[cfg(test)]
 pub fn rllvm_config() -> &'static RLLVMConfig {
     static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
-    RLLVM_CONFIG.get_or_init(|| RLLVMConfig::default())
+    RLLVM_CONFIG.get_or_init(RLLVMConfig::default)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -214,7 +214,7 @@ impl Default for RLLVMConfig {
                 log::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
                 std::process::exit(1);
             },
-            |x| PathBuf::from(x),
+            PathBuf::from,
         );
 
         // Find `clang`

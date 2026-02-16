@@ -24,34 +24,21 @@ where
     }
 
     // Parent directory
-    let parent_dir = src_filepath.parent().expect(&format!(
-        "Failed to obtain the parent directory: {:?}",
-        src_filepath
-    ));
+    let parent_dir = src_filepath
+        .parent()
+        .unwrap_or_else(|| panic!("Failed to obtain the parent directory: {:?}", src_filepath));
     // With extension
     let file_name = src_filepath
         .file_name()
-        .expect(&format!(
-            "Failed to obtain the file name: {:?}",
-            src_filepath
-        ))
+        .unwrap_or_else(|| panic!("Failed to obtain the file name: {:?}", src_filepath))
         .to_str()
-        .expect(&format!(
-            "Failed to convert OsStr to str: {:?}",
-            src_filepath
-        ));
+        .unwrap_or_else(|| panic!("Failed to convert OsStr to str: {:?}", src_filepath));
     // Without extension
     let file_stem = src_filepath
         .file_stem()
-        .expect(&format!(
-            "Failed to obtain the file stem: {:?}",
-            src_filepath
-        ))
+        .unwrap_or_else(|| panic!("Failed to obtain the file stem: {:?}", src_filepath))
         .to_str()
-        .expect(&format!(
-            "Failed to convert OsStr to str: {:?}",
-            src_filepath
-        ));
+        .unwrap_or_else(|| panic!("Failed to convert OsStr to str: {:?}", src_filepath));
 
     let object_file_name = if is_compile_only {
         // Compile only. We need to explicitly generate the object file
@@ -107,8 +94,7 @@ mod tests {
                 is_compile_only,
                 (expected_object_filepath, expected_bitcode_filepath),
             )| {
-                derive_object_and_bitcode_filepath(src_filepath, is_compile_only).map_or(
-                    false,
+                derive_object_and_bitcode_filepath(src_filepath, is_compile_only).is_ok_and(
                     |(object_filepath, bitcode_filepath)| {
                         object_filepath == expected_object_filepath
                             && bitcode_filepath == expected_bitcode_filepath

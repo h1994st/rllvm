@@ -481,7 +481,7 @@ impl CompilerArgsInfo {
 
     pub fn mode(&self) -> CompileMode {
         let mut mode = CompileMode::Compiling;
-        if self.input_files().is_empty() && self.link_args().len() > 0 {
+        if self.input_files().is_empty() && !self.link_args().is_empty() {
             mode = CompileMode::Linking;
             if self.is_lto() {
                 mode = CompileMode::LTO;

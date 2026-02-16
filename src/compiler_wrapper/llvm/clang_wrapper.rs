@@ -100,14 +100,20 @@ pub struct ClangWrapperBuilder {
     is_silent: Option<bool>,
 }
 
-impl ClangWrapperBuilder {
-    pub fn new() -> Self {
+impl Default for ClangWrapperBuilder {
+    fn default() -> Self {
         Self {
             name: String::new(),
             wrapped_compiler: None,
             compiler_kind: CompilerKind::Clang,
             is_silent: None,
         }
+    }
+}
+
+impl ClangWrapperBuilder {
+    pub fn new() -> Self {
+        Self::default()
     }
 }
 

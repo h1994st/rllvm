@@ -16,4 +16,4 @@ pub mod error;
 pub mod utils;
 
 /// Internal constants
-pub(self) mod constants;
+mod constants;
