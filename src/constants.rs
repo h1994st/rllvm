@@ -12,7 +12,7 @@ type CallbackMap = HashMap<&'static str, ArgInfo<String>>;
 /// Declaration order still decides the winner — `^-Wl,.+$` has to beat
 /// `^-W[^l].*$`, for instance — and `SetMatches::iter` yields indices in
 /// ascending order, so "first declared match wins" is preserved.
-pub struct ArgPatternTable {
+pub(crate) struct ArgPatternTable {
     set: RegexSet,
     arg_infos: Vec<ArgInfo<String>>,
 }
@@ -30,7 +30,7 @@ impl ArgPatternTable {
     }
 
     /// Returns the handler for the first declared pattern that matches.
-    pub fn first_match(&self, arg: &str) -> Option<&ArgInfo<String>> {
+    pub(crate) fn first_match(&self, arg: &str) -> Option<&ArgInfo<String>> {
         self.set
             .matches(arg)
             .iter()
@@ -39,28 +39,28 @@ impl ArgPatternTable {
     }
 }
 
-pub const DARWIN_SEGMENT_NAME: &str = "__RLLVM";
-pub const DARWIN_SECTION_NAME: &str = "__llvm_bc";
-pub const ELF_SECTION_NAME: &str = ".llvm_bc";
-pub const COFF_SECTION_NAME: &str = ".llvmbc";
-pub const WASM_SECTION_NAME: &str = ".llvmbc";
+pub(crate) const DARWIN_SEGMENT_NAME: &str = "__RLLVM";
+pub(crate) const DARWIN_SECTION_NAME: &str = "__llvm_bc";
+pub(crate) const ELF_SECTION_NAME: &str = ".llvm_bc";
+pub(crate) const COFF_SECTION_NAME: &str = ".llvmbc";
+pub(crate) const WASM_SECTION_NAME: &str = ".llvmbc";
 
 /// Environment variables
-pub const DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME: &str = "RLLVM_CONFIG";
-pub const HOME_ENV_NAME: &str = "HOME";
+pub(crate) const DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME: &str = "RLLVM_CONFIG";
+pub(crate) const HOME_ENV_NAME: &str = "HOME";
 
 /// The default filepath of the configuration file
-pub const DEFAULT_CONF_FILEPATH_UNDER_HOME: &str = ".rllvm/config.toml";
+pub(crate) const DEFAULT_CONF_FILEPATH_UNDER_HOME: &str = ".rllvm/config.toml";
 
 /// The max version of `LLVM` we're looking for
 #[cfg(not(target_vendor = "apple"))]
-pub const LLVM_VERSION_MAX: u32 = 33;
+pub(crate) const LLVM_VERSION_MAX: u32 = 33;
 
 /// The min version of `LLVM` we're looking for
 #[cfg(not(target_vendor = "apple"))]
-pub const LLVM_VERSION_MIN: u32 = 6;
+pub(crate) const LLVM_VERSION_MIN: u32 = 6;
 
-pub fn arg_exact_match_map() -> &'static CallbackMap {
+pub(crate) fn arg_exact_match_map() -> &'static CallbackMap {
     static ARG_EXACT_MATCH_MAP: OnceLock<CallbackMap> = OnceLock::new();
 
     ARG_EXACT_MATCH_MAP.get_or_init(|| {
@@ -469,7 +469,7 @@ const OBJECT_FILE_NAME_PATTERNS: [&str; 3] = [
 ///
 /// This matches on the name only, exactly as the argument patterns do — it
 /// never touches the filesystem.
-pub fn is_object_file_name(arg: &str) -> bool {
+pub(crate) fn is_object_file_name(arg: &str) -> bool {
     static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
     PATTERNS
         .get_or_init(|| {
@@ -482,7 +482,7 @@ pub fn is_object_file_name(arg: &str) -> bool {
         .any(|pattern| pattern.is_match(arg))
 }
 
-pub fn arg_patterns() -> &'static ArgPatternTable {
+pub(crate) fn arg_patterns() -> &'static ArgPatternTable {
     static ARG_PATTERNS: OnceLock<ArgPatternTable> = OnceLock::new();
     ARG_PATTERNS.get_or_init(|| {
         ArgPatternTable::new(vec![

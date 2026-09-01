@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Returns `true` if the path exists and is not a directory.
-pub fn is_plain_file<P>(file: P) -> bool
+pub(crate) fn is_plain_file<P>(file: P) -> bool
 where
     P: AsRef<Path>,
 {
@@ -33,7 +33,7 @@ where
 }
 
 /// Returns `true` if the file is a relocatable object file.
-pub fn is_object_file<P>(file: P) -> Result<bool, Error>
+pub(crate) fn is_object_file<P>(file: P) -> Result<bool, Error>
 where
     P: AsRef<Path>,
 {

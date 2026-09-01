@@ -8,7 +8,7 @@ use std::{
 use crate::error::Error;
 
 /// Derive the object file and bitcode file paths from a source file path.
-pub fn derive_object_and_bitcode_filepath<P>(
+pub(crate) fn derive_object_and_bitcode_filepath<P>(
     src_filepath: P,
     is_compile_only: bool,
 ) -> Result<(PathBuf, PathBuf), Error>
