@@ -83,3 +83,6 @@ target/
 
 # End of https://www.toptal.com/developers/gitignore/api/rust,macos,visualstudiocode
 .worktrees/
+
+### Claude Code worktrees ###
+.claude/worktrees/
