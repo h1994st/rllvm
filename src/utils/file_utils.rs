@@ -165,17 +165,25 @@ where
                 BinaryFormat::Elf => (
                     vec![],
                     ELF_SECTION_NAME.as_bytes().to_vec(),
-                    SectionFlags::Elf { sh_flags: 0 },
+                    SectionFlags::Elf {
+                        sh_type: object::elf::SHT_PROGBITS,
+                        sh_flags: object::elf::SectionFlags(0),
+                    },
                 ),
                 BinaryFormat::MachO => (
                     DARWIN_SEGMENT_NAME.as_bytes().to_vec(),
                     DARWIN_SECTION_NAME.as_bytes().to_vec(),
-                    SectionFlags::MachO { flags: 0 },
+                    SectionFlags::MachO {
+                        flags: object::macho::SectionFlags(0),
+                        reserved2: 0,
+                    },
                 ),
                 BinaryFormat::Coff => (
                     vec![],
                     COFF_SECTION_NAME.as_bytes().to_vec(),
-                    SectionFlags::Coff { characteristics: 0 },
+                    SectionFlags::Coff {
+                        characteristics: object::pe::SectionFlags(0),
+                    },
                 ),
                 _ => {
                     return Err(Error::UnsupportedBinaryFormat(format!(
@@ -294,6 +302,7 @@ fn copy_macho_build_version(in_object: &File, out_object: &mut write::Object) ->
     if let Some(build_version) = build_version {
         let endian = in_object.endianness();
         let mut version = write::MachOBuildVersion::default();
+        let (build_version, _tools) = build_version;
         version.platform = build_version.platform.get(endian);
         version.minos = build_version.minos.get(endian);
         version.sdk = build_version.sdk.get(endian);
@@ -372,19 +381,24 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
         let flags = match in_symbol.flags() {
             SymbolFlags::None => SymbolFlags::None,
             SymbolFlags::Elf { st_info, st_other } => SymbolFlags::Elf { st_info, st_other },
-            SymbolFlags::MachO { n_desc } => SymbolFlags::MachO { n_desc },
+            SymbolFlags::MachO { n_type, n_desc } => SymbolFlags::MachO { n_type, n_desc },
             SymbolFlags::CoffSection {
+                typ,
+                storage_class,
                 selection,
                 associative_section,
             } => {
                 let associative_section =
                     associative_section.map(|index| *out_sections.get(&index).unwrap());
                 SymbolFlags::CoffSection {
+                    typ,
+                    storage_class,
                     selection,
                     associative_section,
                 }
             }
             SymbolFlags::Xcoff {
+                n_type,
                 n_sclass,
                 x_smtyp,
                 x_smclas,
@@ -393,6 +407,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
                 let containing_csect =
                     containing_csect.map(|index| *out_symbols.get(&index).unwrap());
                 SymbolFlags::Xcoff {
+                    n_type,
                     n_sclass,
                     x_smtyp,
                     x_smclas,
@@ -567,10 +582,11 @@ mod tests {
             File::MachO64(macho) => macho.build_version().ok()?,
             _ => return None,
         }?;
+        let (build_version, _tools) = build_version;
         Some((
-            build_version.platform.get(endian),
-            build_version.minos.get(endian),
-            build_version.sdk.get(endian),
+            build_version.platform.get(endian).0,
+            build_version.minos.get(endian).0,
+            build_version.sdk.get(endian).0,
         ))
     }
 
