@@ -428,12 +428,24 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    /// Builds an absolute path for a bitcode file used in embedding tests.
+    ///
+    /// The file need not exist, but the path must be absolute *on the host*:
+    /// a relative path gets canonicalized, which fails when the file is
+    /// missing. `/tmp/...` is not absolute on Windows.
+    fn tmp_bitcode(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
     #[test]
     fn test_path_injection_and_extraction() {
-        let bitcode_filepath = Path::new("/tmp/hello.bc");
+        let bitcode_pathbuf = tmp_bitcode("hello.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
         let object_filepath = Path::new(test_case!("hello.o"));
 
-        let output_object_filepath = Path::new("/tmp/hello.new.o");
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let output_pathbuf = dir.path().join("hello.new.o");
+        let output_object_filepath = output_pathbuf.as_path();
 
         // Embed bitcode filepath
         let ret = embed_bitcode_filepath_to_object_file(
@@ -451,9 +463,6 @@ mod tests {
         let expected_filepath = PathBuf::from(bitcode_filepath);
         println!("{:?}", embedded_filepaths[0]);
         assert_eq!(embedded_filepaths[0], expected_filepath);
-
-        // Clean
-        fs::remove_file(output_object_filepath).expect("Failed to delete the output object file");
     }
 
     #[test]
@@ -499,7 +508,8 @@ mod tests {
 
         create_minimal_coff_object(&coff_obj_path);
 
-        let bitcode_filepath = Path::new("/tmp/hello.bc");
+        let bitcode_pathbuf = tmp_bitcode("hello.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
 
         // Embed bitcode filepath
         embed_bitcode_filepath_to_object_file(bitcode_filepath, &coff_obj_path, Some(&output_path))
@@ -509,7 +519,7 @@ mod tests {
         let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&output_path)
             .expect("Failed to extract embedded filepaths from COFF object");
         assert_eq!(embedded_filepaths.len(), 1);
-        assert_eq!(embedded_filepaths[0], PathBuf::from("/tmp/hello.bc"));
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("hello.bc"));
     }
 
     #[test]
@@ -519,7 +529,8 @@ mod tests {
 
         create_minimal_coff_object(&coff_obj_path);
 
-        let bitcode_filepath = Path::new("/tmp/inplace.bc");
+        let bitcode_pathbuf = tmp_bitcode("inplace.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
 
         // Embed bitcode filepath in place (no output path)
         embed_bitcode_filepath_to_object_file::<&Path>(bitcode_filepath, &coff_obj_path, None)
@@ -529,7 +540,7 @@ mod tests {
         let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&coff_obj_path)
             .expect("Failed to extract embedded filepaths from COFF object");
         assert_eq!(embedded_filepaths.len(), 1);
-        assert_eq!(embedded_filepaths[0], PathBuf::from("/tmp/inplace.bc"));
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("inplace.bc"));
     }
 
     #[test]
@@ -574,7 +585,8 @@ mod tests {
 
         create_minimal_wasm_object(&wasm_obj_path);
 
-        let bitcode_filepath = Path::new("/tmp/hello.bc");
+        let bitcode_pathbuf = tmp_bitcode("hello.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
 
         // Embed bitcode filepath
         embed_bitcode_filepath_to_object_file(bitcode_filepath, &wasm_obj_path, Some(&output_path))
@@ -584,7 +596,7 @@ mod tests {
         let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&output_path)
             .expect("Failed to extract embedded filepaths from WASM object");
         assert_eq!(embedded_filepaths.len(), 1);
-        assert_eq!(embedded_filepaths[0], PathBuf::from("/tmp/hello.bc"));
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("hello.bc"));
     }
 
     #[test]
@@ -594,7 +606,8 @@ mod tests {
 
         create_minimal_wasm_object(&wasm_obj_path);
 
-        let bitcode_filepath = Path::new("/tmp/inplace.bc");
+        let bitcode_pathbuf = tmp_bitcode("inplace.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
 
         // Embed bitcode filepath in place (no output path)
         embed_bitcode_filepath_to_object_file::<&Path>(bitcode_filepath, &wasm_obj_path, None)
@@ -604,7 +617,7 @@ mod tests {
         let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&wasm_obj_path)
             .expect("Failed to extract embedded filepaths from WASM object");
         assert_eq!(embedded_filepaths.len(), 1);
-        assert_eq!(embedded_filepaths[0], PathBuf::from("/tmp/inplace.bc"));
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("inplace.bc"));
     }
 
     #[test]

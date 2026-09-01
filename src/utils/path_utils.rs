@@ -85,15 +85,19 @@ mod tests {
 
     #[test]
     fn test_derive_object_and_bitcode_filepath() {
-        let src_filepath = Path::new("/tmp/foo.c");
+        // Must be absolute on the host platform: `/tmp/foo.c` is not absolute
+        // on Windows, where paths need a drive prefix.
+        let src_dir = env::temp_dir();
+        let src_filepath = src_dir.join("foo.c");
+        let src_filepath = src_filepath.as_path();
 
         // Linking: the object file is an internal artifact, hidden next to the
         // source file.
         let (object_filepath, bitcode_filepath) =
             derive_object_and_bitcode_filepath(src_filepath, false)
                 .expect("Failed to derive filepaths");
-        assert_eq!(object_filepath, Path::new("/tmp/.foo.o"));
-        assert_eq!(bitcode_filepath, Path::new("/tmp/.foo.o.bc"));
+        assert_eq!(object_filepath, src_dir.join(".foo.o"));
+        assert_eq!(bitcode_filepath, src_dir.join(".foo.o.bc"));
 
         // Compile-only: the compiler writes `foo.o` into the current working
         // directory, which is where the bitcode path must be embedded.
@@ -105,6 +109,6 @@ mod tests {
             env::current_dir().unwrap().join("foo.o"),
             "compile-only object file belongs in the working directory"
         );
-        assert_eq!(bitcode_filepath, Path::new("/tmp/.foo.o.bc"));
+        assert_eq!(bitcode_filepath, src_dir.join(".foo.o.bc"));
     }
 }
