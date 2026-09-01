@@ -7,7 +7,11 @@ use crate::{
     utils::*,
 };
 use regex::Regex;
-use std::{env, path::PathBuf, sync::OnceLock};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 /// Compile mode
 #[derive(Debug)]
@@ -549,14 +553,34 @@ impl CompilerArgsInfo {
 
     /// Derive (source, object, bitcode) filepath triples for all input files.
     pub fn artifact_filepaths(&self) -> Result<Vec<(PathBuf, PathBuf, PathBuf)>, Error> {
+        // Artifacts follow the output. With no `-o` the compiler writes into
+        // the working directory, so that is the output directory too.
+        let output_dir = if self.output_filename.is_empty() {
+            env::current_dir()?
+        } else {
+            let output_filepath = PathBuf::from(&self.output_filename);
+            let output_filepath = if output_filepath.is_absolute() {
+                output_filepath
+            } else {
+                env::current_dir()?.join(output_filepath)
+            };
+            output_filepath
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or(env::current_dir()?)
+        };
+
         let mut artifacts = vec![];
         for src_file in &self.input_files {
             // Obtain the absolute filepath
             let src_filepath = PathBuf::from(src_file).canonicalize()?;
 
             // Derive filepaths of artifacts
-            let (mut object_filepath, mut bitcode_filepath) =
-                derive_object_and_bitcode_filepath(&src_filepath, self.is_compile_only)?;
+            let (mut object_filepath, mut bitcode_filepath) = derive_object_and_bitcode_filepath(
+                &src_filepath,
+                &output_dir,
+                self.is_compile_only,
+            )?;
 
             // In compile-only mode an explicit `-o` names the object file the
             // compiler actually wrote, and that is the file the bitcode path
