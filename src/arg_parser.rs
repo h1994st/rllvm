@@ -647,4 +647,19 @@ mod tests {
         let input = r#"1.c 2.c 3.c 4.c 5.c -Wl,--start-group 7.o 8.o 9.o -Wl,--end-group 10.c 11.c 12.c 13.c"#;
         test_parsing_link_args_internal(input, 5);
     }
+
+    #[test]
+    fn test_parsing_forbidden_flags() {
+        // Forbidden flags are collected, and kept out of the compile/link args
+        let input = r#"-O2 -dead_strip -Wl,-dead_strip -o prog main.c"#;
+        test_parsing(input, |args| {
+            args.forbidden_flags() == &["-dead_strip", "-Wl,-dead_strip"]
+                && !args.compile_args().iter().any(|x| x.contains("dead_strip"))
+                && !args.link_args().iter().any(|x| x.contains("dead_strip"))
+        });
+
+        // No forbidden flag in the command means nothing gets dropped
+        let input = r#"-O2 -o prog main.c"#;
+        test_parsing(input, |args| args.forbidden_flags().is_empty());
+    }
 }
