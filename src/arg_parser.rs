@@ -635,6 +635,18 @@ mod tests {
         test_parsing_lto_internal(input);
     }
 
+    #[test]
+    fn test_parsing_objective_c_sources() {
+        // Objective-C sources are compilation inputs, not unrecognized flags;
+        // otherwise no bitcode is generated for them.
+        test_parsing("-c foo.m", |args| {
+            args.input_files() == &["foo.m".to_string()]
+        });
+        test_parsing("-c foo.mm", |args| {
+            args.input_files() == &["foo.mm".to_string()]
+        });
+    }
+
     fn test_parsing_link_args_internal(input: &str, expected: usize) {
         test_parsing(input, |args| args.link_args().len() == expected);
     }

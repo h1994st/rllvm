@@ -44,9 +44,19 @@ where
     }
 
     let data = fs::read(file)?;
-    let object_file = object::File::parse(&*data)?;
 
-    Ok(object_file.kind() == ObjectKind::Relocatable)
+    // A file that does not parse as an object simply is not one. Propagating
+    // the parse error here would abort the whole invocation, because the
+    // argument parser calls this to classify every argument it does not
+    // otherwise recognize — an Objective-C source, a linker script, or any
+    // other unrecognized-but-existing file would take the build down with it.
+    match object::File::parse(&*data) {
+        Ok(object_file) => Ok(object_file.kind() == ObjectKind::Relocatable),
+        Err(err) => {
+            tracing::debug!("Not an object file: file={:?}, err={}", file, err);
+            Ok(false)
+        }
+    }
 }
 
 /// Resolve the bitcode filepath to a string for embedding.
@@ -589,6 +599,23 @@ mod tests {
             expected,
             "LC_BUILD_VERSION was not preserved across the rebuild"
         );
+    }
+
+    #[test]
+    fn test_is_object_file_on_non_object() {
+        // The argument parser classifies every unrecognized argument with this,
+        // so a file that is not an object must answer "no" rather than raise.
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+
+        let source_path = dir.path().join("hello.m");
+        fs::write(&source_path, "int main(void) { return 0; }\n").expect("Failed to write");
+        assert!(
+            !is_object_file(&source_path).expect("a non-object must not be an error"),
+            "a source file is not an object file"
+        );
+
+        // A real relocatable object still answers "yes".
+        assert!(is_object_file(Path::new(test_case!("hello.o"))).expect("Failed to classify"));
     }
 
     #[test]
