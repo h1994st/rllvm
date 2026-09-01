@@ -72,7 +72,7 @@ The bitcode file itself is always `.{stem}.o.bc` next to the source, unless `bit
 
 Note this compiles each translation unit more than once in link mode (once as part of the original command, once for the intermediate object, once for bitcode). That is known redundancy, not a bug to "fix" accidentally.
 
-Bitcode embedding does *not* use `llvm-objcopy`. `file_utils.rs::copy_object_file` rebuilds the object with the `object` crate's writer and adds the section; WASM is special-cased because that writer has no WASM support. `llvm_objcopy_filepath` remains a required config key that no code path actually executes.
+Bitcode embedding does *not* use `llvm-objcopy`. `file_utils.rs::copy_object_file` rebuilds the object with the `object` crate's writer and adds the section; WASM is special-cased because that writer has no WASM support. `llvm_objcopy_filepath` remains an optional config key that no code path actually executes; it is recorded when found so a planned switch to `llvm-objcopy --add-section` keeps its config surface.
 
 ### Argument parsing
 

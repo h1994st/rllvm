@@ -71,8 +71,8 @@ pub struct RLLVMConfig {
     /// The absolute filepath of `llvm-link`
     llvm_link_filepath: PathBuf,
 
-    /// The absolute filepath of `llvm-objcopy`
-    llvm_objcopy_filepath: PathBuf,
+    /// The absolute filepath of `llvm-objcopy` (optional, currently unused)
+    llvm_objcopy_filepath: Option<PathBuf>,
 
     /// The absolute path of the directory that stores intermediate bitcode files
     bitcode_store_path: Option<PathBuf>,
@@ -126,9 +126,9 @@ impl RLLVMConfig {
         &self.llvm_link_filepath
     }
 
-    /// Returns the path to `llvm-objcopy`.
-    pub fn llvm_objcopy_filepath(&self) -> &PathBuf {
-        &self.llvm_objcopy_filepath
+    /// Returns the optional path to `llvm-objcopy`.
+    pub fn llvm_objcopy_filepath(&self) -> Option<&PathBuf> {
+        self.llvm_objcopy_filepath.as_ref()
     }
 
     /// Returns the optional bitcode store directory path.
@@ -275,13 +275,23 @@ impl RLLVMConfig {
             ("clang++", &self.clangxx_filepath),
             ("llvm-ar", &self.llvm_ar_filepath),
             ("llvm-link", &self.llvm_link_filepath),
-            ("llvm-objcopy", &self.llvm_objcopy_filepath),
         ];
 
         for (name, path) in tools {
             if !path.exists() {
                 print_missing_tool_error(name, Some(path));
             }
+        }
+
+        // `llvm-objcopy` is optional: no code path invokes it today, so a stale
+        // or absent entry must not be reported as an error.
+        if let Some(llvm_objcopy_filepath) = &self.llvm_objcopy_filepath
+            && !llvm_objcopy_filepath.exists()
+        {
+            tracing::debug!(
+                "Configured `llvm-objcopy` does not exist: {:?}",
+                llvm_objcopy_filepath
+            );
         }
 
         // Check version compatibility between clang and LLVM tools
@@ -328,15 +338,21 @@ impl RLLVMConfig {
         // Find `llvm-link`
         let llvm_link_filepath = llvm_bindir.join("llvm-link");
 
-        // Find `llvm-objcopy`
+        // Find `llvm-objcopy`, which is optional: it is recorded when present,
+        // but nothing invokes it, so its absence must not fail the inference.
         let llvm_objcopy_filepath = llvm_bindir.join("llvm-objcopy");
+        let llvm_objcopy_filepath = if llvm_objcopy_filepath.exists() {
+            Some(llvm_objcopy_filepath)
+        } else {
+            tracing::debug!("- llvm-objcopy: (not found in {:?})", llvm_bindir);
+            None
+        };
 
         let llvm_bin_tools: &[(&str, &PathBuf)] = &[
             ("clang", &clang_filepath),
             ("clang++", &clangxx_filepath),
             ("llvm-ar", &llvm_ar_filepath),
             ("llvm-link", &llvm_link_filepath),
-            ("llvm-objcopy", &llvm_objcopy_filepath),
         ];
         for (name, filepath) in llvm_bin_tools {
             if !filepath.exists() {
@@ -364,5 +380,67 @@ impl RLLVMConfig {
             cache_enabled: None,
             cache_dir: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writes a config file containing the required tool paths plus `extra`,
+    /// returning the owning temporary directory, its path, and the inferred
+    /// configuration the paths came from.
+    fn write_config(extra: &str) -> (tempfile::TempDir, PathBuf, RLLVMConfig) {
+        let inferred = RLLVMConfig::try_default().expect("Failed to infer the LLVM tool paths");
+        let contents = format!(
+            "llvm_config_filepath = '{}'\n\
+             clang_filepath = '{}'\n\
+             clangxx_filepath = '{}'\n\
+             llvm_ar_filepath = '{}'\n\
+             llvm_link_filepath = '{}'\n\
+             {}",
+            inferred.llvm_config_filepath().display(),
+            inferred.clang_filepath().display(),
+            inferred.clangxx_filepath().display(),
+            inferred.llvm_ar_filepath().display(),
+            inferred.llvm_link_filepath().display(),
+            extra,
+        );
+
+        let dir = tempfile::tempdir().expect("Failed to create a temporary directory");
+        let config_filepath = dir.path().join("config.toml");
+        fs::write(&config_filepath, contents).expect("Failed to write the test config file");
+        (dir, config_filepath, inferred)
+    }
+
+    #[test]
+    fn test_load_config_without_llvm_objcopy_filepath() {
+        let (_dir, config_filepath, inferred) = write_config("");
+
+        let config = RLLVMConfig::load_path(&config_filepath)
+            .expect("A config without `llvm_objcopy_filepath` should load");
+
+        assert!(config.llvm_objcopy_filepath().is_none());
+        assert_eq!(config.clang_filepath(), inferred.clang_filepath());
+        assert_eq!(config.llvm_link_filepath(), inferred.llvm_link_filepath());
+    }
+
+    #[test]
+    fn test_load_config_with_llvm_objcopy_filepath() {
+        // Existing config files still set the key; they must keep loading.
+        let llvm_objcopy_filepath = RLLVMConfig::try_default()
+            .expect("Failed to infer the LLVM tool paths")
+            .llvm_objcopy_filepath()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("llvm-objcopy"));
+        let (_dir, config_filepath, _inferred) = write_config(&format!(
+            "llvm_objcopy_filepath = '{}'\n",
+            llvm_objcopy_filepath.display()
+        ));
+
+        let config = RLLVMConfig::load_path(&config_filepath)
+            .expect("A config with `llvm_objcopy_filepath` should load");
+
+        assert_eq!(config.llvm_objcopy_filepath(), Some(&llvm_objcopy_filepath));
     }
 }

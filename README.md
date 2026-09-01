@@ -144,7 +144,7 @@ export RLLVM_CONFIG=/path/to/config.toml
 | `clangxx_filepath`         | Yes      | Absolute path to `clang++`                               |
 | `llvm_ar_filepath`         | Yes      | Absolute path to `llvm-ar`                               |
 | `llvm_link_filepath`       | Yes      | Absolute path to `llvm-link`                             |
-| `llvm_objcopy_filepath`    | Yes      | Absolute path to `llvm-objcopy`                          |
+| `llvm_objcopy_filepath`    | No       | Absolute path to `llvm-objcopy` (recorded but currently unused) |
 | `bitcode_store_path`       | No       | Directory for intermediate bitcode files (must be absolute) |
 | `llvm_link_flags`          | No       | Extra flags passed to `llvm-link`                        |
 | `lto_ldflags`              | No       | Extra flags for link-time optimization                   |
