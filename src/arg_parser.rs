@@ -2,7 +2,7 @@
 
 use crate::{
     config::try_rllvm_config,
-    constants::{arg_exact_match_map, arg_patterns},
+    constants::{arg_exact_match_map, arg_patterns, is_object_file_name},
     error::Error,
     utils::*,
 };
@@ -135,11 +135,17 @@ impl CompilerArgsInfo {
     where
         S: AsRef<str>,
     {
-        let group: Vec<String> = args[0..count]
-            .iter()
-            .map(|x| x.as_ref().to_string())
-            .collect();
-        self.link_args.extend(group);
+        for arg in &args[0..count] {
+            let arg = arg.as_ref();
+            self.link_args.push(arg.to_string());
+
+            // A member of a group is still an object file. Recording it keeps
+            // grouped input equivalent to the same file passed on its own,
+            // which goes through `object_file` and lands in both lists.
+            if is_object_file_name(arg) {
+                self.object_files.push(arg.to_string());
+            }
+        }
         self
     }
 
@@ -649,6 +655,32 @@ mod tests {
 
     fn test_parsing_link_args_internal(input: &str, expected: usize) {
         test_parsing(input, |args| args.link_args().len() == expected);
+    }
+
+    #[test]
+    fn test_parsing_linker_group_registers_object_files() {
+        // A file inside a group must be classified the same as outside one.
+        let grouped = "-Wl,--start-group 7.o 8.o -lfoo @rsp.txt -Wl,--end-group";
+        test_parsing(grouped, |args| {
+            args.object_files() == &["7.o".to_string(), "8.o".to_string()]
+        });
+
+        // Everything in the span still reaches the linker, objects included:
+        // both markers, two objects, a library, and a response file.
+        test_parsing(grouped, |args| args.link_args().len() == 6);
+
+        // Non-object members must not be mistaken for objects.
+        test_parsing(grouped, |args| {
+            !args
+                .object_files()
+                .iter()
+                .any(|f| f == "-lfoo" || f == "@rsp.txt")
+        });
+
+        // The ungrouped form is the reference behavior.
+        test_parsing("7.o 8.o", |args| {
+            args.object_files() == &["7.o".to_string(), "8.o".to_string()]
+        });
     }
 
     #[test]

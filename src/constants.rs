@@ -1,5 +1,6 @@
 //! Constants used by the argument parser
 
+use regex::Regex;
 use std::{collections::HashMap, sync::OnceLock};
 
 use crate::arg_parser::{ArgInfo, ArgPatternInfo, CompilerArgsInfo};
@@ -421,6 +422,35 @@ pub fn arg_exact_match_map() -> &'static CallbackMap {
     })
 }
 
+/// Patterns that identify an object-file argument by name.
+///
+/// Shared by [`arg_patterns`], which routes a bare argument to the object-file
+/// handler, and by [`is_object_file_name`], which classifies members of a
+/// `-Wl,--start-group` … `-Wl,--end-group` span. Both must agree: a file
+/// should be treated the same inside a group as outside one.
+const OBJECT_FILE_NAME_PATTERNS: [&str; 3] = [
+    r"^.+\.(o|lo|So|so|po|a|dylib|pico|nossppico)$",
+    r"^.+\.dylib(\.\d)+$",
+    r"^.+\.(So|so)(\.\d)+$",
+];
+
+/// Returns `true` if the argument names an object file.
+///
+/// This matches on the name only, exactly as the argument patterns do — it
+/// never touches the filesystem.
+pub fn is_object_file_name(arg: &str) -> bool {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS
+        .get_or_init(|| {
+            OBJECT_FILE_NAME_PATTERNS
+                .iter()
+                .map(|pattern| Regex::new(pattern).unwrap())
+                .collect()
+        })
+        .iter()
+        .any(|pattern| pattern.is_match(arg))
+}
+
 pub fn arg_patterns() -> &'static PatternCallbackVec {
     static ARG_PATTERNS: OnceLock<PatternCallbackVec> = OnceLock::new();
     ARG_PATTERNS.get_or_init(|| {
@@ -482,13 +512,23 @@ pub fn arg_patterns() -> &'static PatternCallbackVec {
                 0,
                 CompilerArgsInfo::input_file,
             ),
+            // Object-file patterns come from OBJECT_FILE_NAME_PATTERNS so that
+            // grouped and ungrouped members are classified identically.
             ArgPatternInfo::new(
-                r"^.+\.(o|lo|So|so|po|a|dylib|pico|nossppico)$",
+                OBJECT_FILE_NAME_PATTERNS[0],
                 0,
                 CompilerArgsInfo::object_file,
             ),
-            ArgPatternInfo::new(r"^.+\.dylib(\.\d)+$", 0, CompilerArgsInfo::object_file),
-            ArgPatternInfo::new(r"^.+\.(So|so)(\.\d)+$", 0, CompilerArgsInfo::object_file),
+            ArgPatternInfo::new(
+                OBJECT_FILE_NAME_PATTERNS[1],
+                0,
+                CompilerArgsInfo::object_file,
+            ),
+            ArgPatternInfo::new(
+                OBJECT_FILE_NAME_PATTERNS[2],
+                0,
+                CompilerArgsInfo::object_file,
+            ),
         ]
     })
 }
