@@ -38,8 +38,10 @@ fn main() -> Result<(), Error> {
         3 => Level::DEBUG,
         _ => Level::TRACE,
     };
+    // Diagnostics belong on stderr; stdout is the wrapped compiler's output.
     let _ = FmtSubscriber::builder()
         .with_max_level(log_level)
+        .with_writer(std::io::stderr)
         .try_init();
 
     tracing::debug!(

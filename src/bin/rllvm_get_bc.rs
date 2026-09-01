@@ -55,7 +55,13 @@ pub fn main() -> Result<(), Error> {
             _ => Level::TRACE,
         }
     };
-    FmtSubscriber::builder().with_max_level(log_level).init();
+    // Diagnostics belong on stderr: these wrappers stand in for a compiler, and
+    // anything on stdout is captured as build output (`-E` preprocessing,
+    // `-print-*` queries), where a log line corrupts the result.
+    FmtSubscriber::builder()
+        .with_max_level(log_level)
+        .with_writer(std::io::stderr)
+        .init();
 
     // Check if the input file exists
     let input = &args.input;

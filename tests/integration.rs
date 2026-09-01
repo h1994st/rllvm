@@ -473,3 +473,37 @@ fn compile_to_static_archive_and_extract() {
 
     assert_valid_bitcode(&bitcode_path);
 }
+
+#[test]
+fn diagnostics_go_to_stderr_not_stdout() {
+    let tmp = TempDir::new().unwrap();
+    let src_path = tmp.path().join("quiet.c");
+    fs::write(&src_path, "int main(void) { return 0; }\n").unwrap();
+    let output_path = tmp.path().join("quiet");
+
+    // `-vvv` forces a high log level, so the wrapper is guaranteed to emit
+    // diagnostics. They must not land on stdout: these wrappers stand in for a
+    // compiler, and build systems capture stdout as real output (`-E`
+    // preprocessing, `-print-*` queries), where a log line corrupts the result.
+    let output = rllvm("rllvm-cc")
+        .arg("-vvv")
+        .args(["--", "-o"])
+        .arg(&output_path)
+        .arg(&src_path)
+        .output()
+        .expect("Failed to run rllvm-cc");
+
+    assert!(output.status.success(), "rllvm-cc failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.is_empty(),
+        "diagnostics leaked onto stdout: {stdout}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Compiling"),
+        "expected diagnostics on stderr, got: {stderr}"
+    );
+}
