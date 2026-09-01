@@ -1,7 +1,11 @@
-//! rllvm error Type
+//! Error types for the rllvm crate.
+//!
+//! Provides a unified [`Error`] enum covering I/O failures, object file
+//! manipulation errors, configuration issues, and more.
 
 use std::{str::Utf8Error, string::FromUtf8Error};
 
+/// The error type for rllvm operations.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Invalid arguments
@@ -22,12 +26,15 @@ pub enum Error {
     /// String error
     #[error("String error: {0}")]
     StringError(String),
-    /// Logger error
-    #[error("Logger error: {0}")]
-    LoggerError(String),
+    /// Unsupported binary format
+    #[error("Unsupported binary format: {0}")]
+    UnsupportedBinaryFormat(String),
     /// Missing file
     #[error("Missing file: {0}")]
     MissingFile(String),
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
     /// Something else happened
     #[error("Unknown error: {0}")]
     Unknown(String),

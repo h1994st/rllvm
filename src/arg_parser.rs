@@ -7,7 +7,7 @@ use crate::{
     utils::*,
 };
 use regex::Regex;
-use std::{path::PathBuf, sync::OnceLock};
+use std::{env, path::PathBuf, sync::OnceLock};
 
 /// Compile mode
 #[derive(Debug)]
@@ -43,14 +43,19 @@ pub struct CompilerArgsInfo {
     is_print_only: bool,
 }
 
+/// Function signature for argument handlers.
 pub type CallbackFn<S> = for<'a> fn(&'a mut CompilerArgsInfo, S, &[S]) -> &'a mut CompilerArgsInfo;
+/// Boxed argument handler callback.
 pub type Callback<S> = Box<CallbackFn<S>>;
 
+/// Metadata for a compiler argument: its arity and handler function.
 pub struct ArgInfo<S>
 where
     S: AsRef<str>,
 {
+    /// Number of additional parameters consumed by this argument.
     pub arity: usize,
+    /// Handler function invoked when the argument is matched.
     pub handler: CallbackFn<S>,
 }
 
@@ -58,16 +63,20 @@ impl<S> ArgInfo<S>
 where
     S: AsRef<str>,
 {
+    /// Create a new `ArgInfo` with the given arity and handler.
     pub fn new(arity: usize, handler: CallbackFn<S>) -> Self {
         Self { arity, handler }
     }
 }
 
+/// Regex-based argument pattern with associated handler metadata.
 pub struct ArgPatternInfo<S>
 where
     S: AsRef<str>,
 {
+    /// Regex pattern to match against compiler arguments.
     pub pattern: Regex,
+    /// Handler metadata for this pattern.
     pub arg_info: ArgInfo<S>,
 }
 
@@ -75,6 +84,7 @@ impl<S> ArgPatternInfo<S>
 where
     S: AsRef<str>,
 {
+    /// Create a new `ArgPatternInfo` from a regex string, arity, and handler.
     pub fn new(pattern: &str, arity: usize, handler: CallbackFn<S>) -> Self {
         let pattern = Regex::new(pattern).unwrap();
         let arg_info = ArgInfo::new(arity, handler);
@@ -83,6 +93,7 @@ where
 }
 
 impl CompilerArgsInfo {
+    /// Handle an input file argument.
     pub fn input_file<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -99,6 +110,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle an output file argument (`-o`).
     pub fn output_file<S>(&mut self, _flag: S, args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -107,6 +119,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle an object file argument and add it to link args.
     pub fn object_file<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -117,6 +130,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a linker group (`-Wl,--start-group ... -Wl,--end-group`).
     pub fn linker_group<S>(&mut self, _start: S, count: usize, args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -129,6 +143,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a preprocess-only flag (`-E`).
     pub fn preprocess_only<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -137,6 +152,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a dependency-only flag (`-M`, `-MM`).
     pub fn dependency_only<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -146,6 +162,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a print-only flag (`-print-*`, `--version`).
     pub fn print_only<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -154,6 +171,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle an assemble-only flag (`-S`).
     pub fn assemble_only<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -162,6 +180,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a verbose flag (`-v`).
     pub fn verbose<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -170,6 +189,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a compile-only flag (`-c`).
     pub fn compile_only<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -178,6 +198,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle an emit-LLVM flag (`-emit-llvm`).
     pub fn emit_llvm<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -187,6 +208,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle an LTO flag (`-flto`, `-flto=thin`).
     pub fn lto<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -196,6 +218,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a unary link flag (flag only, no additional parameter).
     pub fn link_unary<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -204,6 +227,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a unary compile flag (flag only, no additional parameter).
     pub fn compile_unary<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -212,6 +236,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a flag that is forbidden and recorded as a warning.
     pub fn warning_link_unary<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -221,6 +246,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a binary flag with no side effects (ignored).
     pub fn default_binary<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -229,6 +255,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a binary dependency flag (flag + one parameter).
     pub fn dependency_binary<S>(&mut self, flag: S, args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -239,6 +266,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a binary compile flag (flag + one parameter).
     pub fn compile_binary<S>(&mut self, flag: S, args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -248,6 +276,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a binary link flag (flag + one parameter).
     pub fn link_binary<S>(&mut self, flag: S, args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -257,6 +286,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a unary flag applied to both compile and link args.
     pub fn compile_link_unary<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -268,6 +298,7 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle a binary flag applied to both compile and link args (flag + one parameter).
     pub fn compile_link_binary<S>(&mut self, flag: S, args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
@@ -281,7 +312,13 @@ impl CompilerArgsInfo {
         self
     }
 
-    fn consume_params<S>(&mut self, i: usize, arg: S, arg_info: &ArgInfo<S>, args: &[S]) -> usize
+    fn consume_params<S>(
+        &mut self,
+        i: usize,
+        arg: S,
+        arg_info: &ArgInfo<S>,
+        args: &[S],
+    ) -> Result<usize, Error>
     where
         S: AsRef<str>,
     {
@@ -289,12 +326,21 @@ impl CompilerArgsInfo {
         // Exclude the current argument
         let param_start = i + 1;
         let param_end = param_start + arg_info.arity;
+        if param_end > args.len() {
+            return Err(Error::InvalidArguments(format!(
+                "'{}' expects {} parameter(s), but only {} remain",
+                arg.as_ref(),
+                arg_info.arity,
+                args.len() - param_start
+            )));
+        }
         let params = &args[param_start..param_end];
         handler(self, arg, params);
 
-        arg_info.arity
+        Ok(arg_info.arity)
     }
 
+    /// Parse a sequence of compiler arguments and classify them.
     pub fn parse_args<S>(&mut self, args: &[S]) -> Result<&'_ mut Self, Error>
     where
         S: AsRef<str>,
@@ -311,7 +357,7 @@ impl CompilerArgsInfo {
             // Try to match the flag exactly
             if let Some(arg_info) = arg_exact_match_map().get(arg.as_str()) {
                 // Consume more parameters
-                offset += self.consume_params(i, arg.to_string(), arg_info, &args);
+                offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
             } else if arg == "-Wl,--start-group" {
                 // Need to handle the N-ary grouping flag
                 if let Some(group_end) = args[i..].iter().position(|x| x == "-Wl,--end-group") {
@@ -336,7 +382,7 @@ impl CompilerArgsInfo {
                     let arg_info = &arg_pattern.arg_info;
                     if pattern.is_match(arg.as_str()) {
                         // Consume more parameters
-                        offset += self.consume_params(i, arg.to_string(), arg_info, &args);
+                        offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
 
                         matched = true;
                         break;
@@ -361,74 +407,88 @@ impl CompilerArgsInfo {
 }
 
 impl CompilerArgsInfo {
+    /// Returns the original input arguments.
     pub fn input_args(&self) -> &Vec<String> {
         self.input_args.as_ref()
     }
 
+    /// Returns the list of input source files.
     pub fn input_files(&self) -> &Vec<String> {
         self.input_files.as_ref()
     }
 
+    /// Returns the list of object files.
     pub fn object_files(&self) -> &Vec<String> {
         self.object_files.as_ref()
     }
 
+    /// Returns the output filename.
     pub fn output_filename(&self) -> &str {
         self.output_filename.as_ref()
     }
 
+    /// Returns the compilation-phase arguments.
     pub fn compile_args(&self) -> &Vec<String> {
         self.compile_args.as_ref()
     }
 
+    /// Returns the link-phase arguments.
     pub fn link_args(&self) -> &Vec<String> {
         self.link_args.as_ref()
     }
 
+    /// Returns flags that are forbidden for this tool.
     pub fn forbidden_flags(&self) -> &Vec<String> {
         self.forbidden_flags.as_ref()
     }
 
+    /// Returns `true` if verbose mode is enabled.
     pub fn is_verbose(&self) -> bool {
         self.is_verbose
     }
 
+    /// Returns `true` if only dependency generation was requested.
     pub fn is_dependency_only(&self) -> bool {
         self.is_dependency_only
     }
 
+    /// Returns `true` if only preprocessing was requested.
     pub fn is_preprocess_only(&self) -> bool {
         self.is_preprocess_only
     }
 
+    /// Returns `true` if only assembly output was requested.
     pub fn is_assemble_only(&self) -> bool {
         self.is_assemble_only
     }
 
+    /// Returns `true` if the input files are assembly.
     pub fn is_assembly(&self) -> bool {
         self.is_assembly
     }
 
+    /// Returns `true` if compile-only mode is enabled (`-c`).
     pub fn is_compile_only(&self) -> bool {
         self.is_compile_only
     }
 
+    /// Returns `true` if LLVM IR emission is enabled (`-emit-llvm`).
     pub fn is_emit_llvm(&self) -> bool {
         self.is_emit_llvm
     }
 
+    /// Returns `true` if link-time optimization is enabled.
     pub fn is_lto(&self) -> bool {
         self.is_lto
     }
 
+    /// Returns `true` if print-only mode is enabled.
     pub fn is_print_only(&self) -> bool {
         self.is_print_only
     }
 
+    /// Returns `true` if bitcode generation should be skipped for the current arguments.
     pub fn is_bitcode_generation_skipped(&self) -> bool {
-        let mut is_skipped = false;
-        let mut message = "no reason";
-
         let conditions = [
             (
                 rllvm_config().is_configure_only(),
@@ -467,18 +527,15 @@ impl CompilerArgsInfo {
 
         for (condition, reason) in conditions {
             if condition {
-                is_skipped = true;
-                message = reason;
+                tracing::warn!("Skip bitcode generation: {}", reason);
+                return true;
             }
         }
 
-        if is_skipped {
-            log::warn!("Skip bitcode generation: {}", message);
-        }
-
-        is_skipped
+        false
     }
 
+    /// Determine the current compile mode based on parsed arguments.
     pub fn mode(&self) -> CompileMode {
         let mut mode = CompileMode::Compiling;
         if self.input_files().is_empty() && !self.link_args().is_empty() {
@@ -491,6 +548,7 @@ impl CompilerArgsInfo {
         mode
     }
 
+    /// Derive (source, object, bitcode) filepath triples for all input files.
     pub fn artifact_filepaths(&self) -> Result<Vec<(PathBuf, PathBuf, PathBuf)>, Error> {
         let mut artifacts = vec![];
         for src_file in &self.input_files {
@@ -498,8 +556,21 @@ impl CompilerArgsInfo {
             let src_filepath = PathBuf::from(src_file).canonicalize()?;
 
             // Derive filepaths of artifacts
-            let (object_filepath, mut bitcode_filepath) =
+            let (mut object_filepath, mut bitcode_filepath) =
                 derive_object_and_bitcode_filepath(&src_filepath, self.is_compile_only)?;
+
+            // In compile-only mode an explicit `-o` names the object file the
+            // compiler actually wrote, and that is the file the bitcode path
+            // has to be embedded into. (`clang -c` rejects `-o` for more than
+            // one input, so a single output filename is unambiguous here.)
+            if self.is_compile_only && !self.output_filename.is_empty() {
+                let explicit_output = PathBuf::from(&self.output_filename);
+                object_filepath = if explicit_output.is_absolute() {
+                    explicit_output
+                } else {
+                    env::current_dir()?.join(explicit_output)
+                };
+            }
 
             // Update the bitcode filepath, if the bitcode store path is provided
             if let Some(bitcode_store_path) = rllvm_config().bitcode_store_path() {
@@ -517,10 +588,13 @@ impl CompilerArgsInfo {
 
                         bitcode_filepath = bitcode_store_path.join(new_bitcode_filename);
                     } else {
-                        log::warn!("Cannot obtain the bitcode filename: {:?}", bitcode_filepath);
+                        tracing::warn!(
+                            "Cannot obtain the bitcode filename: {:?}",
+                            bitcode_filepath
+                        );
                     }
                 } else {
-                    log::warn!(
+                    tracing::warn!(
                         "Ignore the bitcode store path, as it does not exist: {:?}",
                         bitcode_store_path
                     );

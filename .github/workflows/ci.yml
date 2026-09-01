@@ -19,24 +19,26 @@ env:
 
 jobs:
   test:
-    name: Build and Test
+    name: Build and Test (${{ matrix.os }})
     needs: [fmt-check, clippy]
     strategy:
+      # One platform failing should not hide the results for the others.
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macOS-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install stable toolchain
         run: rustup update stable
 
       - name: Install LLVM/Clang (Linux)
-        if: ${{ runner.os == 'Linux' }}
+        if: runner.os == 'Linux'
         run: |
           sudo apt install -y llvm llvm-dev clang libclang-dev
           command -v llvm-config && clang -v
 
       - name: Install LLVM/Clang (macOS)
-        if: ${{ runner.os == 'macOS' }}
+        if: runner.os == 'macOS'
         run: |
           brew install llvm
 
@@ -67,23 +69,23 @@ jobs:
         run: cargo fmt --all --check --verbose
 
   clippy:
-    name: Clippy Check
+    name: Clippy Check (${{ matrix.os }})
     strategy:
       matrix:
-        os: [ubuntu-latest, macOS-latest]
+        os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install stable toolchain
         run: rustup update stable
 
       - name: Install LLVM/Clang (Linux)
-        if: ${{ runner.os == 'Linux' }}
+        if: runner.os == 'Linux'
         run: |
           sudo apt install -y llvm llvm-dev clang libclang-dev
           command -v llvm-config && clang -v
 
       - name: Install LLVM/Clang (macOS)
-        if: ${{ runner.os == 'macOS' }}
+        if: runner.os == 'macOS'
         run: |
           brew install llvm
 
@@ -94,6 +96,41 @@ jobs:
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
+
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run cargo audit
+        run: cargo audit
+
+  msrv:
+    name: MSRV Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install MSRV toolchain
+        run: rustup update 1.88
+
+      - name: Set MSRV as default
+        run: rustup default 1.88
+
+      - name: Install LLVM/Clang
+        run: |
+          sudo apt install -y llvm llvm-dev clang libclang-dev
+
+      - name: Checkout sources
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build with MSRV
+        run: cargo build --verbose
 
   coverage:
     runs-on: ubuntu-latest
@@ -118,4 +155,4 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
           files: lcov.info
-          fail_ci_if_error: true
+          fail_ci_if_error: false

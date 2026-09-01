@@ -1,0 +1,12 @@
+target/
+.git/
+.github/
+.worktrees/
+.vscode/
+.claude/
+*.bc
+*.bca
+*.manifest
+*.pdb
+lcov.info
+docs/plans/

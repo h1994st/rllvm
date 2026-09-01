@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use log::LevelFilter;
 use rllvm::{
     compiler_wrapper::{
         CompilerKind, CompilerWrapper, CompilerWrapperBuilder, llvm::ClangWrapperBuilder,
@@ -9,7 +8,8 @@ use rllvm::{
     config::rllvm_config,
     error::Error,
 };
-use simple_logger::SimpleLogger;
+use tracing::Level;
+use tracing_subscriber::FmtSubscriber;
 
 /// Extraction arguments
 #[derive(Parser, Debug)]
@@ -39,16 +39,16 @@ pub fn rllvm_main(name: &str, compiler_kind: CompilerKind) -> Result<(), Error> 
     // Set log level
     // The verbose flag will override the configured log level
     let log_level = if args.verbose == 0 {
-        rllvm_config().log_level().to_level_filter()
+        rllvm_config().log_level()
     } else {
-        LevelFilter::iter()
-            .nth(1 + args.verbose as usize)
-            .unwrap_or(LevelFilter::max())
+        match args.verbose {
+            1 => Level::WARN,
+            2 => Level::INFO,
+            3 => Level::DEBUG,
+            _ => Level::TRACE,
+        }
     };
-    SimpleLogger::new()
-        .with_level(log_level)
-        .init()
-        .map_err(|err| Error::LoggerError(err.to_string()))?;
+    FmtSubscriber::builder().with_max_level(log_level).init();
 
     let mut cc_builder = ClangWrapperBuilder::new()
         .name(name)

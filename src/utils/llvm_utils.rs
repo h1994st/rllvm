@@ -14,6 +14,7 @@ use crate::constants::{LLVM_VERSION_MAX, LLVM_VERSION_MIN};
 use crate::utils::{execute_command_for_status, execute_command_for_stdout_string};
 use crate::{config::rllvm_config, error::Error};
 
+/// Execute `llvm-ar` with the given arguments.
 pub fn execute_llvm_ar<P, S>(llvm_ar_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
 where
     P: AsRef<Path>,
@@ -22,6 +23,7 @@ where
     execute_command_for_status(llvm_ar_filepath, args)
 }
 
+/// Execute `llvm-link` with the given arguments.
 pub fn execute_llvm_link<P, S>(llvm_link_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
 where
     P: AsRef<Path>,
@@ -30,6 +32,7 @@ where
     execute_command_for_status(llvm_link_filepath, args)
 }
 
+/// Execute `llvm-config` with the given arguments and return stdout.
 pub fn execute_llvm_config<P, S>(llvm_config_filepath: P, args: &[S]) -> Result<String, Error>
 where
     P: AsRef<Path>,
@@ -95,9 +98,9 @@ pub fn find_llvm_config() -> Result<PathBuf, Error> {
             }
         }
 
-        Err(Error::MissingFile(
-            "Failed to find `llvm-config`".to_string(),
-        ))
+        Err(Error::MissingFile(format!(
+            "Failed to find `llvm-config` (searched PATH and versioned names llvm-config-{{{LLVM_VERSION_MIN}..{LLVM_VERSION_MAX}}})"
+        )))
     }
 }
 
@@ -122,13 +125,13 @@ where
     // Output
     args.extend_from_slice(&[
         "-o".to_string(),
-        String::from(output_filepath.to_string_lossy()),
+        output_filepath.to_string_lossy().into_owned(),
     ]);
     // Input bitcode files
     args.extend(
         bitcode_filepaths
             .iter()
-            .map(|x| String::from(x.as_ref().to_string_lossy())),
+            .map(|x| x.as_ref().to_string_lossy().into_owned()),
     );
 
     execute_command_for_status(rllvm_config().llvm_link_filepath(), &args)
@@ -151,13 +154,13 @@ where
 
     let mut args = vec![
         "rs".to_string(),
-        String::from(output_filepath.to_string_lossy()),
+        output_filepath.to_string_lossy().into_owned(),
     ];
     // Input bitcode files
     args.extend(
         bitcode_filepaths
             .iter()
-            .map(|x| String::from(x.as_ref().to_string_lossy())),
+            .map(|x| x.as_ref().to_string_lossy().into_owned()),
     );
 
     execute_command_for_status(rllvm_config().llvm_ar_filepath(), &args).map(|status| status.code())

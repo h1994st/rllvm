@@ -6,6 +6,7 @@ use crate::{
     arg_parser::CompilerArgsInfo, compiler_wrapper::*, config::rllvm_config, error::Error,
 };
 
+/// Clang/Clang++ compiler wrapper that generates LLVM bitcode alongside normal compilation.
 #[derive(Debug)]
 pub struct ClangWrapper {
     name: String,

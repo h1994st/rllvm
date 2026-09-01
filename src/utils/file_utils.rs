@@ -13,10 +13,14 @@ use object::{
 };
 
 use crate::{
-    constants::{DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME},
+    constants::{
+        COFF_SECTION_NAME, DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME,
+        WASM_SECTION_NAME,
+    },
     error::Error,
 };
 
+/// Returns `true` if the path exists and is not a directory.
 pub fn is_plain_file<P>(file: P) -> bool
 where
     P: AsRef<Path>,
@@ -25,6 +29,7 @@ where
     file.exists() && !file.is_dir()
 }
 
+/// Returns `true` if the file is a relocatable object file.
 pub fn is_object_file<P>(file: P) -> Result<bool, Error>
 where
     P: AsRef<Path>,
@@ -39,6 +44,63 @@ where
     let object_file = object::File::parse(&*data)?;
 
     Ok(object_file.kind() == ObjectKind::Relocatable)
+}
+
+/// Resolve the bitcode filepath to a string for embedding.
+fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
+    let absolute_filepath = if bitcode_filepath.is_absolute() {
+        bitcode_filepath.to_string_lossy().into_owned()
+    } else {
+        bitcode_filepath
+            .canonicalize()?
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    // The linker concatenates these sections when it merges object files, so
+    // every entry must be newline-terminated for the reader to split the
+    // combined section back into individual paths.
+    Ok(format!("{absolute_filepath}\n"))
+}
+
+/// Encode an unsigned integer as a LEB128 byte sequence.
+fn encode_leb128(mut value: usize) -> Vec<u8> {
+    let mut result = vec![];
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        result.push(byte);
+        if value == 0 {
+            break;
+        }
+    }
+    result
+}
+
+/// Append a custom section to a WASM binary.
+///
+/// WASM custom sections have the format:
+/// - Section ID: 0 (custom section)
+/// - Section size (LEB128)
+/// - Name length (LEB128)
+/// - Name bytes
+/// - Section payload
+fn append_wasm_custom_section(wasm_data: &[u8], section_name: &str, payload: &[u8]) -> Vec<u8> {
+    let name_bytes = section_name.as_bytes();
+    let name_len_encoded = encode_leb128(name_bytes.len());
+    let content_size = name_len_encoded.len() + name_bytes.len() + payload.len();
+    let section_size_encoded = encode_leb128(content_size);
+
+    let mut result = wasm_data.to_vec();
+    result.push(0x00); // Custom section ID
+    result.extend_from_slice(&section_size_encoded);
+    result.extend_from_slice(&name_len_encoded);
+    result.extend_from_slice(name_bytes);
+    result.extend_from_slice(payload);
+    result
 }
 
 /// Embed the path of the bitcode to the corresponding object file
@@ -57,40 +119,58 @@ where
     let object_file = object::File::parse(&*data)?;
     let object_binary_format = object_file.format();
 
-    // Platform-dependent properties
-    let (segment_name, section_name, flags) = match object_binary_format {
-        BinaryFormat::Elf => (
-            vec![],
-            ELF_SECTION_NAME.as_bytes().to_vec(),
-            SectionFlags::Elf { sh_flags: 0 },
-        ),
-        BinaryFormat::MachO => (
-            DARWIN_SEGMENT_NAME.as_bytes().to_vec(),
-            DARWIN_SECTION_NAME.as_bytes().to_vec(),
-            SectionFlags::MachO { flags: 0 },
-        ),
-        _ => unimplemented!(),
+    let bitcode_filepath_string = resolve_bitcode_filepath(bitcode_filepath)?;
+
+    let output_data = match object_binary_format {
+        BinaryFormat::Wasm => {
+            // The `object` crate's write API does not support WASM, so we
+            // directly append a custom section to the raw binary.
+            append_wasm_custom_section(&data, WASM_SECTION_NAME, bitcode_filepath_string.as_bytes())
+        }
+        _ => {
+            // Platform-dependent properties
+            let (segment_name, section_name, flags) = match object_binary_format {
+                BinaryFormat::Elf => (
+                    vec![],
+                    ELF_SECTION_NAME.as_bytes().to_vec(),
+                    SectionFlags::Elf { sh_flags: 0 },
+                ),
+                BinaryFormat::MachO => (
+                    DARWIN_SEGMENT_NAME.as_bytes().to_vec(),
+                    DARWIN_SECTION_NAME.as_bytes().to_vec(),
+                    SectionFlags::MachO { flags: 0 },
+                ),
+                BinaryFormat::Coff => (
+                    vec![],
+                    COFF_SECTION_NAME.as_bytes().to_vec(),
+                    SectionFlags::Coff { characteristics: 0 },
+                ),
+                _ => {
+                    return Err(Error::UnsupportedBinaryFormat(format!(
+                        "{:?}",
+                        object_binary_format
+                    )));
+                }
+            };
+
+            // Copy the input object file into a new mutable object file
+            let mut new_object_file = copy_object_file(object_file)?;
+
+            // Add a section
+            let section_id =
+                new_object_file.add_section(segment_name, section_name, SectionKind::Unknown);
+            let new_section = new_object_file.section_mut(section_id);
+
+            new_section.set_data(bitcode_filepath_string.as_bytes(), 1);
+            // NOTE: we have to explicitly set flags; otherwise, the flags will be
+            // inferred based on the section kind, but `Section::Unknown` is not
+            // supported for auto inferring flags
+            new_section.flags = flags;
+
+            new_object_file.write()?
+        }
     };
 
-    // Copy the input object file into a new mutable object file
-    let mut new_object_file = copy_object_file(object_file)?;
-
-    // Add a section
-    let section_id = new_object_file.add_section(segment_name, section_name, SectionKind::Unknown);
-    let new_section = new_object_file.section_mut(section_id);
-
-    let bitcode_filepath_string = if bitcode_filepath.is_absolute() {
-        bitcode_filepath.to_string_lossy().to_string()
-    } else {
-        format!("{}\n", bitcode_filepath.canonicalize()?.to_string_lossy())
-    };
-    new_section.set_data(bitcode_filepath_string.as_bytes(), 1);
-    // NOTE: we have to explicitly set flags; otherwise, the flags will be
-    // inferred based on the section kind, but `Section::Unknown` is not
-    // supported for auto inferring flags
-    new_section.flags = flags;
-
-    let output_data = new_object_file.write().unwrap();
     if let Some(output_object_filepath) = output_object_filepath {
         // Save the new object file
         fs::write(output_object_filepath, output_data)?;
@@ -265,7 +345,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     Ok(out_object)
 }
 
-/// Extract the path of the bitcode from the parsed object
+/// Extract bitcode filepaths embedded in a parsed object file.
 pub fn extract_bitcode_filepaths_from_parsed_object(
     object_file: &object::File,
 ) -> Result<Vec<PathBuf>, Error> {
@@ -274,7 +354,14 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
     let section_name = match object_binary_format {
         BinaryFormat::Elf => ELF_SECTION_NAME.as_bytes(),
         BinaryFormat::MachO => DARWIN_SECTION_NAME.as_bytes(),
-        _ => unimplemented!("unsupported binary format: {:?}", object_binary_format),
+        BinaryFormat::Coff => COFF_SECTION_NAME.as_bytes(),
+        BinaryFormat::Wasm => WASM_SECTION_NAME.as_bytes(),
+        _ => {
+            return Err(Error::UnsupportedBinaryFormat(format!(
+                "{:?}",
+                object_binary_format
+            )));
+        }
     };
 
     match object_file.section_by_name_bytes(section_name) {
@@ -299,7 +386,7 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
     }
 }
 
-/// Extract the path of the bitcode from the corresponding object file
+/// Extract bitcode filepaths from an object file on disk.
 pub fn extract_bitcode_filepaths_from_object_file<P>(
     object_filepath: P,
 ) -> Result<Vec<PathBuf>, Error>
@@ -314,6 +401,7 @@ where
     extract_bitcode_filepaths_from_parsed_object(&object_file)
 }
 
+/// Extract and deduplicate bitcode filepaths from multiple parsed object files.
 pub fn extract_bitcode_filepaths_from_parsed_objects(
     object_files: &[object::File],
 ) -> Result<Vec<PathBuf>, Error> {
@@ -340,12 +428,24 @@ mod tests {
         path::{Path, PathBuf},
     };
 
+    /// Builds an absolute path for a bitcode file used in embedding tests.
+    ///
+    /// The file need not exist, but the path must be absolute *on the host*:
+    /// a relative path gets canonicalized, which fails when the file is
+    /// missing. `/tmp/...` is not absolute on Windows.
+    fn tmp_bitcode(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
     #[test]
     fn test_path_injection_and_extraction() {
-        let bitcode_filepath = Path::new("/tmp/hello.bc");
+        let bitcode_pathbuf = tmp_bitcode("hello.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
         let object_filepath = Path::new(test_case!("hello.o"));
 
-        let output_object_filepath = Path::new("/tmp/hello.new.o");
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let output_pathbuf = dir.path().join("hello.new.o");
+        let output_object_filepath = output_pathbuf.as_path();
 
         // Embed bitcode filepath
         let ret = embed_bitcode_filepath_to_object_file(
@@ -360,13 +460,9 @@ mod tests {
             .expect("Failed to extract embedded filepaths");
         assert!(!embedded_filepaths.is_empty());
 
-        let embedded_filepath = embedded_filepaths[0].clone();
         let expected_filepath = PathBuf::from(bitcode_filepath);
-        println!("{:?}", embedded_filepath);
-        assert_eq!(embedded_filepath, expected_filepath);
-
-        // Clean
-        fs::remove_file(output_object_filepath).expect("Failed to delete the output object file");
+        println!("{:?}", embedded_filepaths[0]);
+        assert_eq!(embedded_filepaths[0], expected_filepath);
     }
 
     #[test]
@@ -384,5 +480,156 @@ mod tests {
         ];
         println!("{:?}", embedded_filepaths);
         assert_eq!(embedded_filepaths, expected_filepaths)
+    }
+
+    /// Create a minimal COFF object file using the `object` crate's write API.
+    fn create_minimal_coff_object(path: &Path) {
+        use object::Architecture;
+
+        let mut obj = write::Object::new(
+            BinaryFormat::Coff,
+            Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        let section_id = obj.add_section(vec![], b".text".to_vec(), SectionKind::Text);
+        let section = obj.section_mut(section_id);
+        // A single `ret` instruction
+        section.set_data(&[0xc3], 1);
+
+        let data = obj.write().expect("Failed to write COFF object");
+        fs::write(path, data).expect("Failed to write COFF file");
+    }
+
+    #[test]
+    fn test_coff_path_injection_and_extraction() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let coff_obj_path = dir.path().join("test.obj");
+        let output_path = dir.path().join("test.out.obj");
+
+        create_minimal_coff_object(&coff_obj_path);
+
+        let bitcode_pathbuf = tmp_bitcode("hello.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
+
+        // Embed bitcode filepath
+        embed_bitcode_filepath_to_object_file(bitcode_filepath, &coff_obj_path, Some(&output_path))
+            .expect("Failed to embed bitcode filepath into COFF object");
+
+        // Extract embedded filepaths
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&output_path)
+            .expect("Failed to extract embedded filepaths from COFF object");
+        assert_eq!(embedded_filepaths.len(), 1);
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("hello.bc"));
+    }
+
+    #[test]
+    fn test_coff_overwrite_in_place() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let coff_obj_path = dir.path().join("test.obj");
+
+        create_minimal_coff_object(&coff_obj_path);
+
+        let bitcode_pathbuf = tmp_bitcode("inplace.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
+
+        // Embed bitcode filepath in place (no output path)
+        embed_bitcode_filepath_to_object_file::<&Path>(bitcode_filepath, &coff_obj_path, None)
+            .expect("Failed to embed bitcode filepath into COFF object in place");
+
+        // Extract
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&coff_obj_path)
+            .expect("Failed to extract embedded filepaths from COFF object");
+        assert_eq!(embedded_filepaths.len(), 1);
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("inplace.bc"));
+    }
+
+    #[test]
+    fn test_coff_no_bitcode_section_returns_empty() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let coff_obj_path = dir.path().join("test.obj");
+
+        create_minimal_coff_object(&coff_obj_path);
+
+        // Extract from object with no bitcode section
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&coff_obj_path)
+            .expect("Failed to extract from COFF object without bitcode section");
+        assert!(embedded_filepaths.is_empty());
+    }
+
+    /// Create a minimal valid WASM binary file.
+    ///
+    /// Constructs a WASM module with the magic number, version header, and
+    /// an empty type section. The `object` crate requires at least 16 bytes
+    /// to detect the file format.
+    fn create_minimal_wasm_object(path: &Path) {
+        let mut data = vec![];
+        // WASM magic number: \0asm
+        data.extend_from_slice(&[0x00, 0x61, 0x73, 0x6d]);
+        // WASM version 1
+        data.extend_from_slice(&[0x01, 0x00, 0x00, 0x00]);
+        // Type section (id=1), size=1, with 0 type entries
+        data.extend_from_slice(&[0x01, 0x01, 0x00]);
+        // Function section (id=3), size=1, with 0 function entries
+        data.extend_from_slice(&[0x03, 0x01, 0x00]);
+        // Code section (id=10), size=1, with 0 code entries
+        data.extend_from_slice(&[0x0a, 0x01, 0x00]);
+
+        fs::write(path, data).expect("Failed to write WASM file");
+    }
+
+    #[test]
+    fn test_wasm_path_injection_and_extraction() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let wasm_obj_path = dir.path().join("test.wasm");
+        let output_path = dir.path().join("test.out.wasm");
+
+        create_minimal_wasm_object(&wasm_obj_path);
+
+        let bitcode_pathbuf = tmp_bitcode("hello.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
+
+        // Embed bitcode filepath
+        embed_bitcode_filepath_to_object_file(bitcode_filepath, &wasm_obj_path, Some(&output_path))
+            .expect("Failed to embed bitcode filepath into WASM object");
+
+        // Extract embedded filepaths
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&output_path)
+            .expect("Failed to extract embedded filepaths from WASM object");
+        assert_eq!(embedded_filepaths.len(), 1);
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("hello.bc"));
+    }
+
+    #[test]
+    fn test_wasm_overwrite_in_place() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let wasm_obj_path = dir.path().join("test.wasm");
+
+        create_minimal_wasm_object(&wasm_obj_path);
+
+        let bitcode_pathbuf = tmp_bitcode("inplace.bc");
+        let bitcode_filepath = bitcode_pathbuf.as_path();
+
+        // Embed bitcode filepath in place (no output path)
+        embed_bitcode_filepath_to_object_file::<&Path>(bitcode_filepath, &wasm_obj_path, None)
+            .expect("Failed to embed bitcode filepath into WASM object in place");
+
+        // Extract
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&wasm_obj_path)
+            .expect("Failed to extract embedded filepaths from WASM object");
+        assert_eq!(embedded_filepaths.len(), 1);
+        assert_eq!(embedded_filepaths[0], tmp_bitcode("inplace.bc"));
+    }
+
+    #[test]
+    fn test_wasm_no_bitcode_section_returns_empty() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let wasm_obj_path = dir.path().join("test.wasm");
+
+        create_minimal_wasm_object(&wasm_obj_path);
+
+        // Extract from object with no bitcode section
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&wasm_obj_path)
+            .expect("Failed to extract from WASM object without bitcode section");
+        assert!(embedded_filepaths.is_empty());
     }
 }

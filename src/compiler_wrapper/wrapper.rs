@@ -8,6 +8,7 @@ use std::{
 
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
+    cache,
     config::rllvm_config,
     error::Error,
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
@@ -46,7 +47,7 @@ pub trait CompilerWrapper {
     fn command(&self) -> Result<Vec<String>, Error> {
         let args_info = self.args();
         let compiler_filepath = self.wrapped_compiler();
-        let mut args = vec![String::from(compiler_filepath.to_string_lossy())];
+        let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
 
         // Append LTO LDFLAGS
         if args_info.input_files().is_empty() && !args_info.link_args().is_empty() {
@@ -97,7 +98,7 @@ pub trait CompilerWrapper {
         S: AsRef<OsStr> + std::fmt::Debug,
     {
         if !self.is_silent() {
-            log::debug!("[{:?}] args={:?}", mode, args);
+            tracing::debug!("[{:?}] args={:?}", mode, args);
         }
         if args.is_empty() {
             return Err(Error::InvalidArguments(
@@ -106,7 +107,7 @@ pub trait CompilerWrapper {
         }
         let status = execute_command_for_status(args[0].as_ref(), &args[1..])?;
         if !self.is_silent() {
-            log::debug!("[{:?}] exit_status={}", mode, status);
+            tracing::debug!("[{:?}] exit_status={}", mode, status);
         }
 
         if !status.success() {
@@ -129,8 +130,27 @@ pub trait CompilerWrapper {
 
     /// Generate bitcode files for all input files
     fn generate_bitcode_files_and_embed_filepaths(&self) -> Result<Option<i32>, Error> {
+        let config = rllvm_config();
         let is_compile_only = self.args().is_compile_only();
         let artifact_filepaths = self.args().artifact_filepaths()?;
+
+        // Determine if caching is enabled
+        let caching_enabled = cache::is_cache_enabled(config.cache_enabled());
+        let cache_directory = if caching_enabled {
+            match cache::cache_dir(config.cache_dir().map(|p| p.as_path())) {
+                Ok(dir) => Some(dir),
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to initialize cache directory, caching disabled: {}",
+                        err
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let mut object_filepaths = vec![];
         for (src_filepath, object_filepath, bitcode_filepath) in artifact_filepaths {
             if !is_compile_only {
@@ -145,8 +165,44 @@ pub trait CompilerWrapper {
                 // The source file is a bitcode; therefore, we do not need to
                 // generate the bitcode and directly use the source file
                 src_filepath
+            } else if let Some(ref cache_dir) = cache_directory {
+                // Caching is enabled — check for a cache hit
+                let cache_key = cache::compute_cache_key(
+                    &src_filepath,
+                    self.args().compile_args(),
+                    config.bitcode_generation_flags(),
+                )?;
+
+                if let Some(cached_path) = cache::cache_lookup(cache_dir, &src_filepath, cache_key)
+                {
+                    // Cache hit — copy cached bitcode to expected output location
+                    std::fs::copy(&cached_path, &bitcode_filepath).map_err(|err| {
+                        tracing::error!(
+                            "Failed to copy cached bitcode {:?} to {:?}: {}",
+                            cached_path,
+                            bitcode_filepath,
+                            err
+                        );
+                        err
+                    })?;
+                    bitcode_filepath
+                } else {
+                    // Cache miss — generate bitcode and store in cache
+                    if let Some(code) =
+                        self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
+                        && code != 0
+                    {
+                        return Ok(Some(code));
+                    }
+                    if let Err(err) =
+                        cache::cache_store(cache_dir, &src_filepath, cache_key, &bitcode_filepath)
+                    {
+                        tracing::warn!("Failed to store bitcode in cache: {}", err);
+                    }
+                    bitcode_filepath
+                }
             } else {
-                // Generate the bitcode
+                // No caching — generate the bitcode
                 if let Some(code) = self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
                     && code != 0
                 {
@@ -157,6 +213,19 @@ pub trait CompilerWrapper {
 
             // Embed the path of the bitcode to the corresponding object file
             embed_bitcode_filepath_to_object_file(&src_bitcode_filepath, &object_filepath, None)?;
+        }
+
+        // Log cache statistics if caching was used
+        if cache_directory.is_some() {
+            cache::log_cache_stats();
+        }
+
+        // In compile-only mode the wrapped compiler already produced the final
+        // object file and there is nothing left to link. The same holds when no
+        // intermediate objects were built, in which case a link step would
+        // invoke the compiler with no inputs at all.
+        if is_compile_only || object_filepaths.is_empty() {
+            return Ok(Some(0));
         }
 
         let output_filepath = PathBuf::from(self.args().output_filename()).canonicalize()?;
@@ -176,7 +245,7 @@ pub trait CompilerWrapper {
         let bitcode_filepath = bitcode_filepath.as_ref();
         let compiler_filepath = self.wrapped_compiler();
 
-        let mut args = vec![String::from(compiler_filepath.to_string_lossy())];
+        let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
         args.extend(self.args().compile_args().iter().cloned());
         // Add bitcode generation flags
         if let Some(bitcode_generation_flags) = rllvm_config().bitcode_generation_flags() {
@@ -186,8 +255,8 @@ pub trait CompilerWrapper {
             "-emit-llvm".to_string(),
             "-c".to_string(),
             "-o".to_string(),
-            String::from(bitcode_filepath.to_string_lossy()),
-            String::from(src_filepath.to_string_lossy()),
+            bitcode_filepath.to_string_lossy().into_owned(),
+            src_filepath.to_string_lossy().into_owned(),
         ]);
 
         let mode = CompileMode::BitcodeGeneration;
@@ -208,13 +277,13 @@ pub trait CompilerWrapper {
         let object_filepath = object_filepath.as_ref();
         let wrapped_compiler = self.wrapped_compiler();
 
-        let mut args = vec![String::from(wrapped_compiler.to_string_lossy())];
+        let mut args = vec![wrapped_compiler.to_string_lossy().into_owned()];
         args.extend(self.args().compile_args().iter().cloned());
         args.extend_from_slice(&[
             "-c".to_string(),
             "-o".to_string(),
-            String::from(object_filepath.to_string_lossy()),
-            String::from(src_filepath.to_string_lossy()),
+            object_filepath.to_string_lossy().into_owned(),
+            src_filepath.to_string_lossy().into_owned(),
         ]);
 
         let mode = CompileMode::Compiling;
@@ -233,7 +302,7 @@ pub trait CompilerWrapper {
         let output_filepath = output_filepath.as_ref();
         let wrapped_compiler = self.wrapped_compiler();
 
-        let mut args = vec![String::from(wrapped_compiler.to_string_lossy())];
+        let mut args = vec![wrapped_compiler.to_string_lossy().into_owned()];
         if self.args().is_lto() {
             // Add LTO LDFLAGS
             if let Some(lto_ldflags) = rllvm_config().lto_ldflags() {
@@ -245,13 +314,13 @@ pub trait CompilerWrapper {
         // Output
         args.extend_from_slice(&[
             "-o".to_string(),
-            String::from(output_filepath.to_string_lossy()),
+            output_filepath.to_string_lossy().into_owned(),
         ]);
         // Input object files
         args.extend(
             object_filepaths
                 .iter()
-                .map(|x| String::from(x.as_ref().to_string_lossy())),
+                .map(|x| x.as_ref().to_string_lossy().into_owned()),
         );
 
         // Mode
