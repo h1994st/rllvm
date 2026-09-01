@@ -48,14 +48,19 @@ where
 
 /// Resolve the bitcode filepath to a string for embedding.
 fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
-    if bitcode_filepath.is_absolute() {
-        Ok(bitcode_filepath.to_string_lossy().into_owned())
+    let absolute_filepath = if bitcode_filepath.is_absolute() {
+        bitcode_filepath.to_string_lossy().into_owned()
     } else {
-        Ok(format!(
-            "{}\n",
-            bitcode_filepath.canonicalize()?.to_string_lossy()
-        ))
-    }
+        bitcode_filepath
+            .canonicalize()?
+            .to_string_lossy()
+            .into_owned()
+    };
+
+    // The linker concatenates these sections when it merges object files, so
+    // every entry must be newline-terminated for the reader to split the
+    // combined section back into individual paths.
+    Ok(format!("{absolute_filepath}\n"))
 }
 
 /// Encode an unsigned integer as a LEB128 byte sequence.
@@ -83,11 +88,7 @@ fn encode_leb128(mut value: usize) -> Vec<u8> {
 /// - Name length (LEB128)
 /// - Name bytes
 /// - Section payload
-fn append_wasm_custom_section(
-    wasm_data: &[u8],
-    section_name: &str,
-    payload: &[u8],
-) -> Vec<u8> {
+fn append_wasm_custom_section(wasm_data: &[u8], section_name: &str, payload: &[u8]) -> Vec<u8> {
     let name_bytes = section_name.as_bytes();
     let name_len_encoded = encode_leb128(name_bytes.len());
     let content_size = name_len_encoded.len() + name_bytes.len() + payload.len();
@@ -124,11 +125,7 @@ where
         BinaryFormat::Wasm => {
             // The `object` crate's write API does not support WASM, so we
             // directly append a custom section to the raw binary.
-            append_wasm_custom_section(
-                &data,
-                WASM_SECTION_NAME,
-                bitcode_filepath_string.as_bytes(),
-            )
+            append_wasm_custom_section(&data, WASM_SECTION_NAME, bitcode_filepath_string.as_bytes())
         }
         _ => {
             // Platform-dependent properties
