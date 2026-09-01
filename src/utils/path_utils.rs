@@ -1,9 +1,7 @@
 //! Filepath-related utility functions
 
 use std::{
-    collections::hash_map::DefaultHasher,
     env,
-    hash::{Hash, Hasher},
     path::{Path, PathBuf},
 };
 
@@ -65,16 +63,37 @@ where
     Ok((object_filepath, bitcode_filepath))
 }
 
-/// Compute a hash of the given file path for use in unique naming.
+/// FNV-1a 64-bit offset basis.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+/// FNV-1a 64-bit prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// Compute a stable hash of the given file path for use in unique naming.
+///
+/// This is FNV-1a, spelled out here rather than taken from a crate or from
+/// `DefaultHasher`. `DefaultHasher` is explicitly *not* guaranteed to stay the
+/// same across Rust releases, and bitcode files in `bitcode_store_path` are
+/// named after this value: a toolchain upgrade would rename every future
+/// artifact and orphan everything already in the store.
+///
+/// The bytes hashed come from [`Path::to_string_lossy`], not from the
+/// platform's native `OsStr` encoding (raw bytes on Unix, UTF-16 on Windows),
+/// so the same textual path yields the same hash on every platform and
+/// architecture. Non-Unicode paths hash through the replacement character and
+/// can therefore collide; the store filename also carries the source file stem,
+/// so a collision needs two non-Unicode paths that share a stem.
 pub fn calculate_filepath_hash<P>(filepath: P) -> u64
 where
     P: AsRef<Path>,
 {
     let filepath = filepath.as_ref();
 
-    let mut hasher = DefaultHasher::new();
-    filepath.hash(&mut hasher);
-    hasher.finish()
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in filepath.to_string_lossy().as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -109,5 +128,39 @@ mod tests {
             "compile-only object file belongs in the working directory"
         );
         assert_eq!(bitcode_filepath, src_dir.join(".foo.o.bc"));
+    }
+
+    #[test]
+    fn test_calculate_filepath_hash_is_stable() {
+        // Hard-coded expectations, deliberately: this hash names files in the
+        // bitcode store, so it must survive Rust upgrades and be identical on
+        // every platform. If these values change, the store is orphaned.
+        assert_eq!(
+            calculate_filepath_hash(Path::new("")),
+            0xcbf2_9ce4_8422_2325
+        );
+        assert_eq!(
+            calculate_filepath_hash(Path::new("/tmp/foo.c")),
+            6720249941370504407
+        );
+        assert_eq!(
+            calculate_filepath_hash(Path::new(
+                "/home/user/projects/very/deeply/nested/directory/structure/with/many/components/source_file.c"
+            )),
+            16351161328938945821
+        );
+    }
+
+    #[test]
+    fn test_calculate_filepath_hash_distinguishes_paths() {
+        let foo = calculate_filepath_hash(Path::new("/tmp/foo.c"));
+        let bar = calculate_filepath_hash(Path::new("/tmp/bar.c"));
+        let nested = calculate_filepath_hash(Path::new("/tmp/sub/foo.c"));
+
+        assert_ne!(foo, bar, "different file stems must hash differently");
+        assert_ne!(foo, nested, "different directories must hash differently");
+
+        // Same input, same hash.
+        assert_eq!(foo, calculate_filepath_hash(PathBuf::from("/tmp/foo.c")));
     }
 }
