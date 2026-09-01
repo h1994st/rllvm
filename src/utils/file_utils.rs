@@ -2,9 +2,10 @@
 
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
-    str,
+    process, str,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use object::{
@@ -13,11 +14,13 @@ use object::{
 };
 
 use crate::{
+    config::try_rllvm_config,
     constants::{
         COFF_SECTION_NAME, DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME,
         WASM_SECTION_NAME,
     },
     error::Error,
+    utils::execute_command_for_status,
 };
 
 /// Returns `true` if the path exists and is not a directory.
@@ -121,6 +124,25 @@ where
 
     let bitcode_filepath_string = resolve_bitcode_filepath(bitcode_filepath)?;
 
+    // Prefer `llvm-objcopy` where it is configured and the format supports it.
+    // Rebuilding the object with the `object` crate writer (below) loses
+    // information the writer does not model — on Mach-O it drops the platform
+    // load command, which makes the linker emit
+    // `no platform load command found in '...', assuming: macOS` for every
+    // object rllvm touches. `llvm-objcopy` rewrites in place and keeps it.
+    if !matches!(object_binary_format, BinaryFormat::Wasm)
+        && let Some(objcopy_filepath) = try_rllvm_config()?.llvm_objcopy_filepath()
+        && objcopy_filepath.exists()
+    {
+        return embed_with_objcopy(
+            objcopy_filepath,
+            object_binary_format,
+            &bitcode_filepath_string,
+            object_filepath,
+            output_object_filepath.as_ref().map(|p| p.as_ref()),
+        );
+    }
+
     let output_data = match object_binary_format {
         BinaryFormat::Wasm => {
             // The `object` crate's write API does not support WASM, so we
@@ -182,6 +204,95 @@ where
     Ok(())
 }
 
+/// Section specifier for `llvm-objcopy --add-section`.
+///
+/// Mach-O needs the segment as well; the other formats name the section alone.
+fn objcopy_section_specifier(format: BinaryFormat) -> Result<String, Error> {
+    match format {
+        BinaryFormat::Elf => Ok(ELF_SECTION_NAME.to_string()),
+        BinaryFormat::MachO => Ok(format!("{DARWIN_SEGMENT_NAME},{DARWIN_SECTION_NAME}")),
+        BinaryFormat::Coff => Ok(COFF_SECTION_NAME.to_string()),
+        _ => Err(Error::UnsupportedBinaryFormat(format!("{format:?}"))),
+    }
+}
+
+/// Embed the bitcode path by shelling out to `llvm-objcopy --add-section`.
+///
+/// The payload has to reach objcopy as a file, so it is staged in a uniquely
+/// named temporary file and removed afterwards.
+fn embed_with_objcopy(
+    objcopy_filepath: &Path,
+    format: BinaryFormat,
+    bitcode_filepath_string: &str,
+    object_filepath: &Path,
+    output_object_filepath: Option<&Path>,
+) -> Result<(), Error> {
+    static PAYLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let section_specifier = objcopy_section_specifier(format)?;
+
+    let payload_filepath = env::temp_dir().join(format!(
+        "rllvm-bcpath-{}-{}",
+        process::id(),
+        PAYLOAD_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&payload_filepath, bitcode_filepath_string)?;
+
+    let mut args = vec![
+        format!(
+            "--add-section={section_specifier}={}",
+            payload_filepath.display()
+        ),
+        object_filepath.to_string_lossy().into_owned(),
+    ];
+    if let Some(output_object_filepath) = output_object_filepath {
+        args.push(output_object_filepath.to_string_lossy().into_owned());
+    }
+
+    let status = execute_command_for_status(objcopy_filepath, &args);
+
+    // Remove the staged payload whether or not objcopy succeeded.
+    let _ = fs::remove_file(&payload_filepath);
+
+    let status = status?;
+    if !status.success() {
+        return Err(Error::ExecutionFailure(format!(
+            "Failed to embed the bitcode path with {objcopy_filepath:?}: exit_status={status}"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Carry the Mach-O `LC_BUILD_VERSION` command across a rebuild.
+///
+/// [`copy_object_file`] reconstructs the object from the pieces the writer
+/// models — sections, symbols, relocations, comdats — and anything outside that
+/// set is silently dropped. `LC_BUILD_VERSION` is one such casualty, and losing
+/// it makes the linker report `no platform load command found in '...',
+/// assuming: macOS` for every object rllvm touches.
+///
+/// Only `LC_BUILD_VERSION` is restored. Objects from older toolchains carry
+/// `LC_VERSION_MIN_MACOSX` instead, which the writer cannot emit.
+fn copy_macho_build_version(in_object: &File, out_object: &mut write::Object) -> Result<(), Error> {
+    let build_version = match in_object {
+        File::MachO32(macho) => macho.build_version()?,
+        File::MachO64(macho) => macho.build_version()?,
+        _ => return Ok(()),
+    };
+
+    if let Some(build_version) = build_version {
+        let endian = in_object.endianness();
+        let mut version = write::MachOBuildVersion::default();
+        version.platform = build_version.platform.get(endian);
+        version.minos = build_version.minos.get(endian);
+        version.sdk = build_version.sdk.get(endian);
+        out_object.set_macho_build_version(version);
+    }
+
+    Ok(())
+}
+
 fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     if in_object.kind() != ObjectKind::Relocatable {
         return Err(Error::InvalidArguments(format!(
@@ -197,6 +308,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     );
     out_object.mangling = write::Mangling::None;
     out_object.flags = in_object.flags();
+    copy_macho_build_version(&in_object, &mut out_object)?;
 
     // Sections
     let mut out_sections = HashMap::new();
@@ -435,6 +547,69 @@ mod tests {
     /// missing. `/tmp/...` is not absolute on Windows.
     fn tmp_bitcode(name: &str) -> PathBuf {
         std::env::temp_dir().join(name)
+    }
+
+    /// Read the `LC_BUILD_VERSION` triple from a Mach-O object, if present.
+    fn macho_build_version(object_file: &File) -> Option<(u32, u32, u32)> {
+        let endian = object_file.endianness();
+        let build_version = match object_file {
+            File::MachO32(macho) => macho.build_version().ok()?,
+            File::MachO64(macho) => macho.build_version().ok()?,
+            _ => return None,
+        }?;
+        Some((
+            build_version.platform.get(endian),
+            build_version.minos.get(endian),
+            build_version.sdk.get(endian),
+        ))
+    }
+
+    #[test]
+    fn test_macho_build_version_survives_rebuild() {
+        // Rebuilding an object drops anything the writer does not model. Losing
+        // the platform load command makes the linker fall back to a guess and
+        // warn on every object, so it has to be carried across explicitly.
+        let data = fs::read(test_case!("hello.o")).expect("Failed to read the fixture");
+        let in_object = object::File::parse(&*data).expect("Failed to parse the fixture");
+        assert_eq!(in_object.format(), BinaryFormat::MachO);
+
+        let expected = macho_build_version(&in_object);
+        assert!(
+            expected.is_some(),
+            "fixture carries no LC_BUILD_VERSION, so this test would prove nothing"
+        );
+
+        let rebuilt = copy_object_file(in_object).expect("Failed to rebuild the object");
+        let rebuilt_data = rebuilt.write().expect("Failed to serialize the object");
+        let rebuilt_object =
+            object::File::parse(&*rebuilt_data).expect("Failed to parse the rebuilt object");
+
+        assert_eq!(
+            macho_build_version(&rebuilt_object),
+            expected,
+            "LC_BUILD_VERSION was not preserved across the rebuild"
+        );
+    }
+
+    #[test]
+    fn test_objcopy_section_specifier() {
+        // Mach-O needs `segment,section`; the others name the section alone.
+        assert_eq!(
+            objcopy_section_specifier(BinaryFormat::MachO).unwrap(),
+            format!("{DARWIN_SEGMENT_NAME},{DARWIN_SECTION_NAME}")
+        );
+        assert_eq!(
+            objcopy_section_specifier(BinaryFormat::Elf).unwrap(),
+            ELF_SECTION_NAME
+        );
+        assert_eq!(
+            objcopy_section_specifier(BinaryFormat::Coff).unwrap(),
+            COFF_SECTION_NAME
+        );
+
+        // WASM is handled by appending a custom section directly, never by
+        // objcopy, so it must not produce a specifier.
+        assert!(objcopy_section_specifier(BinaryFormat::Wasm).is_err());
     }
 
     #[test]
