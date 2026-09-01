@@ -381,20 +381,13 @@ impl CompilerArgsInfo {
                     self.compile_unary(arg, &[]);
                 }
             } else {
-                // Try to match a pattern
-                let mut matched = false;
-                for arg_pattern in arg_patterns().iter() {
-                    let pattern = &arg_pattern.pattern;
-                    let arg_info = &arg_pattern.arg_info;
-                    if pattern.is_match(arg.as_str()) {
-                        // Consume more parameters
-                        offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
-
-                        matched = true;
-                        break;
-                    }
-                }
-                if !matched {
+                // Try to match a pattern. One `RegexSet` pass replaces a test
+                // per pattern; the table returns the first declared match, so
+                // the ordering the patterns rely on still holds.
+                if let Some(arg_info) = arg_patterns().first_match(arg.as_str()) {
+                    // Consume more parameters
+                    offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
+                } else {
                     let handler = if is_object_file(arg)? {
                         CompilerArgsInfo::object_file
                     } else {
@@ -655,6 +648,30 @@ mod tests {
 
     fn test_parsing_link_args_internal(input: &str, expected: usize) {
         test_parsing(input, |args| args.link_args().len() == expected);
+    }
+
+    #[test]
+    fn test_parsing_prefers_the_first_declared_pattern() {
+        // Several patterns overlap, and the earlier declaration must win:
+        // `^-fsanitize=.+$` and `^-fuse-ld=.+$` both come before the catch-all
+        // `^-f.+$`, which would otherwise swallow them as plain compile flags.
+        // A single RegexSet pass reports every match, so this pins the choice.
+
+        // -fsanitize=: compile *and* link, not compile-only.
+        test_parsing("-fsanitize=address", |args| {
+            args.compile_args() == &["-fsanitize=address".to_string()]
+                && args.link_args() == &["-fsanitize=address".to_string()]
+        });
+
+        // -fuse-ld=: link-only.
+        test_parsing("-fuse-ld=lld", |args| {
+            args.link_args() == &["-fuse-ld=lld".to_string()] && args.compile_args().is_empty()
+        });
+
+        // A plain -f flag falls through to the catch-all: compile-only.
+        test_parsing("-fPIC", |args| {
+            args.compile_args() == &["-fPIC".to_string()] && args.link_args().is_empty()
+        });
     }
 
     #[test]
