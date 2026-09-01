@@ -153,6 +153,15 @@ where
         );
     }
 
+    // Failing that, the read-modify-write builder keeps unmodelled load
+    // commands where the rebuild below would drop them. It only covers Mach-O,
+    // and only objects whose load commands it understands.
+    if object_binary_format == BinaryFormat::MachO
+        && let Some(output_data) = embed_with_macho_builder(&data, &bitcode_filepath_string)
+    {
+        return write_object_output(output_data, object_filepath, output_object_filepath);
+    }
+
     let output_data = match object_binary_format {
         BinaryFormat::Wasm => {
             // The `object` crate's write API does not support WASM, so we
@@ -211,15 +220,87 @@ where
         }
     };
 
-    if let Some(output_object_filepath) = output_object_filepath {
-        // Save the new object file
-        fs::write(output_object_filepath, output_data)?;
-    } else {
-        // Overwrite the input object file
-        fs::write(object_filepath, output_data)?;
+    write_object_output(output_data, object_filepath, output_object_filepath)
+}
+
+/// Write the rewritten object, either to the requested path or over the input.
+fn write_object_output<P>(
+    output_data: Vec<u8>,
+    object_filepath: &Path,
+    output_object_filepath: Option<P>,
+) -> Result<(), Error>
+where
+    P: AsRef<Path>,
+{
+    match output_object_filepath {
+        Some(output_object_filepath) => fs::write(output_object_filepath, output_data)?,
+        None => fs::write(object_filepath, output_data)?,
     }
 
     Ok(())
+}
+
+/// Pack a section or segment name into the fixed-size field Mach-O uses.
+fn macho_name_field(name: &str) -> Option<[u8; 16]> {
+    let bytes = name.as_bytes();
+    if bytes.len() > 16 {
+        return None;
+    }
+    let mut field = [0u8; 16];
+    field[..bytes.len()].copy_from_slice(bytes);
+    Some(field)
+}
+
+/// Embed the bitcode path by editing the Mach-O with the `object` crate's
+/// read-modify-write builder.
+///
+/// Unlike [`copy_object_file`], which reconstructs the object from an abstract
+/// model and drops anything outside it, the builder round-trips the input and
+/// keeps unmodelled load commands as opaque bytes.
+///
+/// Returns `None` when the builder cannot represent the input, so the caller
+/// falls back to rebuilding. It refuses objects carrying load commands it does
+/// not model — `LC_LINKER_OPTION`, emitted for autolinking, is one such case —
+/// which is a loud failure rather than a silent loss.
+fn embed_with_macho_builder(data: &[u8], bitcode_filepath_string: &str) -> Option<Vec<u8>> {
+    use object::build::macho::{Builder, SectionData};
+
+    let mut builder = Builder::read(data)
+        .inspect_err(|err| {
+            tracing::debug!("Mach-O builder cannot handle this object: {}", err);
+        })
+        .ok()?;
+
+    let sectname = macho_name_field(DARWIN_SECTION_NAME)?;
+    let segname = macho_name_field(DARWIN_SEGMENT_NAME)?;
+
+    let section_id = {
+        let section = builder.sections.add();
+        section.sectname = sectname;
+        section.segname = segname;
+        // Mach-O stores the alignment as a power of two, so 0 means
+        // byte-aligned. Anything larger makes the linker pad between the
+        // sections it concatenates, and those NUL bytes land in the middle of
+        // the newline-separated path list.
+        section.align = 0;
+        section.data = SectionData::Data(bitcode_filepath_string.as_bytes().to_vec().into());
+        section.id()
+    };
+
+    // A section is only written if a segment references it. A relocatable
+    // object carries exactly one segment holding every section.
+    let segment = builder.segments.iter_mut().next()?;
+    segment.sections.push(section_id);
+
+    let mut output_data = Vec::new();
+    builder
+        .write(&mut output_data)
+        .inspect_err(|err| {
+            tracing::debug!("Mach-O builder failed to write: {}", err);
+        })
+        .ok()?;
+
+    Some(output_data)
 }
 
 /// Section specifier for `llvm-objcopy --add-section`.
@@ -587,6 +668,46 @@ mod tests {
             build_version.minos.get(endian).0,
             build_version.sdk.get(endian).0,
         ))
+    }
+
+    #[test]
+    fn test_macho_builder_embeds_without_padding() {
+        let data = create_minimal_macho_object();
+        let before = object::File::parse(&*data).expect("Failed to parse the object");
+        let expected_version = macho_build_version(&before);
+
+        let payload = "/tmp/one.bc\n";
+        let output = embed_with_macho_builder(&data, payload)
+            .expect("the builder should handle a plain object");
+        let after = object::File::parse(&*output).expect("Failed to parse the output");
+
+        // The whole point of this path: load commands survive.
+        assert_eq!(
+            macho_build_version(&after),
+            expected_version,
+            "the builder must round-trip LC_BUILD_VERSION"
+        );
+
+        let section = after
+            .section_by_name_bytes(DARWIN_SECTION_NAME.as_bytes())
+            .expect("bitcode section missing");
+        assert_eq!(
+            section.data().expect("Failed to read the section"),
+            payload.as_bytes()
+        );
+
+        // The section must be byte-aligned. Mach-O stores alignment as a power
+        // of two, so anything larger makes the *linker* insert padding between
+        // the sections it concatenates, and those NUL bytes land between the
+        // newline-separated entries — corrupting every path after the first.
+        // The damage appears only once objects are linked, so assert the
+        // alignment here rather than the section contents.
+        assert_eq!(section.align(), 1, "bitcode section must be byte-aligned");
+
+        // And it round-trips through the reader.
+        let extracted = extract_bitcode_filepaths_from_parsed_object(&after)
+            .expect("Failed to extract embedded filepaths");
+        assert_eq!(extracted, vec![PathBuf::from("/tmp/one.bc")]);
     }
 
     #[test]
