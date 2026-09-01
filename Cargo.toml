@@ -4,8 +4,10 @@ categories = ["command-line-utilities", "development-tools", "development-tools:
 description = "A tool to build whole-program LLVM bitcode files"
 edition = "2024"
 rust-version = "1.88"
+# `tests/` is intentionally included so the published crate can run its own
+# test suite; `tests/data/` holds fixtures the unit tests reach through the
+# `test_case!` macro as well.
 exclude = [
-  "tests/*",
   ".github/*",
 ]
 keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
