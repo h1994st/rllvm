@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    arg_parser::CompilerArgsInfo, compiler_wrapper::*, config::rllvm_config, error::Error,
+    arg_parser::CompilerArgsInfo, compiler_wrapper::*, config::try_rllvm_config, error::Error,
 };
 
 /// Clang/Clang++ compiler wrapper that generates LLVM bitcode alongside normal compilation.
@@ -20,21 +20,22 @@ pub struct ClangWrapper {
 }
 
 impl ClangWrapper {
-    pub fn new(name: &str, compiler_kind: CompilerKind) -> Self {
+    pub fn new(name: &str, compiler_kind: CompilerKind) -> Result<Self, Error> {
         // Obtain the compiler path from the configuration
+        let config = try_rllvm_config()?;
         let compiler_path = match compiler_kind {
-            CompilerKind::Clang => rllvm_config().clang_filepath(),
-            CompilerKind::ClangXX => rllvm_config().clangxx_filepath(),
+            CompilerKind::Clang => config.clang_filepath(),
+            CompilerKind::ClangXX => config.clangxx_filepath(),
         };
 
-        Self {
+        Ok(Self {
             name: name.to_string(),
             wrapped_compiler: compiler_path.clone(),
             compiler_kind,
             is_silent: false,
             is_parse_args_called: false,
             args: CompilerArgsInfo::default(),
-        }
+        })
     }
 }
 
@@ -121,24 +122,29 @@ impl ClangWrapperBuilder {
 impl CompilerWrapperBuilder for ClangWrapperBuilder {
     type OutputType = ClangWrapper;
 
-    fn build(&self) -> Self::OutputType {
-        // Obtain the compiler path from the configuration, if not provided
-        let compiler_path = self
-            .wrapped_compiler
-            .as_ref()
-            .unwrap_or(match self.compiler_kind {
-                CompilerKind::Clang => rllvm_config().clang_filepath(),
-                CompilerKind::ClangXX => rllvm_config().clangxx_filepath(),
-            });
+    fn build(&self) -> Result<Self::OutputType, Error> {
+        // Obtain the compiler path from the configuration, if not provided.
+        // The configuration is only consulted when no path was supplied, so a
+        // caller that provides one can run without a usable config file.
+        let compiler_path = match self.wrapped_compiler.as_ref() {
+            Some(compiler_path) => compiler_path.clone(),
+            None => {
+                let config = try_rllvm_config()?;
+                match self.compiler_kind {
+                    CompilerKind::Clang => config.clang_filepath().clone(),
+                    CompilerKind::ClangXX => config.clangxx_filepath().clone(),
+                }
+            }
+        };
 
-        ClangWrapper {
+        Ok(ClangWrapper {
             name: self.name.clone(),
-            wrapped_compiler: compiler_path.clone(),
+            wrapped_compiler: compiler_path,
             compiler_kind: self.compiler_kind,
             is_silent: self.is_silent.unwrap_or(false),
             is_parse_args_called: false,
             args: CompilerArgsInfo::default(),
-        }
+        })
     }
 
     fn name(mut self, name: &str) -> Self {

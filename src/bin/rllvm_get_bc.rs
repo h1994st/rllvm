@@ -2,7 +2,7 @@ use std::{fs, path::PathBuf};
 
 use clap::Parser;
 use object::Object;
-use rllvm::{config::rllvm_config, error::Error, merge::MergeStrategy, utils::*};
+use rllvm::{config::try_rllvm_config, error::Error, merge::MergeStrategy, utils::*};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -46,7 +46,7 @@ pub fn main() -> Result<(), Error> {
     // Set log level
     // The verbose flag will override the configured log level
     let log_level = if args.verbose == 0 {
-        rllvm_config().log_level()
+        try_rllvm_config()?.log_level()
     } else {
         match args.verbose {
             1 => Level::WARN,

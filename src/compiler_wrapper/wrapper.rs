@@ -9,7 +9,7 @@ use std::{
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
     cache,
-    config::rllvm_config,
+    config::try_rllvm_config,
     diagnostics::print_warning,
     error::Error,
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
@@ -55,7 +55,7 @@ pub trait CompilerWrapper {
             // Linking
             if args_info.is_lto() {
                 // Add LTO LDFLAGS
-                if let Some(lto_ldflags) = rllvm_config().lto_ldflags() {
+                if let Some(lto_ldflags) = try_rllvm_config()?.lto_ldflags() {
                     args.extend(lto_ldflags.iter().cloned());
                 }
             }
@@ -105,7 +105,7 @@ pub trait CompilerWrapper {
         {
             return Ok(Some(code));
         }
-        if self.args().is_bitcode_generation_skipped() {
+        if self.args().is_bitcode_generation_skipped()? {
             return Ok(Some(0));
         }
 
@@ -149,7 +149,7 @@ pub trait CompilerWrapper {
 
     /// Generate bitcode files for all input files
     fn generate_bitcode_files_and_embed_filepaths(&self) -> Result<Option<i32>, Error> {
-        let config = rllvm_config();
+        let config = try_rllvm_config()?;
         let is_compile_only = self.args().is_compile_only();
         let artifact_filepaths = self.args().artifact_filepaths()?;
 
@@ -267,7 +267,7 @@ pub trait CompilerWrapper {
         let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
         args.extend(self.args().compile_args().iter().cloned());
         // Add bitcode generation flags
-        if let Some(bitcode_generation_flags) = rllvm_config().bitcode_generation_flags() {
+        if let Some(bitcode_generation_flags) = try_rllvm_config()?.bitcode_generation_flags() {
             args.extend(bitcode_generation_flags.iter().cloned());
         }
         args.extend_from_slice(&[
@@ -324,7 +324,7 @@ pub trait CompilerWrapper {
         let mut args = vec![wrapped_compiler.to_string_lossy().into_owned()];
         if self.args().is_lto() {
             // Add LTO LDFLAGS
-            if let Some(lto_ldflags) = rllvm_config().lto_ldflags() {
+            if let Some(lto_ldflags) = try_rllvm_config()?.lto_ldflags() {
                 args.extend(lto_ldflags.iter().cloned());
             }
         }
@@ -354,7 +354,7 @@ pub trait CompilerWrapperBuilder {
     type OutputType;
 
     /// Build the compiler wrapper
-    fn build(&self) -> Self::OutputType;
+    fn build(&self) -> Result<Self::OutputType, Error>;
 
     /// Set the compiler name
     #[must_use]

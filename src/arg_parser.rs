@@ -1,7 +1,7 @@
 //! Command-line argument parser
 
 use crate::{
-    config::rllvm_config,
+    config::try_rllvm_config,
     constants::{arg_exact_match_map, arg_patterns},
     error::Error,
     utils::*,
@@ -488,10 +488,10 @@ impl CompilerArgsInfo {
     }
 
     /// Returns `true` if bitcode generation should be skipped for the current arguments.
-    pub fn is_bitcode_generation_skipped(&self) -> bool {
+    pub fn is_bitcode_generation_skipped(&self) -> Result<bool, Error> {
         let conditions = [
             (
-                rllvm_config().is_configure_only(),
+                try_rllvm_config()?.is_configure_only(),
                 "we are in configure-only mode",
             ),
             (
@@ -528,11 +528,11 @@ impl CompilerArgsInfo {
         for (condition, reason) in conditions {
             if condition {
                 tracing::warn!("Skip bitcode generation: {}", reason);
-                return true;
+                return Ok(true);
             }
         }
 
-        false
+        Ok(false)
     }
 
     /// Determine the current compile mode based on parsed arguments.
@@ -573,7 +573,7 @@ impl CompilerArgsInfo {
             }
 
             // Update the bitcode filepath, if the bitcode store path is provided
-            if let Some(bitcode_store_path) = rllvm_config().bitcode_store_path() {
+            if let Some(bitcode_store_path) = try_rllvm_config()?.bitcode_store_path() {
                 if bitcode_store_path.exists() {
                     // Obtain a new bitcode filename based on the hash of the source filepath
                     if bitcode_filepath.file_name().is_some() {
