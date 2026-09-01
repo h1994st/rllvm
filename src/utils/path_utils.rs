@@ -7,13 +7,28 @@ use std::{
 
 use crate::error::Error;
 
-/// Derive the object file and bitcode file paths from a source file path.
-pub(crate) fn derive_object_and_bitcode_filepath<P>(
+/// Derive the intermediate object and bitcode paths for one source file.
+///
+/// Artifacts follow the **output**, not the source. Writing next to the source
+/// breaks read-only source trees (distro packaging, cached checkouts), and
+/// under `make -j` one source built by two targets derives the same paths in
+/// the same directory, so the two invocations race and the bitcode a given
+/// object points at may have been built with the other target's flags. The
+/// output directory is writable by construction — the build system chose it —
+/// and differs per target.
+///
+/// `output_dir` is where the compiler was asked to put its result. Names carry
+/// a hash of the absolute source path, so two sources sharing a stem in
+/// different directories do not collide once both land in one output
+/// directory.
+pub(crate) fn derive_object_and_bitcode_filepath<P, Q>(
     src_filepath: P,
+    output_dir: Q,
     is_compile_only: bool,
 ) -> Result<(PathBuf, PathBuf), Error>
 where
     P: AsRef<Path>,
+    Q: AsRef<Path>,
 {
     let src_filepath = src_filepath.as_ref();
     if !src_filepath.is_absolute() {
@@ -22,14 +37,8 @@ where
             src_filepath
         )));
     }
+    let output_dir = output_dir.as_ref();
 
-    // Parent directory
-    let parent_dir = src_filepath.parent().ok_or_else(|| {
-        Error::InvalidArguments(format!(
-            "Failed to obtain the parent directory: {:?}",
-            src_filepath
-        ))
-    })?;
     // Without extension
     let file_stem = src_filepath
         .file_stem()
@@ -47,8 +56,12 @@ where
             ))
         })?;
 
-    // We always hide the bitcode file, alongside the source file
-    let bitcode_filepath = parent_dir.join(format!(".{file_stem}.o.bc"));
+    let src_filepath_hash = calculate_filepath_hash(src_filepath);
+    let artifact_stem = format!("{file_stem}_{src_filepath_hash:016x}");
+
+    // The bitcode file is hidden, and outlives the build: its absolute path is
+    // embedded in the object and read back later by `rllvm-get-bc`.
+    let bitcode_filepath = output_dir.join(format!(".{artifact_stem}.o.bc"));
 
     let object_filepath = if is_compile_only {
         // The compiler writes the object file itself. Absent an explicit `-o`,
@@ -56,8 +69,8 @@ where
         // next to the source. Callers override this when `-o` is given.
         env::current_dir()?.join(format!("{file_stem}.o"))
     } else {
-        // Hide the object file, as it exists only for bitcode generation
-        parent_dir.join(format!(".{file_stem}.o"))
+        // Hidden, and only needed until the final link consumes it.
+        output_dir.join(format!(".{artifact_stem}.o"))
     };
 
     Ok((object_filepath, bitcode_filepath))
@@ -108,26 +121,50 @@ mod tests {
         let src_dir = env::temp_dir();
         let src_filepath = src_dir.join("foo.c");
         let src_filepath = src_filepath.as_path();
+        let output_dir = env::temp_dir().join("rllvm-output");
 
-        // Linking: the object file is an internal artifact, hidden next to the
-        // source file.
+        let hash = calculate_filepath_hash(src_filepath);
+        let stem = format!("foo_{hash:016x}");
+
+        // Linking: both artifacts are internal and land beside the output, not
+        // beside the source.
         let (object_filepath, bitcode_filepath) =
-            derive_object_and_bitcode_filepath(src_filepath, false)
+            derive_object_and_bitcode_filepath(src_filepath, &output_dir, false)
                 .expect("Failed to derive filepaths");
-        assert_eq!(object_filepath, src_dir.join(".foo.o"));
-        assert_eq!(bitcode_filepath, src_dir.join(".foo.o.bc"));
+        assert_eq!(object_filepath, output_dir.join(format!(".{stem}.o")));
+        assert_eq!(bitcode_filepath, output_dir.join(format!(".{stem}.o.bc")));
 
         // Compile-only: the compiler writes `foo.o` into the current working
         // directory, which is where the bitcode path must be embedded.
         let (object_filepath, bitcode_filepath) =
-            derive_object_and_bitcode_filepath(src_filepath, true)
+            derive_object_and_bitcode_filepath(src_filepath, &output_dir, true)
                 .expect("Failed to derive filepaths");
         assert_eq!(
             object_filepath,
             env::current_dir().unwrap().join("foo.o"),
             "compile-only object file belongs in the working directory"
         );
-        assert_eq!(bitcode_filepath, src_dir.join(".foo.o.bc"));
+        assert_eq!(bitcode_filepath, output_dir.join(format!(".{stem}.o.bc")));
+    }
+
+    #[test]
+    fn test_same_stem_in_different_directories_does_not_collide() {
+        // Two sources sharing a stem now land in one output directory, so the
+        // names have to disambiguate them — otherwise concurrent builds race
+        // and each overwrites the other's bitcode.
+        let output_dir = env::temp_dir().join("rllvm-output");
+        let first = env::temp_dir().join("a").join("util.c");
+        let second = env::temp_dir().join("b").join("util.c");
+
+        let (first_object, first_bitcode) =
+            derive_object_and_bitcode_filepath(&first, &output_dir, false)
+                .expect("Failed to derive filepaths");
+        let (second_object, second_bitcode) =
+            derive_object_and_bitcode_filepath(&second, &output_dir, false)
+                .expect("Failed to derive filepaths");
+
+        assert_ne!(first_object, second_object);
+        assert_ne!(first_bitcode, second_bitcode);
     }
 
     #[test]
