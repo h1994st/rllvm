@@ -9,7 +9,7 @@ use std::{
 use crate::error::Error;
 
 /// Execute a command and return its exit status, inheriting stdout/stderr.
-pub fn execute_command_for_status<P, S>(
+pub(crate) fn execute_command_for_status<P, S>(
     program_filepath: P,
     args: &[S],
 ) -> Result<ExitStatus, Error>
@@ -39,7 +39,7 @@ where
 }
 
 /// Execute a command and capture its stdout as a trimmed string.
-pub fn execute_command_for_stdout_string<P, S>(
+pub(crate) fn execute_command_for_stdout_string<P, S>(
     program_filepath: P,
     args: &[S],
 ) -> Result<String, Error>
@@ -49,17 +49,4 @@ where
 {
     let output = execute_command_for_output(program_filepath, args)?;
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
-}
-
-/// Execute a command and capture its stderr as a trimmed string.
-pub fn execute_command_for_stderr_string<P, S>(
-    program_filepath: P,
-    args: &[S],
-) -> Result<String, Error>
-where
-    P: AsRef<Path>,
-    S: AsRef<OsStr>,
-{
-    let output = execute_command_for_output(program_filepath, args)?;
-    Ok(String::from_utf8(output.stderr)?.trim().to_string())
 }

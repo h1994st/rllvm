@@ -15,6 +15,10 @@
 //!
 //! See [`config`] for TOML-based configuration via `~/.rllvm/config.toml`.
 
+// Keeps the public surface deliberate: a `pub` item that no `pub use`
+// re-exports is a mistake, not API.
+#![warn(unreachable_pub)]
+
 /// Command-line argument parsing for compiler flag classification.
 pub mod arg_parser;
 
