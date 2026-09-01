@@ -2,9 +2,10 @@
 
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
-    str,
+    process, str,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use object::{
@@ -13,11 +14,13 @@ use object::{
 };
 
 use crate::{
+    config::try_rllvm_config,
     constants::{
         COFF_SECTION_NAME, DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME,
         WASM_SECTION_NAME,
     },
     error::Error,
+    utils::execute_command_for_status,
 };
 
 /// Returns `true` if the path exists and is not a directory.
@@ -121,6 +124,25 @@ where
 
     let bitcode_filepath_string = resolve_bitcode_filepath(bitcode_filepath)?;
 
+    // Prefer `llvm-objcopy` where it is configured and the format supports it.
+    // Rebuilding the object with the `object` crate writer (below) loses
+    // information the writer does not model — on Mach-O it drops the platform
+    // load command, which makes the linker emit
+    // `no platform load command found in '...', assuming: macOS` for every
+    // object rllvm touches. `llvm-objcopy` rewrites in place and keeps it.
+    if !matches!(object_binary_format, BinaryFormat::Wasm)
+        && let Some(objcopy_filepath) = try_rllvm_config()?.llvm_objcopy_filepath()
+        && objcopy_filepath.exists()
+    {
+        return embed_with_objcopy(
+            objcopy_filepath,
+            object_binary_format,
+            &bitcode_filepath_string,
+            object_filepath,
+            output_object_filepath.as_ref().map(|p| p.as_ref()),
+        );
+    }
+
     let output_data = match object_binary_format {
         BinaryFormat::Wasm => {
             // The `object` crate's write API does not support WASM, so we
@@ -177,6 +199,66 @@ where
     } else {
         // Overwrite the input object file
         fs::write(object_filepath, output_data)?;
+    }
+
+    Ok(())
+}
+
+/// Section specifier for `llvm-objcopy --add-section`.
+///
+/// Mach-O needs the segment as well; the other formats name the section alone.
+fn objcopy_section_specifier(format: BinaryFormat) -> Result<String, Error> {
+    match format {
+        BinaryFormat::Elf => Ok(ELF_SECTION_NAME.to_string()),
+        BinaryFormat::MachO => Ok(format!("{DARWIN_SEGMENT_NAME},{DARWIN_SECTION_NAME}")),
+        BinaryFormat::Coff => Ok(COFF_SECTION_NAME.to_string()),
+        _ => Err(Error::UnsupportedBinaryFormat(format!("{format:?}"))),
+    }
+}
+
+/// Embed the bitcode path by shelling out to `llvm-objcopy --add-section`.
+///
+/// The payload has to reach objcopy as a file, so it is staged in a uniquely
+/// named temporary file and removed afterwards.
+fn embed_with_objcopy(
+    objcopy_filepath: &Path,
+    format: BinaryFormat,
+    bitcode_filepath_string: &str,
+    object_filepath: &Path,
+    output_object_filepath: Option<&Path>,
+) -> Result<(), Error> {
+    static PAYLOAD_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let section_specifier = objcopy_section_specifier(format)?;
+
+    let payload_filepath = env::temp_dir().join(format!(
+        "rllvm-bcpath-{}-{}",
+        process::id(),
+        PAYLOAD_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&payload_filepath, bitcode_filepath_string)?;
+
+    let mut args = vec![
+        format!(
+            "--add-section={section_specifier}={}",
+            payload_filepath.display()
+        ),
+        object_filepath.to_string_lossy().into_owned(),
+    ];
+    if let Some(output_object_filepath) = output_object_filepath {
+        args.push(output_object_filepath.to_string_lossy().into_owned());
+    }
+
+    let status = execute_command_for_status(objcopy_filepath, &args);
+
+    // Remove the staged payload whether or not objcopy succeeded.
+    let _ = fs::remove_file(&payload_filepath);
+
+    let status = status?;
+    if !status.success() {
+        return Err(Error::ExecutionFailure(format!(
+            "Failed to embed the bitcode path with {objcopy_filepath:?}: exit_status={status}"
+        )));
     }
 
     Ok(())
@@ -435,6 +517,27 @@ mod tests {
     /// missing. `/tmp/...` is not absolute on Windows.
     fn tmp_bitcode(name: &str) -> PathBuf {
         std::env::temp_dir().join(name)
+    }
+
+    #[test]
+    fn test_objcopy_section_specifier() {
+        // Mach-O needs `segment,section`; the others name the section alone.
+        assert_eq!(
+            objcopy_section_specifier(BinaryFormat::MachO).unwrap(),
+            format!("{DARWIN_SEGMENT_NAME},{DARWIN_SECTION_NAME}")
+        );
+        assert_eq!(
+            objcopy_section_specifier(BinaryFormat::Elf).unwrap(),
+            ELF_SECTION_NAME
+        );
+        assert_eq!(
+            objcopy_section_specifier(BinaryFormat::Coff).unwrap(),
+            COFF_SECTION_NAME
+        );
+
+        // WASM is handled by appending a custom section directly, never by
+        // objcopy, so it must not produce a specifier.
+        assert!(objcopy_section_specifier(BinaryFormat::Wasm).is_err());
     }
 
     #[test]
