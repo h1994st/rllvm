@@ -220,6 +220,14 @@ pub trait CompilerWrapper {
             cache::log_cache_stats();
         }
 
+        // In compile-only mode the wrapped compiler already produced the final
+        // object file and there is nothing left to link. The same holds when no
+        // intermediate objects were built, in which case a link step would
+        // invoke the compiler with no inputs at all.
+        if is_compile_only || object_filepaths.is_empty() {
+            return Ok(Some(0));
+        }
+
         let output_filepath = PathBuf::from(self.args().output_filename()).canonicalize()?;
         self.link_object_files(&object_filepaths, output_filepath)
     }

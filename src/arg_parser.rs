@@ -7,7 +7,7 @@ use crate::{
     utils::*,
 };
 use regex::Regex;
-use std::{path::PathBuf, sync::OnceLock};
+use std::{env, path::PathBuf, sync::OnceLock};
 
 /// Compile mode
 #[derive(Debug)]
@@ -312,7 +312,13 @@ impl CompilerArgsInfo {
         self
     }
 
-    fn consume_params<S>(&mut self, i: usize, arg: S, arg_info: &ArgInfo<S>, args: &[S]) -> usize
+    fn consume_params<S>(
+        &mut self,
+        i: usize,
+        arg: S,
+        arg_info: &ArgInfo<S>,
+        args: &[S],
+    ) -> Result<usize, Error>
     where
         S: AsRef<str>,
     {
@@ -320,10 +326,18 @@ impl CompilerArgsInfo {
         // Exclude the current argument
         let param_start = i + 1;
         let param_end = param_start + arg_info.arity;
+        if param_end > args.len() {
+            return Err(Error::InvalidArguments(format!(
+                "'{}' expects {} parameter(s), but only {} remain",
+                arg.as_ref(),
+                arg_info.arity,
+                args.len() - param_start
+            )));
+        }
         let params = &args[param_start..param_end];
         handler(self, arg, params);
 
-        arg_info.arity
+        Ok(arg_info.arity)
     }
 
     /// Parse a sequence of compiler arguments and classify them.
@@ -343,7 +357,7 @@ impl CompilerArgsInfo {
             // Try to match the flag exactly
             if let Some(arg_info) = arg_exact_match_map().get(arg.as_str()) {
                 // Consume more parameters
-                offset += self.consume_params(i, arg.to_string(), arg_info, &args);
+                offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
             } else if arg == "-Wl,--start-group" {
                 // Need to handle the N-ary grouping flag
                 if let Some(group_end) = args[i..].iter().position(|x| x == "-Wl,--end-group") {
@@ -368,7 +382,7 @@ impl CompilerArgsInfo {
                     let arg_info = &arg_pattern.arg_info;
                     if pattern.is_match(arg.as_str()) {
                         // Consume more parameters
-                        offset += self.consume_params(i, arg.to_string(), arg_info, &args);
+                        offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
 
                         matched = true;
                         break;
@@ -542,8 +556,21 @@ impl CompilerArgsInfo {
             let src_filepath = PathBuf::from(src_file).canonicalize()?;
 
             // Derive filepaths of artifacts
-            let (object_filepath, mut bitcode_filepath) =
+            let (mut object_filepath, mut bitcode_filepath) =
                 derive_object_and_bitcode_filepath(&src_filepath, self.is_compile_only)?;
+
+            // In compile-only mode an explicit `-o` names the object file the
+            // compiler actually wrote, and that is the file the bitcode path
+            // has to be embedded into. (`clang -c` rejects `-o` for more than
+            // one input, so a single output filename is unambiguous here.)
+            if self.is_compile_only && !self.output_filename.is_empty() {
+                let explicit_output = PathBuf::from(&self.output_filename);
+                object_filepath = if explicit_output.is_absolute() {
+                    explicit_output
+                } else {
+                    env::current_dir()?.join(explicit_output)
+                };
+            }
 
             // Update the bitcode filepath, if the bitcode store path is provided
             if let Some(bitcode_store_path) = rllvm_config().bitcode_store_path() {
