@@ -67,6 +67,17 @@ pub trait CompilerWrapper {
         if !args_info.forbidden_flags().is_empty() {
             let forbidden_flags_set: HashSet<String> =
                 HashSet::from_iter(args_info.forbidden_flags().iter().cloned());
+
+            // Report every dropped flag once, so the user knows the resulting
+            // binary differs from the one their command asked for
+            let mut removed_flags: Vec<&str> =
+                forbidden_flags_set.iter().map(String::as_str).collect();
+            removed_flags.sort_unstable();
+            tracing::warn!(
+                "Removed the following flag(s) from the compilation, as they are incompatible with bitcode generation: {}",
+                removed_flags.join(", ")
+            );
+
             args.retain(|x| !forbidden_flags_set.contains(x));
         }
 
