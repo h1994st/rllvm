@@ -264,6 +264,35 @@ fn embed_with_objcopy(
     Ok(())
 }
 
+/// Carry the Mach-O `LC_BUILD_VERSION` command across a rebuild.
+///
+/// [`copy_object_file`] reconstructs the object from the pieces the writer
+/// models — sections, symbols, relocations, comdats — and anything outside that
+/// set is silently dropped. `LC_BUILD_VERSION` is one such casualty, and losing
+/// it makes the linker report `no platform load command found in '...',
+/// assuming: macOS` for every object rllvm touches.
+///
+/// Only `LC_BUILD_VERSION` is restored. Objects from older toolchains carry
+/// `LC_VERSION_MIN_MACOSX` instead, which the writer cannot emit.
+fn copy_macho_build_version(in_object: &File, out_object: &mut write::Object) -> Result<(), Error> {
+    let build_version = match in_object {
+        File::MachO32(macho) => macho.build_version()?,
+        File::MachO64(macho) => macho.build_version()?,
+        _ => return Ok(()),
+    };
+
+    if let Some(build_version) = build_version {
+        let endian = in_object.endianness();
+        let mut version = write::MachOBuildVersion::default();
+        version.platform = build_version.platform.get(endian);
+        version.minos = build_version.minos.get(endian);
+        version.sdk = build_version.sdk.get(endian);
+        out_object.set_macho_build_version(version);
+    }
+
+    Ok(())
+}
+
 fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     if in_object.kind() != ObjectKind::Relocatable {
         return Err(Error::InvalidArguments(format!(
@@ -279,6 +308,7 @@ fn copy_object_file(in_object: File) -> Result<write::Object, Error> {
     );
     out_object.mangling = write::Mangling::None;
     out_object.flags = in_object.flags();
+    copy_macho_build_version(&in_object, &mut out_object)?;
 
     // Sections
     let mut out_sections = HashMap::new();
@@ -517,6 +547,48 @@ mod tests {
     /// missing. `/tmp/...` is not absolute on Windows.
     fn tmp_bitcode(name: &str) -> PathBuf {
         std::env::temp_dir().join(name)
+    }
+
+    /// Read the `LC_BUILD_VERSION` triple from a Mach-O object, if present.
+    fn macho_build_version(object_file: &File) -> Option<(u32, u32, u32)> {
+        let endian = object_file.endianness();
+        let build_version = match object_file {
+            File::MachO32(macho) => macho.build_version().ok()?,
+            File::MachO64(macho) => macho.build_version().ok()?,
+            _ => return None,
+        }?;
+        Some((
+            build_version.platform.get(endian),
+            build_version.minos.get(endian),
+            build_version.sdk.get(endian),
+        ))
+    }
+
+    #[test]
+    fn test_macho_build_version_survives_rebuild() {
+        // Rebuilding an object drops anything the writer does not model. Losing
+        // the platform load command makes the linker fall back to a guess and
+        // warn on every object, so it has to be carried across explicitly.
+        let data = fs::read(test_case!("hello.o")).expect("Failed to read the fixture");
+        let in_object = object::File::parse(&*data).expect("Failed to parse the fixture");
+        assert_eq!(in_object.format(), BinaryFormat::MachO);
+
+        let expected = macho_build_version(&in_object);
+        assert!(
+            expected.is_some(),
+            "fixture carries no LC_BUILD_VERSION, so this test would prove nothing"
+        );
+
+        let rebuilt = copy_object_file(in_object).expect("Failed to rebuild the object");
+        let rebuilt_data = rebuilt.write().expect("Failed to serialize the object");
+        let rebuilt_object =
+            object::File::parse(&*rebuilt_data).expect("Failed to parse the rebuilt object");
+
+        assert_eq!(
+            macho_build_version(&rebuilt_object),
+            expected,
+            "LC_BUILD_VERSION was not preserved across the rebuild"
+        );
     }
 
     #[test]
