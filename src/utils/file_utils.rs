@@ -559,7 +559,6 @@ pub fn extract_bitcode_filepaths_from_parsed_objects(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::test_case;
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -595,14 +594,14 @@ mod tests {
         // Rebuilding an object drops anything the writer does not model. Losing
         // the platform load command makes the linker fall back to a guess and
         // warn on every object, so it has to be carried across explicitly.
-        let data = fs::read(test_case!("hello.o")).expect("Failed to read the fixture");
-        let in_object = object::File::parse(&*data).expect("Failed to parse the fixture");
+        let data = create_minimal_macho_object();
+        let in_object = object::File::parse(&*data).expect("Failed to parse the object");
         assert_eq!(in_object.format(), BinaryFormat::MachO);
 
         let expected = macho_build_version(&in_object);
         assert!(
             expected.is_some(),
-            "fixture carries no LC_BUILD_VERSION, so this test would prove nothing"
+            "the object carries no LC_BUILD_VERSION, so this test would prove nothing"
         );
 
         let rebuilt = copy_object_file(in_object).expect("Failed to rebuild the object");
@@ -631,7 +630,9 @@ mod tests {
         );
 
         // A real relocatable object still answers "yes".
-        assert!(is_object_file(Path::new(test_case!("hello.o"))).expect("Failed to classify"));
+        let object_path = dir.path().join("real.obj");
+        create_minimal_coff_object(&object_path);
+        assert!(is_object_file(&object_path).expect("Failed to classify"));
     }
 
     #[test]
@@ -659,9 +660,11 @@ mod tests {
     fn test_path_injection_and_extraction() {
         let bitcode_pathbuf = tmp_bitcode("hello.bc");
         let bitcode_filepath = bitcode_pathbuf.as_path();
-        let object_filepath = Path::new(test_case!("hello.o"));
 
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let object_pathbuf = dir.path().join("hello.o");
+        fs::write(&object_pathbuf, create_minimal_macho_object()).expect("Failed to write");
+        let object_filepath = object_pathbuf.as_path();
         let output_pathbuf = dir.path().join("hello.new.o");
         let output_object_filepath = output_pathbuf.as_path();
 
@@ -685,10 +688,19 @@ mod tests {
 
     #[test]
     fn test_paths_extraction() {
-        let object_filepath = Path::new(test_case!("foo_bar_baz.dylib"));
+        // The linker concatenates the bitcode sections of the objects it
+        // merges, so a linked artifact carries several newline-separated paths
+        // in one section. Reproduce that shape directly.
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let object_filepath = dir.path().join("merged.obj");
+        create_object_with_bitcode_paths(
+            &object_filepath,
+            &["/tmp/foo.bc", "/tmp/bar.bc", "/tmp/baz.bc", "/tmp/bar.bc"],
+        );
 
-        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(object_filepath)
+        let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&object_filepath)
             .expect("Failed to extract embedded filepaths");
+        // Sorted and deduplicated: four entries, one repeated.
         assert_eq!(embedded_filepaths.len(), 3);
 
         let expected_filepaths = vec![
@@ -701,6 +713,64 @@ mod tests {
     }
 
     /// Create a minimal COFF object file using the `object` crate's write API.
+    /// Build a minimal Mach-O relocatable object carrying `LC_BUILD_VERSION`.
+    ///
+    /// Synthesized rather than read from a checked-in fixture so the crate
+    /// ships no test binaries, and so the test runs on any host — a Mach-O
+    /// object produced by the local compiler would be ELF on Linux.
+    fn create_minimal_macho_object() -> Vec<u8> {
+        use object::Architecture;
+
+        let mut obj = write::Object::new(
+            BinaryFormat::MachO,
+            Architecture::Aarch64,
+            object::Endianness::Little,
+        );
+        // `MachOBuildVersion` is non-exhaustive, so it has to be built by
+        // assignment rather than a struct literal.
+        let mut build_version = write::MachOBuildVersion::default();
+        build_version.platform = object::macho::PLATFORM_MACOS;
+        build_version.minos = object::macho::Version(0x000f_0000);
+        build_version.sdk = object::macho::Version(0x000f_0000);
+        obj.set_macho_build_version(build_version);
+        let section_id = obj.add_section(b"__TEXT".to_vec(), b"__text".to_vec(), SectionKind::Text);
+        // `ret` on arm64
+        obj.section_mut(section_id)
+            .set_data(&[0xc0, 0x03, 0x5f, 0xd6], 4);
+
+        obj.write().expect("Failed to write Mach-O object")
+    }
+
+    /// Write a relocatable object whose bitcode section already holds several
+    /// newline-separated paths, as it would after the linker concatenated the
+    /// sections of several objects.
+    fn create_object_with_bitcode_paths(path: &Path, paths: &[&str]) {
+        use object::Architecture;
+
+        let mut obj = write::Object::new(
+            BinaryFormat::Coff,
+            Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        let text_id = obj.add_section(vec![], b".text".to_vec(), SectionKind::Text);
+        obj.section_mut(text_id).set_data(&[0xc3], 1);
+
+        let payload: String = paths.iter().map(|p| format!("{p}\n")).collect();
+        let section_id = obj.add_section(
+            vec![],
+            COFF_SECTION_NAME.as_bytes().to_vec(),
+            SectionKind::Unknown,
+        );
+        let section = obj.section_mut(section_id);
+        section.set_data(payload.as_bytes(), 1);
+        section.flags = SectionFlags::Coff {
+            characteristics: object::pe::SectionFlags(0),
+        };
+
+        let data = obj.write().expect("Failed to write object");
+        fs::write(path, data).expect("Failed to write object file");
+    }
+
     fn create_minimal_coff_object(path: &Path) {
         use object::Architecture;
 

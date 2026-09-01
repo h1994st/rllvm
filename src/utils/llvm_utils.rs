@@ -176,10 +176,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        compiler_wrapper::{CompilerKind, CompilerWrapper, llvm::ClangWrapper},
-        utils::test_case,
-    };
+    use crate::compiler_wrapper::{CompilerKind, CompilerWrapper, llvm::ClangWrapper};
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -199,59 +196,58 @@ mod tests {
         }));
     }
 
-    fn build_bitcode_files(label: &str) -> bool {
-        let bitcode_filepaths = [
-            PathBuf::from(format!("/tmp/{}_bar.bc", label)),
-            PathBuf::from(format!("/tmp/{}_baz.bc", label)),
-            PathBuf::from(format!("/tmp/{}_foo.bc", label)),
+    /// Compile three small sources to bitcode inside a temporary directory.
+    ///
+    /// The sources are written here rather than read from `tests/data`, so the
+    /// published crate needs no fixture files, and the temporary directory
+    /// keeps concurrent test runs from colliding in `/tmp`.
+    fn build_bitcode_files(dir: &Path) -> Vec<PathBuf> {
+        let sources = [
+            ("bar", "int bar(int a) { return a + 1; }\n"),
+            (
+                "baz",
+                "float baz_max(double a, double b) { return (float)(a > b ? a : b); }\n",
+            ),
+            ("foo", "int foo(int a, int b) { return a + b; }\n"),
         ];
 
-        let input_args = [
-            [
-                "-c",
-                "-emit-llvm",
-                "-o",
-                bitcode_filepaths[0].to_str().unwrap(),
-                test_case!("bar.c"),
-            ],
-            [
-                "-c",
-                "-emit-llvm",
-                "-o",
-                bitcode_filepaths[1].to_str().unwrap(),
-                test_case!("baz.c"),
-            ],
-            [
-                "-c",
-                "-emit-llvm",
-                "-o",
-                bitcode_filepaths[2].to_str().unwrap(),
-                test_case!("foo.c"),
-            ],
-        ];
+        sources
+            .iter()
+            .map(|(name, contents)| {
+                let source_path = dir.join(format!("{name}.c"));
+                fs::write(&source_path, contents).expect("Failed to write the source file");
 
-        input_args.iter().all(|args| {
-            let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang)
-                .expect("Failed to build the clang wrapper");
-            cc.parse_args(args).unwrap().run().unwrap() == Some(0)
-        })
+                let bitcode_path = dir.join(format!("{name}.bc"));
+                let args = [
+                    "-c",
+                    "-emit-llvm",
+                    "-o",
+                    bitcode_path.to_str().unwrap(),
+                    source_path.to_str().unwrap(),
+                ];
+
+                let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang)
+                    .expect("Failed to build the clang wrapper");
+                assert_eq!(
+                    cc.parse_args(&args).unwrap().run().unwrap(),
+                    Some(0),
+                    "Failed to generate bitcode for {name}.c"
+                );
+
+                bitcode_path
+            })
+            .collect()
     }
 
     #[test]
     fn test_link_bitcode_files() {
-        // Prepare input bitcode files
-        assert!(build_bitcode_files("link"));
-
-        let bitcode_filepaths = [
-            Path::new("/tmp/link_bar.bc"),
-            Path::new("/tmp/link_baz.bc"),
-            Path::new("/tmp/link_foo.bc"),
-        ];
-
-        let output_filepath = Path::new("/tmp/foo_bar_baz.bc");
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let bitcode_filepaths = build_bitcode_files(dir.path());
+        let output_pathbuf = dir.path().join("foo_bar_baz.bc");
+        let output_filepath = output_pathbuf.as_path();
 
         assert!(
-            link_bitcode_files(&bitcode_filepaths, output_filepath).map_or_else(
+            link_bitcode_files(&bitcode_filepaths, output_pathbuf.clone()).map_or_else(
                 |err| {
                     println!("Failed to link bitcode files: {:?}", err);
                     false
@@ -262,29 +258,17 @@ mod tests {
 
         // Check if the output file is successfully created
         assert!(output_filepath.exists() && output_filepath.is_file());
-
-        // Clean
-        fs::remove_file(output_filepath).expect("Failed to delete the output bitcode file");
-        bitcode_filepaths.iter().for_each(|&bitcode_filepath| {
-            fs::remove_file(bitcode_filepath).expect("Failed to delete the input bitcode file")
-        });
     }
 
     #[test]
     fn test_archive_bitcode_files() {
-        // Prepare input bitcode files
-        assert!(build_bitcode_files("archive"));
-
-        let bitcode_filepaths = [
-            Path::new("/tmp/archive_bar.bc"),
-            Path::new("/tmp/archive_baz.bc"),
-            Path::new("/tmp/archive_foo.bc"),
-        ];
-
-        let output_filepath = Path::new("/tmp/foo_bar_baz.bca");
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let bitcode_filepaths = build_bitcode_files(dir.path());
+        let output_pathbuf = dir.path().join("foo_bar_baz.bca");
+        let output_filepath = output_pathbuf.as_path();
 
         assert!(
-            archive_bitcode_files(&bitcode_filepaths, output_filepath).map_or_else(
+            archive_bitcode_files(&bitcode_filepaths, output_pathbuf.clone()).map_or_else(
                 |err| {
                     println!("Failed to archive bitcode files: {:?}", err);
                     false
@@ -311,10 +295,6 @@ mod tests {
             )
         );
 
-        // Clean
-        fs::remove_file(output_filepath).expect("Failed to delete the output bitcode file");
-        bitcode_filepaths.iter().for_each(|&bitcode_filepath| {
-            fs::remove_file(bitcode_filepath).expect("Failed to delete the input bitcode file")
-        });
+        // The TempDir cleans up every artifact when it drops.
     }
 }
