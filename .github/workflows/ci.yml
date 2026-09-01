@@ -130,10 +130,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install MSRV toolchain
-        run: rustup update 1.85
+        run: rustup update 1.88
 
       - name: Set MSRV as default
-        run: rustup default 1.85
+        run: rustup default 1.88
 
       - name: Install LLVM/Clang
         run: |
@@ -170,4 +170,4 @@ jobs:
         with:
           token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
           files: lcov.info
-          fail_ci_if_error: true
+          fail_ci_if_error: false

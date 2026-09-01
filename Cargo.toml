@@ -3,16 +3,14 @@ authors = ["Shengtuo Hu <h1994st@gmail.com>"]
 categories = ["command-line-utilities", "development-tools", "development-tools::build-utils"]
 description = "A tool to build whole-program LLVM bitcode files"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 exclude = [
   "tests/*",
   ".github/*",
-  "Cargo.lock",
 ]
 keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
 homepage = "https://github.com/h1994st/rllvm"
 license = "GPL-3.0"
-license-file = "LICENSE"
 name = "rllvm"
 readme = "README.md"
 repository = "https://github.com/h1994st/rllvm"
