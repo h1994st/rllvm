@@ -1,5 +1,7 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use tempfile::TempDir;
 
@@ -9,6 +11,55 @@ fn cargo_bin(name: &str) -> PathBuf {
     path.pop();
     path.push(name);
     path
+}
+
+/// Writes a configuration file describing the LLVM installation on this machine
+/// and returns its path.
+///
+/// Without this the wrappers fall back to `~/.rllvm/config.toml`, which makes
+/// the suite depend on whatever the developer happens to have configured — a
+/// stale entry there fails every test before any behavior is exercised.
+fn test_config_path() -> &'static Path {
+    static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
+    CONFIG_PATH.get_or_init(|| {
+        let llvm_config = find_llvm_config().expect("llvm-config not found; is LLVM installed?");
+        let output = Command::new(&llvm_config)
+            .arg("--bindir")
+            .output()
+            .expect("Failed to run llvm-config --bindir");
+        assert!(output.status.success(), "llvm-config --bindir failed");
+        let bindir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+
+        let tool = |name: &str| bindir.join(name).display().to_string();
+        let contents = format!(
+            "llvm_config_filepath = '{}'\n\
+             clang_filepath = '{}'\n\
+             clangxx_filepath = '{}'\n\
+             llvm_ar_filepath = '{}'\n\
+             llvm_link_filepath = '{}'\n\
+             llvm_objcopy_filepath = '{}'\n",
+            llvm_config.display(),
+            tool("clang"),
+            tool("clang++"),
+            tool("llvm-ar"),
+            tool("llvm-link"),
+            tool("llvm-objcopy"),
+        );
+
+        let config_dir = std::env::temp_dir().join("rllvm-integration-tests");
+        fs::create_dir_all(&config_dir).expect("Failed to create the test config directory");
+        let config_path = config_dir.join("config.toml");
+        fs::write(&config_path, contents).expect("Failed to write the test config file");
+        config_path
+    })
+}
+
+/// Returns a `Command` for one of the rllvm binaries, pinned to the isolated
+/// test configuration.
+fn rllvm(name: &str) -> Command {
+    let mut command = Command::new(cargo_bin(name));
+    command.env("RLLVM_CONFIG", test_config_path());
+    command
 }
 
 /// Returns the absolute path to a test fixture file in tests/data/.
@@ -48,18 +99,18 @@ fn find_llvm_config() -> Option<PathBuf> {
     #[cfg(target_vendor = "apple")]
     {
         // Search Homebrew cellar
-        if let Ok(output) = Command::new("brew").arg("--cellar").output() {
-            if output.status.success() {
-                let cellar = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                for pattern in &[
-                    format!("{cellar}/llvm@*/*/bin/llvm-config"),
-                    format!("{cellar}/llvm/*/bin/llvm-config"),
-                ] {
-                    if let Ok(paths) = glob::glob(pattern) {
-                        if let Some(Ok(p)) = paths.last() {
-                            return Some(p);
-                        }
-                    }
+        if let Ok(output) = Command::new("brew").arg("--cellar").output()
+            && output.status.success()
+        {
+            let cellar = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            for pattern in &[
+                format!("{cellar}/llvm@*/*/bin/llvm-config"),
+                format!("{cellar}/llvm/*/bin/llvm-config"),
+            ] {
+                if let Ok(paths) = glob::glob(pattern)
+                    && let Some(Ok(p)) = paths.last()
+                {
+                    return Some(p);
                 }
             }
         }
@@ -121,7 +172,7 @@ fn compile_single_c_file_and_extract_bitcode() {
     let object_path = tmp.path().join("foo.o");
 
     // Step 1: Compile foo.c with rllvm-cc (compile-only mode)
-    let status = Command::new(cargo_bin("rllvm-cc"))
+    let status = rllvm("rllvm-cc")
         .args(["--", "-c", "-o"])
         .arg(&object_path)
         .arg(fixture("foo.c"))
@@ -132,7 +183,7 @@ fn compile_single_c_file_and_extract_bitcode() {
 
     // Step 2: Extract bitcode with rllvm-get-bc
     let bitcode_path = tmp.path().join("foo.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&object_path)
         .args(["-o"])
         .arg(&bitcode_path)
@@ -149,9 +200,11 @@ fn compile_multiple_c_files_and_link() {
     let tmp = TempDir::new().unwrap();
     let output_path = tmp.path().join("combined");
 
-    // Compile and link foo.c + bar.c + baz.c into a single output
-    let status = Command::new(cargo_bin("rllvm-cc"))
-        .args(["--", "-o"])
+    // Compile and link foo.c + bar.c + baz.c into a single output. These
+    // fixtures are library functions with no `main`, so they link as a shared
+    // library rather than an executable.
+    let status = rllvm("rllvm-cc")
+        .args(["--", "-shared", "-fPIC", "-o"])
         .arg(&output_path)
         .arg(fixture("foo.c"))
         .arg(fixture("bar.c"))
@@ -163,7 +216,7 @@ fn compile_multiple_c_files_and_link() {
 
     // Extract bitcode from the linked output
     let bitcode_path = tmp.path().join("combined.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&output_path)
         .args(["-o"])
         .arg(&bitcode_path)
@@ -192,7 +245,7 @@ int main(void) { return square(3) - 9; }
     let object_path = tmp.path().join("main.o");
 
     // Compile with rllvm-cc
-    let status = Command::new(cargo_bin("rllvm-cc"))
+    let status = rllvm("rllvm-cc")
         .args(["--", "-c", "-o"])
         .arg(&object_path)
         .arg(&c_source)
@@ -202,7 +255,7 @@ int main(void) { return square(3) - 9; }
 
     // Extract bitcode
     let bitcode_path = tmp.path().join("main.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&object_path)
         .args(["-o"])
         .arg(&bitcode_path)
@@ -233,7 +286,7 @@ int main(void) {
     let exe_path = tmp.path().join("hello");
 
     // Compile + link with rllvm-cc
-    let status = Command::new(cargo_bin("rllvm-cc"))
+    let status = rllvm("rllvm-cc")
         .args(["--", "-o"])
         .arg(&exe_path)
         .arg(&c_source)
@@ -254,7 +307,7 @@ int main(void) {
 
     // Extract bitcode
     let bitcode_path = tmp.path().join("hello.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&exe_path)
         .args(["-o"])
         .arg(&bitcode_path)
@@ -271,7 +324,7 @@ fn compile_cxx_file_and_extract_bitcode() {
     let exe_path = tmp.path().join("hello_cxx");
 
     // Compile hello.cc with rllvm-cxx
-    let status = Command::new(cargo_bin("rllvm-cxx"))
+    let status = rllvm("rllvm-cxx")
         .args(["--", "-o"])
         .arg(&exe_path)
         .arg(fixture("hello.cc"))
@@ -292,7 +345,7 @@ fn compile_cxx_file_and_extract_bitcode() {
 
     // Extract bitcode
     let bitcode_path = tmp.path().join("hello_cxx.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&exe_path)
         .args(["-o"])
         .arg(&bitcode_path)
@@ -309,7 +362,7 @@ fn get_bc_with_manifest_flag() {
     let object_path = tmp.path().join("foo.o");
 
     // Compile
-    let status = Command::new(cargo_bin("rllvm-cc"))
+    let status = rllvm("rllvm-cc")
         .args(["--", "-c", "-o"])
         .arg(&object_path)
         .arg(fixture("foo.c"))
@@ -319,7 +372,7 @@ fn get_bc_with_manifest_flag() {
 
     // Extract with manifest flag
     let bitcode_path = tmp.path().join("foo.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&object_path)
         .args(["-m", "-o"])
         .arg(&bitcode_path)
@@ -356,7 +409,7 @@ fn compile_with_optimization_flags() {
     let object_path = tmp.path().join("foo_opt.o");
 
     // Compile with -O2
-    let status = Command::new(cargo_bin("rllvm-cc"))
+    let status = rllvm("rllvm-cc")
         .args(["--", "-O2", "-c", "-o"])
         .arg(&object_path)
         .arg(fixture("foo.c"))
@@ -366,7 +419,7 @@ fn compile_with_optimization_flags() {
 
     // Extract and verify bitcode
     let bitcode_path = tmp.path().join("foo_opt.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&object_path)
         .args(["-o"])
         .arg(&bitcode_path)
@@ -386,7 +439,7 @@ fn compile_to_static_archive_and_extract() {
         .iter()
         .map(|name| {
             let obj = tmp.path().join(format!("{name}.o"));
-            let status = Command::new(cargo_bin("rllvm-cc"))
+            let status = rllvm("rllvm-cc")
                 .args(["--", "-c", "-o"])
                 .arg(&obj)
                 .arg(fixture(&format!("{name}.c")))
@@ -410,7 +463,7 @@ fn compile_to_static_archive_and_extract() {
 
     // Extract bitcode from archive
     let bitcode_path = tmp.path().join("libfoo.a.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
+    let status = rllvm("rllvm-get-bc")
         .arg(&archive_path)
         .args(["-o"])
         .arg(&bitcode_path)
