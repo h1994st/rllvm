@@ -94,23 +94,23 @@ fn parse_ir(ir: &str, file_path: PathBuf, file_size: u64) -> BitcodeInfo {
         }
 
         // Function definition start: "define ... @name(...) {"
-        if trimmed.starts_with("define ") {
-            if let Some(name) = extract_function_name(trimmed) {
-                // Close any previous function (shouldn't happen with well-formed IR)
-                if let Some(prev_name) = current_func_name.take() {
-                    functions.push(FunctionInfo {
-                        name: prev_name,
-                        basic_block_count: current_bb_count,
-                        instruction_count: current_instr_count,
-                    });
-                }
-                current_func_name = Some(name);
-                current_bb_count = 0;
-                current_instr_count = 0;
-                // The entry block is implicit (first label after define)
-                // We count it when we see the first instruction or label
-                continue;
+        // `extract_function_name` accepts definitions only, so no separate
+        // prefix check is needed here.
+        if let Some(name) = extract_function_name(trimmed) {
+            // Close any previous function (shouldn't happen with well-formed IR)
+            if let Some(prev_name) = current_func_name.take() {
+                functions.push(FunctionInfo {
+                    name: prev_name,
+                    basic_block_count: current_bb_count,
+                    instruction_count: current_instr_count,
+                });
             }
+            current_func_name = Some(name);
+            current_bb_count = 0;
+            current_instr_count = 0;
+            // The entry block is implicit (first label after define)
+            // We count it when we see the first instruction or label
+            continue;
         }
 
         // Inside a function body
@@ -166,6 +166,11 @@ fn parse_ir(ir: &str, file_path: PathBuf, file_size: u64) -> BitcodeInfo {
 ///
 /// Looks for `@name(` pattern in the line.
 fn extract_function_name(line: &str) -> Option<String> {
+    // Only definitions carry a body. `declare` lines are prototypes (LLVM
+    // intrinsics, external symbols) and must not be counted as functions.
+    if !line.starts_with("define ") {
+        return None;
+    }
     let at_pos = line.find('@')?;
     let after_at = &line[at_pos + 1..];
     let end = after_at.find('(')?;
