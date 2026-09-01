@@ -10,6 +10,7 @@ use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
     cache,
     config::rllvm_config,
+    diagnostics::print_warning,
     error::Error,
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
 };
@@ -73,10 +74,17 @@ pub trait CompilerWrapper {
             let mut removed_flags: Vec<&str> =
                 forbidden_flags_set.iter().map(String::as_str).collect();
             removed_flags.sort_unstable();
-            tracing::warn!(
+            let message = format!(
                 "Removed the following flag(s) from the compilation, as they are incompatible with bitcode generation: {}",
                 removed_flags.join(", ")
             );
+
+            // Deliberately not a `tracing::warn!`: the default log level is
+            // ERROR, so a log record would be invisible to exactly the
+            // non-interactive build-system runs that most need to know the
+            // produced binary differs from the one they asked for. This goes
+            // straight to stderr, where compiler diagnostics belong
+            print_warning(&message);
 
             args.retain(|x| !forbidden_flags_set.contains(x));
         }
