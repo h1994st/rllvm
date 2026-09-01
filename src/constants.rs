@@ -1,12 +1,43 @@
 //! Constants used by the argument parser
 
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use std::{collections::HashMap, sync::OnceLock};
 
-use crate::arg_parser::{ArgInfo, ArgPatternInfo, CompilerArgsInfo};
+use crate::arg_parser::{ArgInfo, CallbackFn, CompilerArgsInfo};
 
 type CallbackMap = HashMap<&'static str, ArgInfo<String>>;
-type PatternCallbackVec = Vec<ArgPatternInfo<String>>;
+/// Ordered pattern table for arguments that no exact match handled.
+///
+/// Matching is a single `RegexSet` pass rather than a test per pattern.
+/// Declaration order still decides the winner — `^-Wl,.+$` has to beat
+/// `^-W[^l].*$`, for instance — and `SetMatches::iter` yields indices in
+/// ascending order, so "first declared match wins" is preserved.
+pub struct ArgPatternTable {
+    set: RegexSet,
+    arg_infos: Vec<ArgInfo<String>>,
+}
+
+impl ArgPatternTable {
+    fn new(entries: Vec<(&str, usize, CallbackFn<String>)>) -> Self {
+        let set = RegexSet::new(entries.iter().map(|(pattern, _, _)| *pattern))
+            .expect("argument patterns must compile");
+        let arg_infos = entries
+            .into_iter()
+            .map(|(_, arity, handler)| ArgInfo::new(arity, handler))
+            .collect();
+
+        Self { set, arg_infos }
+    }
+
+    /// Returns the handler for the first declared pattern that matches.
+    pub fn first_match(&self, arg: &str) -> Option<&ArgInfo<String>> {
+        self.set
+            .matches(arg)
+            .iter()
+            .next()
+            .map(|index| &self.arg_infos[index])
+    }
+}
 
 pub const DARWIN_SEGMENT_NAME: &str = "__RLLVM";
 pub const DARWIN_SECTION_NAME: &str = "__llvm_bc";
@@ -451,84 +482,84 @@ pub fn is_object_file_name(arg: &str) -> bool {
         .any(|pattern| pattern.is_match(arg))
 }
 
-pub fn arg_patterns() -> &'static PatternCallbackVec {
-    static ARG_PATTERNS: OnceLock<PatternCallbackVec> = OnceLock::new();
+pub fn arg_patterns() -> &'static ArgPatternTable {
+    static ARG_PATTERNS: OnceLock<ArgPatternTable> = OnceLock::new();
     ARG_PATTERNS.get_or_init(|| {
-        vec![
-            ArgPatternInfo::new(r"^-MF.*$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-MJ.*$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-MQ.*$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-MT.*$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-Wl,.+$", 0, CompilerArgsInfo::link_unary),
-            ArgPatternInfo::new(r"^-W[^l].*$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-W[l][^,].*$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-(l|L).+$", 0, CompilerArgsInfo::link_unary),
-            ArgPatternInfo::new(r"^-I.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-D.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-B.+$", 0, CompilerArgsInfo::compile_link_unary),
-            ArgPatternInfo::new(r"^-isystem.+$", 0, CompilerArgsInfo::compile_link_unary),
-            ArgPatternInfo::new(r"^-U.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-fsanitize=.+$", 0, CompilerArgsInfo::compile_link_unary),
-            ArgPatternInfo::new(r"^-fuse-ld=.+$", 0, CompilerArgsInfo::link_unary),
-            ArgPatternInfo::new(r"^-flto=.+$", 0, CompilerArgsInfo::lto),
-            ArgPatternInfo::new(r"^-f.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-rtlib=.+$", 0, CompilerArgsInfo::link_unary),
-            ArgPatternInfo::new(r"^-std=.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-stdlib=.+$", 0, CompilerArgsInfo::compile_link_unary),
-            ArgPatternInfo::new(r"^-mtune=.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^--sysroot=.+$", 0, CompilerArgsInfo::compile_link_unary),
-            ArgPatternInfo::new(r"^-print-.*$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(
+        ArgPatternTable::new(vec![
+            (r"^-MF.*$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-MJ.*$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-MQ.*$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-MT.*$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-Wl,.+$", 0, CompilerArgsInfo::link_unary),
+            (r"^-W[^l].*$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-W[l][^,].*$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-(l|L).+$", 0, CompilerArgsInfo::link_unary),
+            (r"^-I.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-D.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-B.+$", 0, CompilerArgsInfo::compile_link_unary),
+            (r"^-isystem.+$", 0, CompilerArgsInfo::compile_link_unary),
+            (r"^-U.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-fsanitize=.+$", 0, CompilerArgsInfo::compile_link_unary),
+            (r"^-fuse-ld=.+$", 0, CompilerArgsInfo::link_unary),
+            (r"^-flto=.+$", 0, CompilerArgsInfo::lto),
+            (r"^-f.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-rtlib=.+$", 0, CompilerArgsInfo::link_unary),
+            (r"^-std=.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-stdlib=.+$", 0, CompilerArgsInfo::compile_link_unary),
+            (r"^-mtune=.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^--sysroot=.+$", 0, CompilerArgsInfo::compile_link_unary),
+            (r"^-print-.*$", 0, CompilerArgsInfo::compile_unary),
+            (
                 r"^-mmacosx-version-min=.+$",
                 0,
                 CompilerArgsInfo::compile_link_unary,
             ),
-            ArgPatternInfo::new(
+            (
                 r"^-mstack-alignment=.+$",
                 0,
                 CompilerArgsInfo::compile_unary,
             ),
-            ArgPatternInfo::new(r"^-march=.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-mregparm=.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(r"^-mcmodel=.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(
+            (r"^-march=.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-mregparm=.+$", 0, CompilerArgsInfo::compile_unary),
+            (r"^-mcmodel=.+$", 0, CompilerArgsInfo::compile_unary),
+            (
                 r"^-mpreferred-stack-boundary=.+$",
                 0,
                 CompilerArgsInfo::compile_unary,
             ),
-            ArgPatternInfo::new(
+            (
                 r"^-mindirect-branch=.+$",
                 0,
                 CompilerArgsInfo::compile_unary,
             ),
-            ArgPatternInfo::new(r"^--param=.+$", 0, CompilerArgsInfo::compile_unary),
-            ArgPatternInfo::new(
+            (r"^--param=.+$", 0, CompilerArgsInfo::compile_unary),
+            (
                 r"^.+\.(c|cc|cpp|C|cxx|i|s|S|bc|m|mm|M)$",
                 0,
                 CompilerArgsInfo::input_file,
             ),
-            ArgPatternInfo::new(
+            (
                 r"^.+\.([fF](|[0-9][0-9]|or|OR|pp|PP))$",
                 0,
                 CompilerArgsInfo::input_file,
             ),
             // Object-file patterns come from OBJECT_FILE_NAME_PATTERNS so that
             // grouped and ungrouped members are classified identically.
-            ArgPatternInfo::new(
+            (
                 OBJECT_FILE_NAME_PATTERNS[0],
                 0,
                 CompilerArgsInfo::object_file,
             ),
-            ArgPatternInfo::new(
+            (
                 OBJECT_FILE_NAME_PATTERNS[1],
                 0,
                 CompilerArgsInfo::object_file,
             ),
-            ArgPatternInfo::new(
+            (
                 OBJECT_FILE_NAME_PATTERNS[2],
                 0,
                 CompilerArgsInfo::object_file,
             ),
-        ]
+        ])
     })
 }
