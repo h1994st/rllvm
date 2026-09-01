@@ -39,7 +39,8 @@ struct DetectedTools {
     clangxx: PathBuf,
     llvm_ar: PathBuf,
     llvm_link: PathBuf,
-    llvm_objcopy: PathBuf,
+    /// Optional: recorded when present, but no code path invokes it today
+    llvm_objcopy: Option<PathBuf>,
 }
 
 fn find_llvm_config_with_prefix(prefix: &Path) -> Result<PathBuf, Error> {
@@ -105,7 +106,6 @@ fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
         ("clang++", &clangxx),
         ("llvm-ar", &llvm_ar),
         ("llvm-link", &llvm_link),
-        ("llvm-objcopy", &llvm_objcopy),
     ];
 
     let mut missing = Vec::new();
@@ -125,6 +125,16 @@ fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
         )));
     }
 
+    // `llvm-objcopy` is optional: it is recorded when present, but nothing
+    // invokes it, so its absence is not a failure.
+    let llvm_objcopy = if llvm_objcopy.exists() {
+        eprintln!("  llvm-objcopy: OK");
+        Some(llvm_objcopy)
+    } else {
+        eprintln!("  llvm-objcopy: not found (optional)");
+        None
+    };
+
     Ok(DetectedTools {
         llvm_config,
         llvm_version,
@@ -137,21 +147,28 @@ fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
 }
 
 fn generate_toml(tools: &DetectedTools) -> String {
-    format!(
+    let mut toml_content = format!(
         r#"llvm_config_filepath = "{}"
 clang_filepath = "{}"
 clangxx_filepath = "{}"
 llvm_ar_filepath = "{}"
 llvm_link_filepath = "{}"
-llvm_objcopy_filepath = "{}"
 "#,
         tools.llvm_config.display(),
         tools.clang.display(),
         tools.clangxx.display(),
         tools.llvm_ar.display(),
         tools.llvm_link.display(),
-        tools.llvm_objcopy.display(),
-    )
+    );
+
+    if let Some(llvm_objcopy) = &tools.llvm_objcopy {
+        toml_content.push_str(&format!(
+            "llvm_objcopy_filepath = \"{}\"\n",
+            llvm_objcopy.display()
+        ));
+    }
+
+    toml_content
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -177,7 +194,10 @@ fn main() -> Result<(), Error> {
     eprintln!("clang++      : {}", tools.clangxx.display());
     eprintln!("llvm-ar      : {}", tools.llvm_ar.display());
     eprintln!("llvm-link    : {}", tools.llvm_link.display());
-    eprintln!("llvm-objcopy : {}", tools.llvm_objcopy.display());
+    match &tools.llvm_objcopy {
+        Some(llvm_objcopy) => eprintln!("llvm-objcopy : {}", llvm_objcopy.display()),
+        None => eprintln!("llvm-objcopy : (not found, optional)"),
+    }
 
     if args.dry_run {
         eprintln!();
