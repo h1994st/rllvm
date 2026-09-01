@@ -72,7 +72,14 @@ The bitcode file itself is always `.{stem}.o.bc` next to the source, unless `bit
 
 Note this compiles each translation unit more than once in link mode (once as part of the original command, once for the intermediate object, once for bitcode). That is known redundancy, not a bug to "fix" accidentally.
 
-Bitcode embedding does *not* use `llvm-objcopy`. `file_utils.rs::copy_object_file` rebuilds the object with the `object` crate's writer and adds the section; WASM is special-cased because that writer has no WASM support. `llvm_objcopy_filepath` remains an optional config key that no code path actually executes; it is recorded when found so a planned switch to `llvm-objcopy --add-section` keeps its config surface.
+Bitcode embedding has two paths, and the order matters:
+
+1. **`llvm-objcopy --add-section`**, when `llvm_objcopy_filepath` is configured and present. It edits the file in place, copying load commands through without needing to understand them, so nothing is lost.
+2. **`file_utils.rs::copy_object_file`** otherwise — it rebuilds the object through the `object` crate's writer, which is a *synthesizer*: it emits a new file from an abstract model and has no channel for input bytes it does not model. Anything outside that model is dropped.
+
+The fallback is genuinely lossy, not merely less tidy. `LC_BUILD_VERSION` is carried across explicitly by name (without it the linker warns `no platform load command found` on every object), but other unmodeled commands still vanish — an Objective-C object loses all 8 of its `LC_LINKER_OPTION` commands, which carry autolink directives, so the result can fail to link. **Prefer objcopy; do not "simplify" by deleting that path.**
+
+WASM never uses objcopy: it appends a custom section to the raw binary, because the `object` writer has no WASM support at all.
 
 ### Argument parsing
 
@@ -83,11 +90,15 @@ Bitcode embedding does *not* use `llvm-objcopy`. `file_utils.rs::copy_object_fil
 3. Linear scan of `arg_patterns()` regexes.
 4. Fallback: `is_object_file()` (which parses the file) decides object file vs. unrecognized compile flag.
 
-Each entry is `(arity, handler_fn_pointer)`. **Arity drives consumption independently of the handler**: the parser skips `arity` following arguments regardless of what the handler does with them, so a wrong arity silently swallows the next argument — several historical bugs came from exactly this. Handlers sort flags into `compile_args` (used for bitcode generation), `link_args` (used for the relink), `input_files`, `object_files`, or `forbidden_flags` (stripped from the user's command entirely, currently without warning).
+Each entry is `(arity, handler_fn_pointer)`. **Arity drives consumption independently of the handler**: the parser skips `arity` following arguments regardless of what the handler does with them, so a wrong arity silently swallows the next argument — several historical bugs came from exactly this. Handlers sort flags into `compile_args` (used for bitcode generation), `link_args` (used for the relink), `input_files`, `object_files`, or `forbidden_flags` (stripped from the user's command entirely, with a notice printed to stderr).
+
+The step-4 fallback must stay total: `is_object_file()` returns `Ok(false)` for anything that does not parse as an object, rather than propagating. It is asked about *every* unrecognized argument, so raising there takes down builds that merely mention a linker script or an unfamiliar source extension.
 
 ### Configuration
 
-`config.rs` loads TOML via `confy` from `$RLLVM_CONFIG`, else `~/.rllvm/config.toml`, cached in a `OnceLock`. `rllvm_config()` panics if the config cannot be loaded or inferred. Under `#[cfg(test)]` it uses `try_default()`, re-deriving every tool path from `llvm-config`, so unit tests never read a config file.
+`config.rs` reads TOML directly (via the `toml` crate — deliberately not `confy`, whose `load_path` requires `Default` and calls it to create a missing file, which forced a panic onto the first-run path). An existing file is parsed; otherwise the configuration is inferred from `llvm-config` and written out, creating parent directories.
+
+`try_rllvm_config() -> Result<&'static RLLVMConfig, Error>` is the only accessor, caching a `Result<RLLVMConfig, String>` in a `OnceLock`. The failure is stored as a message because `OnceLock` hands out shared references and `Error` is not `Clone`. Library code returns errors rather than panicking or exiting — keep it that way. Under `#[cfg(test)]` it uses `try_default()`, re-deriving every tool path from `llvm-config`, so unit tests never read a config file.
 
 ## Conventions
 
