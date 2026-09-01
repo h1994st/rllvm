@@ -507,3 +507,36 @@ fn diagnostics_go_to_stderr_not_stdout() {
         "expected diagnostics on stderr, got: {stderr}"
     );
 }
+
+#[test]
+fn compile_objective_c_file_and_extract_bitcode() {
+    let tmp = TempDir::new().unwrap();
+    let src_path = tmp.path().join("objc.m");
+    // Plain C content in a `.m` file: enough to exercise the Objective-C
+    // source extension without needing an Objective-C runtime or frameworks,
+    // so this runs on Linux as well as macOS.
+    fs::write(&src_path, "int answer(void) { return 42; }\n").unwrap();
+    let object_path = tmp.path().join("objc.o");
+
+    let status = rllvm("rllvm-cc")
+        .args(["--", "-c", "-o"])
+        .arg(&object_path)
+        .arg(&src_path)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc failed on an Objective-C source");
+    assert!(object_path.exists(), "Object file not created");
+
+    // The point of the test: `.m` must be treated as a compilation input, so
+    // bitcode is generated and embedded rather than silently skipped.
+    let bitcode_path = tmp.path().join("objc.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&object_path)
+        .args(["-o"])
+        .arg(&bitcode_path)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed");
+
+    assert_valid_bitcode(&bitcode_path);
+}

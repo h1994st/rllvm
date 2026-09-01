@@ -473,7 +473,7 @@ pub fn arg_patterns() -> &'static PatternCallbackVec {
             ),
             ArgPatternInfo::new(r"^--param=.+$", 0, CompilerArgsInfo::compile_unary),
             ArgPatternInfo::new(
-                r"^.+\.(c|cc|cpp|C|cxx|i|s|S|bc)$",
+                r"^.+\.(c|cc|cpp|C|cxx|i|s|S|bc|m|mm|M)$",
                 0,
                 CompilerArgsInfo::input_file,
             ),
