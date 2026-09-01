@@ -5,7 +5,7 @@ use rllvm::{
     compiler_wrapper::{
         CompilerKind, CompilerWrapper, CompilerWrapperBuilder, llvm::ClangWrapperBuilder,
     },
-    config::rllvm_config,
+    config::try_rllvm_config,
     error::Error,
 };
 use tracing::Level;
@@ -39,7 +39,7 @@ pub fn rllvm_main(name: &str, compiler_kind: CompilerKind) -> Result<(), Error> 
     // Set log level
     // The verbose flag will override the configured log level
     let log_level = if args.verbose == 0 {
-        rllvm_config().log_level()
+        try_rllvm_config()?.log_level()
     } else {
         match args.verbose {
             1 => Level::WARN,
@@ -62,7 +62,7 @@ pub fn rllvm_main(name: &str, compiler_kind: CompilerKind) -> Result<(), Error> 
     if let Some(compiler) = args.compiler {
         cc_builder = cc_builder.wrapped_compiler(compiler);
     }
-    let mut cc = cc_builder.build();
+    let mut cc = cc_builder.build()?;
 
     if let Some(code) = cc.parse_args(&args.clang_args)?.run()? {
         std::process::exit(code);

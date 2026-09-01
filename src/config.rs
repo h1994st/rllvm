@@ -23,36 +23,43 @@ use crate::{
     utils::{execute_llvm_config, find_llvm_config},
 };
 
-/// Returns a reference to the global [`RLLVMConfig`] singleton.
+/// The cached outcome of loading the configuration.
 ///
-/// In production, the configuration is loaded from the config file.
-/// In tests, it is inferred by discovering LLVM tools on the system.
-#[cfg(not(test))]
-pub fn rllvm_config() -> &'static RLLVMConfig {
-    static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
-    RLLVM_CONFIG.get_or_init(|| {
-        RLLVMConfig::new().unwrap_or_else(|err| {
-            panic!("Failed to load rllvm configuration: {err}");
-        })
-    })
+/// The failure is stored as a message rather than as an [`Error`], because a
+/// `OnceLock` hands out shared references and the error type is not `Clone` — every
+/// caller needs its own owned error.
+type ConfigResult = Result<RLLVMConfig, String>;
+
+fn config_result_to_ref(result: &'static ConfigResult) -> Result<&'static RLLVMConfig, Error> {
+    match result {
+        Ok(config) => Ok(config),
+        Err(message) => Err(Error::ConfigError(message.clone())),
+    }
 }
 
-/// Returns a reference to the global [`RLLVMConfig`] singleton (test variant).
+#[cfg(not(test))]
+pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
+    static RLLVM_CONFIG: OnceLock<ConfigResult> = OnceLock::new();
+    config_result_to_ref(RLLVM_CONFIG.get_or_init(|| {
+        RLLVMConfig::new().map_err(|err| format!("Failed to load rllvm configuration: {err}"))
+    }))
+}
+
+/// Returns the global [`RLLVMConfig`] singleton (test variant).
 ///
 /// Uses [`RLLVMConfig::try_default`] to infer configuration from the system.
 #[cfg(test)]
-pub fn rllvm_config() -> &'static RLLVMConfig {
-    static RLLVM_CONFIG: OnceLock<RLLVMConfig> = OnceLock::new();
-    RLLVM_CONFIG.get_or_init(|| {
-        RLLVMConfig::try_default().unwrap_or_else(|err| {
-            panic!("Failed to infer rllvm configuration: {err}");
-        })
-    })
+pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
+    static RLLVM_CONFIG: OnceLock<ConfigResult> = OnceLock::new();
+    config_result_to_ref(RLLVM_CONFIG.get_or_init(|| {
+        RLLVMConfig::try_default()
+            .map_err(|err| format!("Failed to infer rllvm configuration: {err}"))
+    }))
 }
 
 /// Configuration for rllvm, specifying LLVM tool paths and optional flags.
 ///
-/// Typically loaded from `~/.rllvm/config.toml` via [`rllvm_config`], or
+/// Typically loaded from `~/.rllvm/config.toml` via [`try_rllvm_config`], or
 /// inferred from the system using [`RLLVMConfig::try_default`].
 #[derive(Serialize, Deserialize, Debug)]
 pub struct RLLVMConfig {
@@ -203,16 +210,21 @@ impl RLLVMConfig {
         P: AsRef<Path> + std::fmt::Debug,
     {
         let config_filepath = config_filepath.as_ref();
-        let mut config = confy::load_path::<RLLVMConfig>(config_filepath).map_err(|err| {
-            tracing::error!(
-                "Failed to load configuration: config_filepath={:?}, err={}",
-                config_filepath,
-                err
-            );
-            Error::ConfigError(format!(
-                "Failed to load configuration from {config_filepath:?}: {err}"
-            ))
-        })?;
+
+        // An existing file is parsed; otherwise the configuration is inferred
+        // from the LLVM installation and written out for next time.
+        //
+        // This is deliberately not `confy::load_path`, which reaches for
+        // `Default` to create a missing file. Inferring a configuration can
+        // fail (no `llvm-config` on the system), and `Default` has no way to
+        // report that other than panicking — on the very first run, at that.
+        let mut config = if Self::config_file_has_content(config_filepath) {
+            Self::parse_file(config_filepath)?
+        } else {
+            let inferred = Self::try_default()?;
+            inferred.write_to(config_filepath)?;
+            inferred
+        };
 
         config.validate_tool_paths();
 
@@ -258,11 +270,63 @@ impl RLLVMConfig {
     }
 }
 
-impl Default for RLLVMConfig {
-    fn default() -> Self {
-        Self::try_default().unwrap_or_else(|err| {
-            panic!("Failed to infer rllvm configuration: {err}");
+impl RLLVMConfig {
+    /// Returns `true` if the path names a file with something in it.
+    ///
+    /// An empty file is treated as absent, matching how a partially written or
+    /// truncated config would otherwise fail to parse.
+    fn config_file_has_content(config_filepath: &Path) -> bool {
+        fs::metadata(config_filepath).is_ok_and(|meta| meta.is_file() && meta.len() > 0)
+    }
+
+    /// Parse a configuration file from disk.
+    fn parse_file(config_filepath: &Path) -> Result<Self, Error> {
+        let contents = fs::read_to_string(config_filepath).map_err(|err| {
+            tracing::error!(
+                "Failed to read configuration: config_filepath={:?}, err={}",
+                config_filepath,
+                err
+            );
+            Error::ConfigError(format!(
+                "Failed to read configuration from {config_filepath:?}: {err}"
+            ))
+        })?;
+
+        toml::from_str(&contents).map_err(|err| {
+            tracing::error!(
+                "Failed to parse configuration: config_filepath={:?}, err={}",
+                config_filepath,
+                err
+            );
+            Error::ConfigError(format!(
+                "Failed to parse configuration from {config_filepath:?}: {err}"
+            ))
         })
+    }
+
+    /// Serialize this configuration to the given path, creating parent
+    /// directories as needed.
+    fn write_to(&self, config_filepath: &Path) -> Result<(), Error> {
+        if let Some(parent_dir) = config_filepath.parent()
+            && !parent_dir.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent_dir)?;
+        }
+
+        let contents = toml::to_string_pretty(self).map_err(|err| {
+            Error::ConfigError(format!("Failed to serialize the configuration: {err}"))
+        })?;
+        fs::write(config_filepath, contents).map_err(|err| {
+            tracing::error!(
+                "Failed to write configuration: config_filepath={:?}, err={}",
+                config_filepath,
+                err
+            );
+            err
+        })?;
+
+        tracing::info!("Wrote inferred configuration to {:?}", config_filepath);
+        Ok(())
     }
 }
 

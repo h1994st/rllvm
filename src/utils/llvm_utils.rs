@@ -12,7 +12,7 @@ use which::which;
 #[cfg(not(target_vendor = "apple"))]
 use crate::constants::{LLVM_VERSION_MAX, LLVM_VERSION_MIN};
 use crate::utils::{execute_command_for_status, execute_command_for_stdout_string};
-use crate::{config::rllvm_config, error::Error};
+use crate::{config::try_rllvm_config, error::Error};
 
 /// Execute `llvm-ar` with the given arguments.
 pub fn execute_llvm_ar<P, S>(llvm_ar_filepath: P, args: &[S]) -> Result<ExitStatus, Error>
@@ -59,13 +59,19 @@ fn find_llvm_config_brew() -> Result<PathBuf, Error> {
         // location for current release brew formula
         format!("{brew_cellar_path}/llvm/{llvm_config_filepath_suffix}"),
     ];
-    let glob_results = llvm_config_glob_patterns.iter().flat_map(|pattern| {
-        glob(pattern).unwrap_or_else(|err| {
-            panic!("Could not read glob pattern: pattern={pattern}, err={err}");
-        })
-    });
-    match glob_results.last() {
-        Some(llvm_config_filepath) => Ok(llvm_config_filepath.unwrap()),
+    let mut candidates = vec![];
+    for pattern in &llvm_config_glob_patterns {
+        let matches = glob(pattern).map_err(|err| {
+            Error::InvalidArguments(format!(
+                "Could not read glob pattern: pattern={pattern}, err={err}"
+            ))
+        })?;
+        // Entries that cannot be read (permissions, races) are skipped rather
+        // than aborting the search.
+        candidates.extend(matches.flatten());
+    }
+    match candidates.last() {
+        Some(llvm_config_filepath) => Ok(llvm_config_filepath.clone()),
         None => Err(Error::Unknown(format!(
             "Failed to find `llvm-config` in brew cellar with glob patterns: {}",
             llvm_config_glob_patterns.join(" ")
@@ -119,7 +125,7 @@ where
 
     let mut args = vec![];
     // Link arguments
-    if let Some(llvm_link_flags) = rllvm_config().llvm_link_flags() {
+    if let Some(llvm_link_flags) = try_rllvm_config()?.llvm_link_flags() {
         args.extend(llvm_link_flags.iter().cloned());
     }
     // Output
@@ -134,7 +140,7 @@ where
             .map(|x| x.as_ref().to_string_lossy().into_owned()),
     );
 
-    execute_command_for_status(rllvm_config().llvm_link_filepath(), &args)
+    execute_command_for_status(try_rllvm_config()?.llvm_link_filepath(), &args)
         .map(|status| status.code())
 }
 
@@ -163,7 +169,8 @@ where
             .map(|x| x.as_ref().to_string_lossy().into_owned()),
     );
 
-    execute_command_for_status(rllvm_config().llvm_ar_filepath(), &args).map(|status| status.code())
+    execute_command_for_status(try_rllvm_config()?.llvm_ar_filepath(), &args)
+        .map(|status| status.code())
 }
 
 #[cfg(test)]
@@ -224,7 +231,8 @@ mod tests {
         ];
 
         input_args.iter().all(|args| {
-            let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang);
+            let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang)
+                .expect("Failed to build the clang wrapper");
             cc.parse_args(args).unwrap().run().unwrap() == Some(0)
         })
     }

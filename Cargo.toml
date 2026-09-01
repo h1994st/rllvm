@@ -19,7 +19,7 @@ version = "0.1.6"
 [dependencies]
 clap = {version = "~4.5.48", features = ["derive"]}
 clap_complete = "~4.5"
-confy = "~1.0.0"
+toml = "~0.8"
 object = {version = "~0.37.3", features = ["all"]}
 regex = "~1.11.3"
 serde = {version = "~1.0.227", features = ["derive"]}
