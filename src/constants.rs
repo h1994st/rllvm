@@ -49,8 +49,8 @@ pub fn arg_exact_match_map() -> &'static CallbackMap {
             ArgInfo::new(1, CompilerArgsInfo::default_binary),
         );
 
-        m.insert("--version", ArgInfo::new(0, CompilerArgsInfo::compile_only));
-        m.insert("-v", ArgInfo::new(0, CompilerArgsInfo::compile_only));
+        m.insert("--version", ArgInfo::new(0, CompilerArgsInfo::print_only));
+        m.insert("-v", ArgInfo::new(0, CompilerArgsInfo::verbose));
 
         m.insert("-w", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-W", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
@@ -121,7 +121,7 @@ pub fn arg_exact_match_map() -> &'static CallbackMap {
         m.insert("-mmmx", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-mbmi", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-mbmi2", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
-        m.insert("-mf161c", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
+        m.insert("-mf16c", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-mfma", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-mno-mmx", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert(
@@ -214,8 +214,8 @@ pub fn arg_exact_match_map() -> &'static CallbackMap {
 
         m.insert("-arch", ArgInfo::new(1, CompilerArgsInfo::compile_binary));
 
-        m.insert("-P", ArgInfo::new(1, CompilerArgsInfo::compile_unary));
-        m.insert("-C", ArgInfo::new(1, CompilerArgsInfo::compile_unary));
+        m.insert("-P", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
+        m.insert("-C", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
 
         m.insert("-M", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
         m.insert("-MM", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
