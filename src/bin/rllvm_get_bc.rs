@@ -183,20 +183,17 @@ pub fn main() -> Result<(), Error> {
     }
 
     // Merge bitcode files using the selected strategy
-    if let Some(code) = rllvm::merge::merge_bitcode_files(
-        strategy,
-        &bitcode_filepaths,
-        output_filepath.clone(),
-    )
-    .map_err(|err| {
-        tracing::error!(
-            "Failed to merge ({}) bitcode files: bitcode_filepaths={:?}, err={:?}",
-            strategy,
-            bitcode_filepaths,
-            err
-        );
-        err
-    })?
+    if let Some(code) =
+        rllvm::merge::merge_bitcode_files(strategy, &bitcode_filepaths, output_filepath.clone())
+            .map_err(|err| {
+                tracing::error!(
+                    "Failed to merge ({}) bitcode files: bitcode_filepaths={:?}, err={:?}",
+                    strategy,
+                    bitcode_filepaths,
+                    err
+                );
+                err
+            })?
         && code != 0
     {
         std::process::exit(code);

@@ -155,10 +155,10 @@ llvm_objcopy_filepath = "{}"
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = env::var("HOME") {
-            return PathBuf::from(home).join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/")
+        && let Ok(home) = env::var("HOME")
+    {
+        return PathBuf::from(home).join(rest);
     }
     PathBuf::from(path)
 }
@@ -189,15 +189,15 @@ fn main() -> Result<(), Error> {
     let output_path = expand_tilde(&args.output);
 
     // Create parent directory if needed
-    if let Some(parent) = output_path.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent).map_err(|err| {
-                Error::ConfigError(format!(
-                    "Failed to create config directory {:?}: {}",
-                    parent, err
-                ))
-            })?;
-        }
+    if let Some(parent) = output_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            Error::ConfigError(format!(
+                "Failed to create config directory {:?}: {}",
+                parent, err
+            ))
+        })?;
     }
 
     fs::write(&output_path, &toml_content).map_err(|err| {

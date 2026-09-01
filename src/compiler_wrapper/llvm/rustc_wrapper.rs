@@ -89,12 +89,12 @@ impl RustcWrapper {
         }
 
         // Step 5: Embed the bitcode path into the object file
-        if output_path.exists() && bitcode_path.exists() {
-            if let Err(err) =
+        if output_path.exists()
+            && bitcode_path.exists()
+            && let Err(err) =
                 embed_bitcode_filepath_to_object_file::<&Path>(&bitcode_path, &output_path, None)
-            {
-                tracing::warn!("Failed to embed bitcode path into object file: {}", err);
-            }
+        {
+            tracing::warn!("Failed to embed bitcode path into object file: {}", err);
         }
 
         Ok(Some(0))
@@ -134,7 +134,7 @@ impl RustcWrapper {
             filtered_args.push(arg.clone());
         }
 
-        filtered_args.push(format!("--emit=llvm-bc"));
+        filtered_args.push("--emit=llvm-bc".to_string());
         filtered_args.push("-o".to_string());
         filtered_args.push(bitcode_path.to_string_lossy().into_owned());
 

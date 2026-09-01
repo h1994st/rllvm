@@ -37,10 +37,10 @@ fn try_extract_bitcode_from_object(path: &PathBuf) -> Result<Option<PathBuf>, Er
     let data = fs::read(path)?;
     if object::File::parse(&*data).is_ok() {
         let bc_paths = extract_bitcode_filepaths_from_object_file(path)?;
-        if let Some(first) = bc_paths.into_iter().next() {
-            if first.exists() {
-                return Ok(Some(first));
-            }
+        if let Some(first) = bc_paths.into_iter().next()
+            && first.exists()
+        {
+            return Ok(Some(first));
         }
     }
     Ok(None)

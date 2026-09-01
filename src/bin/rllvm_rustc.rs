@@ -49,10 +49,10 @@ fn main() -> Result<(), Error> {
     );
 
     let wrapper = RustcWrapper::new(rustc_path);
-    if let Some(code) = wrapper.run(&rustc_args)? {
-        if code != 0 {
-            std::process::exit(code);
-        }
+    if let Some(code) = wrapper.run(&rustc_args)?
+        && code != 0
+    {
+        std::process::exit(code);
     }
 
     Ok(())

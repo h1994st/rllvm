@@ -77,7 +77,12 @@ fn partial_link_bitcode_files<P: AsRef<Path>>(
     let output_dir = output_filepath.parent().unwrap_or(Path::new("."));
 
     for (idx, (dir, files)) in groups.iter().enumerate() {
-        tracing::debug!("Partial group {}: dir={:?}, {} files", idx, dir, files.len());
+        tracing::debug!(
+            "Partial group {}: dir={:?}, {} files",
+            idx,
+            dir,
+            files.len()
+        );
         let intermediate = output_dir.join(format!("{}_partial_{}.bc", output_stem, idx));
 
         let result = link_bitcode_files(files.as_slice(), intermediate.as_path())?;
@@ -91,7 +96,8 @@ fn partial_link_bitcode_files<P: AsRef<Path>>(
     }
 
     // Final link of the per-group intermediates.
-    let intermediates_as_paths: Vec<&Path> = intermediate_files.iter().map(|p| p.as_path()).collect();
+    let intermediates_as_paths: Vec<&Path> =
+        intermediate_files.iter().map(|p| p.as_path()).collect();
     let result = link_bitcode_files(&intermediates_as_paths, output_filepath);
 
     // Clean up intermediate files.
@@ -114,10 +120,10 @@ fn group_by_parent_dir<P: AsRef<Path>>(paths: &[P]) -> BTreeMap<PathBuf, Vec<&Pa
 
 fn cleanup_files(files: &[PathBuf]) {
     for f in files {
-        if f.exists() {
-            if let Err(e) = std::fs::remove_file(f) {
-                tracing::warn!("Failed to clean up intermediate file {:?}: {}", f, e);
-            }
+        if f.exists()
+            && let Err(e) = std::fs::remove_file(f)
+        {
+            tracing::warn!("Failed to clean up intermediate file {:?}: {}", f, e);
         }
     }
 }
