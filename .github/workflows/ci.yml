@@ -1,18 +1,14 @@
 name: rllvm CI
 
+# No `paths-ignore`: these jobs are required status checks on `main`, and a
+# required check whose workflow never runs leaves a pull request waiting on a
+# status that will never arrive. Running CI on a docs-only change costs a few
+# minutes; a permanently unmergeable pull request costs more.
 on:
   push:
     branches: ["main"]
-    paths-ignore:
-      - "README.md"
-      - ".gitignore"
-      - "LICENSE"
   pull_request:
     branches: ["main"]
-    paths-ignore:
-      - "README.md"
-      - ".gitignore"
-      - "LICENSE"
 
 env:
   CARGO_TERM_COLOR: always
