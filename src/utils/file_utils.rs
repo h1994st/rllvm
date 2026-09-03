@@ -62,18 +62,36 @@ where
 /// Resolve the bitcode filepath to a string for embedding.
 fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     let absolute_filepath = if bitcode_filepath.is_absolute() {
-        bitcode_filepath.to_string_lossy().into_owned()
+        bitcode_filepath.to_path_buf()
     } else {
-        bitcode_filepath
-            .canonicalize()?
-            .to_string_lossy()
-            .into_owned()
+        bitcode_filepath.canonicalize()?
     };
+
+    // When a bitcode root is configured, record the path relative to it. An
+    // absolute path pins the object to the machine and directory that built it,
+    // so it breaks under `mv`, container extraction, compiler caches replaying
+    // an object into a different tree, and CI artifacts consumed by another job.
+    // A relative entry survives all of those; `rllvm-get-bc --bitcode-root`
+    // supplies the root again at extraction time.
+    //
+    // Unset is the default and keeps the historical absolute form, so objects
+    // produced by older versions stay readable. The reader distinguishes the two
+    // by the leading separator, which is why no format flag is needed.
+    let recorded = try_rllvm_config()
+        .ok()
+        .and_then(|config| config.bitcode_root())
+        .and_then(|root| {
+            absolute_filepath
+                .strip_prefix(&root)
+                .ok()
+                .map(|relative| relative.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| absolute_filepath.to_string_lossy().into_owned());
 
     // The linker concatenates these sections when it merges object files, so
     // every entry must be newline-terminated for the reader to split the
     // combined section back into individual paths.
-    Ok(format!("{absolute_filepath}\n"))
+    Ok(format!("{recorded}\n"))
 }
 
 /// Encode an unsigned integer as a LEB128 byte sequence.

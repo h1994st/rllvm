@@ -16,7 +16,8 @@ use tracing::Level;
 
 use crate::{
     constants::{
-        DEFAULT_CONF_FILEPATH_UNDER_HOME, DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
+        BITCODE_ROOT_ENV_NAME, DEFAULT_CONF_FILEPATH_UNDER_HOME,
+        DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
     },
     diagnostics::{check_version_compatibility, print_missing_tool_error},
     error::Error,
@@ -55,6 +56,28 @@ pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
         RLLVMConfig::try_default()
             .map_err(|err| format!("Failed to infer rllvm configuration: {err}"))
     }))
+}
+
+/// Returns the path the configuration is read from, and written to.
+///
+/// `$RLLVM_CONFIG` when set, otherwise `~/.rllvm/config.toml`.
+///
+/// Every component that needs to know where the configuration lives must go
+/// through this. The path used to be decided in two places — here for reading
+/// and in `rllvm-init` for writing — and they disagreed: `rllvm-init` hardcoded
+/// the home path and ignored `RLLVM_CONFIG` entirely, so it could report writing
+/// a configuration that nothing would ever read, while silently overwriting the
+/// user's real one.
+pub fn config_filepath() -> PathBuf {
+    env::var(DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME).map_or_else(
+        |_| {
+            // Default config file
+            PathBuf::from(env::var(HOME_ENV_NAME).unwrap_or("".into()))
+                .join(DEFAULT_CONF_FILEPATH_UNDER_HOME)
+        },
+        // User-defined config file
+        PathBuf::from,
+    )
 }
 
 /// Configuration for rllvm, specifying LLVM tool paths and optional flags.
@@ -102,6 +125,9 @@ pub struct RLLVMConfig {
     /// Enable incremental bitcode caching (Default: false).
     /// Can also be enabled via `RLLVM_CACHE=1` environment variable.
     cache_enabled: Option<bool>,
+
+    /// Root that embedded bitcode paths are recorded relative to (Default: none)
+    bitcode_root: Option<PathBuf>,
 
     /// Custom cache directory path (Default: `~/.rllvm/cache/`)
     cache_dir: Option<PathBuf>,
@@ -179,6 +205,21 @@ impl RLLVMConfig {
         self.cache_enabled.unwrap_or_default()
     }
 
+    /// Returns the root that embedded bitcode paths are recorded relative to.
+    ///
+    /// `$RLLVM_BITCODE_ROOT` wins over the configuration file, so a build can opt
+    /// into relocatable paths without editing a shared config.
+    ///
+    /// When unset, paths are recorded absolute, which is the historical
+    /// behaviour and keeps existing objects readable.
+    pub fn bitcode_root(&self) -> Option<PathBuf> {
+        env::var(BITCODE_ROOT_ENV_NAME)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| self.bitcode_root.clone())
+    }
+
     /// Returns the optional custom cache directory path.
     pub fn cache_dir(&self) -> Option<&PathBuf> {
         self.cache_dir.as_ref()
@@ -191,18 +232,7 @@ impl RLLVMConfig {
     /// The file path is determined by the `RLLVM_CONFIG` environment variable,
     /// falling back to `~/.rllvm/config.toml`.
     pub fn new() -> Result<Self, Error> {
-        let config_filepath = env::var(DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME).map_or_else(
-            |_| {
-                // Default config file
-                PathBuf::from(env::var(HOME_ENV_NAME).unwrap_or("".into()))
-                    .join(DEFAULT_CONF_FILEPATH_UNDER_HOME)
-            },
-            |x| {
-                // User-defined config file
-                PathBuf::from(x)
-            },
-        );
-        Self::load_path(config_filepath)
+        Self::load_path(config_filepath())
     }
 
     fn load_path<P>(config_filepath: P) -> Result<Self, Error>
@@ -441,6 +471,7 @@ impl RLLVMConfig {
             bitcode_generation_flags: None,
             is_configure_only: None,
             log_level: None,
+            bitcode_root: None,
             cache_enabled: None,
             cache_dir: None,
         })

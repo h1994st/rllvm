@@ -35,6 +35,16 @@ struct ExtractionArgs {
     #[arg(short = 'm', long)]
     save_manifest: bool,
 
+    /// Directory that relative embedded bitcode paths resolve against
+    ///
+    /// Objects built with `RLLVM_BITCODE_ROOT` set record paths relative to that
+    /// root, so they survive the build tree being moved, copied out of a
+    /// container, or replayed from a compiler cache. Point this at wherever the
+    /// tree lives now. Absolute entries, which is what older objects contain,
+    /// are unaffected. Defaults to the current directory.
+    #[arg(long)]
+    bitcode_root: Option<PathBuf>,
+
     /// Verbose mode
     #[arg(short = 'v', long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -164,6 +174,25 @@ pub fn main() -> Result<(), Error> {
         tracing::error!("{}", error_message);
         return Err(Error::MissingFile(error_message));
     }
+    // Resolve relative entries against the root. A leading separator means the
+    // entry is absolute -- the historical format -- and is left alone, which is
+    // what lets both forms coexist in one section without a version marker.
+    let bitcode_filepaths: Vec<PathBuf> = {
+        let root = args
+            .bitcode_root
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("."));
+        bitcode_filepaths
+            .into_iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path
+                } else {
+                    root.join(path)
+                }
+            })
+            .collect()
+    };
     tracing::debug!("Bitcode filepaths: {:?}", bitcode_filepaths);
     if args.save_manifest {
         // Write bitcode filepaths into the manifest file

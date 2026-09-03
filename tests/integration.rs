@@ -486,7 +486,7 @@ fn diagnostics_go_to_stderr_not_stdout() {
     // compiler, and build systems capture stdout as real output (`-E`
     // preprocessing, `-print-*` queries), where a log line corrupts the result.
     let output = rllvm("rllvm-cc")
-        .arg("-vvv")
+        .arg("--rllvm-verbose=3")
         .args(["--", "-o"])
         .arg(&output_path)
         .arg(&src_path)
@@ -539,4 +539,277 @@ fn compile_objective_c_file_and_extract_bitcode() {
     assert!(status.success(), "rllvm-get-bc failed");
 
     assert_valid_bitcode(&bitcode_path);
+}
+
+/// `rllvm-init` must write where `RLLVM_CONFIG` points.
+///
+/// The path is chosen in two places — `RLLVMConfig::new()` for reading and
+/// `rllvm-init` for writing — and they disagreed: init hardcoded
+/// `~/.rllvm/config.toml`, so it could report writing a config that the rest of
+/// the toolchain would never read, and silently overwrite the real one.
+///
+/// `HOME` is redirected as well, so a regression writes into the temp directory
+/// rather than the developer's own `~/.rllvm/config.toml`.
+#[test]
+fn test_rllvm_init_honours_rllvm_config_env() {
+    let tmp = TempDir::new().expect("Failed to create temp dir");
+    let fake_home = tmp.path().join("home");
+    fs::create_dir_all(&fake_home).expect("Failed to create fake home");
+    let target = tmp.path().join("nested").join("rllvm.toml");
+
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .env("RLLVM_CONFIG", &target)
+        .env("HOME", &fake_home)
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(
+        output.status.success(),
+        "rllvm-init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        target.exists(),
+        "rllvm-init ignored RLLVM_CONFIG; nothing at {}",
+        target.display()
+    );
+    assert!(
+        !fake_home.join(".rllvm").join("config.toml").exists(),
+        "rllvm-init fell back to HOME despite RLLVM_CONFIG being set"
+    );
+}
+
+/// An explicit `-o` still wins over `RLLVM_CONFIG`.
+#[test]
+fn test_rllvm_init_output_flag_overrides_env() {
+    let tmp = TempDir::new().expect("Failed to create temp dir");
+    let fake_home = tmp.path().join("home");
+    fs::create_dir_all(&fake_home).expect("Failed to create fake home");
+    let from_env = tmp.path().join("from_env.toml");
+    let from_flag = tmp.path().join("from_flag.toml");
+
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .arg("-o")
+        .arg(&from_flag)
+        .env("RLLVM_CONFIG", &from_env)
+        .env("HOME", &fake_home)
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(output.status.success(), "rllvm-init failed");
+
+    assert!(from_flag.exists(), "-o was not honoured");
+    assert!(!from_env.exists(), "RLLVM_CONFIG overrode an explicit -o");
+}
+
+/// `rllvm-cc` must work as a drop-in `CC`, with no `--` separator.
+///
+/// This is the primary way a compiler wrapper is used — `CC=rllvm-cc ./configure`
+/// — and gllvm's `gclang` supports it. Requiring a separator forces every user to
+/// write a shim script.
+#[test]
+fn dropin_compile_without_separator() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+
+    let output = rllvm("rllvm-cc")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "rllvm-cc rejected a bare compiler invocation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(object_path.exists(), "Object file not created");
+
+    // The bitcode contract must still hold on this path.
+    let bitcode_path = tmp.path().join("foo.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&object_path)
+        .arg("-o")
+        .arg(&bitcode_path)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed");
+    assert_valid_bitcode(&bitcode_path);
+}
+
+/// `--version` must reach the compiler, not be answered by the wrapper.
+///
+/// CMake and autoconf identify the compiler by running `$CC --version`. If clap
+/// answers it, they misidentify the toolchain — a failure that looks nothing
+/// like an argument-parsing bug.
+#[test]
+fn dropin_version_passes_through_to_compiler() {
+    let output = rllvm("rllvm-cc")
+        .arg("--version")
+        .output()
+        .expect("Failed to run rllvm-cc --version");
+    assert!(output.status.success(), "rllvm-cc --version failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("clang"),
+        "--version did not reach the compiler; got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("rllvm-cc"),
+        "the wrapper answered --version instead of the compiler; got: {stdout}"
+    );
+}
+
+/// `-v` belongs to the compiler too, for the same reason as `--version`.
+#[test]
+fn dropin_dash_v_passes_through_to_compiler() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+
+    let output = rllvm("rllvm-cc")
+        .args(["-v", "-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "-v was not passed through: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(object_path.exists(), "Object file not created with -v");
+}
+
+/// The per-invocation compiler override survives, under its namespaced name.
+#[test]
+fn rllvm_compiler_override_still_works() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+    let clang = find_llvm_config()
+        .map(|c| c.parent().unwrap().join("clang"))
+        .expect("llvm-config not found");
+
+    let output = rllvm("rllvm-cc")
+        .arg(format!("--rllvm-compiler={}", clang.display()))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "--rllvm-compiler was rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(object_path.exists(), "Object file not created");
+}
+
+/// Bare `--rllvm-verbose` must not consume the following compiler argument.
+///
+/// Without `require_equals`, clap would treat `-c` as the verbose level and the
+/// compile would lose its `-c`, silently turning a compile into a link.
+#[test]
+fn rllvm_verbose_does_not_swallow_next_argument() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+
+    let output = rllvm("rllvm-cc")
+        .arg("--rllvm-verbose")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "bare --rllvm-verbose broke the invocation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        object_path.exists(),
+        "-c was consumed as the verbose value; no object produced"
+    );
+}
+
+/// A build tree recorded with `RLLVM_BITCODE_ROOT` survives being moved.
+///
+/// Absolute paths pin an object to the directory that built it. This breaks
+/// under `mv`, when artifacts are copied out of a container, when a compiler
+/// cache replays an object into a different tree, and when CI hands objects to
+/// another job. Recording relative to a root and supplying the root again at
+/// extraction time makes the object portable.
+#[test]
+fn relocated_build_tree_extracts_with_bitcode_root() {
+    let tmp = TempDir::new().unwrap();
+    let build_a = tmp.path().join("a");
+    fs::create_dir_all(&build_a).unwrap();
+    let src = build_a.join("foo.c");
+    fs::copy(fixture("foo.c"), &src).unwrap();
+    let object_path = build_a.join("foo.o");
+
+    let status = rllvm("rllvm-cc")
+        .env("RLLVM_BITCODE_ROOT", &build_a)
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&src)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "compile failed");
+
+    // The build directory moves; the object and its bitcode travel together.
+    let build_b = tmp.path().join("b");
+    fs::rename(&build_a, &build_b).unwrap();
+
+    let bitcode_path = tmp.path().join("foo.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(build_b.join("foo.o"))
+        .arg("--bitcode-root")
+        .arg(&build_b)
+        .arg("-o")
+        .arg(&bitcode_path)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "extraction failed after relocation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_bitcode(&bitcode_path);
+}
+
+/// Negative control: without a root, the recorded path is absolute and the same
+/// relocation breaks extraction. If this ever passes, the test above proves
+/// nothing.
+#[test]
+fn relocated_build_tree_fails_without_bitcode_root() {
+    let tmp = TempDir::new().unwrap();
+    let build_a = tmp.path().join("a");
+    fs::create_dir_all(&build_a).unwrap();
+    let src = build_a.join("foo.c");
+    fs::copy(fixture("foo.c"), &src).unwrap();
+    let object_path = build_a.join("foo.o");
+
+    // No RLLVM_BITCODE_ROOT: the historical absolute form.
+    let status = rllvm("rllvm-cc")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&src)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "compile failed");
+
+    let build_b = tmp.path().join("b");
+    fs::rename(&build_a, &build_b).unwrap();
+
+    let bitcode_path = tmp.path().join("foo.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(build_b.join("foo.o"))
+        .arg("-o")
+        .arg(&bitcode_path)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        !output.status.success(),
+        "absolute paths unexpectedly survived relocation; the positive test is vacuous"
+    );
 }

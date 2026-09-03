@@ -54,7 +54,7 @@ cargo install --path .
 
 ```bash
 # Compile C code (wraps clang)
-rllvm-cc -- -o hello hello.c
+rllvm-cc -o hello hello.c
 
 # Compile C++ code (wraps clang++)
 rllvm-cxx -- -o hello hello.cc
@@ -116,11 +116,26 @@ See [`examples/cmake/`](examples/cmake/) for a complete example.
 ### Wrapper flags
 
 ```
-rllvm-cc [OPTIONS] -- <compiler args...>
+rllvm-cc [OPTIONS] <compiler args...>
+
+Usable directly as CC -- no `--` separator required:
+
+    export CC=rllvm-cc && ./configure && make
+
+Wrapper options are long-only and prefixed `--rllvm-`, so they cannot collide
+with a compiler flag. Everything else, including `-c`, `-v`, `--help` and
+`--version`, is passed straight to the compiler -- build systems identify the
+compiler by running `$CC --version`, so the wrapper must not answer it.
 
 Options:
-  -c, --compiler <PATH>    Override the wrapped compiler path
-  -v, --verbose            Increase log verbosity (repeat for more: -vvvvv)
+  --rllvm-compiler <PATH>   Override the wrapped compiler path
+  --rllvm-verbose[=LEVEL]   Log verbosity; bare flag is level 1, max 4
+  --rllvm-help              Print help for the wrapper
+  --rllvm-version           Print the wrapper version
+
+`--` is still accepted, so existing shim scripts keep working:
+
+    rllvm-cc --rllvm-verbose=3 -- -o hello hello.c
 ```
 
 ## Configuration
@@ -146,11 +161,34 @@ export RLLVM_CONFIG=/path/to/config.toml
 | `llvm_link_filepath`       | Yes      | Absolute path to `llvm-link`                             |
 | `llvm_objcopy_filepath`    | No       | Absolute path to `llvm-objcopy` (recorded but currently unused) |
 | `bitcode_store_path`       | No       | Directory for intermediate bitcode files (must be absolute) |
+| `bitcode_root`             | No       | Record embedded bitcode paths relative to this root, so objects survive being moved (default: absolute paths) |
 | `llvm_link_flags`          | No       | Extra flags passed to `llvm-link`                        |
 | `lto_ldflags`              | No       | Extra flags for link-time optimization                   |
 | `bitcode_generation_flags` | No       | Extra flags for bitcode generation (e.g., `-flto`)       |
 | `is_configure_only`        | No       | Skip bitcode generation entirely (default: `false`)      |
 | `log_level`                | No       | 0=off, 1=error, 2=warn, 3=info, 4=debug, 5=trace        |
+
+### Relocatable bitcode paths
+
+By default an object records the **absolute** path of its bitcode, which pins it
+to the directory that built it. That breaks if the tree is moved, copied out of a
+container, replayed from a compiler cache into a different tree, or handed to
+another CI job.
+
+Set a root to record paths relative to it, then name the root again when
+extracting:
+
+```bash
+export RLLVM_BITCODE_ROOT=/path/to/build
+make
+
+# later, after the tree has moved:
+rllvm-get-bc --bitcode-root /new/path/to/build prog -o prog.bc
+```
+
+`RLLVM_BITCODE_ROOT` overrides the `bitcode_root` config key. Objects built
+without a root keep absolute paths and are unaffected — the extractor tells the
+two apart by the leading separator, so both forms can appear in the same binary.
 
 ### Example config
 

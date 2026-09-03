@@ -49,6 +49,9 @@ pub(crate) const WASM_SECTION_NAME: &str = ".llvmbc";
 pub(crate) const DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME: &str = "RLLVM_CONFIG";
 pub(crate) const HOME_ENV_NAME: &str = "HOME";
 
+/// Root that embedded bitcode paths are recorded relative to, when set.
+pub(crate) const BITCODE_ROOT_ENV_NAME: &str = "RLLVM_BITCODE_ROOT";
+
 /// The default filepath of the configuration file
 pub(crate) const DEFAULT_CONF_FILEPATH_UNDER_HOME: &str = ".rllvm/config.toml";
 

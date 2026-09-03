@@ -5,6 +5,7 @@ use std::{
 
 use clap::Parser;
 use rllvm::{
+    config::config_filepath,
     error::Error,
     utils::{execute_llvm_config, find_llvm_config},
 };
@@ -19,8 +20,11 @@ use rllvm::{
 )]
 struct InitArgs {
     /// Output path for the generated config file
-    #[arg(short = 'o', long, default_value = "~/.rllvm/config.toml")]
-    output: String,
+    ///
+    /// Defaults to wherever the rest of the toolchain reads its configuration
+    /// from: `$RLLVM_CONFIG` when set, otherwise `~/.rllvm/config.toml`.
+    #[arg(short = 'o', long)]
+    output: Option<String>,
 
     /// Print detected configuration without writing to disk
     #[arg(long)]
@@ -206,7 +210,12 @@ fn main() -> Result<(), Error> {
         return Ok(());
     }
 
-    let output_path = expand_tilde(&args.output);
+    // Resolved through the same helper the loader uses, so init cannot write a
+    // configuration that the wrappers will not read. An explicit -o still wins.
+    let output_path = args
+        .output
+        .as_deref()
+        .map_or_else(config_filepath, expand_tilde);
 
     // Create parent directory if needed
     if let Some(parent) = output_path.parent()
