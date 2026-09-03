@@ -730,3 +730,86 @@ fn rllvm_verbose_does_not_swallow_next_argument() {
         "-c was consumed as the verbose value; no object produced"
     );
 }
+
+/// A build tree recorded with `RLLVM_BITCODE_ROOT` survives being moved.
+///
+/// Absolute paths pin an object to the directory that built it. This breaks
+/// under `mv`, when artifacts are copied out of a container, when a compiler
+/// cache replays an object into a different tree, and when CI hands objects to
+/// another job. Recording relative to a root and supplying the root again at
+/// extraction time makes the object portable.
+#[test]
+fn relocated_build_tree_extracts_with_bitcode_root() {
+    let tmp = TempDir::new().unwrap();
+    let build_a = tmp.path().join("a");
+    fs::create_dir_all(&build_a).unwrap();
+    let src = build_a.join("foo.c");
+    fs::copy(fixture("foo.c"), &src).unwrap();
+    let object_path = build_a.join("foo.o");
+
+    let status = rllvm("rllvm-cc")
+        .env("RLLVM_BITCODE_ROOT", &build_a)
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&src)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "compile failed");
+
+    // The build directory moves; the object and its bitcode travel together.
+    let build_b = tmp.path().join("b");
+    fs::rename(&build_a, &build_b).unwrap();
+
+    let bitcode_path = tmp.path().join("foo.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(build_b.join("foo.o"))
+        .arg("--bitcode-root")
+        .arg(&build_b)
+        .arg("-o")
+        .arg(&bitcode_path)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "extraction failed after relocation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_bitcode(&bitcode_path);
+}
+
+/// Negative control: without a root, the recorded path is absolute and the same
+/// relocation breaks extraction. If this ever passes, the test above proves
+/// nothing.
+#[test]
+fn relocated_build_tree_fails_without_bitcode_root() {
+    let tmp = TempDir::new().unwrap();
+    let build_a = tmp.path().join("a");
+    fs::create_dir_all(&build_a).unwrap();
+    let src = build_a.join("foo.c");
+    fs::copy(fixture("foo.c"), &src).unwrap();
+    let object_path = build_a.join("foo.o");
+
+    // No RLLVM_BITCODE_ROOT: the historical absolute form.
+    let status = rllvm("rllvm-cc")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(&src)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "compile failed");
+
+    let build_b = tmp.path().join("b");
+    fs::rename(&build_a, &build_b).unwrap();
+
+    let bitcode_path = tmp.path().join("foo.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(build_b.join("foo.o"))
+        .arg("-o")
+        .arg(&bitcode_path)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        !output.status.success(),
+        "absolute paths unexpectedly survived relocation; the positive test is vacuous"
+    );
+}

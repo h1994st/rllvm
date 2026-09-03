@@ -16,7 +16,8 @@ use tracing::Level;
 
 use crate::{
     constants::{
-        DEFAULT_CONF_FILEPATH_UNDER_HOME, DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
+        BITCODE_ROOT_ENV_NAME, DEFAULT_CONF_FILEPATH_UNDER_HOME,
+        DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
     },
     diagnostics::{check_version_compatibility, print_missing_tool_error},
     error::Error,
@@ -125,6 +126,9 @@ pub struct RLLVMConfig {
     /// Can also be enabled via `RLLVM_CACHE=1` environment variable.
     cache_enabled: Option<bool>,
 
+    /// Root that embedded bitcode paths are recorded relative to (Default: none)
+    bitcode_root: Option<PathBuf>,
+
     /// Custom cache directory path (Default: `~/.rllvm/cache/`)
     cache_dir: Option<PathBuf>,
 }
@@ -199,6 +203,21 @@ impl RLLVMConfig {
     /// Returns whether caching is enabled in the config.
     pub fn cache_enabled(&self) -> bool {
         self.cache_enabled.unwrap_or_default()
+    }
+
+    /// Returns the root that embedded bitcode paths are recorded relative to.
+    ///
+    /// `$RLLVM_BITCODE_ROOT` wins over the configuration file, so a build can opt
+    /// into relocatable paths without editing a shared config.
+    ///
+    /// When unset, paths are recorded absolute, which is the historical
+    /// behaviour and keeps existing objects readable.
+    pub fn bitcode_root(&self) -> Option<PathBuf> {
+        env::var(BITCODE_ROOT_ENV_NAME)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| self.bitcode_root.clone())
     }
 
     /// Returns the optional custom cache directory path.
@@ -452,6 +471,7 @@ impl RLLVMConfig {
             bitcode_generation_flags: None,
             is_configure_only: None,
             log_level: None,
+            bitcode_root: None,
             cache_enabled: None,
             cache_dir: None,
         })
