@@ -171,6 +171,8 @@ pub fn log_cache_stats() {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     #[test]
@@ -268,8 +270,30 @@ mod tests {
         assert_eq!(path, PathBuf::from("/tmp/cache/foo_1234567890abcdef.bc"));
     }
 
+    /// Serialises the tests that mutate `RLLVM_CACHE`.
+    ///
+    /// The environment is process-global but cargo runs tests in parallel
+    /// threads, so these two raced: `test_is_cache_enabled_default` calling
+    /// `remove_var` between the other test's `set_var` and its assertion made
+    /// that assertion fail. It reproduced locally in roughly five runs out of
+    /// eight, and surfaced in CI as an unrelated-looking failure.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Takes the environment lock, ignoring poisoning.
+    ///
+    /// A panic in one of these tests poisons the mutex; without this the
+    /// remaining tests would fail on the lock rather than on their own
+    /// assertions, hiding the original failure.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn test_is_cache_enabled_default() {
+        let _guard = env_guard();
+
         // Without env var, should follow config
         unsafe { env::remove_var(RLLVM_CACHE_ENV) };
         assert!(!is_cache_enabled(false));
@@ -278,6 +302,8 @@ mod tests {
 
     #[test]
     fn test_is_cache_enabled_env_override() {
+        let _guard = env_guard();
+
         unsafe { env::set_var(RLLVM_CACHE_ENV, "1") };
         assert!(is_cache_enabled(false));
 
