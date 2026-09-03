@@ -57,6 +57,28 @@ pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
     }))
 }
 
+/// Returns the path the configuration is read from, and written to.
+///
+/// `$RLLVM_CONFIG` when set, otherwise `~/.rllvm/config.toml`.
+///
+/// Every component that needs to know where the configuration lives must go
+/// through this. The path used to be decided in two places — here for reading
+/// and in `rllvm-init` for writing — and they disagreed: `rllvm-init` hardcoded
+/// the home path and ignored `RLLVM_CONFIG` entirely, so it could report writing
+/// a configuration that nothing would ever read, while silently overwriting the
+/// user's real one.
+pub fn config_filepath() -> PathBuf {
+    env::var(DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME).map_or_else(
+        |_| {
+            // Default config file
+            PathBuf::from(env::var(HOME_ENV_NAME).unwrap_or("".into()))
+                .join(DEFAULT_CONF_FILEPATH_UNDER_HOME)
+        },
+        // User-defined config file
+        PathBuf::from,
+    )
+}
+
 /// Configuration for rllvm, specifying LLVM tool paths and optional flags.
 ///
 /// Typically loaded from `~/.rllvm/config.toml` via [`try_rllvm_config`], or
@@ -191,18 +213,7 @@ impl RLLVMConfig {
     /// The file path is determined by the `RLLVM_CONFIG` environment variable,
     /// falling back to `~/.rllvm/config.toml`.
     pub fn new() -> Result<Self, Error> {
-        let config_filepath = env::var(DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME).map_or_else(
-            |_| {
-                // Default config file
-                PathBuf::from(env::var(HOME_ENV_NAME).unwrap_or("".into()))
-                    .join(DEFAULT_CONF_FILEPATH_UNDER_HOME)
-            },
-            |x| {
-                // User-defined config file
-                PathBuf::from(x)
-            },
-        );
-        Self::load_path(config_filepath)
+        Self::load_path(config_filepath())
     }
 
     fn load_path<P>(config_filepath: P) -> Result<Self, Error>

@@ -540,3 +540,63 @@ fn compile_objective_c_file_and_extract_bitcode() {
 
     assert_valid_bitcode(&bitcode_path);
 }
+
+/// `rllvm-init` must write where `RLLVM_CONFIG` points.
+///
+/// The path is chosen in two places — `RLLVMConfig::new()` for reading and
+/// `rllvm-init` for writing — and they disagreed: init hardcoded
+/// `~/.rllvm/config.toml`, so it could report writing a config that the rest of
+/// the toolchain would never read, and silently overwrite the real one.
+///
+/// `HOME` is redirected as well, so a regression writes into the temp directory
+/// rather than the developer's own `~/.rllvm/config.toml`.
+#[test]
+fn test_rllvm_init_honours_rllvm_config_env() {
+    let tmp = TempDir::new().expect("Failed to create temp dir");
+    let fake_home = tmp.path().join("home");
+    fs::create_dir_all(&fake_home).expect("Failed to create fake home");
+    let target = tmp.path().join("nested").join("rllvm.toml");
+
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .env("RLLVM_CONFIG", &target)
+        .env("HOME", &fake_home)
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(
+        output.status.success(),
+        "rllvm-init failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        target.exists(),
+        "rllvm-init ignored RLLVM_CONFIG; nothing at {}",
+        target.display()
+    );
+    assert!(
+        !fake_home.join(".rllvm").join("config.toml").exists(),
+        "rllvm-init fell back to HOME despite RLLVM_CONFIG being set"
+    );
+}
+
+/// An explicit `-o` still wins over `RLLVM_CONFIG`.
+#[test]
+fn test_rllvm_init_output_flag_overrides_env() {
+    let tmp = TempDir::new().expect("Failed to create temp dir");
+    let fake_home = tmp.path().join("home");
+    fs::create_dir_all(&fake_home).expect("Failed to create fake home");
+    let from_env = tmp.path().join("from_env.toml");
+    let from_flag = tmp.path().join("from_flag.toml");
+
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .arg("-o")
+        .arg(&from_flag)
+        .env("RLLVM_CONFIG", &from_env)
+        .env("HOME", &fake_home)
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(output.status.success(), "rllvm-init failed");
+
+    assert!(from_flag.exists(), "-o was not honoured");
+    assert!(!from_env.exists(), "RLLVM_CONFIG overrode an explicit -o");
+}
