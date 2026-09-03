@@ -19,5 +19,9 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux
 install-path = "CARGO_HOME"
 # Whether to install an updater program
 install-updater = false
+# Trigger the release build with workflow_dispatch rather than tag-push, so dist
+# creates the GitHub Release (and therefore the tag) and owns the release notes.
+# release-please owns the version bump and CHANGELOG; see RELEASING.md.
+dispatch-releases = true
 # Whether to enable GitHub Attestations
 github-attestations = true

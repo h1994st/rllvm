@@ -1,0 +1,54 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  # Required to dispatch the release workflow. workflow_dispatch is one of the
+  # two events GitHub lets the default GITHUB_TOKEN trigger, which is why this
+  # design needs no PAT or GitHub App.
+  actions: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Maintains the release PR: version bump, Cargo.lock, CHANGELOG.
+      # skip-github-release is set in release-please-config.json, so this never
+      # tags or releases -- cargo-dist does both, because whoever creates the
+      # GitHub Release owns its notes and we want dist's (install instructions).
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - uses: actions/checkout@v4
+
+      # Decide whether a release is due by comparing release-please's own record
+      # of the current version against the tags that exist. The action's
+      # release_created output is not usable here: it describes releases the
+      # action created, and skip-github-release means it creates none.
+      #
+      # The failure this guards against is quiet: a merged version bump and
+      # CHANGELOG with no release and nothing visibly broken. So anything other
+      # than "tag exists" or "dispatch succeeded" fails the job.
+      - name: Dispatch the release build when a release is due
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          VERSION="$(jq -er '."."' .release-please-manifest.json)"
+          TAG="v${VERSION}"
+
+          if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::notice::${TAG} is already released; nothing to do."
+            exit 0
+          fi
+
+          echo "::notice::${TAG} has no tag yet - dispatching the release build."
+          gh workflow run release.yml --ref main -f tag="${TAG}"
