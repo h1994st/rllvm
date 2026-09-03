@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use rllvm::{
     compiler_wrapper::{
         CompilerKind, CompilerWrapper, CompilerWrapperBuilder, llvm::ClangWrapperBuilder,
@@ -11,24 +11,28 @@ use rllvm::{
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-/// Wrapper arguments.
-///
-/// This must be usable as a drop-in `CC`, so every argument the compiler could
-/// plausibly own has to reach the compiler:
-///
-/// - Compiler arguments are collected as a trailing var-arg, so no `--`
-///   separator is needed. `--` still works, for callers that want to be explicit.
-/// - The wrapper's own options are long-only and prefixed `--rllvm-`. Clang has
-///   no `--rllvm-*` flags, so collision is impossible. In particular `-c` and
-///   `-v` belong to the compiler, not to us.
-/// - clap's built-in `--help`/`--version` are disabled and re-exposed under the
-///   prefix. Build systems identify the compiler by running `$CC --version`; if
-///   the wrapper answered that, CMake and autoconf would misidentify the
-///   toolchain, which looks nothing like an argument-parsing bug.
+// Wrapper arguments.
+//
+// This must be usable as a drop-in `CC`, so every argument the compiler could
+// plausibly own has to reach the compiler:
+//
+// - Compiler arguments are collected as a trailing var-arg, so no `--`
+//   separator is needed. `--` still works, for callers that want to be explicit.
+// - The wrapper's own options are long-only and prefixed `--rllvm-`. Clang has
+//   no `--rllvm-*` flags, so collision is impossible. In particular `-c` and
+//   `-v` belong to the compiler, not to us.
+// - clap's built-in `--help`/`--version` are disabled and re-exposed under the
+//   prefix. Build systems identify the compiler by running `$CC --version`; if
+//   the wrapper answered that, CMake and autoconf would misidentify the
+//   toolchain, which looks nothing like an argument-parsing bug.
+//
+// These notes are deliberately NOT doc comments: clap promotes a struct's doc
+// comment to `long_about`, which would print this rationale to anyone running
+// `--rllvm-help`.
 #[derive(Parser, Debug)]
 #[command(
-    name = "rllvm-cc",
     about = "Execute the wrapped clang compiler",
+    long_about = None,
     author = "Shengtuo Hu <h1994st@gmail.com>",
     version,
     disable_help_flag = true,
@@ -68,7 +72,15 @@ struct ClangWrapperArgs {
 }
 
 pub fn rllvm_main(name: &str, compiler_kind: CompilerKind) -> Result<(), Error> {
-    let args = ClangWrapperArgs::parse();
+    // `rllvm-cxx` reuses this entry point, so the command name has to follow the
+    // binary rather than be baked into the derive -- otherwise `rllvm-cxx
+    // --rllvm-version` reports `rllvm-cc`, and its usage line is wrong too.
+    let bin_name = match compiler_kind {
+        CompilerKind::Clang => "rllvm-cc",
+        CompilerKind::ClangXX => "rllvm-cxx",
+    };
+    let matches = ClangWrapperArgs::command().name(bin_name).get_matches();
+    let args = ClangWrapperArgs::from_arg_matches(&matches).unwrap_or_else(|err| err.exit());
 
     // Set log level
     // The verbose flag will override the configured log level
