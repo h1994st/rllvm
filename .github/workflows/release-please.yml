@@ -20,12 +20,12 @@ jobs:
       # skip-github-release is set in release-please-config.json, so this never
       # tags or releases -- cargo-dist does both, because whoever creates the
       # GitHub Release owns its notes and we want dist's (install instructions).
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Decide whether a release is due by comparing release-please's own record
       # of the current version against the tags that exist. The action's
