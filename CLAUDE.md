@@ -66,3 +66,5 @@ Integration tests write their own config and pass it through `RLLVM_CONFIG`, so 
 ### Commits
 
 [Conventional Commits](https://www.conventionalcommits.org/): `<type>: <summary>`, using the types already in the log (`feat`, `fix`, `refactor`, `chore`, `ci`, `doc`). Keep the body short or empty. PR titles follow the same format.
+
+Releases are derived from these commits by release-please, so the type is not cosmetic — see [RELEASING.md](RELEASING.md). While below 1.0, `feat:` and `fix:` bump the patch version and **`feat!:` (or a `BREAKING CHANGE:` footer) bumps the minor**. Mark breaking changes: v0.1.7 removed `-c` and `-v` from the wrapper CLI but was committed as `feat:`, so it shipped as a patch, and that cannot be corrected after release.
