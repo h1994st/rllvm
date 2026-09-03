@@ -54,7 +54,7 @@ cargo install --path .
 
 ```bash
 # Compile C code (wraps clang)
-rllvm-cc -- -o hello hello.c
+rllvm-cc -o hello hello.c
 
 # Compile C++ code (wraps clang++)
 rllvm-cxx -- -o hello hello.cc
@@ -116,11 +116,26 @@ See [`examples/cmake/`](examples/cmake/) for a complete example.
 ### Wrapper flags
 
 ```
-rllvm-cc [OPTIONS] -- <compiler args...>
+rllvm-cc [OPTIONS] <compiler args...>
+
+Usable directly as CC -- no `--` separator required:
+
+    export CC=rllvm-cc && ./configure && make
+
+Wrapper options are long-only and prefixed `--rllvm-`, so they cannot collide
+with a compiler flag. Everything else, including `-c`, `-v`, `--help` and
+`--version`, is passed straight to the compiler -- build systems identify the
+compiler by running `$CC --version`, so the wrapper must not answer it.
 
 Options:
-  -c, --compiler <PATH>    Override the wrapped compiler path
-  -v, --verbose            Increase log verbosity (repeat for more: -vvvvv)
+  --rllvm-compiler <PATH>   Override the wrapped compiler path
+  --rllvm-verbose[=LEVEL]   Log verbosity; bare flag is level 1, max 4
+  --rllvm-help              Print help for the wrapper
+  --rllvm-version           Print the wrapper version
+
+`--` is still accepted, so existing shim scripts keep working:
+
+    rllvm-cc --rllvm-verbose=3 -- -o hello hello.c
 ```
 
 ## Configuration

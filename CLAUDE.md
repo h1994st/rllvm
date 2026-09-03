@@ -33,11 +33,14 @@ Point `RLLVM_CONFIG` at a scratch file so you do not clobber the user's `~/.rllv
 
 ```bash
 export RLLVM_CONFIG=/tmp/scratch/rllvm.toml
-rllvm-cc -vvv -- -o prog main.c a.c    # `--` separates wrapper args from compiler args
-rllvm-get-bc -vvv prog                 # Produces prog.bc
+rllvm-cc --rllvm-verbose=3 -o prog main.c a.c   # no separator needed
+rllvm-cc --rllvm-verbose=3 -- -o prog main.c a.c # `--` still works, for explicitness
+rllvm-get-bc -vvv prog                           # Produces prog.bc
 ```
 
-`-vvv` is essential: the wrapper logs every sub-command it runs (`[Compiling]`, `[BitcodeGeneration]`, `[Linking]`), which is the fastest way to see what the argument parser decided.
+`--rllvm-verbose=3` is essential: the wrapper logs every sub-command it runs (`[Compiling]`, `[BitcodeGeneration]`, `[Linking]`), which is the fastest way to see what the argument parser decided.
+
+The wrappers stand in for a compiler, so every flag clang could own reaches clang: `-c`, `-v` and `--version` are the compiler's. The wrapper's own options are long-only and prefixed `--rllvm-` (`--rllvm-compiler`, `--rllvm-verbose`, `--rllvm-help`, `--rllvm-version`). `rllvm-get-bc` is not a compiler stand-in, so it keeps ordinary `-v`.
 
 ## Architecture
 

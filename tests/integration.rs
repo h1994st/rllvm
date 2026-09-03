@@ -486,7 +486,7 @@ fn diagnostics_go_to_stderr_not_stdout() {
     // compiler, and build systems capture stdout as real output (`-E`
     // preprocessing, `-print-*` queries), where a log line corrupts the result.
     let output = rllvm("rllvm-cc")
-        .arg("-vvv")
+        .arg("--rllvm-verbose=3")
         .args(["--", "-o"])
         .arg(&output_path)
         .arg(&src_path)
@@ -599,4 +599,134 @@ fn test_rllvm_init_output_flag_overrides_env() {
 
     assert!(from_flag.exists(), "-o was not honoured");
     assert!(!from_env.exists(), "RLLVM_CONFIG overrode an explicit -o");
+}
+
+/// `rllvm-cc` must work as a drop-in `CC`, with no `--` separator.
+///
+/// This is the primary way a compiler wrapper is used — `CC=rllvm-cc ./configure`
+/// — and gllvm's `gclang` supports it. Requiring a separator forces every user to
+/// write a shim script.
+#[test]
+fn dropin_compile_without_separator() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+
+    let output = rllvm("rllvm-cc")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "rllvm-cc rejected a bare compiler invocation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(object_path.exists(), "Object file not created");
+
+    // The bitcode contract must still hold on this path.
+    let bitcode_path = tmp.path().join("foo.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&object_path)
+        .arg("-o")
+        .arg(&bitcode_path)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed");
+    assert_valid_bitcode(&bitcode_path);
+}
+
+/// `--version` must reach the compiler, not be answered by the wrapper.
+///
+/// CMake and autoconf identify the compiler by running `$CC --version`. If clap
+/// answers it, they misidentify the toolchain — a failure that looks nothing
+/// like an argument-parsing bug.
+#[test]
+fn dropin_version_passes_through_to_compiler() {
+    let output = rllvm("rllvm-cc")
+        .arg("--version")
+        .output()
+        .expect("Failed to run rllvm-cc --version");
+    assert!(output.status.success(), "rllvm-cc --version failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("clang"),
+        "--version did not reach the compiler; got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("rllvm-cc"),
+        "the wrapper answered --version instead of the compiler; got: {stdout}"
+    );
+}
+
+/// `-v` belongs to the compiler too, for the same reason as `--version`.
+#[test]
+fn dropin_dash_v_passes_through_to_compiler() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+
+    let output = rllvm("rllvm-cc")
+        .args(["-v", "-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "-v was not passed through: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(object_path.exists(), "Object file not created with -v");
+}
+
+/// The per-invocation compiler override survives, under its namespaced name.
+#[test]
+fn rllvm_compiler_override_still_works() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+    let clang = find_llvm_config()
+        .map(|c| c.parent().unwrap().join("clang"))
+        .expect("llvm-config not found");
+
+    let output = rllvm("rllvm-cc")
+        .arg(format!("--rllvm-compiler={}", clang.display()))
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "--rllvm-compiler was rejected: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(object_path.exists(), "Object file not created");
+}
+
+/// Bare `--rllvm-verbose` must not consume the following compiler argument.
+///
+/// Without `require_equals`, clap would treat `-c` as the verbose level and the
+/// compile would lose its `-c`, silently turning a compile into a link.
+#[test]
+fn rllvm_verbose_does_not_swallow_next_argument() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+
+    let output = rllvm("rllvm-cc")
+        .arg("--rllvm-verbose")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "bare --rllvm-verbose broke the invocation: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        object_path.exists(),
+        "-c was consumed as the verbose value; no object produced"
+    );
 }

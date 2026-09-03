@@ -11,25 +11,59 @@ use rllvm::{
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-/// Extraction arguments
+/// Wrapper arguments.
+///
+/// This must be usable as a drop-in `CC`, so every argument the compiler could
+/// plausibly own has to reach the compiler:
+///
+/// - Compiler arguments are collected as a trailing var-arg, so no `--`
+///   separator is needed. `--` still works, for callers that want to be explicit.
+/// - The wrapper's own options are long-only and prefixed `--rllvm-`. Clang has
+///   no `--rllvm-*` flags, so collision is impossible. In particular `-c` and
+///   `-v` belong to the compiler, not to us.
+/// - clap's built-in `--help`/`--version` are disabled and re-exposed under the
+///   prefix. Build systems identify the compiler by running `$CC --version`; if
+///   the wrapper answered that, CMake and autoconf would misidentify the
+///   toolchain, which looks nothing like an argument-parsing bug.
 #[derive(Parser, Debug)]
 #[command(
     name = "rllvm-cc",
     about = "Execute the wrapped clang compiler",
     author = "Shengtuo Hu <h1994st@gmail.com>",
-    version
+    version,
+    disable_help_flag = true,
+    disable_version_flag = true
 )]
 struct ClangWrapperArgs {
     /// Path to the wrapped compiler
-    #[arg(short = 'c', long)]
+    #[arg(long = "rllvm-compiler")]
     compiler: Option<PathBuf>,
 
-    /// Verbose mode
-    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
+    /// Verbose mode: `--rllvm-verbose` for level 1, `--rllvm-verbose=3` for level 3
+    ///
+    /// A repeated-count flag would mean writing `--rllvm-verbose` three times,
+    /// since there is no short form to spare — `-v` belongs to the compiler.
+    /// `require_equals` keeps the value from swallowing the next compiler
+    /// argument, so `--rllvm-verbose -c foo.c` parses as level 1 plus `-c foo.c`.
+    #[arg(
+        long = "rllvm-verbose",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "1",
+        default_value = "0"
+    )]
     verbose: u8,
 
+    /// Print this help (the compiler owns plain `--help`)
+    #[arg(long = "rllvm-help", action = clap::ArgAction::Help)]
+    rllvm_help: Option<bool>,
+
+    /// Print the wrapper version (the compiler owns plain `--version`)
+    #[arg(long = "rllvm-version", action = clap::ArgAction::Version)]
+    rllvm_version: Option<bool>,
+
     /// Compiler arguments
-    #[arg(last = true)]
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     clang_args: Vec<String>,
 }
 
