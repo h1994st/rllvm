@@ -813,3 +813,48 @@ fn relocated_build_tree_fails_without_bitcode_root() {
         "absolute paths unexpectedly survived relocation; the positive test is vacuous"
     );
 }
+
+/// Each wrapper must identify itself by its own name.
+///
+/// `rllvm-cxx` reuses `rllvm_cc.rs`, which hardcoded `name = "rllvm-cc"` in the
+/// clap derive, so `rllvm-cxx --rllvm-version` reported `rllvm-cc` and its help
+/// showed the wrong usage line.
+#[test]
+fn each_wrapper_reports_its_own_name() {
+    for bin in ["rllvm-cc", "rllvm-cxx"] {
+        let output = rllvm(bin)
+            .arg("--rllvm-version")
+            .output()
+            .unwrap_or_else(|e| panic!("Failed to run {bin}: {e}"));
+        assert!(output.status.success(), "{bin} --rllvm-version failed");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.starts_with(bin),
+            "{bin} identified itself as {stdout:?}"
+        );
+    }
+}
+
+/// `--rllvm-help` must describe the tool, not explain its implementation.
+///
+/// clap promotes a struct's doc comment to `long_about`, so the rationale for
+/// the argument layout was being printed to users who asked for help.
+#[test]
+fn wrapper_help_does_not_leak_implementation_notes() {
+    let output = rllvm("rllvm-cc")
+        .arg("--rllvm-help")
+        .output()
+        .expect("Failed to run rllvm-cc --rllvm-help");
+    assert!(output.status.success(), "--rllvm-help failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Wrapper arguments"),
+        "help leaked the struct's implementation notes: {stdout}"
+    );
+    assert!(
+        stdout.contains("Execute the wrapped clang compiler"),
+        "help lost its description: {stdout}"
+    );
+}
