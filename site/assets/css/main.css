@@ -1,0 +1,558 @@
+/* rllvm — project site
+ *
+ * Cool ground, one warm accent. The accent marks exactly one idea: the single
+ * module that comes out of a build. Nothing else borrows it.
+ *
+ * Monospace is reserved for machine text — paths, code, section names, hex.
+ * It is never used to style a label.
+ */
+
+:root {
+  --paper: #fafbfd;
+  --raised: #f1f4f9;
+  --ink: #0e1420;
+  --muted: #59647a;
+  --rule: #e2e7f0;
+  --accent: #b26a00;
+  --syn-comment: #6b7689;
+  --syn-string: #0f766e;
+  --syn-key: #6d28d9;
+
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, "SF Mono",
+    Menlo, Consolas, monospace;
+
+  --measure: 68ch;
+  --gutter: clamp(1.25rem, 5vw, 3.5rem);
+  /* Keeps the measure honest on wide displays without centering the text. */
+  --shelf: max(var(--gutter), (100% - 82rem) / 2);
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --paper: #0b0f17;
+  --raised: #131926;
+  --ink: #e3e9f4;
+  --muted: #8c97ac;
+  --rule: #1e2635;
+  --accent: #f0a202;
+  --syn-comment: #6f7c92;
+  --syn-string: #5eead4;
+  --syn-key: #c4b5fd;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    --paper: #0b0f17;
+    --raised: #131926;
+    --ink: #e3e9f4;
+    --muted: #8c97ac;
+    --rule: #1e2635;
+    --accent: #f0a202;
+    --syn-comment: #6f7c92;
+    --syn-string: #5eead4;
+    --syn-key: #c4b5fd;
+
+    color-scheme: dark;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 1.0625rem;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+  text-decoration-color: color-mix(in srgb, var(--muted) 55%, transparent);
+  text-underline-offset: 0.2em;
+}
+
+a:hover {
+  text-decoration-color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+.skip {
+  position: absolute;
+  left: -9999px;
+}
+
+.skip:focus {
+  left: var(--gutter);
+  top: 0.75rem;
+  z-index: 10;
+  background: var(--paper);
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+}
+
+/* ---------- masthead ---------- */
+
+.masthead {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.9rem;
+  padding: 0.85rem var(--shelf);
+  background: color-mix(in srgb, var(--paper) 82%, transparent);
+  backdrop-filter: saturate(1.6) blur(12px);
+  border-bottom: 1px solid var(--rule);
+}
+
+.wordmark {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-decoration: none;
+}
+
+.version {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+}
+
+.masthead nav {
+  margin-left: auto;
+  min-width: 0;
+  display: flex;
+  gap: 1.1rem;
+  font-size: 0.92rem;
+}
+
+.theme {
+  font: inherit;
+  font-size: 0.85rem;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+  cursor: pointer;
+}
+
+.theme:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+/* The row is the tightest thing on the page; shed the least useful parts
+   before it wraps. docs.rs first, then the version. */
+@media (max-width: 34rem) {
+  .masthead nav a:nth-child(3) {
+    display: none;
+  }
+}
+
+@media (max-width: 26rem) {
+  .version {
+    display: none;
+  }
+}
+
+/* ---------- hero ---------- */
+
+.hero > * {
+  min-width: 0;
+}
+
+.hero {
+  display: grid;
+  gap: clamp(2rem, 5vw, 4rem);
+  align-items: start;
+  padding: clamp(3rem, 8vw, 5.5rem) var(--shelf) clamp(2.5rem, 6vw, 4rem);
+  border-bottom: 1px solid var(--rule);
+}
+
+@media (min-width: 60rem) {
+  .hero {
+    grid-template-columns: 1.05fr 0.95fr;
+  }
+}
+
+.pitch h1 {
+  margin: 0;
+  font-size: clamp(2.1rem, 5.2vw, 3.3rem);
+  font-weight: 600;
+  line-height: 1.06;
+  letter-spacing: -0.028em;
+  max-width: 18ch;
+}
+
+.lead {
+  margin: 1.1rem 0 0;
+  max-width: 46ch;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+
+.install {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 1.9rem;
+  padding: 0.55rem 0.6rem 0.55rem 0.95rem;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--raised);
+}
+
+.install code {
+  font-family: var(--font-mono);
+  font-size: 0.94rem;
+}
+
+.install button {
+  font: inherit;
+  font-size: 0.82rem;
+  color: var(--muted);
+  background: var(--paper);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 0.2rem 0.6rem;
+  cursor: pointer;
+}
+
+.install button:hover {
+  color: var(--ink);
+}
+
+/* ---------- the ledger ---------- */
+
+/* Each row is one translation unit: the source on the left, the bitcode path
+   the wrapper records on the right, joined so the pairing is legible. The
+   spine down the right is the section the linker concatenates. */
+
+.ledger {
+  margin: 0;
+  max-width: min(27rem, 100%);
+  font-family: var(--font-mono);
+  font-size: clamp(0.82rem, 1.6vw, 0.92rem);
+}
+
+@media (min-width: 60rem) {
+  .ledger {
+    padding-top: 0.7rem;
+  }
+}
+
+.ledger ol {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+
+.ledger ol::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: 0.85rem;
+  bottom: 0.85rem;
+  width: 1px;
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    var(--rule) 14%,
+    var(--rule) 86%,
+    transparent
+  );
+}
+
+.ledger li {
+  display: grid;
+  grid-template-columns: auto minmax(1.5rem, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.4rem 1.15rem 0.4rem 0;
+  animation: enter 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation-delay: calc(var(--i) * 80ms);
+}
+
+.ledger .tie {
+  height: 1px;
+  background: repeating-linear-gradient(
+    to right,
+    var(--rule) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+.ledger .src {
+  color: var(--muted);
+}
+
+.ledger .bc {
+  color: var(--ink);
+}
+
+.ledger figcaption {
+  display: grid;
+  gap: 0.25rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--rule);
+  animation: enter 0.6s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+  animation-delay: 460ms;
+}
+
+.ledger .section-name {
+  color: var(--muted);
+  font-size: 0.84em;
+}
+
+.ledger .out {
+  color: var(--accent);
+  font-size: 1.3em;
+  font-weight: 500;
+}
+
+@keyframes enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .ledger li,
+  .ledger figcaption {
+    animation: none;
+  }
+}
+
+/* ---------- shell ---------- */
+
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3rem;
+  padding: clamp(2.5rem, 6vw, 4rem) var(--shelf) 4rem;
+}
+
+@media (min-width: 74rem) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr) 13rem;
+  }
+
+  .prose {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .rail {
+    grid-column: 2;
+    grid-row: 1;
+  }
+}
+
+.prose,
+.rail {
+  min-width: 0;
+}
+
+.rail nav {
+  position: sticky;
+  top: 5rem;
+  display: grid;
+  gap: 0.35rem;
+  font-size: 0.88rem;
+  border-left: 1px solid var(--rule);
+  padding-left: 1rem;
+}
+
+.rail a {
+  color: var(--muted);
+  text-decoration: none;
+  padding: 0.05rem 0;
+}
+
+.rail a:hover,
+.rail a[aria-current="true"] {
+  color: var(--ink);
+}
+
+.rail a.sub {
+  padding-left: 0.85rem;
+  font-size: 0.84rem;
+}
+
+/* ---------- prose ---------- */
+
+.prose {
+  max-width: var(--measure);
+}
+
+.prose > * {
+  margin-inline: 0;
+}
+
+.prose h2 {
+  margin: 3.2rem 0 1rem;
+  padding-top: 1.6rem;
+  border-top: 1px solid var(--rule);
+  font-size: clamp(1.4rem, 2.4vw, 1.75rem);
+  font-weight: 600;
+  letter-spacing: -0.018em;
+  line-height: 1.2;
+}
+
+.prose > h2:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.prose h3 {
+  margin: 2.2rem 0 0.7rem;
+  font-size: 1.12rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.prose p,
+.prose ul,
+.prose ol {
+  margin: 0 0 1.1rem;
+}
+
+.prose li {
+  margin-bottom: 0.45rem;
+}
+
+.prose li::marker {
+  color: var(--muted);
+}
+
+.prose strong {
+  font-weight: 600;
+}
+
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--raised);
+  border-radius: 4px;
+  padding: 0.12em 0.34em;
+}
+
+.prose pre {
+  margin: 0 0 1.4rem;
+  padding: 1rem 1.15rem;
+  background: var(--raised);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  overflow-x: auto;
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
+.prose pre code {
+  background: none;
+  padding: 0;
+  font-size: 1em;
+}
+
+.prose table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 0 0 1.4rem;
+  font-size: 0.94rem;
+}
+
+.prose th,
+.prose td {
+  text-align: left;
+  padding: 0.5rem 0.9rem 0.5rem 0;
+  border-bottom: 1px solid var(--rule);
+  vertical-align: top;
+}
+
+.prose th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.prose blockquote {
+  margin: 0 0 1.2rem;
+  padding-left: 1rem;
+  border-left: 2px solid var(--rule);
+  color: var(--muted);
+}
+
+.prose hr {
+  margin: 2.5rem 0;
+  border: 0;
+  border-top: 1px solid var(--rule);
+}
+
+/* Rouge, kept to three ideas: what is not code, what is text, what is named. */
+.highlight .c, .highlight .c1, .highlight .cm, .highlight .cd {
+  color: var(--syn-comment);
+  font-style: italic;
+}
+
+.highlight .s, .highlight .s1, .highlight .s2, .highlight .sb, .highlight .se {
+  color: var(--syn-string);
+}
+
+.highlight .k, .highlight .kd, .highlight .kn, .highlight .kr, .highlight .nb,
+.highlight .nt {
+  color: var(--syn-key);
+}
+
+.highlight .nv, .highlight .na, .highlight .no, .highlight .m, .highlight .mi {
+  color: var(--accent);
+}
+
+/* ---------- footer ---------- */
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding: 2rem var(--shelf) 3rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+footer p {
+  margin: 0;
+  max-width: var(--measure);
+}
