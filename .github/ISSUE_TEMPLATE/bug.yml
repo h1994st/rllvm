@@ -1,0 +1,63 @@
+name: Bug report
+description: Something does not work
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Command
+      description: The exact invocation that triggers it.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: verbose
+    attributes:
+      label: Verbose output
+      description: >
+        Re-run with `--rllvm-verbose=3`. This logs every sub-command the wrapper
+        runs, and is usually enough to identify the cause on its own.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: rllvm version
+      description: "`rllvm-cc --rllvm-version`"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15 arm64 / Ubuntu 24.04 x86_64
+
+  - type: input
+    id: llvm
+    attributes:
+      label: LLVM version
+      description: "`llvm-config --version`"
+
+  - type: dropdown
+    id: buildsystem
+    attributes:
+      label: Build system
+      description: >
+        Worth being precise: some bugs only appear under one of these. Autotools
+        invokes the compiler in ways CMake never does.
+      options:
+        - CMake
+        - Autotools (configure/make)
+        - Plain make or a script
+        - Direct invocation
+        - Other
