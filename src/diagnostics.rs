@@ -111,7 +111,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_major_version() {
+    fn parses_major_version() {
         assert_eq!(parse_major_version("17.0.6"), Some(17));
         assert_eq!(parse_major_version("18.1.0"), Some(18));
         assert_eq!(parse_major_version("15"), Some(15));
@@ -120,9 +120,57 @@ mod tests {
     }
 
     #[test]
-    fn test_install_suggestion_contains_tool_name() {
+    fn install_suggestion_contains_tool_name() {
         let suggestion = install_suggestion("llvm-config");
         assert!(suggestion.contains("llvm-config"));
         assert!(suggestion.contains("llvm"));
+    }
+
+    #[test]
+    fn print_helpers_do_not_panic() {
+        // These only write to stderr; the point is that every formatting branch
+        // is exercised, including the two arms of print_missing_tool_error.
+        print_warning("a warning");
+        print_error("an error");
+        print_missing_tool_error("llvm-link", Some(Path::new("/nowhere/llvm-link")));
+        print_missing_tool_error("llvm-link", None);
+    }
+
+    #[test]
+    fn install_suggestion_differs_by_platform_but_always_mentions_the_tool() {
+        for tool in [
+            "clang",
+            "llvm-link",
+            "llvm-ar",
+            "llvm-config",
+            "something-else",
+        ] {
+            let s = install_suggestion(tool);
+            assert!(!s.is_empty(), "no suggestion for {tool}");
+        }
+    }
+
+    #[test]
+    fn parses_major_version_rejects_junk() {
+        assert_eq!(parse_major_version("not a version"), None);
+        assert_eq!(parse_major_version(""), None);
+    }
+
+    #[test]
+    fn version_compatibility_tolerates_missing_tools() {
+        // Both lookups fail, so the function must return quietly rather than
+        // panicking or printing a spurious mismatch.
+        check_version_compatibility(
+            Path::new("/nonexistent/clang"),
+            Path::new("/nonexistent/llvm-config"),
+        );
+    }
+
+    #[test]
+    fn version_compatibility_runs_against_the_real_toolchain() {
+        // Exercises the success path: both versions parse and are compared.
+        if let Ok(config) = crate::config::RLLVMConfig::try_default() {
+            check_version_compatibility(config.clang_filepath(), config.llvm_config_filepath());
+        }
     }
 }

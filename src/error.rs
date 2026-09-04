@@ -51,3 +51,40 @@ impl From<FromUtf8Error> for Error {
         Self::StringError(format!("{}", value))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn utf8_errors_convert_to_string_errors() {
+        // Both From impls exist so `?` works on UTF-8 conversion failures.
+        // Built at runtime: clippy rejects a literal it can prove is invalid.
+        let invalid: Vec<u8> = vec![0x66, 0x6f, 0x80];
+        let utf8_err = std::str::from_utf8(&invalid).unwrap_err();
+        let err: Error = utf8_err.into();
+        assert!(matches!(err, Error::StringError(_)));
+        assert!(err.to_string().contains("String error"));
+
+        let from_utf8_err = String::from_utf8(invalid.clone()).unwrap_err();
+        let err: Error = from_utf8_err.into();
+        assert!(matches!(err, Error::StringError(_)));
+    }
+
+    #[test]
+    fn every_variant_renders_a_message() {
+        let cases = [
+            Error::InvalidArguments("a".into()),
+            Error::ExecutionFailure("b".into()),
+            Error::StringError("c".into()),
+            Error::UnsupportedBinaryFormat("d".into()),
+            Error::MissingFile("e".into()),
+            Error::ConfigError("f".into()),
+            Error::Unknown("g".into()),
+            Error::Io(std::io::Error::other("h")),
+        ];
+        for err in cases {
+            assert!(!err.to_string().is_empty(), "empty Display for {err:?}");
+        }
+    }
+}

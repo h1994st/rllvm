@@ -127,3 +127,61 @@ fn cleanup_files(files: &[PathBuf]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn merge_strategy_display() {
+        assert_eq!(MergeStrategy::Full.to_string(), "full");
+        assert_eq!(MergeStrategy::Partial.to_string(), "partial");
+        assert_eq!(MergeStrategy::Archive.to_string(), "archive");
+    }
+
+    #[test]
+    fn group_by_parent_dir_splits_on_directory() {
+        let paths = [
+            Path::new("/a/one.bc"),
+            Path::new("/b/two.bc"),
+            Path::new("/a/three.bc"),
+        ];
+        let groups = group_by_parent_dir(&paths);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[&PathBuf::from("/a")].len(), 2);
+        assert_eq!(groups[&PathBuf::from("/b")].len(), 1);
+    }
+
+    #[test]
+    fn group_by_parent_dir_single_directory_is_one_group() {
+        // `partial` falls back to a full link when this returns one group, so
+        // the boundary matters.
+        let paths = [Path::new("/a/one.bc"), Path::new("/a/two.bc")];
+        assert_eq!(group_by_parent_dir(&paths).len(), 1);
+    }
+
+    #[test]
+    fn group_by_parent_dir_handles_paths_without_a_parent() {
+        let paths = [Path::new("bare.bc")];
+        let groups = group_by_parent_dir(&paths);
+        assert_eq!(groups.len(), 1);
+        assert!(groups.contains_key(&PathBuf::from("")));
+    }
+
+    #[test]
+    fn cleanup_files_removes_what_exists_and_tolerates_what_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("present.bc");
+        let absent = dir.path().join("absent.bc");
+        fs::write(&present, b"x").unwrap();
+
+        // The absent path must not panic or abort the cleanup of the rest.
+        cleanup_files(&[present.clone(), absent.clone()]);
+
+        assert!(!present.exists(), "existing intermediate was not removed");
+        assert!(!absent.exists());
+    }
+}

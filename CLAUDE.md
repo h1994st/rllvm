@@ -18,7 +18,7 @@ A single long-lived `main` plus short-lived feature branches. Branch off `main`,
 cargo build                                # Build all binaries
 cargo test --all                           # Unit + integration tests
 cargo test --test integration              # Integration tests only
-cargo test test_parsing_lto                # A single test by name
+cargo test parsing_lto                     # A single test by name
 cargo clippy --all-targets -- -D warnings  # CI gate
 cargo fmt --all --check                    # CI gate
 ```
@@ -60,6 +60,8 @@ Two things that look like bugs and are not: link mode compiles each translation 
 ### Tests
 
 Integration tests write their own config and pass it through `RLLVM_CONFIG`, so they never read `~/.rllvm/config.toml`. Keep it that way: route every spawned binary through the `rllvm()` helper in `tests/integration.rs`.
+
+Test functions do not use a `test_` prefix: name them after the behaviour asserted (`parsing_lto`, `bitcode_store_path_relative_is_ignored`).
 
 **Confirm a new test fails before its fix.** Several tests in this repo have passed with the bug present — asserting on the wrong field, or on a value something else produced. Check that the sabotage targets the layer that can actually break.
 

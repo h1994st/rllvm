@@ -164,7 +164,7 @@ mod tests {
     };
 
     #[test]
-    fn test_find_llvm_config() {
+    fn finds_llvm_config() {
         assert!(find_llvm_config().is_ok_and(|llvm_config_path| {
             println!("llvm_config_path={:?}", llvm_config_path);
             llvm_config_path.exists()
@@ -221,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn test_link_bitcode_files() {
+    fn links_bitcode_files() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let bitcode_filepaths = build_bitcode_files(dir.path());
         let output_pathbuf = dir.path().join("foo_bar_baz.bc");
@@ -242,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_bitcode_files() {
+    fn archives_bitcode_files() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let bitcode_filepaths = build_bitcode_files(dir.path());
         let output_pathbuf = dir.path().join("foo_bar_baz.bca");

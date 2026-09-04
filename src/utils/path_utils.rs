@@ -115,7 +115,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_derive_object_and_bitcode_filepath() {
+    fn derives_object_and_bitcode_filepath() {
         // Must be absolute on the host platform: `/tmp/foo.c` is not absolute
         // on Windows, where paths need a drive prefix.
         let src_dir = env::temp_dir();
@@ -148,7 +148,7 @@ mod tests {
     }
 
     #[test]
-    fn test_same_stem_in_different_directories_does_not_collide() {
+    fn same_stem_in_different_directories_does_not_collide() {
         // Two sources sharing a stem now land in one output directory, so the
         // names have to disambiguate them — otherwise concurrent builds race
         // and each overwrites the other's bitcode.
@@ -168,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_filepath_hash_is_stable() {
+    fn calculate_filepath_hash_is_stable() {
         // Hard-coded expectations, deliberately: this hash names files in the
         // bitcode store, so it must survive Rust upgrades and be identical on
         // every platform. If these values change, the store is orphaned.
@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calculate_filepath_hash_distinguishes_paths() {
+    fn calculate_filepath_hash_distinguishes_paths() {
         let foo = calculate_filepath_hash(Path::new("/tmp/foo.c"));
         let bar = calculate_filepath_hash(Path::new("/tmp/bar.c"));
         let nested = calculate_filepath_hash(Path::new("/tmp/sub/foo.c"));
@@ -199,5 +199,22 @@ mod tests {
 
         // Same input, same hash.
         assert_eq!(foo, calculate_filepath_hash(PathBuf::from("/tmp/foo.c")));
+    }
+
+    #[test]
+    fn derive_rejects_a_relative_source_path() {
+        let err = derive_object_and_bitcode_filepath(
+            Path::new("relative/foo.c"),
+            Path::new("/tmp"),
+            true,
+        );
+        assert!(err.is_err(), "a relative source path must be rejected");
+    }
+
+    #[test]
+    fn derive_rejects_a_path_without_a_file_stem() {
+        // A path ending in `..` has no file stem.
+        let err = derive_object_and_bitcode_filepath(Path::new("/tmp/.."), Path::new("/tmp"), true);
+        assert!(err.is_err(), "a path with no file stem must be rejected");
     }
 }

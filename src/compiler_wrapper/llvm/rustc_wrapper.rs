@@ -246,19 +246,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_should_skip_bitcode_version() {
+    fn should_skip_bitcode_version() {
         assert!(should_skip_bitcode(&["--version"]));
         assert!(should_skip_bitcode(&["-vV"]));
         assert!(should_skip_bitcode(&["-V"]));
     }
 
     #[test]
-    fn test_should_skip_bitcode_no_source() {
+    fn should_skip_bitcode_no_source() {
         assert!(should_skip_bitcode(&["-o", "output", "--crate-type=lib"]));
     }
 
     #[test]
-    fn test_should_skip_bitcode_proc_macro() {
+    fn should_skip_bitcode_proc_macro() {
         assert!(should_skip_bitcode(&[
             "src/lib.rs",
             "--crate-type=proc-macro",
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_not_skip_bitcode_normal() {
+    fn should_not_skip_bitcode_normal() {
         assert!(!should_skip_bitcode(&[
             "src/main.rs",
             "--crate-type=bin",
@@ -279,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn test_should_skip_bitcode_emit_metadata_only() {
+    fn should_skip_bitcode_emit_metadata_only() {
         assert!(should_skip_bitcode(&[
             "src/lib.rs",
             "--emit=metadata",
@@ -289,7 +289,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_output_path() {
+    fn finds_output_path() {
         assert_eq!(
             find_output_path(&["src/main.rs", "-o", "/tmp/output"]),
             Some("/tmp/output")
@@ -298,7 +298,7 @@ mod tests {
     }
 
     #[test]
-    fn test_derive_bitcode_path() {
+    fn derives_bitcode_path() {
         assert_eq!(
             derive_bitcode_path(Path::new("/tmp/foo.o")),
             PathBuf::from("/tmp/foo.bc")
