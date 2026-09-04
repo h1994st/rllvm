@@ -54,6 +54,22 @@ fn shared_config_path() -> &'static Path {
     })
 }
 
+/// Asserts a file is LLVM bitcode by its magic bytes only.
+///
+/// `assert_valid_bitcode` shells out to `llvm-dis`, which fails when the
+/// producer is newer than the reader. rustc bundles its own LLVM, so its
+/// bitcode can be unreadable by the system tools -- CI hit exactly this:
+/// "Unknown attribute kind (105) (Producer: 'LLVM22.1.8-rust', Reader: 'LLVM 18.1.3')".
+/// The magic bytes are stable across versions.
+fn assert_bitcode_magic(path: &Path) {
+    let data = fs::read(path).unwrap_or_else(|e| panic!("cannot read {path:?}: {e}"));
+    assert!(data.len() >= 4, "{path:?} is too short to be bitcode");
+    let head = [data[0], data[1], data[2], data[3]];
+    let raw = head == [0x42, 0x43, 0xC0, 0xDE];
+    let wrapped = u32::from_le_bytes(head) == 0x0B17_C0DE;
+    assert!(raw || wrapped, "{path:?} is not LLVM bitcode: {head:02x?}");
+}
+
 /// Returns a `Command` for one of the rllvm binaries, pinned to the isolated
 /// test configuration.
 fn rllvm(name: &str) -> Command {
@@ -1668,7 +1684,7 @@ fn rustc_wrapper_emits_and_embeds_bitcode() {
         "embedded bitcode missing: {:?}",
         paths[0]
     );
-    assert_valid_bitcode(&paths[0]);
+    assert_bitcode_magic(&paths[0]);
 }
 
 /// Query invocations must skip bitcode generation entirely.
