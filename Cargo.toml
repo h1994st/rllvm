@@ -9,7 +9,7 @@ exclude = [
   ".github/*",
 ]
 keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
-homepage = "https://github.com/h1994st/rllvm"
+homepage = "https://shengtuo.me/rllvm"
 license = "Apache-2.0"
 name = "rllvm"
 readme = "README.md"

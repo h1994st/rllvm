@@ -89,3 +89,7 @@ target/
 
 # Build output from the cargo fixture used by the integration tests.
 tests/data/cargo_fixture/target/
+
+# Generated from README.md by site/build.py; never committed, so the
+# published page cannot drift from the repository's front page.
+site/index.md

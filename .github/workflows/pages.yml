@@ -1,0 +1,64 @@
+name: Pages
+
+# Path filters are safe here in a way they would not be in `ci.yml`: this
+# workflow is not a required status check, so a pull request that never runs it
+# is still mergeable.
+on:
+  push:
+    branches: ["main"]
+    paths: ["README.md", "site/**", ".github/workflows/pages.yml"]
+  pull_request:
+    branches: ["main"]
+    paths: ["README.md", "site/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deployment in flight; a half-published site is worse than a
+# slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Generate index from README
+        run: python3 site/build.py
+
+      # `actions/configure-pages` is deliberately absent: its only job here
+      # would be to infer `baseurl`, which `_config.yml` sets outright, and it
+      # fails on pull requests before Pages has been enabled.
+      - name: Build with Jekyll
+        uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./site
+          destination: ./_site
+        env:
+          JEKYLL_GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+
+  deploy:
+    name: Deploy site
+    # Pull requests build the site to catch a README change that breaks it,
+    # but only `main` publishes.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

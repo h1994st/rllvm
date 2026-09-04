@@ -1,0 +1,19 @@
+# Jekyll configuration for the project site at https://shengtuo.me/rllvm.
+#
+# `index.md` is generated from README.md by `build.py` and is not committed, so
+# the published page cannot drift from the repository's front page.
+#
+# There is deliberately no CNAME file in this repository. The user site
+# (h1994st.github.io) owns `shengtuo.me`, and project pages inherit it as
+# `shengtuo.me/<repo>` automatically. A CNAME here would claim the apex domain
+# for this project and take the personal site down with it.
+title: rllvm
+description: Extract whole-program LLVM bitcode from any build.
+
+url: https://shengtuo.me
+baseurl: /rllvm
+
+theme: jekyll-theme-cayman
+
+exclude:
+  - build.py
