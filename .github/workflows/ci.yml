@@ -15,8 +15,9 @@ name: rllvm CI
 on:
   push:
     branches: ["main"]
+  # Every pull request, not just those targeting `main`. A stacked pull request
+  # opened against another branch still has to be tested before its base moves.
   pull_request:
-    branches: ["main"]
 
 env:
   CARGO_TERM_COLOR: always
