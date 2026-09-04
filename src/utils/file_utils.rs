@@ -201,7 +201,9 @@ where
                     DARWIN_SEGMENT_NAME.as_bytes().to_vec(),
                     DARWIN_SECTION_NAME.as_bytes().to_vec(),
                     SectionFlags::MachO {
-                        flags: object::macho::SectionFlags(0),
+                        // Nothing references the section, so ld would
+                        // otherwise dead strip it out of the linked output.
+                        flags: object::macho::S_ATTR_NO_DEAD_STRIP,
                         reserved2: 0,
                     },
                 ),
@@ -301,6 +303,9 @@ fn embed_with_macho_builder(data: &[u8], bitcode_filepath_string: &str) -> Optio
         // sections it concatenates, and those NUL bytes land in the middle of
         // the newline-separated path list.
         section.align = 0;
+        // Nothing references the section, so ld would otherwise dead strip it
+        // out of the linked output.
+        section.flags = object::macho::S_ATTR_NO_DEAD_STRIP;
         section.data = SectionData::Data(bitcode_filepath_string.as_bytes().to_vec().into());
         section.id()
     };
@@ -378,7 +383,140 @@ fn embed_with_objcopy(
         )));
     }
 
+    // `llvm-objcopy` adds the section with flags `0`, and its
+    // `--set-section-flags` only understands ELF flag names, so the Mach-O
+    // attribute has to be written afterwards.
+    if format == BinaryFormat::MachO {
+        let written = output_object_filepath.unwrap_or(object_filepath);
+        let mut data = fs::read(written)?;
+        if set_macho_no_dead_strip(&mut data) {
+            fs::write(written, data)?;
+        } else {
+            tracing::warn!(
+                "Could not mark {written:?} no_dead_strip; a stripping link will drop the section"
+            );
+        }
+    }
+
     Ok(())
+}
+
+// Mach-O load-command and section layouts, fixed by the ABI.
+const MACHO_MAGIC_64: u32 = 0xfeed_facf;
+const MACHO_MAGIC_32: u32 = 0xfeed_face;
+const MACHO_HEADER_64_SIZE: usize = 32;
+const MACHO_HEADER_32_SIZE: usize = 28;
+const MACHO_HEADER_NCMDS_OFFSET: usize = 16;
+const MACHO_LC_SEGMENT_32: u32 = 0x1;
+const MACHO_LC_SEGMENT_64: u32 = 0x19;
+const MACHO_SEGMENT_64_HEADER_SIZE: usize = 72;
+const MACHO_SEGMENT_32_HEADER_SIZE: usize = 56;
+const MACHO_SEGMENT_64_NSECTS_OFFSET: usize = 64;
+const MACHO_SEGMENT_32_NSECTS_OFFSET: usize = 48;
+const MACHO_SECTION_64_SIZE: usize = 80;
+const MACHO_SECTION_32_SIZE: usize = 68;
+const MACHO_SECTION_64_FLAGS_OFFSET: usize = 64;
+const MACHO_SECTION_32_FLAGS_OFFSET: usize = 56;
+/// Length of both `sectname` and `segname` in a Mach-O section header.
+const MACHO_NAME_LENGTH: usize = 16;
+
+/// Reads a Mach-O `sectname`/`segname` field, which is NUL-padded rather than
+/// NUL-terminated when the name fills all sixteen bytes.
+fn macho_name(field: &[u8]) -> &[u8] {
+    field.split(|byte| *byte == 0).next().unwrap_or_default()
+}
+
+/// Reads a little-endian `u32` at `at`, or `None` if it runs off the end.
+fn read_u32_le(data: &[u8], at: usize) -> Option<u32> {
+    data.get(at..at + 4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("a 4-byte slice")))
+}
+
+/// Sets `S_ATTR_NO_DEAD_STRIP` on rllvm's section in a Mach-O object.
+///
+/// The section holds a path nothing references, so `ld -dead_strip` discards
+/// it and extraction from the linked output finds nothing. Marking it is what
+/// lets the wrapper pass `-dead_strip` through instead of deleting it from the
+/// user's link.
+///
+/// Returns `false` when the buffer is not a Mach-O object or carries no rllvm
+/// section, so callers can leave other formats alone. Only little-endian
+/// Mach-O is handled: every target rllvm supports is little-endian, and a
+/// big-endian image would need byte swapping throughout rather than in these
+/// few fields.
+fn set_macho_no_dead_strip(data: &mut [u8]) -> bool {
+    let (is_64, header_size) = match read_u32_le(data, 0) {
+        Some(MACHO_MAGIC_64) => (true, MACHO_HEADER_64_SIZE),
+        Some(MACHO_MAGIC_32) => (false, MACHO_HEADER_32_SIZE),
+        _ => return false,
+    };
+
+    let Some(ncmds) = read_u32_le(data, MACHO_HEADER_NCMDS_OFFSET) else {
+        return false;
+    };
+
+    let (segment_command, nsects_offset, segment_header_size, section_size, flags_offset) = if is_64
+    {
+        (
+            MACHO_LC_SEGMENT_64,
+            MACHO_SEGMENT_64_NSECTS_OFFSET,
+            MACHO_SEGMENT_64_HEADER_SIZE,
+            MACHO_SECTION_64_SIZE,
+            MACHO_SECTION_64_FLAGS_OFFSET,
+        )
+    } else {
+        (
+            MACHO_LC_SEGMENT_32,
+            MACHO_SEGMENT_32_NSECTS_OFFSET,
+            MACHO_SEGMENT_32_HEADER_SIZE,
+            MACHO_SECTION_32_SIZE,
+            MACHO_SECTION_32_FLAGS_OFFSET,
+        )
+    };
+
+    let mut marked = false;
+    let mut command_offset = header_size;
+
+    for _ in 0..ncmds {
+        let (Some(command), Some(command_size)) = (
+            read_u32_le(data, command_offset),
+            read_u32_le(data, command_offset + 4),
+        ) else {
+            return marked;
+        };
+        // A zero-length command would loop forever on a corrupt file.
+        if command_size == 0 {
+            return marked;
+        }
+
+        if command == segment_command
+            && let Some(nsects) = read_u32_le(data, command_offset + nsects_offset)
+        {
+            for index in 0..nsects as usize {
+                let section = command_offset + segment_header_size + index * section_size;
+                let Some(names) = data.get(section..section + 2 * MACHO_NAME_LENGTH) else {
+                    return marked;
+                };
+
+                let sectname = macho_name(&names[..MACHO_NAME_LENGTH]);
+                let segname = macho_name(&names[MACHO_NAME_LENGTH..]);
+
+                if sectname == DARWIN_SECTION_NAME.as_bytes()
+                    && segname == DARWIN_SEGMENT_NAME.as_bytes()
+                    && let Some(flags) = read_u32_le(data, section + flags_offset)
+                {
+                    let flags = flags | object::macho::S_ATTR_NO_DEAD_STRIP.0;
+                    data[section + flags_offset..section + flags_offset + 4]
+                        .copy_from_slice(&flags.to_le_bytes());
+                    marked = true;
+                }
+            }
+        }
+
+        command_offset += command_size as usize;
+    }
+
+    marked
 }
 
 /// Carry the Mach-O `LC_BUILD_VERSION` command across a rebuild.
@@ -1058,5 +1196,86 @@ mod tests {
         let embedded_filepaths = extract_bitcode_filepaths_from_object_file(&wasm_obj_path)
             .expect("Failed to extract from WASM object without bitcode section");
         assert!(embedded_filepaths.is_empty());
+    }
+
+    /// Builds a minimal little-endian 64-bit Mach-O carrying one segment with
+    /// one section, so the load-command walk can be exercised without needing
+    /// a compiler.
+    fn synthetic_macho(sectname: &str, segname: &str) -> Vec<u8> {
+        const SECTION_SIZE: usize = MACHO_SECTION_64_SIZE;
+        const COMMAND_SIZE: usize = MACHO_SEGMENT_64_HEADER_SIZE + SECTION_SIZE;
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&MACHO_MAGIC_64.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // cputype
+        data.extend_from_slice(&0u32.to_le_bytes()); // cpusubtype
+        data.extend_from_slice(&1u32.to_le_bytes()); // filetype: MH_OBJECT
+        data.extend_from_slice(&1u32.to_le_bytes()); // ncmds
+        data.extend_from_slice(&(COMMAND_SIZE as u32).to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes()); // flags
+        data.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        assert_eq!(data.len(), MACHO_HEADER_64_SIZE);
+
+        data.extend_from_slice(&MACHO_LC_SEGMENT_64.to_le_bytes());
+        data.extend_from_slice(&(COMMAND_SIZE as u32).to_le_bytes());
+        data.extend_from_slice(&[0u8; MACHO_NAME_LENGTH]); // segname
+        data.extend_from_slice(&[0u8; 32]); // vmaddr, vmsize, fileoff, filesize
+        data.extend_from_slice(&0u32.to_le_bytes()); // maxprot
+        data.extend_from_slice(&0u32.to_le_bytes()); // initprot
+        data.extend_from_slice(&1u32.to_le_bytes()); // nsects
+        data.extend_from_slice(&0u32.to_le_bytes()); // flags
+        assert_eq!(
+            data.len(),
+            MACHO_HEADER_64_SIZE + MACHO_SEGMENT_64_HEADER_SIZE
+        );
+
+        let mut name = [0u8; MACHO_NAME_LENGTH];
+        name[..sectname.len()].copy_from_slice(sectname.as_bytes());
+        data.extend_from_slice(&name);
+        let mut name = [0u8; MACHO_NAME_LENGTH];
+        name[..segname.len()].copy_from_slice(segname.as_bytes());
+        data.extend_from_slice(&name);
+        data.extend_from_slice(&[0u8; SECTION_SIZE - 2 * MACHO_NAME_LENGTH]);
+
+        data
+    }
+
+    fn section_flags(data: &[u8]) -> u32 {
+        let at =
+            MACHO_HEADER_64_SIZE + MACHO_SEGMENT_64_HEADER_SIZE + MACHO_SECTION_64_FLAGS_OFFSET;
+        read_u32_le(data, at).expect("synthetic object has a flags field")
+    }
+
+    #[test]
+    fn macho_no_dead_strip_marks_the_rllvm_section() {
+        let mut data = synthetic_macho(DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME);
+        assert!(set_macho_no_dead_strip(&mut data));
+        assert_eq!(section_flags(&data), object::macho::S_ATTR_NO_DEAD_STRIP.0);
+
+        // Setting it twice must not change anything further.
+        let once = data.clone();
+        assert!(set_macho_no_dead_strip(&mut data));
+        assert_eq!(once, data);
+    }
+
+    #[test]
+    fn macho_no_dead_strip_leaves_other_sections_alone() {
+        let mut data = synthetic_macho("__text", "__TEXT");
+        assert!(!set_macho_no_dead_strip(&mut data));
+        assert_eq!(section_flags(&data), 0);
+    }
+
+    #[test]
+    fn macho_no_dead_strip_ignores_other_formats() {
+        let mut elf = b"\x7fELF\x02\x01\x01\x00".to_vec();
+        assert!(!set_macho_no_dead_strip(&mut elf));
+
+        let mut truncated = vec![0u8; 2];
+        assert!(!set_macho_no_dead_strip(&mut truncated));
+
+        // A well-formed header whose command count runs off the end.
+        let mut clipped = synthetic_macho(DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME);
+        clipped.truncate(MACHO_HEADER_64_SIZE + 4);
+        assert!(!set_macho_no_dead_strip(&mut clipped));
     }
 }
