@@ -12,6 +12,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Pinned so both runners test the same toolchain. Unpinned, Linux got
+  # Ubuntu's default and macOS got Homebrew's latest -- four majors apart.
+  LLVM_VERSION: "22"
 
 jobs:
   test:
@@ -27,21 +30,15 @@ jobs:
       - name: Install stable toolchain
         run: rustup update stable
 
-      - name: Install LLVM/Clang (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt install -y llvm llvm-dev clang libclang-dev
-          command -v llvm-config && clang -v
-
-      - name: Install LLVM/Clang (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install llvm
-
       - name: Checkout sources
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Install LLVM/Clang
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.LLVM_VERSION }}
 
       - name: Build
         run: cargo build --verbose
@@ -74,21 +71,15 @@ jobs:
       - name: Install stable toolchain
         run: rustup update stable
 
-      - name: Install LLVM/Clang (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt install -y llvm llvm-dev clang libclang-dev
-          command -v llvm-config && clang -v
-
-      - name: Install LLVM/Clang (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          brew install llvm
-
       - name: Checkout sources
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Install LLVM/Clang
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.LLVM_VERSION }}
 
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
@@ -116,14 +107,15 @@ jobs:
       - name: Set MSRV as default
         run: rustup default 1.88
 
-      - name: Install LLVM/Clang
-        run: |
-          sudo apt install -y llvm llvm-dev clang libclang-dev
-
       - name: Checkout sources
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Install LLVM/Clang
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.LLVM_VERSION }}
 
       - name: Build with MSRV
         run: cargo build --verbose
@@ -139,6 +131,11 @@ jobs:
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: Install LLVM/Clang
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: ${{ env.LLVM_VERSION }}
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
