@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="{{ site.lang | default: 'en' }}" data-theme="auto">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    {%- seo -%}
+
+    <!-- `WebSite` is what jekyll-seo-tag emits. This is a compiler tool, and
+         search engines index it better described as source code. -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareSourceCode",
+      "name": "rllvm",
+      "description": {{ site.description | jsonify }},
+      "url": {{ site.url | append: site.baseurl | append: "/" | jsonify }},
+      "codeRepository": "https://github.com/{{ site.repository }}",
+      "programmingLanguage": "Rust",
+      "runtimePlatform": "LLVM",
+      "license": "https://www.apache.org/licenses/LICENSE-2.0",
+      "author": { "@type": "Person", "name": "Shengtuo Hu" }
+    }
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+    <link rel="stylesheet" href="{{ '/assets/css/main.css' | relative_url }}">
+
+    <!-- Applied before first paint so a stored dark preference does not flash
+         the light palette on the way in. -->
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("rllvm-theme");
+          if (stored) document.documentElement.dataset.theme = stored;
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+
+  <body>
+    <a class="skip" href="#content">Skip to content</a>
+
+    <header class="masthead">
+      <a class="wordmark" href="{{ '/' | relative_url }}">rllvm</a>
+      {%- if page.version %}
+      <span class="version">{{ page.version }}</span>
+      {%- endif %}
+      <nav>
+        <a href="https://github.com/{{ site.repository }}">GitHub</a>
+        <a href="https://crates.io/crates/rllvm">crates.io</a>
+        <a href="https://docs.rs/rllvm">docs.rs</a>
+      </nav>
+      <button class="theme" type="button" data-theme-toggle aria-label="Switch theme">
+        <span data-theme-label>Auto</span>
+      </button>
+    </header>
+
+    <section class="hero">
+      <div class="pitch">
+        <h1>{{ page.tagline | default: site.description }}</h1>
+        {%- if page.lead %}
+        <p class="lead">{{ page.lead | markdownify | remove: '<p>' | remove: '</p>' }}</p>
+        {%- endif %}
+        <div class="install">
+          <code>cargo install rllvm</code>
+          <button type="button" data-copy="cargo install rllvm">Copy</button>
+        </div>
+      </div>
+
+      <!-- The mechanism, not an illustration of one: every translation unit
+           writes its bitcode path into an object-file section, the linker
+           concatenates those sections, and the finished binary carries the
+           list. -->
+      <figure class="ledger" aria-label="Five source files compile to bitcode paths that the linker concatenates into one module">
+        <ol>
+          <li style="--i:0"><span class="src">parse.c</span><span class="tie" aria-hidden="true"></span><span class="bc">parse.bc</span></li>
+          <li style="--i:1"><span class="src">lexer.c</span><span class="tie" aria-hidden="true"></span><span class="bc">lexer.bc</span></li>
+          <li style="--i:2"><span class="src">codegen.c</span><span class="tie" aria-hidden="true"></span><span class="bc">codegen.bc</span></li>
+          <li style="--i:3"><span class="src">util.c</span><span class="tie" aria-hidden="true"></span><span class="bc">util.bc</span></li>
+          <li style="--i:4"><span class="src">main.c</span><span class="tie" aria-hidden="true"></span><span class="bc">main.bc</span></li>
+        </ol>
+        <figcaption>
+          <span class="section-name">__RLLVM,__rllvm_bc</span>
+          <span class="out">prog.bc</span>
+        </figcaption>
+      </figure>
+    </section>
+
+    <div class="shell">
+      <aside class="rail" hidden>
+        <nav data-toc aria-label="On this page"></nav>
+      </aside>
+
+      <main id="content" class="prose">
+        {{ content }}
+      </main>
+    </div>
+
+    <footer>
+      <p>
+        Apache-2.0. Built from
+        <a href="https://github.com/{{ site.repository }}/blob/main/README.md">README.md</a>,
+        so this page and the repository cannot disagree.
+      </p>
+    </footer>
+
+    <script src="{{ '/assets/js/site.js' | relative_url }}" defer></script>
+  </body>
+</html>

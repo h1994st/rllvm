@@ -9,11 +9,28 @@
 # for this project and take the personal site down with it.
 title: rllvm
 description: Extract whole-program LLVM bitcode from any build.
+lang: en
 
 url: https://shengtuo.me
 baseurl: /rllvm
 
-theme: jekyll-theme-cayman
+repository: h1994st/rllvm
+
+# GitHub renders and keeps this card current, so there is no image asset to
+# regenerate whenever the repository description changes.
+image: https://opengraph.githubassets.com/1/h1994st/rllvm
+twitter:
+  card: summary_large_image
+
+# No `theme`: the layout in `_layouts/` is the design.
+plugins:
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+markdown: kramdown
+kramdown:
+  input: GFM
+  syntax_highlighter: rouge
 
 exclude:
   - build.py
