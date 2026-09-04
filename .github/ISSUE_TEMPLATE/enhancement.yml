@@ -1,0 +1,25 @@
+name: Enhancement or design
+description: A change, a performance problem, or a design proposal
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is wrong or missing today. Measurements beat adjectives.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What you would change. Leave blank if you only have the problem.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+      description: >
+        What else was considered and why it was rejected. Recording this is the
+        point of a design issue — it stops the same option being re-proposed.
