@@ -1,0 +1,53 @@
+name: Set up LLVM
+description: >
+  Installs a pinned LLVM/Clang toolchain from official channels and puts it
+  first on PATH. Pinning matters: rllvm shells out to llvm-config, llvm-link,
+  llvm-ar, llvm-objcopy and llvm-dis, and an unpinned install gave Ubuntu's
+  default (18) on Linux and Homebrew's latest (22) on macOS, so the two runners
+  tested different toolchains.
+
+inputs:
+  version:
+    description: LLVM major version to install
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # LLVM's own apt repository, so any supported major version is available
+    # rather than whatever the distribution happens to ship.
+    - name: Install LLVM ${{ inputs.version }} (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        wget -qO /tmp/llvm.sh https://apt.llvm.org/llvm.sh
+        chmod +x /tmp/llvm.sh
+        sudo /tmp/llvm.sh "${{ inputs.version }}"
+        sudo apt-get install -y \
+          "llvm-${{ inputs.version }}-dev" "libclang-${{ inputs.version }}-dev"
+        echo "/usr/lib/llvm-${{ inputs.version }}/bin" >> "$GITHUB_PATH"
+
+    - name: Install LLVM ${{ inputs.version }} (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        set -euo pipefail
+        brew install "llvm@${{ inputs.version }}"
+        echo "$(brew --prefix "llvm@${{ inputs.version }}")/bin" >> "$GITHUB_PATH"
+
+    # Fails fast if the pin did not take, rather than letting a test fail later
+    # with a confusing version-skew error.
+    - name: Verify the pinned toolchain
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "llvm-config: $(llvm-config --version)"
+        clang --version | head -1
+        for tool in clang clang++ llvm-link llvm-ar llvm-objcopy llvm-dis; do
+          command -v "$tool" >/dev/null || { echo "missing: $tool" >&2; exit 1; }
+        done
+        case "$(llvm-config --version)" in
+          "${{ inputs.version }}".*) ;;
+          *) echo "expected LLVM ${{ inputs.version }}, got $(llvm-config --version)" >&2; exit 1 ;;
+        esac
