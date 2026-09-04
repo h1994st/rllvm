@@ -217,4 +217,4 @@ If you're already using gllvm or wllvm and they work for you, there's no urgency
 
 ## License
 
-[GPL-3.0](LICENSE)
+[Apache-2.0](LICENSE)
