@@ -17,6 +17,9 @@ pub(crate) struct Actions {
     pub links: bool,
     /// rustc writes an archive itself, whose members have to be patched.
     pub archives: bool,
+    /// rustc writes one object at a path we know, which can be patched
+    /// directly. Only reachable by invoking rustc by hand; cargo never does it.
+    pub object: bool,
 }
 
 /// Crate types that make rustc invoke a linker.
@@ -106,17 +109,26 @@ pub(crate) fn classify(args: &[&str]) -> Option<Actions> {
         return None;
     }
 
-    // No `--crate-type` means bin, which links.
-    if types.is_empty() {
-        return Some(Actions {
-            links: true,
-            archives: false,
-        });
-    }
+    let emit = flag_value(args, "--emit");
+    // An absent `--emit` defaults to `link`.
+    let emits = |kind: &str| match emit {
+        Some(list) => list
+            .split(',')
+            .any(|e| e == kind || e.starts_with(&format!("{kind}="))),
+        None => kind == "link",
+    };
+
+    // `--emit=obj` writes an object rather than a linked or archived
+    // artifact, so whether the crate type would otherwise link or archive is
+    // beside the point.
+    let emits_link = emits("link");
 
     Some(Actions {
-        links: types.iter().any(|t| LINKING_CRATE_TYPES.contains(t)),
-        archives: types.iter().any(|t| ARCHIVING_CRATE_TYPES.contains(t)),
+        // No `--crate-type` means bin, which links.
+        links: emits_link
+            && (types.is_empty() || types.iter().any(|t| LINKING_CRATE_TYPES.contains(t))),
+        archives: emits_link && types.iter().any(|t| ARCHIVING_CRATE_TYPES.contains(t)),
+        object: emits("obj") && flag_value(args, "-o").is_some(),
     })
 }
 
@@ -249,6 +261,17 @@ mod tests {
         ];
         let actions = classify(&args).expect("must not be skipped");
         assert!(actions.links && actions.archives);
+    }
+
+    /// Invoking rustc by hand with `--emit=obj -o` yields one object at a
+    /// known path, which is patched directly rather than through a marker.
+    #[test]
+    fn classifies_emit_obj_with_output_flag_as_a_patchable_object() {
+        let args = vec!["--crate-type=lib", "--emit=obj", "-o", "/w/lib.o", "lib.rs"];
+        let actions = classify(&args).expect("must not be skipped");
+        assert!(actions.object);
+        assert!(!actions.links, "an object emit does not link");
+        assert!(!actions.archives, "an object emit writes no archive");
     }
 
     #[test]

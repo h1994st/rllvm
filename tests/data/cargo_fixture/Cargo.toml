@@ -1,0 +1,5 @@
+# The empty workspace table matters: without it cargo tries to absorb this
+# fixture into rllvm's own package and refuses to build.
+[workspace]
+members = ["mylib", "myapp"]
+resolver = "2"

@@ -1983,3 +1983,159 @@ fn bitcode_survives_a_dead_stripping_link() {
         "dead stripping removed embedded paths; got {paths:?}"
     );
 }
+
+/// A linked binary carries its bitcode path, recorded through a marker object.
+///
+/// rustc gives no chance to patch the objects it links, so the path rides in
+/// on `-C link-arg` instead. Patching the finished binary is not an option: on
+/// Darwin it invalidates the code signature and the binary is killed on sight.
+#[test]
+fn rustc_wrapper_embeds_into_a_linked_binary() {
+    let rustc = which("rustc").expect("rustc not found");
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("main.rs");
+    fs::write(&src, "fn main() { println!(\"hello\"); }\n").unwrap();
+    let exe = tmp.path().join("prog");
+
+    let output = rllvm("rllvm-rustc")
+        .arg(&rustc)
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    assert!(
+        output.status.success(),
+        "rustc wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(exe.exists(), "no executable produced");
+
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+        .expect("the linked binary carries no rllvm section");
+    assert_eq!(paths.len(), 1, "expected one embedded path, got {paths:?}");
+    assert!(
+        paths[0].exists(),
+        "embedded bitcode missing: {:?}",
+        paths[0]
+    );
+    assert_bitcode_magic(&paths[0]);
+}
+
+/// Recursively copy a directory, so the checked-in fixture never gains a
+/// `target/` and parallel test runs cannot race on one.
+fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy the cargo fixture somewhere writable and build it under the wrapper.
+fn build_cargo_fixture(tmp: &TempDir) -> PathBuf {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/cargo_fixture");
+    let root = tmp.path().join("cargo_fixture");
+    copy_dir_all(&fixture, &root).expect("failed to copy the cargo fixture");
+
+    let output = Command::new("cargo")
+        .arg("build")
+        .current_dir(&root)
+        .env("RUSTC_WRAPPER", cargo_bin("rllvm-rustc"))
+        .env("RLLVM_CONFIG", shared_config_path())
+        // Otherwise the fixture inherits rllvm's own target directory.
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .expect("Failed to run cargo build");
+    assert!(
+        output.status.success(),
+        "cargo build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    root
+}
+
+/// #85: under cargo the wrapper produced nothing and reported success.
+///
+/// Asserting on both crates is the point. A binary carrying only its own path
+/// passes a "some bitcode exists" check while dependency bitcode is silently
+/// missing, and the two arrive by different routes — the binary's own path
+/// through a marker object, the dependency's through its patched rlib.
+#[test]
+fn cargo_build_embeds_bitcode_for_bin_and_lib() {
+    let tmp = TempDir::new().unwrap();
+    let root = build_cargo_fixture(&tmp);
+    let exe = root.join("target/debug/myapp");
+    assert!(exe.exists(), "cargo did not produce the binary");
+
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+        .expect("the cargo-built binary carries no rllvm section");
+    let names: Vec<String> = paths
+        .iter()
+        .filter_map(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+
+    assert!(
+        names.iter().any(|name| name.starts_with("myapp")),
+        "the binary's own bitcode is missing: {names:?}"
+    );
+    assert!(
+        names.iter().any(|name| name.starts_with("mylib")),
+        "the dependency's bitcode is missing: {names:?}"
+    );
+
+    let bitcode = tmp.path().join("whole.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(&exe)
+        .arg("-o")
+        .arg(&bitcode)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "extraction failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_bitcode_magic(&bitcode);
+}
+
+/// A library crate is usable on its own, without a binary to link it into.
+#[test]
+fn cargo_build_bitcode_extractable_from_rlib() {
+    let tmp = TempDir::new().unwrap();
+    let root = build_cargo_fixture(&tmp);
+
+    let rlib = fs::read_dir(root.join("target/debug/deps"))
+        .expect("no deps directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().is_some_and(|ext| ext == "rlib")
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("libmylib-"))
+        })
+        .expect("mylib rlib not found");
+
+    let bitcode = tmp.path().join("mylib.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(&rlib)
+        .arg("-o")
+        .arg(&bitcode)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "extraction from the rlib failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_bitcode_magic(&bitcode);
+}
