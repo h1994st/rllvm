@@ -114,6 +114,20 @@ rllvm-get-bc build/my_program
 
 See [`examples/cmake/`](examples/cmake/) for a complete example.
 
+### WebAssembly
+
+rllvm works for `wasm32` targets, including whole-program extraction from a
+linked module:
+
+```bash
+rllvm-cc --target=wasm32-unknown-unknown -c -o lib.o lib.c
+rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry -o app.wasm lib.o main.o
+rllvm-get-bc app.wasm -o app.bc
+```
+
+Linking needs `wasm-ld`, which ships with LLD rather than LLVM and must match
+your LLVM version. See [`examples/wasm/`](examples/wasm/).
+
 ### Wrapper flags
 
 ```
