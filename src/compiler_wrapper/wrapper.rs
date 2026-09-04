@@ -10,6 +10,7 @@ use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
     cache,
     config::try_rllvm_config,
+    constants::DEFAULT_LINK_OUTPUT_FILENAME,
     diagnostics::print_warning,
     error::Error,
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
@@ -247,7 +248,17 @@ pub trait CompilerWrapper {
             return Ok(Some(0));
         }
 
-        let output_filepath = PathBuf::from(self.args().output_filename()).canonicalize()?;
+        // Without an explicit `-o` the compiler wrote its default output, and that
+        // is the file we must relink over. `output_filename` is only populated
+        // when `-o` is parsed, so it is empty here -- and `PathBuf::from("")`
+        // canonicalises to ENOENT. That surfaced as autoconf's "C compiler cannot
+        // create executables" on its very first probe, which looks nothing like a
+        // wrapper bug. CMake always passes `-o`, so this hid behind CMake builds.
+        let output_filename = match self.args().output_filename() {
+            "" => DEFAULT_LINK_OUTPUT_FILENAME,
+            name => name,
+        };
+        let output_filepath = PathBuf::from(output_filename).canonicalize()?;
         self.link_object_files(&object_filepaths, output_filepath)
     }
 

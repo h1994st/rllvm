@@ -858,3 +858,42 @@ fn wrapper_help_does_not_leak_implementation_notes() {
         "help lost its description: {stdout}"
     );
 }
+
+/// Linking without `-o` must work: the compiler's default output is `a.out`.
+///
+/// `configure` probes the toolchain with bare `$CC conftest.c` and no `-o`, so
+/// this is the very first thing autoconf does. `output_filename` is only set
+/// when `-o` is parsed, so it stayed empty and `PathBuf::from("").canonicalize()`
+/// failed with ENOENT — surfacing as "C compiler cannot create executables",
+/// which looks nothing like a wrapper bug.
+///
+/// CMake always passes `-o`, which is why this survived a full CMake build.
+#[test]
+fn link_without_output_flag_defaults_to_a_out() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("conftest.c");
+    fs::write(&src, "int main(void) { return 0; }\n").unwrap();
+
+    let output = rllvm("rllvm-cc")
+        .current_dir(tmp.path())
+        .arg("conftest.c")
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "linking without -o failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(tmp.path().join("a.out").exists(), "a.out was not produced");
+
+    // The bitcode contract must hold on this path too.
+    let bitcode_path = tmp.path().join("a.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(tmp.path().join("a.out"))
+        .arg("-o")
+        .arg(&bitcode_path)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed on a.out");
+    assert_valid_bitcode(&bitcode_path);
+}
