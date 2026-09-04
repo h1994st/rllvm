@@ -57,10 +57,11 @@ cargo install --path .
 rllvm-cc -o hello hello.c
 
 # Compile C++ code (wraps clang++)
-rllvm-cxx -- -o hello hello.cc
+rllvm-cxx -o hello hello.cc
 ```
 
-Arguments before `--` are rllvm flags; arguments after `--` are passed directly to the underlying compiler.
+No `--` separator is needed. Wrapper flags are prefixed `--rllvm-`; everything
+else goes to the compiler.
 
 ### Extract bitcode
 
@@ -140,7 +141,7 @@ Options:
 
 ## Configuration
 
-rllvm is configured via a TOML file. On first run, a default config is created at `~/.rllvm/config.toml` with tool paths inferred from `llvm-config`.
+rllvm is configured via a TOML file. On first run, a default config is created with tool paths inferred from `llvm-config`, at `$RLLVM_CONFIG` if set, otherwise `~/.rllvm/config.toml`.
 
 ### Config file location
 
@@ -159,7 +160,7 @@ export RLLVM_CONFIG=/path/to/config.toml
 | `clangxx_filepath`         | Yes      | Absolute path to `clang++`                               |
 | `llvm_ar_filepath`         | Yes      | Absolute path to `llvm-ar`                               |
 | `llvm_link_filepath`       | Yes      | Absolute path to `llvm-link`                             |
-| `llvm_objcopy_filepath`    | No       | Absolute path to `llvm-objcopy` (recorded but currently unused) |
+| `llvm_objcopy_filepath`    | No       | Absolute path to `llvm-objcopy`; used to embed bitcode paths when present, falling back to an internal rewriter |
 | `bitcode_store_path`       | No       | Directory for intermediate bitcode files (must be absolute) |
 | `bitcode_root`             | No       | Record embedded bitcode paths relative to this root, so objects survive being moved (default: absolute paths) |
 | `llvm_link_flags`          | No       | Extra flags passed to `llvm-link`                        |
