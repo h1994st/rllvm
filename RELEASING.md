@@ -58,9 +58,27 @@ manual edit will conflict with the release PR.
 
 ## If something goes wrong
 
-**The release PR never appears.** release-please only reacts to commit types that
-trigger a release. If everything since the last release was `chore:`/`ci:`/`doc:`,
-there is nothing to release — that is correct behaviour, not a failure.
+**The release PR never appears.** Two causes, and they look identical from outside.
+
+The innocent one: release-please only reacts to commit types that trigger a
+release. If everything since the last release was `chore:`/`ci:`/`doc:`, there is
+nothing to release — correct behaviour, not a failure.
+
+The other one is a real block. Check the `release-please` workflow log for:
+
+```
+⚠ There are untagged, merged release PRs outstanding - aborting
+```
+
+release-please labels its release PR `autorelease: pending` and flips it to
+`autorelease: tagged` when it creates the release. Because cargo-dist creates
+the release here instead, that flip has to be done for it — the workflow does
+this automatically now, but if a release PR is left `autorelease: pending` after
+its version is tagged, every later release is blocked. Fix by hand with:
+
+```bash
+gh pr edit <N> --add-label 'autorelease: tagged' --remove-label 'autorelease: pending'
+```
 
 **The release PR merged but no release happened.** This is the failure worth
 knowing about, because it is quiet. The workflow decides a release is due by
