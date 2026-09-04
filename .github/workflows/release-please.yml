@@ -27,6 +27,8 @@ jobs:
       # instead, so reconcile the label here -- before release-please runs, so it
       # sees a clean slate. Self-healing: a release that never tagged keeps its
       # pending label and is retried rather than silently marked done.
+      - uses: actions/checkout@v7
+
       - name: Reconcile labels on already-released PRs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -34,11 +36,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          gh label create 'autorelease: tagged' --repo "$REPO" \
+          # Read the label names from release-please's own config rather than
+          # hardcoding them, so the two cannot drift apart. They are pinned there
+          # for exactly this reason.
+          PENDING="$(jq -er '.packages["."].label' release-please-config.json)"
+          TAGGED="$(jq -er '.packages["."]["release-label"]' release-please-config.json)"
+
+          gh label create "$TAGGED" --repo "$REPO" \
             --color ededed --description 'Release PR whose version has been tagged' \
             2>/dev/null || true
 
-          gh pr list --repo "$REPO" --state merged --label 'autorelease: pending' \
+          gh pr list --repo "$REPO" --state merged --label "$PENDING" \
             --json number,title --limit 20 | jq -c '.[]' | while read -r pr; do
             NUM="$(jq -r '.number' <<<"$pr")"
             VER="$(jq -r '.title' <<<"$pr" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
@@ -47,8 +55,7 @@ jobs:
             if gh api "repos/${REPO}/git/ref/tags/v${VER}" >/dev/null 2>&1; then
               echo "::notice::v${VER} is tagged; marking PR #${NUM} as released."
               gh pr edit "$NUM" --repo "$REPO" \
-                --add-label 'autorelease: tagged' \
-                --remove-label 'autorelease: pending'
+                --add-label "$TAGGED" --remove-label "$PENDING"
             else
               echo "::notice::PR #${NUM} claims v${VER}, which is not tagged yet; leaving it pending."
             fi
@@ -62,8 +69,6 @@ jobs:
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-      - uses: actions/checkout@v7
 
       # Decide whether a release is due by comparing release-please's own record
       # of the current version against the tags that exist. The action's
