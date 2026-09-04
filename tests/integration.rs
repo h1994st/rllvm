@@ -19,7 +19,7 @@ fn cargo_bin(name: &str) -> PathBuf {
 /// Without this the wrappers fall back to `~/.rllvm/config.toml`, which makes
 /// the suite depend on whatever the developer happens to have configured — a
 /// stale entry there fails every test before any behavior is exercised.
-fn test_config_path() -> &'static Path {
+fn shared_config_path() -> &'static Path {
     static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
     CONFIG_PATH.get_or_init(|| {
         let llvm_config = find_llvm_config().expect("llvm-config not found; is LLVM installed?");
@@ -54,11 +54,27 @@ fn test_config_path() -> &'static Path {
     })
 }
 
+/// Asserts a file is LLVM bitcode by its magic bytes only.
+///
+/// `assert_valid_bitcode` shells out to `llvm-dis`, which fails when the
+/// producer is newer than the reader. rustc bundles its own LLVM, so its
+/// bitcode can be unreadable by the system tools -- CI hit exactly this:
+/// "Unknown attribute kind (105) (Producer: 'LLVM22.1.8-rust', Reader: 'LLVM 18.1.3')".
+/// The magic bytes are stable across versions.
+fn assert_bitcode_magic(path: &Path) {
+    let data = fs::read(path).unwrap_or_else(|e| panic!("cannot read {path:?}: {e}"));
+    assert!(data.len() >= 4, "{path:?} is too short to be bitcode");
+    let head = [data[0], data[1], data[2], data[3]];
+    let raw = head == [0x42, 0x43, 0xC0, 0xDE];
+    let wrapped = u32::from_le_bytes(head) == 0x0B17_C0DE;
+    assert!(raw || wrapped, "{path:?} is not LLVM bitcode: {head:02x?}");
+}
+
 /// Returns a `Command` for one of the rllvm binaries, pinned to the isolated
 /// test configuration.
 fn rllvm(name: &str) -> Command {
     let mut command = Command::new(cargo_bin(name));
-    command.env("RLLVM_CONFIG", test_config_path());
+    command.env("RLLVM_CONFIG", shared_config_path());
     command
 }
 
@@ -551,7 +567,7 @@ fn compile_objective_c_file_and_extract_bitcode() {
 /// `HOME` is redirected as well, so a regression writes into the temp directory
 /// rather than the developer's own `~/.rllvm/config.toml`.
 #[test]
-fn test_rllvm_init_honours_rllvm_config_env() {
+fn rllvm_init_honours_rllvm_config_env() {
     let tmp = TempDir::new().expect("Failed to create temp dir");
     let fake_home = tmp.path().join("home");
     fs::create_dir_all(&fake_home).expect("Failed to create fake home");
@@ -581,7 +597,7 @@ fn test_rllvm_init_honours_rllvm_config_env() {
 
 /// An explicit `-o` still wins over `RLLVM_CONFIG`.
 #[test]
-fn test_rllvm_init_output_flag_overrides_env() {
+fn rllvm_init_output_flag_overrides_env() {
     let tmp = TempDir::new().expect("Failed to create temp dir");
     let fake_home = tmp.path().join("home");
     fs::create_dir_all(&fake_home).expect("Failed to create fake home");
@@ -896,4 +912,878 @@ fn link_without_output_flag_defaults_to_a_out() {
         .expect("Failed to run rllvm-get-bc");
     assert!(status.success(), "rllvm-get-bc failed on a.out");
     assert_valid_bitcode(&bitcode_path);
+}
+
+/// Compiles two sources that live in *different* directories and links them.
+///
+/// Returns (executable, temp dir). `partial` groups bitcode by parent directory
+/// and falls back to a full link when there is only one group, so a fixture
+/// spread across directories is what exercises its real path.
+fn build_across_two_directories(tmp: &TempDir) -> PathBuf {
+    let a_dir = tmp.path().join("a");
+    let b_dir = tmp.path().join("b");
+    fs::create_dir_all(&a_dir).unwrap();
+    fs::create_dir_all(&b_dir).unwrap();
+
+    fs::write(a_dir.join("a.c"), "int a_value(void) { return 1; }\n").unwrap();
+    fs::write(
+        b_dir.join("b.c"),
+        "int a_value(void);\nint main(void) { return a_value() - 1; }\n",
+    )
+    .unwrap();
+
+    let a_obj = a_dir.join("a.o");
+    let b_obj = b_dir.join("b.o");
+    for (src, obj) in [(a_dir.join("a.c"), &a_obj), (b_dir.join("b.c"), &b_obj)] {
+        let status = rllvm("rllvm-cc")
+            .args(["-c", "-o"])
+            .arg(obj)
+            .arg(src)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "compile failed");
+    }
+
+    let exe = tmp.path().join("prog");
+    let status = rllvm("rllvm-cc")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&a_obj)
+        .arg(&b_obj)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "link failed");
+    exe
+}
+
+/// Every merge strategy produces a usable artifact from the same input.
+#[test]
+fn get_bc_merge_strategies_all_produce_output() {
+    let tmp = TempDir::new().unwrap();
+    let exe = build_across_two_directories(&tmp);
+
+    for (strategy, ext) in [("full", "bc"), ("partial", "bc"), ("archive", "bca")] {
+        let out = tmp.path().join(format!("{strategy}.{ext}"));
+        let output = rllvm("rllvm-get-bc")
+            .arg(&exe)
+            .args(["--merge-strategy", strategy, "-o"])
+            .arg(&out)
+            .output()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(
+            output.status.success(),
+            "merge-strategy={strategy} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(out.exists(), "merge-strategy={strategy} produced no output");
+    }
+
+    // full and partial are different routes to the same module, so they must
+    // agree on content.
+    assert_valid_bitcode(&tmp.path().join("full.bc"));
+    assert_valid_bitcode(&tmp.path().join("partial.bc"));
+}
+
+/// `partial` must leave no intermediate `*_partial_N.bc` files behind.
+#[test]
+fn get_bc_partial_cleans_up_intermediates() {
+    let tmp = TempDir::new().unwrap();
+    let exe = build_across_two_directories(&tmp);
+    let out = tmp.path().join("merged.bc");
+
+    let status = rllvm("rllvm-get-bc")
+        .arg(&exe)
+        .args(["--merge-strategy", "partial", "-o"])
+        .arg(&out)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "partial merge failed");
+
+    let leftovers: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("_partial_"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "partial left intermediates behind: {leftovers:?}"
+    );
+}
+
+/// Completions generate for every shell and every binary.
+#[test]
+fn completions_generate_for_all_shells_and_binaries() {
+    for bin in ["cc", "cxx", "get-bc"] {
+        for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
+            let output = rllvm("rllvm-completions")
+                .args(["--shell", shell, "--bin", bin])
+                .output()
+                .expect("Failed to run rllvm-completions");
+            assert!(
+                output.status.success(),
+                "completions failed for {bin}/{shell}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                !output.stdout.is_empty(),
+                "completions for {bin}/{shell} were empty"
+            );
+        }
+    }
+}
+
+/// `rllvm-info` accepts both a raw `.bc` and an object file with an embedded path.
+#[test]
+fn info_reports_on_bitcode_and_on_object_files() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+    let status = rllvm("rllvm-cc")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "compile failed");
+
+    let bitcode_path = tmp.path().join("foo.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&object_path)
+        .arg("-o")
+        .arg(&bitcode_path)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "extraction failed");
+
+    // Raw bitcode, and the object file it came from: both must be accepted, and
+    // the object path exercises the embedded-section lookup.
+    for input in [&bitcode_path, &object_path] {
+        let output = rllvm("rllvm-info")
+            .arg(input)
+            .output()
+            .expect("Failed to run rllvm-info");
+        assert!(
+            output.status.success(),
+            "rllvm-info failed on {input:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.stdout.is_empty(),
+            "rllvm-info produced no output for {input:?}"
+        );
+    }
+
+    // -f lists function names; foo.c defines one.
+    let output = rllvm("rllvm-info")
+        .arg("-f")
+        .arg(&bitcode_path)
+        .output()
+        .expect("Failed to run rllvm-info");
+    assert!(output.status.success(), "rllvm-info -f failed");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("foo"),
+        "-f did not list the expected function"
+    );
+}
+
+/// A file that is neither bitcode nor an object must fail cleanly, not panic.
+#[test]
+fn info_rejects_a_file_that_is_neither_bitcode_nor_object() {
+    let tmp = TempDir::new().unwrap();
+    let junk = tmp.path().join("junk.txt");
+    fs::write(&junk, b"not bitcode, not an object file\n").unwrap();
+
+    let output = rllvm("rllvm-info")
+        .arg(&junk)
+        .output()
+        .expect("Failed to run rllvm-info");
+    assert!(!output.status.success(), "junk input unexpectedly accepted");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "rllvm-info panicked instead of reporting an error: {stderr}"
+    );
+}
+
+/// `rllvm-rustc` works both as `RUSTC` and as `RUSTC_WRAPPER`.
+///
+/// cargo invokes a wrapper as `rllvm-rustc <path-to-rustc> <args...>` but a
+/// replacement as `rllvm-rustc <args...>`, and the binary tells them apart by
+/// inspecting argv[1]. Neither mode had any coverage.
+#[test]
+fn rustc_wrapper_handles_both_invocation_modes() {
+    let rustc = which("rustc").expect("rustc not found");
+
+    // RUSTC_WRAPPER mode: argv[1] is the real rustc.
+    let output = rllvm("rllvm-rustc")
+        .arg(&rustc)
+        .arg("--version")
+        .output()
+        .expect("Failed to run rllvm-rustc in wrapper mode");
+    assert!(
+        output.status.success(),
+        "wrapper mode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("rustc"),
+        "wrapper mode did not reach rustc"
+    );
+
+    // RUSTC mode: no rustc path, so the binary must find one itself.
+    let output = rllvm("rllvm-rustc")
+        .arg("--version")
+        .output()
+        .expect("Failed to run rllvm-rustc in rustc mode");
+    assert!(
+        output.status.success(),
+        "rustc mode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("rustc"),
+        "rustc mode did not reach rustc"
+    );
+}
+
+/// `RLLVM_REAL_RUSTC` overrides the discovered rustc.
+#[test]
+fn rustc_wrapper_honours_real_rustc_override() {
+    let rustc = which("rustc").expect("rustc not found");
+
+    let output = rllvm("rllvm-rustc")
+        .env("RLLVM_REAL_RUSTC", &rustc)
+        .arg("--version")
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    assert!(output.status.success(), "override was rejected");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("rustc"));
+}
+
+/// Writes a config identical to the test one but with a chosen key removed.
+fn config_without(key: &str, dir: &Path) -> PathBuf {
+    let base = fs::read_to_string(shared_config_path()).expect("read test config");
+    let filtered: String = base
+        .lines()
+        .filter(|l| !l.trim_start().starts_with(key))
+        .map(|l| format!("{l}\n"))
+        .collect();
+    let path = dir.join("config.toml");
+    fs::write(&path, filtered).expect("write config");
+    path
+}
+
+/// The embed path must work when `llvm-objcopy` is not configured.
+///
+/// Embedding prefers `llvm-objcopy` and falls back to rebuilding the object
+/// through the `object` crate. The fallback is the lossy one, so it is the more
+/// important of the two to keep working — and every other test takes the
+/// objcopy path, because the test config always has it.
+#[test]
+fn embedding_falls_back_when_objcopy_is_unavailable() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = config_without("llvm_objcopy_filepath", tmp.path());
+    let object_path = tmp.path().join("foo.o");
+
+    let output = Command::new(cargo_bin("rllvm-cc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "compile failed without objcopy: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The contract must still hold on the fallback path.
+    let bitcode_path = tmp.path().join("foo.bc");
+    let status = Command::new(cargo_bin("rllvm-get-bc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .arg(&object_path)
+        .arg("-o")
+        .arg(&bitcode_path)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "extraction failed on the fallback path");
+    assert_valid_bitcode(&bitcode_path);
+}
+
+/// A config pointing at a non-existent objcopy also takes the fallback.
+#[test]
+fn embedding_falls_back_when_objcopy_path_is_missing() {
+    let tmp = TempDir::new().unwrap();
+    let base = fs::read_to_string(shared_config_path()).unwrap();
+    let cfg = tmp.path().join("config.toml");
+    let rewritten: String = base
+        .lines()
+        .map(|l| {
+            if l.trim_start().starts_with("llvm_objcopy_filepath") {
+                "llvm_objcopy_filepath = '/nonexistent/llvm-objcopy'".to_string()
+            } else {
+                l.to_string()
+            }
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    fs::write(&cfg, rewritten).unwrap();
+
+    let object_path = tmp.path().join("foo.o");
+    let output = Command::new(cargo_bin("rllvm-cc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "compile failed with a bogus objcopy path: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(object_path.exists());
+}
+
+/// Exercises the object-rebuild embed path, which neither other tier reaches.
+///
+/// Embedding has three tiers: `llvm-objcopy`, a Mach-O in-place builder, and a
+/// full rebuild through the `object` crate. The rebuild only runs for a
+/// non-Mach-O object when objcopy is unavailable, so it needs both conditions
+/// arranged at once — and it is the lossy tier, so leaving it untested is the
+/// worst of the three.
+///
+/// `--target` makes clang emit ELF regardless of host, so this runs everywhere.
+#[test]
+fn embedding_rebuilds_elf_objects_without_objcopy() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = config_without("llvm_objcopy_filepath", tmp.path());
+    let object_path = tmp.path().join("foo.o");
+
+    let output = Command::new(cargo_bin("rllvm-cc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .args(["--target=x86_64-unknown-linux-gnu", "-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "ELF compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The embedded path must survive the rebuild.
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&object_path)
+        .expect("failed to read the embedded section back");
+    assert_eq!(paths.len(), 1, "expected exactly one embedded bitcode path");
+    assert!(
+        paths[0].exists(),
+        "embedded path does not exist: {:?}",
+        paths[0]
+    );
+}
+
+/// `rllvm-get-bc` on a path that does not exist fails cleanly.
+#[test]
+fn get_bc_reports_a_missing_input() {
+    let tmp = TempDir::new().unwrap();
+    let output = rllvm("rllvm-get-bc")
+        .arg(tmp.path().join("nope.o"))
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(!output.status.success(), "missing input was accepted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("panicked"),
+        "panicked instead of failing: {stderr}"
+    );
+}
+
+/// An object with no embedded bitcode section fails with a clear error.
+#[test]
+fn get_bc_reports_an_object_without_bitcode() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("plain.c");
+    fs::write(&src, "int plain(void) { return 0; }\n").unwrap();
+    let obj = tmp.path().join("plain.o");
+
+    // Compile with the real clang, so no section is embedded.
+    let clang = find_llvm_config()
+        .map(|c| c.parent().unwrap().join("clang"))
+        .expect("clang not found");
+    let status = Command::new(clang)
+        .args(["-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .status()
+        .expect("clang failed");
+    assert!(status.success());
+
+    let output = rllvm("rllvm-get-bc")
+        .arg(&obj)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        !output.status.success(),
+        "an object with no bitcode was accepted"
+    );
+}
+
+/// Verbosity levels are accepted and do not corrupt stdout.
+#[test]
+fn get_bc_verbosity_levels_are_accepted() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+    let status = rllvm("rllvm-cc")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .status()
+        .expect("compile failed");
+    assert!(status.success());
+
+    for flag in ["-v", "-vv", "-vvv", "-vvvv"] {
+        let out = tmp.path().join(format!("out{}.bc", flag.len()));
+        let output = rllvm("rllvm-get-bc")
+            .arg(flag)
+            .arg(&object_path)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(output.status.success(), "{flag} failed");
+        assert!(out.exists());
+    }
+}
+
+/// `-b` selects the archive strategy when `--merge-strategy` is absent.
+#[test]
+fn get_bc_dash_b_selects_archive() {
+    let tmp = TempDir::new().unwrap();
+    let object_path = tmp.path().join("foo.o");
+    let status = rllvm("rllvm-cc")
+        .args(["-c", "-o"])
+        .arg(&object_path)
+        .arg(fixture("foo.c"))
+        .status()
+        .expect("compile failed");
+    assert!(status.success());
+
+    let out = tmp.path().join("foo.bca");
+    let status = rllvm("rllvm-get-bc")
+        .arg("-b")
+        .arg(&object_path)
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "-b failed");
+    assert!(out.exists(), "-b produced no archive");
+}
+
+/// `rllvm-init --dry-run` prints a config without writing one.
+#[test]
+fn init_dry_run_writes_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("config.toml");
+
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .arg("--dry-run")
+        .arg("-o")
+        .arg(&target)
+        .env("HOME", tmp.path())
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(output.status.success(), "--dry-run failed");
+    assert!(!target.exists(), "--dry-run wrote a config file");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("clang_filepath"),
+        "--dry-run printed no config"
+    );
+}
+
+/// `--llvm-prefix` pointing somewhere without LLVM fails cleanly.
+#[test]
+fn init_reports_a_bad_llvm_prefix() {
+    let tmp = TempDir::new().unwrap();
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .args(["--llvm-prefix", "/nonexistent/llvm"])
+        .env("HOME", tmp.path())
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(!output.status.success(), "a bogus prefix was accepted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "panicked: {stderr}");
+}
+
+/// `--llvm-prefix` accepts both a prefix and its bin directory.
+#[test]
+fn init_accepts_prefix_and_bindir() {
+    let llvm_config = find_llvm_config().expect("llvm-config not found");
+    let bindir = llvm_config.parent().unwrap().to_path_buf();
+    let prefix = bindir.parent().unwrap().to_path_buf();
+
+    for candidate in [prefix, bindir] {
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("config.toml");
+        let output = Command::new(cargo_bin("rllvm-init"))
+            .arg("--llvm-prefix")
+            .arg(&candidate)
+            .arg("-o")
+            .arg(&target)
+            .env("HOME", tmp.path())
+            .output()
+            .expect("Failed to run rllvm-init");
+        assert!(
+            output.status.success(),
+            "--llvm-prefix {candidate:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(target.exists(), "no config written for {candidate:?}");
+    }
+}
+
+/// Rebuilds an ELF object whose content exercises the whole copy path.
+///
+/// `copy_object_file` walks sections, symbols and relocations. A trivial
+/// translation unit touches almost none of that, so this fixture deliberately
+/// contains a BSS global, an undefined external, a static, and references that
+/// produce relocations.
+#[test]
+fn embedding_rebuilds_an_elf_object_with_varied_content() {
+    let tmp = TempDir::new().unwrap();
+    let cfg = config_without("llvm_objcopy_filepath", tmp.path());
+
+    let src = tmp.path().join("rich.c");
+    fs::write(
+        &src,
+        r#"
+int uninitialized_global;              /* BSS */
+int initialized_global = 42;           /* data */
+static int static_value = 7;           /* local symbol */
+extern int external_symbol;            /* undefined */
+extern int external_fn(int);
+
+int use_everything(void) {
+    return external_symbol + uninitialized_global + initialized_global
+         + static_value + external_fn(1);
+}
+"#,
+    )
+    .unwrap();
+
+    let object_path = tmp.path().join("rich.o");
+    let output = Command::new(cargo_bin("rllvm-cc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .args(["--target=x86_64-unknown-linux-gnu", "-c", "-o"])
+        .arg(&object_path)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "rich ELF compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&object_path)
+        .expect("failed to read the embedded section back");
+    assert_eq!(paths.len(), 1);
+
+    // The rebuilt object must still parse and keep its symbols.
+    let data = fs::read(&object_path).unwrap();
+    let obj = object::File::parse(&*data).expect("rebuilt object does not parse");
+    let names: Vec<String> = {
+        use object::{Object, ObjectSymbol};
+        obj.symbols()
+            .filter_map(|s| s.name().ok().map(|n| n.to_string()))
+            .collect()
+    };
+    for expected in ["use_everything", "external_symbol", "uninitialized_global"] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "symbol {expected} lost in the rebuild; have {names:?}"
+        );
+    }
+}
+
+/// `bitcode_store_path` redirects bitcode into a central directory.
+///
+/// A documented config option with no coverage. The store also renames each
+/// file using a hash of the source path, so two sources with the same stem in
+/// different directories cannot collide.
+#[test]
+fn bitcode_store_path_collects_bitcode_centrally() {
+    let tmp = TempDir::new().unwrap();
+    let store = tmp.path().join("store");
+    fs::create_dir_all(&store).unwrap();
+
+    let base = fs::read_to_string(shared_config_path()).unwrap();
+    let cfg = tmp.path().join("config.toml");
+    fs::write(
+        &cfg,
+        format!("{base}bitcode_store_path = '{}'\n", store.display()),
+    )
+    .unwrap();
+
+    // Two sources sharing a stem, in different directories.
+    let mut objects = vec![];
+    for dir in ["a", "b"] {
+        let d = tmp.path().join(dir);
+        fs::create_dir_all(&d).unwrap();
+        let src = d.join("same.c");
+        fs::write(&src, format!("int {dir}_fn(void) {{ return 0; }}\n")).unwrap();
+        let obj = d.join("same.o");
+
+        let output = Command::new(cargo_bin("rllvm-cc"))
+            .env("RLLVM_CONFIG", &cfg)
+            .args(["-c", "-o"])
+            .arg(&obj)
+            .arg(&src)
+            .output()
+            .expect("Failed to run rllvm-cc");
+        assert!(
+            output.status.success(),
+            "compile failed with a bitcode store: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        objects.push(obj);
+    }
+
+    let stored: Vec<_> = fs::read_dir(&store)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        stored.len(),
+        2,
+        "same-stem sources collided in the store: {stored:?}"
+    );
+
+    // Extraction must still resolve through the store.
+    let out = tmp.path().join("same.bc");
+    let status = Command::new(cargo_bin("rllvm-get-bc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .arg(&objects[0])
+        .arg("-o")
+        .arg(&out)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "extraction failed with a bitcode store");
+    assert_valid_bitcode(&out);
+}
+
+/// A forbidden flag is dropped from the build and reported on stderr.
+///
+/// The warning goes to stderr rather than the log deliberately: the default log
+/// level is ERROR, so a log record would be invisible to the non-interactive
+/// build-system runs that most need to know the binary differs from the one
+/// their command asked for.
+#[test]
+fn forbidden_flags_are_dropped_and_reported() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("main.c");
+    fs::write(&src, "int main(void) { return 0; }\n").unwrap();
+    let exe = tmp.path().join("prog");
+
+    let output = rllvm("rllvm-cc")
+        .arg("-dead_strip")
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(exe.exists(), "no executable produced");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dead_strip"),
+        "the dropped flag was not reported: {stderr}"
+    );
+}
+
+/// `lto_ldflags` are appended when linking with `-flto`.
+#[test]
+fn lto_ldflags_are_appended_when_linking_with_lto() {
+    let tmp = TempDir::new().unwrap();
+    let base = fs::read_to_string(shared_config_path()).unwrap();
+    let cfg = tmp.path().join("config.toml");
+    fs::write(&cfg, format!("{base}lto_ldflags = ['-Wl,-v']\n")).unwrap();
+
+    let src = tmp.path().join("main.c");
+    fs::write(&src, "int main(void) { return 0; }\n").unwrap();
+    let obj = tmp.path().join("main.o");
+
+    let status = Command::new(cargo_bin("rllvm-cc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .args(["-flto", "-c", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .status()
+        .expect("compile failed");
+    assert!(status.success());
+
+    // Linking from objects only, with -flto, is the path that consumes lto_ldflags.
+    let exe = tmp.path().join("prog");
+    let output = Command::new(cargo_bin("rllvm-cc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .args(["-flto", "-o"])
+        .arg(&exe)
+        .arg(&obj)
+        .output()
+        .expect("link failed");
+    assert!(
+        output.status.success(),
+        "LTO link failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(exe.exists());
+}
+
+/// `rllvm-rustc` compiles Rust to an object and embeds a bitcode path.
+///
+/// The pure helpers in the rustc wrapper are unit-tested, but `run()` itself —
+/// the pass-through invocation, the `--emit=llvm-bc` re-invocation, and the
+/// embedding — had no coverage at all.
+#[test]
+fn rustc_wrapper_emits_and_embeds_bitcode() {
+    let rustc = which("rustc").expect("rustc not found");
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("lib.rs");
+    fs::write(&src, "pub fn add(a: i32, b: i32) -> i32 { a + b }\n").unwrap();
+    let obj = tmp.path().join("lib.o");
+
+    let output = rllvm("rllvm-rustc")
+        .arg(&rustc)
+        .args(["--crate-type=lib", "--emit=obj", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    assert!(
+        output.status.success(),
+        "rustc wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(obj.exists(), "no object produced");
+
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&obj)
+        .expect("failed to read the embedded section");
+    assert_eq!(paths.len(), 1, "expected one embedded bitcode path");
+    assert!(
+        paths[0].exists(),
+        "embedded bitcode missing: {:?}",
+        paths[0]
+    );
+    assert_bitcode_magic(&paths[0]);
+}
+
+/// Query invocations must skip bitcode generation entirely.
+#[test]
+fn rustc_wrapper_skips_bitcode_for_query_invocations() {
+    let rustc = which("rustc").expect("rustc not found");
+
+    for query in ["--version", "--print=sysroot"] {
+        let output = rllvm("rllvm-rustc")
+            .arg(&rustc)
+            .arg(query)
+            .output()
+            .expect("Failed to run rllvm-rustc");
+        assert!(
+            output.status.success(),
+            "{query} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stdout.is_empty(), "{query} produced no output");
+    }
+}
+
+/// A failing rustc invocation propagates its exit code without embedding.
+#[test]
+fn rustc_wrapper_propagates_failure() {
+    let rustc = which("rustc").expect("rustc not found");
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("bad.rs");
+    fs::write(&src, "this is not valid rust\n").unwrap();
+
+    let output = rllvm("rllvm-rustc")
+        .arg(&rustc)
+        .args(["--crate-type=lib", "--emit=obj"])
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    assert!(
+        !output.status.success(),
+        "a broken crate was reported as success"
+    );
+}
+
+/// `rllvm-init` reports a config directory it cannot create.
+#[test]
+fn init_reports_an_uncreatable_config_directory() {
+    let tmp = TempDir::new().unwrap();
+    // A regular file where a directory would have to be.
+    let blocker = tmp.path().join("blocker");
+    fs::write(&blocker, b"not a directory").unwrap();
+
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .arg("-o")
+        .arg(blocker.join("config.toml"))
+        .env("HOME", tmp.path())
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(!output.status.success(), "an uncreatable path was accepted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "panicked: {stderr}");
+}
+
+/// `rllvm-init` reports a config path it cannot write.
+#[test]
+fn init_reports_an_unwritable_config_path() {
+    let tmp = TempDir::new().unwrap();
+    // Writing to a directory fails.
+    let dir_as_target = tmp.path().join("a_directory");
+    fs::create_dir_all(&dir_as_target).unwrap();
+
+    let output = Command::new(cargo_bin("rllvm-init"))
+        .arg("-o")
+        .arg(&dir_as_target)
+        .env("HOME", tmp.path())
+        .output()
+        .expect("Failed to run rllvm-init");
+    assert!(
+        !output.status.success(),
+        "writing to a directory was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "panicked: {stderr}");
+}
+
+/// `rllvm-get-bc` reports an input it cannot read.
+#[test]
+fn get_bc_reports_an_unreadable_input() {
+    let tmp = TempDir::new().unwrap();
+    // A directory canonicalizes fine but cannot be read as a file.
+    let dir = tmp.path().join("a_directory");
+    fs::create_dir_all(&dir).unwrap();
+
+    let output = rllvm("rllvm-get-bc")
+        .arg(&dir)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        !output.status.success(),
+        "a directory was accepted as input"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "panicked: {stderr}");
 }

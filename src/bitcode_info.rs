@@ -197,7 +197,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_function_name() {
+    fn extracts_function_name() {
         assert_eq!(
             extract_function_name("define i32 @main(i32 %argc, i8** %argv) {"),
             Some("main".to_string())
@@ -213,7 +213,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_ir_basic() {
+    fn parse_ir_basic() {
         let ir = r#"
 target datalayout = "e-m:o-i64:64-i128:128-n32:64-S128-Fn32"
 target triple = "arm64-apple-macosx15.0.0"
@@ -250,7 +250,7 @@ entry:
     }
 
     #[test]
-    fn test_parse_ir_multiple_blocks() {
+    fn parse_ir_multiple_blocks() {
         let ir = r#"
 target triple = "x86_64-unknown-linux-gnu"
 

@@ -170,3 +170,57 @@ impl CompilerWrapperBuilder for ClangWrapperBuilder {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler_wrapper::CompilerWrapperBuilder;
+
+    fn build(kind: CompilerKind) -> ClangWrapper {
+        ClangWrapperBuilder::new()
+            .name("rllvm")
+            .compiler_kind(kind)
+            .build()
+            .expect("failed to build the wrapper")
+    }
+
+    #[test]
+    fn wrapper_exposes_its_name_and_kind() {
+        let cc = build(CompilerKind::Clang);
+        assert_eq!(cc.name(), "rllvm");
+        assert!(matches!(cc.compiler_kind(), CompilerKind::Clang));
+        assert!(cc.wrapped_compiler().ends_with("clang"));
+
+        let cxx = build(CompilerKind::ClangXX);
+        assert!(matches!(cxx.compiler_kind(), CompilerKind::ClangXX));
+        assert!(cxx.wrapped_compiler().ends_with("clang++"));
+    }
+
+    #[test]
+    fn parse_args_rejects_an_empty_argument_list() {
+        let mut cc = build(CompilerKind::Clang);
+        let empty: [&str; 0] = [];
+        assert!(cc.parse_args(&empty).is_err());
+    }
+
+    #[test]
+    fn parse_args_cannot_be_called_twice() {
+        let mut cc = build(CompilerKind::Clang);
+        assert!(cc.parse_args(&["-c", "foo.c"]).is_ok());
+        assert!(
+            cc.parse_args(&["-c", "bar.c"]).is_err(),
+            "a second parse_args must be refused"
+        );
+    }
+
+    #[test]
+    fn builder_overrides_the_wrapped_compiler() {
+        let cc = ClangWrapperBuilder::new()
+            .name("rllvm")
+            .compiler_kind(CompilerKind::Clang)
+            .wrapped_compiler("/custom/clang")
+            .build()
+            .expect("failed to build");
+        assert_eq!(cc.wrapped_compiler(), Path::new("/custom/clang"));
+    }
+}

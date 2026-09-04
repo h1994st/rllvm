@@ -509,7 +509,113 @@ mod tests {
     }
 
     #[test]
-    fn test_load_config_without_llvm_objcopy_filepath() {
+    fn bitcode_store_path_relative_is_ignored() {
+        let (_dir, config_filepath, _) = write_config("bitcode_store_path = 'relative/dir'\n");
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+        assert!(
+            config.bitcode_store_path().is_none(),
+            "a relative bitcode store path must be ignored"
+        );
+    }
+
+    #[test]
+    fn bitcode_store_path_absolute_is_created_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store").join("nested");
+        assert!(!store.exists());
+
+        let (_cfg_dir, config_filepath, _) =
+            write_config(&format!("bitcode_store_path = '{}'\n", store.display()));
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+
+        assert_eq!(config.bitcode_store_path(), Some(&store));
+        assert!(store.is_dir(), "the store directory was not created");
+    }
+
+    #[test]
+    fn bitcode_store_path_pointing_at_a_file_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("a_file");
+        fs::write(&not_a_dir, b"x").unwrap();
+
+        let (_cfg_dir, config_filepath, _) =
+            write_config(&format!("bitcode_store_path = '{}'\n", not_a_dir.display()));
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+
+        assert!(
+            config.bitcode_store_path().is_none(),
+            "a store path that is not a directory must be ignored"
+        );
+    }
+
+    #[test]
+    fn bitcode_store_path_existing_directory_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(&store).unwrap();
+
+        let (_cfg_dir, config_filepath, _) =
+            write_config(&format!("bitcode_store_path = '{}'\n", store.display()));
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+        assert_eq!(config.bitcode_store_path(), Some(&store));
+    }
+
+    #[test]
+    fn missing_config_file_is_written_from_inferred_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_filepath = dir.path().join("nested").join("config.toml");
+        assert!(!config_filepath.exists());
+
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+
+        assert!(
+            config_filepath.exists(),
+            "first run must write the inferred config"
+        );
+        assert!(config.clang_filepath().exists());
+    }
+
+    #[test]
+    fn optional_flag_accessors_round_trip() {
+        let (_dir, config_filepath, _) = write_config(
+            "llvm_link_flags = ['-v']\n\
+             lto_ldflags = ['-flto']\n\
+             bitcode_generation_flags = ['-g']\n\
+             is_configure_only = true\n\
+             cache_enabled = true\n\
+             log_level = 3\n",
+        );
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+
+        assert_eq!(config.llvm_link_flags(), Some(&vec!["-v".to_string()]));
+        assert_eq!(config.lto_ldflags(), Some(&vec!["-flto".to_string()]));
+        assert_eq!(
+            config.bitcode_generation_flags(),
+            Some(&vec!["-g".to_string()])
+        );
+        assert!(config.is_configure_only());
+        assert!(config.cache_enabled());
+        assert_eq!(config.log_level(), Level::DEBUG);
+    }
+
+    #[test]
+    fn log_level_mapping_covers_every_value() {
+        for (value, expected) in [
+            (0u8, Level::ERROR),
+            (1, Level::WARN),
+            (2, Level::INFO),
+            (3, Level::DEBUG),
+            (4, Level::TRACE),
+            (9, Level::TRACE),
+        ] {
+            let (_dir, config_filepath, _) = write_config(&format!("log_level = {value}\n"));
+            let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+            assert_eq!(config.log_level(), expected, "log_level = {value}");
+        }
+    }
+
+    #[test]
+    fn load_config_without_llvm_objcopy_filepath() {
         let (_dir, config_filepath, inferred) = write_config("");
 
         let config = RLLVMConfig::load_path(&config_filepath)
@@ -521,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_config_with_llvm_objcopy_filepath() {
+    fn load_config_with_llvm_objcopy_filepath() {
         // Existing config files still set the key; they must keep loading.
         let llvm_objcopy_filepath = RLLVMConfig::try_default()
             .expect("Failed to infer the LLVM tool paths")

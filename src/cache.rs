@@ -176,7 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_compute_cache_key_deterministic() {
+    fn compute_cache_key_deterministic() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("test.c");
         fs::write(&src, "int main() { return 0; }").unwrap();
@@ -189,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_cache_key_changes_with_content() {
+    fn compute_cache_key_changes_with_content() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("test.c");
         let args = vec!["-O2".to_string()];
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_cache_key_changes_with_flags() {
+    fn compute_cache_key_changes_with_flags() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("test.c");
         fs::write(&src, "int main() { return 0; }").unwrap();
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_cache_key_arg_order_independent() {
+    fn compute_cache_key_arg_order_independent() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("test.c");
         fs::write(&src, "int main() { return 0; }").unwrap();
@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_lookup_miss() {
+    fn cache_lookup_miss() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("test.c");
         let result = cache_lookup(dir.path(), &src, 12345);
@@ -238,7 +238,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_store_and_lookup() {
+    fn cache_store_and_lookup() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("cache");
         fs::create_dir(&cache).unwrap();
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cached_bitcode_path_format() {
+    fn cached_bitcode_path_format() {
         let cache = Path::new("/tmp/cache");
         let src = Path::new("/tmp/foo.c");
         let path = cached_bitcode_path(cache, src, 0x1234567890ABCDEF);
@@ -273,7 +273,7 @@ mod tests {
     /// Serialises the tests that mutate `RLLVM_CACHE`.
     ///
     /// The environment is process-global but cargo runs tests in parallel
-    /// threads, so these two raced: `test_is_cache_enabled_default` calling
+    /// threads, so these two raced: `is_cache_enabled_default` calling
     /// `remove_var` between the other test's `set_var` and its assertion made
     /// that assertion fail. It reproduced locally in roughly five runs out of
     /// eight, and surfaced in CI as an unrelated-looking failure.
@@ -291,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_cache_enabled_default() {
+    fn is_cache_enabled_default() {
         let _guard = env_guard();
 
         // Without env var, should follow config
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_cache_enabled_env_override() {
+    fn is_cache_enabled_env_override() {
         let _guard = env_guard();
 
         unsafe { env::set_var(RLLVM_CACHE_ENV, "1") };
@@ -314,7 +314,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cache_dir_creation() {
+    fn cache_dir_creation() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("new_cache_dir");
         assert!(!cache.exists());
@@ -322,5 +322,30 @@ mod tests {
         let result = cache_dir(Some(&cache)).unwrap();
         assert_eq!(result, cache);
         assert!(cache.exists());
+    }
+
+    #[test]
+    fn cache_store_reports_a_missing_source() {
+        let _guard = env_guard();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+
+        let err = cache_store(
+            &cache,
+            Path::new("/nonexistent/foo.c"),
+            1,
+            Path::new("/nonexistent/foo.bc"),
+        );
+        assert!(err.is_err(), "storing a missing file must fail");
+    }
+
+    #[test]
+    fn cache_stats_and_logging_run() {
+        let _guard = env_guard();
+        let (hits, misses) = cache_stats();
+        assert!(hits < u64::MAX && misses < u64::MAX);
+        // Exercises both the empty and non-empty formatting branches.
+        log_cache_stats();
     }
 }

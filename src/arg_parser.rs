@@ -634,7 +634,7 @@ impl CompilerArgsInfo {
 mod tests {
     use super::CompilerArgsInfo;
 
-    fn test_parsing<F>(input: &str, check_func: F)
+    fn parse_and_assert<F>(input: &str, check_func: F)
     where
         F: Fn(&CompilerArgsInfo) -> bool,
     {
@@ -645,73 +645,73 @@ mod tests {
         assert!(check_func(ret.unwrap()));
     }
 
-    fn test_parsing_lto_internal(input: &str) {
-        test_parsing(input, |args| args.is_lto());
+    fn assert_lto(input: &str) {
+        parse_and_assert(input, |args| args.is_lto());
     }
 
     #[test]
-    fn test_parsing_lto() {
+    fn parsing_lto() {
         let input = r#"-pthread -c -Wno-unused-result -Wsign-compare -Wunreachable-code -DNDEBUG -g -fwrapv -O3 -Wall -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -flto -g -std=c99 -Wextra -Wno-unused-result -Wno-unused-parameter -Wno-missing-field-initializers -Wstrict-prototypes -Werror=implicit-function-declaration -fprofile-instr-use=code.profclangd -I./Include/internal  -I. -I./Include -D_FORTIFY_SOURCE=2 -D_FORTIFY_SOURCE=2 -fPIC -DPy_BUILD_CORE -DSOABI='"cpython-38-x86_64-linux-gnu"'	-o Python/dynload_shlib.o ./Python/dynload_shlib.c"#;
-        test_parsing_lto_internal(input);
+        assert_lto(input);
 
         let input = r#"-pthread -c -Wno-unused-result -Wsign-compare -Wunreachable-code -DNDEBUG -g -fwrapv -O3 -Wall -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -flto=thin -g -std=c99 -Wextra -Wno-unused-result -Wno-unused-parameter -Wno-missing-field-initializers -Wstrict-prototypes -Werror=implicit-function-declaration -fprofile-instr-use=code.profclangd -I./Include/internal  -I. -I./Include -D_FORTIFY_SOURCE=2 -D_FORTIFY_SOURCE=2 -fPIC -DPy_BUILD_CORE -DSOABI='"cpython-38-x86_64-linux-gnu"'	-o Python/dynload_shlib.o ./Python/dynload_shlib.c"#;
-        test_parsing_lto_internal(input);
+        assert_lto(input);
     }
 
     #[test]
-    fn test_parsing_objective_c_sources() {
+    fn parsing_objective_c_sources() {
         // Objective-C sources are compilation inputs, not unrecognized flags;
         // otherwise no bitcode is generated for them.
-        test_parsing("-c foo.m", |args| {
+        parse_and_assert("-c foo.m", |args| {
             args.input_files() == &["foo.m".to_string()]
         });
-        test_parsing("-c foo.mm", |args| {
+        parse_and_assert("-c foo.mm", |args| {
             args.input_files() == &["foo.mm".to_string()]
         });
     }
 
-    fn test_parsing_link_args_internal(input: &str, expected: usize) {
-        test_parsing(input, |args| args.link_args().len() == expected);
+    fn assert_link_arg_count(input: &str, expected: usize) {
+        parse_and_assert(input, |args| args.link_args().len() == expected);
     }
 
     #[test]
-    fn test_parsing_prefers_the_first_declared_pattern() {
+    fn parsing_prefers_the_first_declared_pattern() {
         // Several patterns overlap, and the earlier declaration must win:
         // `^-fsanitize=.+$` and `^-fuse-ld=.+$` both come before the catch-all
         // `^-f.+$`, which would otherwise swallow them as plain compile flags.
         // A single RegexSet pass reports every match, so this pins the choice.
 
         // -fsanitize=: compile *and* link, not compile-only.
-        test_parsing("-fsanitize=address", |args| {
+        parse_and_assert("-fsanitize=address", |args| {
             args.compile_args() == &["-fsanitize=address".to_string()]
                 && args.link_args() == &["-fsanitize=address".to_string()]
         });
 
         // -fuse-ld=: link-only.
-        test_parsing("-fuse-ld=lld", |args| {
+        parse_and_assert("-fuse-ld=lld", |args| {
             args.link_args() == &["-fuse-ld=lld".to_string()] && args.compile_args().is_empty()
         });
 
         // A plain -f flag falls through to the catch-all: compile-only.
-        test_parsing("-fPIC", |args| {
+        parse_and_assert("-fPIC", |args| {
             args.compile_args() == &["-fPIC".to_string()] && args.link_args().is_empty()
         });
     }
 
     #[test]
-    fn test_parsing_linker_group_registers_object_files() {
+    fn parsing_linker_group_registers_object_files() {
         // A file inside a group must be classified the same as outside one.
         let grouped = "-Wl,--start-group 7.o 8.o -lfoo @rsp.txt -Wl,--end-group";
-        test_parsing(grouped, |args| {
+        parse_and_assert(grouped, |args| {
             args.object_files() == &["7.o".to_string(), "8.o".to_string()]
         });
 
         // Everything in the span still reaches the linker, objects included:
         // both markers, two objects, a library, and a response file.
-        test_parsing(grouped, |args| args.link_args().len() == 6);
+        parse_and_assert(grouped, |args| args.link_args().len() == 6);
 
         // Non-object members must not be mistaken for objects.
-        test_parsing(grouped, |args| {
+        parse_and_assert(grouped, |args| {
             !args
                 .object_files()
                 .iter()
@@ -719,25 +719,25 @@ mod tests {
         });
 
         // The ungrouped form is the reference behavior.
-        test_parsing("7.o 8.o", |args| {
+        parse_and_assert("7.o 8.o", |args| {
             args.object_files() == &["7.o".to_string(), "8.o".to_string()]
         });
     }
 
     #[test]
-    fn test_parsing_link_args() {
+    fn parsing_link_args() {
         let input = r#"-Wl,--fatal-warnings -Wl,--build-id=sha1 -fPIC -Wl,-z,noexecstack -Wl,-z,relro -Wl,-z,now -Wl,-z,defs -Wl,--as-needed -fuse-ld=lld -Wl,--icf=all -Wl,--color-diagnostics -flto=thin -Wl,--thinlto-jobs=8 -Wl,--thinlto-cache-dir=thinlto-cache -Wl,--thinlto-cache-policy,cache_size=10\%:cache_size_bytes=10g:cache_size_files=100000 -Wl,--lto-O0 -fwhole-program-vtables -Wl,--no-call-graph-profile-sort -m64 -Wl,-O2 -Wl,--gc-sections -Wl,--gdb-index -rdynamic -fsanitize=cfi-vcall -fsanitize=cfi-icall -pie -Wl,--disable-new-dtags -Wl,-O1,--sort-common,--as-needed,-z,relro,-z,now -o "./brotli" -Wl,--start-group @"./brotli.rsp"  -Wl,--end-group  -latomic -ldl -lpthread -lrt"#;
-        test_parsing_link_args_internal(input, 32);
+        assert_link_arg_count(input, 32);
 
         let input = r#"1.c 2.c 3.c 4.c 5.c -Wl,--start-group 7.o 8.o 9.o -Wl,--end-group 10.c 11.c 12.c 13.c"#;
-        test_parsing_link_args_internal(input, 5);
+        assert_link_arg_count(input, 5);
     }
 
     #[test]
-    fn test_parsing_forbidden_flags() {
+    fn parsing_forbidden_flags() {
         // Forbidden flags are collected, and kept out of the compile/link args
         let input = r#"-O2 -dead_strip -Wl,-dead_strip -o prog main.c"#;
-        test_parsing(input, |args| {
+        parse_and_assert(input, |args| {
             args.forbidden_flags() == &["-dead_strip", "-Wl,-dead_strip"]
                 && !args.compile_args().iter().any(|x| x.contains("dead_strip"))
                 && !args.link_args().iter().any(|x| x.contains("dead_strip"))
@@ -745,6 +745,121 @@ mod tests {
 
         // No forbidden flag in the command means nothing gets dropped
         let input = r#"-O2 -o prog main.c"#;
-        test_parsing(input, |args| args.forbidden_flags().is_empty());
+        parse_and_assert(input, |args| args.forbidden_flags().is_empty());
+    }
+
+    #[test]
+    fn parsing_mode_flags() {
+        parse_and_assert("-E main.c", |a| a.is_preprocess_only());
+        parse_and_assert("-S main.c", |a| a.is_assemble_only());
+        parse_and_assert("-c main.c", |a| a.is_compile_only());
+        parse_and_assert("-emit-llvm -c main.c", |a| a.is_emit_llvm());
+        parse_and_assert("-v -c main.c", |a| a.is_verbose());
+        parse_and_assert("-M main.c", |a| a.is_dependency_only());
+        parse_and_assert("-MM main.c", |a| a.is_dependency_only());
+
+        // Absence must not set them.
+        parse_and_assert("-o prog main.c", |a| {
+            !a.is_preprocess_only()
+                && !a.is_assemble_only()
+                && !a.is_compile_only()
+                && !a.is_emit_llvm()
+                && !a.is_verbose()
+                && !a.is_dependency_only()
+                && !a.is_lto()
+                && !a.is_print_only()
+        });
+    }
+
+    #[test]
+    fn parsing_assembly_input_is_detected() {
+        parse_and_assert("-c foo.s", |a| a.is_assembly());
+        parse_and_assert("-c foo.S", |a| a.is_assembly());
+        parse_and_assert("-c foo.c", |a| !a.is_assembly());
+    }
+
+    #[test]
+    fn parsing_output_filename() {
+        parse_and_assert("-o prog main.c", |a| a.output_filename() == "prog");
+        parse_and_assert("-c main.c", |a| a.output_filename().is_empty());
+    }
+
+    #[test]
+    fn parsing_input_and_object_files() {
+        parse_and_assert("-o prog a.c b.c", |a| {
+            a.input_files() == &["a.c", "b.c"] && a.object_files().is_empty()
+        });
+        // input_args records the original argument list verbatim.
+        parse_and_assert("-c main.c", |a| a.input_args() == &["-c", "main.c"]);
+    }
+
+    #[test]
+    fn parsing_binary_flags_consume_their_argument() {
+        // Arity drives consumption, so a binary flag must not leak its value
+        // into the input file list -- that is the classic failure here.
+        parse_and_assert("-I include -o prog main.c", |a| {
+            a.input_files() == &["main.c"] && a.compile_args().iter().any(|x| x == "include")
+        });
+        parse_and_assert("-include hdr.h -c main.c", |a| {
+            a.input_files() == &["main.c"]
+        });
+        parse_and_assert("-MF deps.d -c main.c", |a| a.input_files() == &["main.c"]);
+        parse_and_assert("-e entry -o prog main.c", |a| {
+            a.input_files() == &["main.c"]
+        });
+        parse_and_assert("-arch arm64 -o prog main.c", |a| {
+            a.input_files() == &["main.c"]
+        });
+    }
+
+    #[test]
+    fn parsing_splits_compile_and_link_arguments() {
+        // -I and -O2 are compile concerns; -L and -l are link concerns. The
+        // split matters because compile_args feeds bitcode generation and
+        // link_args feeds the relink.
+        parse_and_assert("-I inc -L lib -lfoo -O2 -o prog main.c", |a| {
+            a.compile_args() == &["-I", "inc", "-O2"] && a.link_args() == &["-L", "lib", "-lfoo"]
+        });
+    }
+
+    #[test]
+    fn parsing_warning_flags_reach_both_phases() {
+        parse_and_assert("-Wall -o prog main.c", |a| {
+            a.compile_args().iter().any(|x| x == "-Wall")
+        });
+    }
+
+    #[test]
+    fn parsing_unrecognised_flag_is_kept_not_dropped() {
+        // The fallback must stay total: an unknown flag is treated as a compile
+        // flag rather than raising, because it is asked about every argument.
+        parse_and_assert("-fsome-future-flag -c main.c", |a| {
+            a.compile_args().iter().any(|x| x == "-fsome-future-flag")
+                && a.input_files() == &["main.c"]
+        });
+    }
+
+    #[test]
+    fn parsing_defines_are_compile_arguments() {
+        parse_and_assert("-DFOO=1 -UBAR -c main.c", |a| {
+            a.compile_args().iter().any(|x| x == "-DFOO=1")
+                && a.compile_args().iter().any(|x| x == "-UBAR")
+        });
+    }
+
+    #[test]
+    fn parsing_sysroot_reaches_both_phases() {
+        // --sysroot is the one flag routed through compile_link_binary: it and
+        // its argument must appear in both phases.
+        parse_and_assert("--sysroot /sdk -o prog main.c", |a| {
+            a.compile_args() == &["--sysroot", "/sdk"] && a.link_args() == &["--sysroot", "/sdk"]
+        });
+    }
+
+    #[test]
+    fn parsing_empty_argument_list() {
+        parse_and_assert("", |a| {
+            a.input_files().is_empty() && a.object_files().is_empty() && !a.is_compile_only()
+        });
     }
 }

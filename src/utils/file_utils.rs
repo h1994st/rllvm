@@ -689,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn test_macho_builder_embeds_without_padding() {
+    fn macho_builder_embeds_without_padding() {
         let data = create_minimal_macho_object();
         let before = object::File::parse(&*data).expect("Failed to parse the object");
         let expected_version = macho_build_version(&before);
@@ -729,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn test_macho_build_version_survives_rebuild() {
+    fn macho_build_version_survives_rebuild() {
         // Rebuilding an object drops anything the writer does not model. Losing
         // the platform load command makes the linker fall back to a guess and
         // warn on every object, so it has to be carried across explicitly.
@@ -756,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_object_file_on_non_object() {
+    fn is_object_file_on_non_object() {
         // The argument parser classifies every unrecognized argument with this,
         // so a file that is not an object must answer "no" rather than raise.
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn test_objcopy_section_specifier() {
+    fn builds_objcopy_section_specifier() {
         // Mach-O needs `segment,section`; the others name the section alone.
         assert_eq!(
             objcopy_section_specifier(BinaryFormat::MachO).unwrap(),
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn test_path_injection_and_extraction() {
+    fn path_injection_and_extraction() {
         let bitcode_pathbuf = tmp_bitcode("hello.bc");
         let bitcode_filepath = bitcode_pathbuf.as_path();
 
@@ -826,7 +826,7 @@ mod tests {
     }
 
     #[test]
-    fn test_paths_extraction() {
+    fn paths_extraction() {
         // The linker concatenates the bitcode sections of the objects it
         // merges, so a linked artifact carries several newline-separated paths
         // in one section. Reproduce that shape directly.
@@ -928,7 +928,7 @@ mod tests {
     }
 
     #[test]
-    fn test_coff_path_injection_and_extraction() {
+    fn coff_path_injection_and_extraction() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let coff_obj_path = dir.path().join("test.obj");
         let output_path = dir.path().join("test.out.obj");
@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn test_coff_overwrite_in_place() {
+    fn coff_overwrite_in_place() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let coff_obj_path = dir.path().join("test.obj");
 
@@ -971,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn test_coff_no_bitcode_section_returns_empty() {
+    fn coff_no_bitcode_section_returns_empty() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let coff_obj_path = dir.path().join("test.obj");
 
@@ -1005,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_path_injection_and_extraction() {
+    fn wasm_path_injection_and_extraction() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let wasm_obj_path = dir.path().join("test.wasm");
         let output_path = dir.path().join("test.out.wasm");
@@ -1027,7 +1027,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_overwrite_in_place() {
+    fn wasm_overwrite_in_place() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let wasm_obj_path = dir.path().join("test.wasm");
 
@@ -1048,7 +1048,7 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_no_bitcode_section_returns_empty() {
+    fn wasm_no_bitcode_section_returns_empty() {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let wasm_obj_path = dir.path().join("test.wasm");
 

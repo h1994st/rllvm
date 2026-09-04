@@ -140,8 +140,16 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
+      # Gates the build, so coverage cannot silently rot. Measured on macOS at
+      # 88.8% lines / 90.4% regions; the thresholds sit a few points below that
+      # because this job runs on Linux, where the `#[cfg(target_vendor =
+      # "apple")]` code does not exist and the denominators differ. Tighten once
+      # a CI run reports the Linux numbers. Lowering one should need a reason.
       - name: Generate code coverage reports
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: |
+          cargo llvm-cov --all-features --workspace \
+            --lcov --output-path lcov.info \
+            --fail-under-lines 85 --fail-under-functions 85 --fail-under-regions 87
 
       - name: Upload coverage reports to Codecov
         uses: codecov/codecov-action@v7

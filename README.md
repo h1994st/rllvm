@@ -167,7 +167,7 @@ export RLLVM_CONFIG=/path/to/config.toml
 | `lto_ldflags`              | No       | Extra flags for link-time optimization                   |
 | `bitcode_generation_flags` | No       | Extra flags for bitcode generation (e.g., `-flto`)       |
 | `is_configure_only`        | No       | Skip bitcode generation entirely (default: `false`)      |
-| `log_level`                | No       | 0=off, 1=error, 2=warn, 3=info, 4=debug, 5=trace        |
+| `log_level`                | No       | 0=error (default), 1=warn, 2=info, 3=debug, 4+=trace     |
 
 ### Relocatable bitcode paths
 

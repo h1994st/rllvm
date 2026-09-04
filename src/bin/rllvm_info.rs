@@ -28,8 +28,20 @@ struct InfoArgs {
 /// Detect whether a file is an LLVM bitcode file by checking its magic bytes.
 fn is_bitcode_file(path: &PathBuf) -> Result<bool, Error> {
     let data = fs::read(path)?;
-    // LLVM bitcode files start with 'BC' (0x42, 0x43) magic
-    Ok(data.len() >= 2 && data[0] == 0x42 && data[1] == 0x43)
+    if data.len() < 4 {
+        return Ok(false);
+    }
+    let head = [data[0], data[1], data[2], data[3]];
+
+    // Raw bitcode begins with 'BC' 0xC0 0xDE.
+    let raw = head == [0x42, 0x43, 0xC0, 0xDE];
+
+    // On Darwin, clang emits the bitcode *wrapper* format instead, whose header
+    // magic is 0x0B17C0DE. Checking only for 'BC' rejected every bitcode file
+    // produced on macOS, which is the default output there.
+    let wrapped = u32::from_le_bytes(head) == 0x0B17_C0DE;
+
+    Ok(raw || wrapped)
 }
 
 /// Try to parse as an object file to check for embedded bitcode.
