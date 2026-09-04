@@ -1,9 +1,17 @@
 name: rllvm CI
 
-# No `paths-ignore`: these jobs are required status checks on `main`, and a
+# No `paths-ignore`: every job here is a required status check on `main`, and a
 # required check whose workflow never runs leaves a pull request waiting on a
-# status that will never arrive. Running CI on a docs-only change costs a few
-# minutes; a permanently unmergeable pull request costs more.
+# status that will never arrive.
+#
+# So the jobs always run, and the work inside them is conditional instead. A
+# documentation-only change still reports all eight checks green, having skipped
+# the LLVM install, the build, the test suite and coverage -- the parts that
+# cost minutes. It pays runner startup and nothing else.
+#
+# The guards sit on steps rather than on jobs on purpose. A job-level `if:`
+# reports the check as "skipped", which is usually treated as passing, but
+# "usually" is a poor foundation for the branch everything merges into.
 on:
   push:
     branches: ["main"]
@@ -17,9 +25,65 @@ env:
   LLVM_VERSION: "22"
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Classify the changed files
+        id: classify
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files=$(gh api --paginate \
+              "repos/${{ github.repository }}/pulls/${{ github.event.number }}/files" \
+              -q '.[].filename')
+          else
+            before="${{ github.event.before }}"
+            # A new branch or a force push leaves no usable base to diff from.
+            if [ -z "$before" ] \
+              || [ "$before" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+              echo "code=true" >> "$GITHUB_OUTPUT"
+              echo "No comparable base commit, so everything runs."
+              exit 0
+            fi
+            files=$(git diff --name-only "$before" "${{ github.sha }}")
+          fi
+
+          echo "Changed files:"
+          echo "$files" | sed 's/^/  /'
+
+          # Only paths that cannot reach the Rust build are listed. Anything
+          # else -- including this workflow -- forces the full run, so a path
+          # nobody thought about fails safe.
+          code=false
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              *.md | site/* | .github/workflows/pages.yml | LICENSE) ;;
+              *)
+                code=true
+                break
+                ;;
+            esac
+          done <<< "$files"
+
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "Builds and tests run: $code"
+
   test:
     name: Build and Test (${{ matrix.os }})
-    needs: [fmt-check, clippy]
+    needs: [changes, fmt-check, clippy]
     strategy:
       # One platform failing should not hide the results for the others.
       fail-fast: false
@@ -28,116 +92,144 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install stable toolchain
+        if: needs.changes.outputs.code == 'true'
         run: rustup update stable
 
       - name: Checkout sources
+        if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
+        if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Build
+        if: needs.changes.outputs.code == 'true'
         run: cargo build --verbose
 
       - name: Run tests
+        if: needs.changes.outputs.code == 'true'
         run: cargo test --all --verbose
 
   fmt-check:
     name: Format Check
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - name: Install stable toolchain
+        if: needs.changes.outputs.code == 'true'
         run: rustup update stable
 
       - name: Checkout sources
+        if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Run cargo fmt
+        if: needs.changes.outputs.code == 'true'
         run: cargo fmt --all --check --verbose
 
   clippy:
     name: Clippy Check (${{ matrix.os }})
+    needs: changes
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install stable toolchain
+        if: needs.changes.outputs.code == 'true'
         run: rustup update stable
 
       - name: Checkout sources
+        if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
+        if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Run clippy
+        if: needs.changes.outputs.code == 'true'
         run: cargo clippy --all-targets -- -D warnings
 
   audit:
     name: Security Audit
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
+        if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v7
 
       - name: Install cargo-audit
+        if: needs.changes.outputs.code == 'true'
         uses: taiki-e/install-action@cargo-audit
 
       - name: Run cargo audit
+        if: needs.changes.outputs.code == 'true'
         run: cargo audit
 
   msrv:
     name: MSRV Check
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - name: Install MSRV toolchain
+        if: needs.changes.outputs.code == 'true'
         run: rustup update 1.88
 
       - name: Set MSRV as default
+        if: needs.changes.outputs.code == 'true'
         run: rustup default 1.88
 
       - name: Checkout sources
+        if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
+        if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Build with MSRV
+        if: needs.changes.outputs.code == 'true'
         run: cargo build --verbose
 
   coverage:
     runs-on: ubuntu-latest
-    needs: [fmt-check, test]
+    needs: [changes, fmt-check, test]
     steps:
       - name: Install stable toolchain
+        if: needs.changes.outputs.code == 'true'
         run: rustup update stable
 
       - name: Checkout sources
+        if: needs.changes.outputs.code == 'true'
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
+        if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
           version: ${{ env.LLVM_VERSION }}
 
       - name: Install cargo-llvm-cov
+        if: needs.changes.outputs.code == 'true'
         uses: taiki-e/install-action@cargo-llvm-cov
 
       # Gates the build, so coverage cannot silently rot. Measured on macOS at
@@ -146,12 +238,14 @@ jobs:
       # "apple")]` code does not exist and the denominators differ. Tighten once
       # a CI run reports the Linux numbers. Lowering one should need a reason.
       - name: Generate code coverage reports
+        if: needs.changes.outputs.code == 'true'
         run: |
           cargo llvm-cov --all-features --workspace \
             --lcov --output-path lcov.info \
             --fail-under-lines 85 --fail-under-functions 85 --fail-under-regions 87
 
       - name: Upload coverage reports to Codecov
+        if: needs.changes.outputs.code == 'true'
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }} # not required for public repos
