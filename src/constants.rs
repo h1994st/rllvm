@@ -57,13 +57,6 @@ pub(crate) const ELF_SECTION_NAME: &str = ".rllvm_bc";
 pub(crate) const COFF_SECTION_NAME: &str = ".rllvm_bc";
 pub(crate) const WASM_SECTION_NAME: &str = ".rllvm_bc";
 
-// Objects produced before the rename. Extraction still reads these so a tree
-// built with an older rllvm stays usable; nothing writes them.
-pub(crate) const LEGACY_DARWIN_SECTION_NAME: &str = "__llvm_bc";
-pub(crate) const LEGACY_ELF_SECTION_NAME: &str = ".llvm_bc";
-pub(crate) const LEGACY_COFF_SECTION_NAME: &str = ".llvmbc";
-pub(crate) const LEGACY_WASM_SECTION_NAME: &str = ".llvmbc";
-
 /// Environment variables
 pub(crate) const DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME: &str = "RLLVM_CONFIG";
 pub(crate) const HOME_ENV_NAME: &str = "HOME";

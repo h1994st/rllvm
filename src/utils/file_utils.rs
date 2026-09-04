@@ -17,8 +17,7 @@ use crate::{
     config::try_rllvm_config,
     constants::{
         COFF_SECTION_NAME, DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME,
-        LEGACY_COFF_SECTION_NAME, LEGACY_DARWIN_SECTION_NAME, LEGACY_ELF_SECTION_NAME,
-        LEGACY_WASM_SECTION_NAME, WASM_SECTION_NAME,
+        WASM_SECTION_NAME,
     },
     error::Error,
     utils::execute_command_for_status,
@@ -588,13 +587,11 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
 ) -> Result<Vec<PathBuf>, Error> {
     let object_binary_format = object_file.format();
 
-    // The current name first, then the pre-rename one, so a tree built with an
-    // older rllvm stays readable. Nothing writes the legacy names.
-    let (section_name, legacy_section_name) = match object_binary_format {
-        BinaryFormat::Elf => (ELF_SECTION_NAME, LEGACY_ELF_SECTION_NAME),
-        BinaryFormat::MachO => (DARWIN_SECTION_NAME, LEGACY_DARWIN_SECTION_NAME),
-        BinaryFormat::Coff => (COFF_SECTION_NAME, LEGACY_COFF_SECTION_NAME),
-        BinaryFormat::Wasm => (WASM_SECTION_NAME, LEGACY_WASM_SECTION_NAME),
+    let section_name = match object_binary_format {
+        BinaryFormat::Elf => ELF_SECTION_NAME.as_bytes(),
+        BinaryFormat::MachO => DARWIN_SECTION_NAME.as_bytes(),
+        BinaryFormat::Coff => COFF_SECTION_NAME.as_bytes(),
+        BinaryFormat::Wasm => WASM_SECTION_NAME.as_bytes(),
         _ => {
             return Err(Error::UnsupportedBinaryFormat(format!(
                 "{:?}",
@@ -603,11 +600,7 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
         }
     };
 
-    let section = object_file
-        .section_by_name_bytes(section_name.as_bytes())
-        .or_else(|| object_file.section_by_name_bytes(legacy_section_name.as_bytes()));
-
-    match section {
+    match object_file.section_by_name_bytes(section_name) {
         Some(section) => {
             let section_data = section.data()?;
             let embedded_filepath_string = str::from_utf8(section_data)?.trim();
