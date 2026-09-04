@@ -2139,3 +2139,97 @@ fn cargo_build_bitcode_extractable_from_rlib() {
     );
     assert_bitcode_magic(&bitcode);
 }
+
+/// `rustc_filepath` in the config selects the rustc to delegate to.
+///
+/// Every other tool rllvm drives is a config key. The rustc wrapper used to
+/// read `$RLLVM_REAL_RUSTC` and nothing else, so a `rustc_filepath` entry in a
+/// shared config had no effect.
+///
+/// The stand-in has to be distinguishable from the real rustc: asserting that
+/// "some rustc ran" passes on the `PATH` fallback whether or not the config is
+/// consulted.
+#[test]
+#[cfg(unix)]
+fn rustc_wrapper_honours_rustc_filepath_from_config() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let rustc = which("rustc").expect("rustc not found");
+    let tmp = TempDir::new().unwrap();
+
+    let stand_in = tmp.path().join("marked-rustc");
+    fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\necho rllvm-stand-in-rustc\nexec {} \"$@\"\n",
+            rustc.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let base = fs::read_to_string(shared_config_path()).unwrap();
+    let cfg = tmp.path().join("config.toml");
+    fs::write(
+        &cfg,
+        format!("{base}rustc_filepath = '{}'\n", stand_in.display()),
+    )
+    .unwrap();
+
+    let output = Command::new(cargo_bin("rllvm-rustc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .env_remove("RLLVM_REAL_RUSTC")
+        .arg("--version")
+        .output()
+        .expect("Failed to run rllvm-rustc");
+
+    assert!(
+        output.status.success(),
+        "the configured rustc was not used: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rllvm-stand-in-rustc"),
+        "the config was ignored and rustc came from PATH instead: {stdout}"
+    );
+}
+
+/// `log_level` in the config reaches the rustc wrapper.
+///
+/// `rllvm-cc` has read this key all along; `rllvm-rustc` looked only at
+/// `$RLLVM_LOG_LEVEL`, so raising the level in a config did nothing for Rust
+/// builds.
+#[test]
+fn rustc_wrapper_honours_log_level_from_config() {
+    let rustc = which("rustc").expect("rustc not found");
+    let tmp = TempDir::new().unwrap();
+    let base = fs::read_to_string(shared_config_path()).unwrap();
+    let cfg = tmp.path().join("config.toml");
+    fs::write(&cfg, format!("{base}log_level = 3\n")).unwrap();
+
+    let src = tmp.path().join("main.rs");
+    fs::write(&src, "fn main() {}\n").unwrap();
+    let exe = tmp.path().join("prog");
+
+    let output = Command::new(cargo_bin("rllvm-rustc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .env_remove("RLLVM_LOG_LEVEL")
+        .arg(&rustc)
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bitcode="),
+        "debug logging from the config did not reach the wrapper: {stderr}"
+    );
+}

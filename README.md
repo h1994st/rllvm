@@ -13,8 +13,8 @@ single `.bc` for the whole program back out of the finished binary.
 
 - **Drop-in compiler wrappers.** `export CC=rllvm-cc` and build. No separator, no
   shim script, no build-system plugin.
-- **Rust and cargo.** `RUSTC_WRAPPER=rllvm-rustc cargo build`, then extract from
-  the binary with every dependency crate's bitcode included.
+- **Rust and cargo.** Wrap `cargo build` and extract from the binary,
+  dependency crates included.
 - **WebAssembly.** Whole-program bitcode from a linked `wasm32` module, not just
   from individual objects.
 - **Relocatable bitcode paths.** Objects normally pin themselves to the directory
@@ -111,10 +111,6 @@ own:
 rllvm-get-bc target/debug/deps/libmylib-<hash>.rlib
 ```
 
-`RLLVM_LOG_LEVEL` sets the wrapper's verbosity (0–4) and `RLLVM_REAL_RUSTC`
-overrides the `rustc` it delegates to. `rllvm-rustc` also works as `RUSTC`
-rather than `RUSTC_WRAPPER`.
-
 ### WebAssembly
 
 ```bash
@@ -158,6 +154,7 @@ lives at `$RLLVM_CONFIG` if set, otherwise `~/.rllvm/config.toml`.
 | `llvm_ar_filepath` | Yes | Absolute path to `llvm-ar` |
 | `llvm_link_filepath` | Yes | Absolute path to `llvm-link` |
 | `llvm_objcopy_filepath` | No | Absolute path to `llvm-objcopy`; preferred for embedding, with an internal fallback |
+| `rustc_filepath` | No | Absolute path to `rustc` (default: `rustc` on `PATH`) |
 | `bitcode_store_path` | No | Directory for intermediate bitcode files (must be absolute) |
 | `bitcode_root` | No | Record embedded paths relative to this root (default: absolute) |
 | `llvm_link_flags` | No | Extra flags for `llvm-link` |
@@ -194,11 +191,9 @@ executable ◄── linker ◄── object files
                         rllvm-get-bc ──► whole-program.bc
 ```
 
-`rllvm-rustc` does the same per crate: cargo builds normally while each crate
-also emits a `.bc`. A crate that links receives the path through a marker
-object added to the link; a crate that produces an `.rlib` has it written into
-the archive's members, so a dependency carries its bitcode wherever it is
-linked.
+`rllvm-rustc` does the same per crate. A crate that links carries the path in a
+marker object added to the link; a crate that produces an `.rlib` carries it in
+the archive's members, so a dependency brings its bitcode wherever it is used.
 
 ## Relationship to gllvm and wllvm
 

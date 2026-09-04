@@ -17,7 +17,7 @@ use tracing::Level;
 use crate::{
     constants::{
         BITCODE_ROOT_ENV_NAME, DEFAULT_CONF_FILEPATH_UNDER_HOME,
-        DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME,
+        DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME, LOG_LEVEL_ENV_NAME, RUSTC_ENV_NAME,
     },
     diagnostics::{check_version_compatibility, print_missing_tool_error},
     error::Error,
@@ -103,6 +103,9 @@ pub struct RLLVMConfig {
 
     /// The absolute filepath of `llvm-objcopy` (optional, currently unused)
     llvm_objcopy_filepath: Option<PathBuf>,
+
+    /// The absolute filepath of `rustc` (optional; `which rustc` when unset)
+    rustc_filepath: Option<PathBuf>,
 
     /// The absolute path of the directory that stores intermediate bitcode files
     bitcode_store_path: Option<PathBuf>,
@@ -190,8 +193,17 @@ impl RLLVMConfig {
     }
 
     /// Returns the configured log level.
+    /// Returns the log level.
+    ///
+    /// `$RLLVM_LOG_LEVEL` wins over the configuration file. `rllvm-cc` layers
+    /// `--rllvm-verbose` on top of both; `rllvm-rustc` has no such flag,
+    /// because cargo owns its command line.
     pub fn log_level(&self) -> Level {
-        match self.log_level.unwrap_or_default() {
+        let level = env::var(LOG_LEVEL_ENV_NAME)
+            .ok()
+            .and_then(|value| value.parse::<u8>().ok())
+            .unwrap_or_else(|| self.log_level.unwrap_or_default());
+        match level {
             0 => Level::ERROR,
             1 => Level::WARN,
             2 => Level::INFO,
@@ -218,6 +230,18 @@ impl RLLVMConfig {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| self.bitcode_root.clone())
+    }
+
+    /// Returns the configured `rustc`, if any.
+    ///
+    /// `$RLLVM_REAL_RUSTC` wins over the configuration file. Unset here and in
+    /// the environment, the wrapper falls back to `rustc` on `PATH`.
+    pub fn rustc_filepath(&self) -> Option<PathBuf> {
+        env::var(RUSTC_ENV_NAME)
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| self.rustc_filepath.clone())
     }
 
     /// Returns the optional custom cache directory path.
@@ -465,6 +489,9 @@ impl RLLVMConfig {
             llvm_ar_filepath,
             llvm_link_filepath,
             llvm_objcopy_filepath,
+            // Not inferred: rustc is not an LLVM tool and need not be
+            // installed. The wrapper falls back to `rustc` on `PATH`.
+            rustc_filepath: None,
             bitcode_store_path: None,
             llvm_link_flags: None,
             lto_ldflags: None,
