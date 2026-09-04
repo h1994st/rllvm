@@ -40,10 +40,22 @@ impl ArgPatternTable {
 }
 
 pub(crate) const DARWIN_SEGMENT_NAME: &str = "__RLLVM";
-pub(crate) const DARWIN_SECTION_NAME: &str = "__llvm_bc";
-pub(crate) const ELF_SECTION_NAME: &str = ".llvm_bc";
-pub(crate) const COFF_SECTION_NAME: &str = ".llvmbc";
-pub(crate) const WASM_SECTION_NAME: &str = ".llvmbc";
+
+// Section names are rllvm's own, not LLVM's. The previous names were LLVM's
+// generic ones, and `.llvmbc` in particular belongs to `clang -fembed-bitcode`.
+// wasm-ld hardcodes a denylist for exactly that name:
+//
+//   if (name == ".llvmbc" || name == ".llvmcmd")
+//     continue;
+//   // Otherwise include custom sections by default and concatenate their contents.
+//
+// (lld/wasm/Writer.cpp). So on WASM the section was silently dropped at link
+// time and whole-program extraction could never work, while every other name is
+// concatenated exactly as the bitcode-path contract requires.
+pub(crate) const DARWIN_SECTION_NAME: &str = "__rllvm_bc";
+pub(crate) const ELF_SECTION_NAME: &str = ".rllvm_bc";
+pub(crate) const COFF_SECTION_NAME: &str = ".rllvm_bc";
+pub(crate) const WASM_SECTION_NAME: &str = ".rllvm_bc";
 
 /// Environment variables
 pub(crate) const DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME: &str = "RLLVM_CONFIG";

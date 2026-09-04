@@ -1787,3 +1787,117 @@ fn get_bc_reports_an_unreadable_input() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("panicked"), "panicked: {stderr}");
 }
+
+/// True when the local clang can target WebAssembly.
+fn wasm_target_available() -> bool {
+    let Some(llvm_config) = find_llvm_config() else {
+        return false;
+    };
+    let clang = llvm_config.parent().unwrap().join("clang");
+    Command::new(clang)
+        .args(["--print-targets"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32"))
+        .unwrap_or(false)
+}
+
+/// True when a WebAssembly linker is on PATH.
+fn wasm_ld_available() -> bool {
+    which("wasm-ld").is_ok()
+}
+
+/// A WebAssembly object carries the embedded bitcode path.
+#[test]
+fn wasm_object_carries_the_bitcode_path() {
+    if !wasm_target_available() {
+        eprintln!("skipping: clang has no wasm32 target");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let obj = tmp.path().join("wasm_lib.o");
+
+    let output = rllvm("rllvm-cc")
+        .args(["--target=wasm32-unknown-unknown", "-c", "-o"])
+        .arg(&obj)
+        .arg(fixture("wasm_lib.c"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "wasm compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&obj)
+        .expect("failed to read the embedded section");
+    assert_eq!(paths.len(), 1, "expected one embedded path");
+    assert_bitcode_magic(&paths[0]);
+}
+
+/// The section survives `wasm-ld` and concatenates across translation units.
+///
+/// This is the whole bitcode-path contract on WebAssembly, and it did not work
+/// before the section was renamed: `lld/wasm/Writer.cpp` skips `.llvmbc` and
+/// `.llvmcmd` by name, because those belong to `clang -fembed-bitcode`, while
+/// concatenating every other custom section. rllvm used `.llvmbc`, so the
+/// linker dropped it and extraction from a linked module always failed.
+#[test]
+fn wasm_linked_module_carries_every_translation_unit() {
+    if !wasm_target_available() || !wasm_ld_available() {
+        eprintln!("skipping: needs a wasm32 target and wasm-ld");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let lib_obj = tmp.path().join("wasm_lib.o");
+    let main_obj = tmp.path().join("wasm_main.o");
+
+    for (src, obj) in [("wasm_lib.c", &lib_obj), ("wasm_main.c", &main_obj)] {
+        let status = rllvm("rllvm-cc")
+            .args(["--target=wasm32-unknown-unknown", "-c", "-o"])
+            .arg(obj)
+            .arg(fixture(src))
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "wasm compile of {src} failed");
+    }
+
+    let module = tmp.path().join("out.wasm");
+    let output = rllvm("rllvm-cc")
+        .args([
+            "--target=wasm32-unknown-unknown",
+            "-nostdlib",
+            "-Wl,--no-entry",
+            "-Wl,--export-all",
+            "-o",
+        ])
+        .arg(&module)
+        .arg(&lib_obj)
+        .arg(&main_obj)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "wasm link failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Both translation units must be listed in the linked module.
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&module)
+        .expect("failed to read the embedded section from the linked module");
+    assert_eq!(
+        paths.len(),
+        2,
+        "linker did not concatenate both paths; got {paths:?}"
+    );
+
+    // And the merged bitcode must contain both functions.
+    let bitcode = tmp.path().join("out.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&module)
+        .arg("-o")
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "extraction from the linked wasm failed");
+    assert_bitcode_magic(&bitcode);
+}
