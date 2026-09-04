@@ -24,7 +24,7 @@ To try the wrappers by hand, point `RLLVM_CONFIG` at a scratch file so you do no
 
 ## Architecture
 
-Four things to know before changing wrapper behaviour. The rest is discoverable from the code.
+Six things to know before changing wrapper behaviour. The rest is discoverable from the code.
 
 **The bitcode-path contract** (`wrapper.rs`, `utils/file_utils.rs`). Each source compiles to an object *and* a `.bc`, and the `.bc` path goes into a dedicated object-file section, **newline-terminated**. The linker *concatenates* those sections, and that concatenation is what records which translation units make up a binary. Break the separator and multi-file builds silently yield one garbage path; only `tests/integration.rs` catches it.
 
@@ -33,6 +33,10 @@ Four things to know before changing wrapper behaviour. The rest is discoverable 
 **Wrappers must behave like compilers.** Every flag the compiler could own reaches it, `-c`, `-v`, `--help` and `--version` included. Build systems identify the compiler with `$CC --version`, so answering it ourselves breaks configure scripts in ways that look nothing like an argument bug. Wrapper options are long-only and prefixed `--rllvm-`. Diagnostics go to stderr, never stdout.
 
 **Arity drives argument consumption** (`arg_parser.rs`, tables in `constants.rs`). The parser skips `arity` arguments regardless of what the handler does, so a wrong arity silently swallows the next one. The final fallback must stay total: `is_object_file()` returns `Ok(false)` for anything unrecognised, because it is asked about *every* unknown argument.
+
+**Mach-O sections need `S_ATTR_NO_DEAD_STRIP`** (`utils/file_utils.rs`). Nothing references the embedded section, so `ld -dead_strip` discards it and extraction from the linked output finds nothing — silently, since the build still succeeds. All three writers set the attribute. `llvm-objcopy` cannot (`--set-section-flags` takes only ELF names), so that path patches the section header itself afterwards. Drop it and the only way back is deleting `-dead_strip` from the user's link, which is what rllvm used to do. ELF and COFF need nothing: rllvm's sections there are non-allocatable and `--gc-sections` only collects allocatable ones.
+
+**The rustc wrapper gets two injection points and no third** (`llvm/rustc_args.rs`, `llvm/rustc_marker.rs`). Cargo never passes `-o`, so the bitcode path comes from `--out-dir` + `--crate-name` + `-C extra-filename`; assuming `-o` is #85. Bitcode is requested by appending `llvm-bc=<path>` to `--emit`, which keeps it to one rustc invocation. A crate type that *links* takes a marker object through `-C link-arg`; a crate type that *archives* has its object members patched after rustc returns. Patching the finished binary instead is not an option — on Darwin it invalidates the code signature and the binary is killed on sight.
 
 Two things that look like bugs and are not: link mode compiles each translation unit more than once (#51), and embedding prefers `llvm-objcopy` over the `object`-crate rebuild because the rebuild drops load commands it does not model. Do not delete the objcopy path.
 

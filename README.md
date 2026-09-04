@@ -13,6 +13,8 @@ single `.bc` for the whole program back out of the finished binary.
 
 - **Drop-in compiler wrappers.** `export CC=rllvm-cc` and build. No separator, no
   shim script, no build-system plugin.
+- **Rust and cargo.** `RUSTC_WRAPPER=rllvm-rustc cargo build`, then extract from
+  the binary with every dependency crate's bitcode included.
 - **WebAssembly.** Whole-program bitcode from a linked `wasm32` module, not just
   from individual objects.
 - **Relocatable bitcode paths.** Objects normally pin themselves to the directory
@@ -94,6 +96,25 @@ rllvm-get-bc build/my_program
 
 See [`examples/cmake/`](examples/cmake/).
 
+### Rust and cargo
+
+```bash
+RUSTC_WRAPPER=rllvm-rustc cargo build
+rllvm-get-bc target/debug/my_program
+```
+
+Every crate in the graph contributes, so the extracted module covers
+dependencies as well as the binary's own code. A library crate works on its
+own:
+
+```bash
+rllvm-get-bc target/debug/deps/libmylib-<hash>.rlib
+```
+
+`RLLVM_LOG_LEVEL` sets the wrapper's verbosity (0–4) and `RLLVM_REAL_RUSTC`
+overrides the `rustc` it delegates to. `rllvm-rustc` also works as `RUSTC`
+rather than `RUSTC_WRAPPER`.
+
 ### WebAssembly
 
 ```bash
@@ -172,6 +193,12 @@ executable ◄── linker ◄── object files
                               ▼
                         rllvm-get-bc ──► whole-program.bc
 ```
+
+`rllvm-rustc` does the same per crate: cargo builds normally while each crate
+also emits a `.bc`. A crate that links receives the path through a marker
+object added to the link; a crate that produces an `.rlib` has it written into
+the archive's members, so a dependency carries its bitcode wherever it is
+linked.
 
 ## Relationship to gllvm and wllvm
 
