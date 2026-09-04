@@ -55,13 +55,20 @@ Two things that look like bugs and are not: link mode compiles each translation 
 - Errors use a `thiserror` enum in `error.rs`; library code returns `Result` rather than exiting or panicking
 - Logging is `tracing`, not `log`
 - `constants.rs` is internal; `utils/` re-exports deliberately, so anything `pub` there is public API
-- Releases are cut by `cargo dist` on version tags
+- Releases are automated by release-please + `cargo dist`; see [RELEASING.md](RELEASING.md). Do not bump `version` by hand, and note that pushing a tag no longer releases.
 
 ### Tests
 
 Integration tests write their own config and pass it through `RLLVM_CONFIG`, so they never read `~/.rllvm/config.toml`. Keep it that way: route every spawned binary through the `rllvm()` helper in `tests/integration.rs`.
 
 **Confirm a new test fails before its fix.** Several tests in this repo have passed with the bug present — asserting on the wrong field, or on a value something else produced. Check that the sabotage targets the layer that can actually break.
+
+### Writing
+
+Keep issues, PR descriptions, and issue comments short and plain: problem, cause,
+fix, verification. Cut narrative framing, rhetorical build-up, and paragraphs
+justifying what the diff already shows. Tables and code blocks are fine when they
+carry facts.
 
 ### Commits
 

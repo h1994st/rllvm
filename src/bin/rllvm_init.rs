@@ -43,7 +43,7 @@ struct DetectedTools {
     clangxx: PathBuf,
     llvm_ar: PathBuf,
     llvm_link: PathBuf,
-    /// Optional: recorded when present, but no code path invokes it today
+    /// Optional: used to embed bitcode paths when present
     llvm_objcopy: Option<PathBuf>,
 }
 
@@ -129,8 +129,8 @@ fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
         )));
     }
 
-    // `llvm-objcopy` is optional: it is recorded when present, but nothing
-    // invokes it, so its absence is not a failure.
+    // `llvm-objcopy` is optional: it is the preferred way to embed the bitcode
+    // path, but there is an internal fallback, so its absence is not a failure.
     let llvm_objcopy = if llvm_objcopy.exists() {
         eprintln!("  llvm-objcopy: OK");
         Some(llvm_objcopy)
