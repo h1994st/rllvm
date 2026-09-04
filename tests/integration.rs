@@ -1577,14 +1577,17 @@ fn bitcode_store_path_collects_bitcode_centrally() {
     assert_valid_bitcode(&out);
 }
 
-/// A forbidden flag is dropped from the build and reported on stderr.
+/// `-dead_strip` reaches the linker and is not reported as dropped.
 ///
-/// The warning goes to stderr rather than the log deliberately: the default log
-/// level is ERROR, so a log record would be invisible to the non-interactive
-/// build-system runs that most need to know the binary differs from the one
-/// their command asked for.
+/// rllvm used to delete the flag, because its embedded section was
+/// unreferenced and ld discarded it, which silently handed the user a binary
+/// their command had not asked for. The section now carries
+/// `S_ATTR_NO_DEAD_STRIP`, so the flag is passed through like any other.
+///
+/// Darwin only: `-dead_strip` is an ld64 flag, and clang rejects it elsewhere.
 #[test]
-fn forbidden_flags_are_dropped_and_reported() {
+#[cfg(target_os = "macos")]
+fn dead_strip_is_passed_through_without_warning() {
     let tmp = TempDir::new().unwrap();
     let src = tmp.path().join("main.c");
     fs::write(&src, "int main(void) { return 0; }\n").unwrap();
@@ -1606,9 +1609,14 @@ fn forbidden_flags_are_dropped_and_reported() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("dead_strip"),
-        "the dropped flag was not reported: {stderr}"
+        !stderr.contains("dead_strip"),
+        "the flag is honoured now, so nothing should be reported: {stderr}"
     );
+
+    // And the bitcode path is still recoverable from the stripped binary.
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+        .expect("no embedded section survived the dead-stripping link");
+    assert_eq!(paths.len(), 1, "expected one embedded path, got {paths:?}");
 }
 
 /// `lto_ldflags` are appended when linking with `-flto`.
@@ -1900,4 +1908,78 @@ fn wasm_linked_module_carries_every_translation_unit() {
         .expect("Failed to run rllvm-get-bc");
     assert!(status.success(), "extraction from the linked wasm failed");
     assert_bitcode_magic(&bitcode);
+}
+
+/// The embedded section survives a link that dead strips.
+///
+/// rllvm's section is unreferenced, so `-dead_strip` is entitled to discard it.
+/// rllvm used to buy survival by deleting the flag from the user's link, which
+/// silently handed them a binary they had not asked for. Marking the section
+/// `S_ATTR_NO_DEAD_STRIP` keeps it instead, so the flag can be passed through.
+///
+/// The stripped-symbol assertion is the load-bearing half. Without it the test
+/// passes while the flag is still being dropped, because a link that never
+/// dead strips trivially preserves the section. `-dead_strip` is an ld64 flag,
+/// so this is Mach-O only; ELF sections added by rllvm are non-allocatable and
+/// were never `--gc-sections` candidates.
+#[test]
+#[cfg(target_os = "macos")]
+fn bitcode_survives_a_dead_stripping_link() {
+    const UNUSED: &str = "rllvm_unreferenced_probe";
+
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("lib.c"),
+        format!("int helper(int x) {{ return x + 1; }}\nint {UNUSED}(int x) {{ return x * 7; }}\n"),
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("main.c"),
+        "int helper(int);\nint main(void) { return helper(41) == 42 ? 0 : 1; }\n",
+    )
+    .unwrap();
+
+    let mut objects = Vec::new();
+    for name in ["lib", "main"] {
+        let object = tmp.path().join(format!("{name}.o"));
+        let status = rllvm("rllvm-cc")
+            .args(["-c", "-o"])
+            .arg(&object)
+            .arg(tmp.path().join(format!("{name}.c")))
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "compiling {name}.c failed");
+        objects.push(object);
+    }
+
+    let exe = tmp.path().join("prog");
+    let output = rllvm("rllvm-cc")
+        .arg("-Wl,-dead_strip")
+        .arg("-o")
+        .arg(&exe)
+        .args(&objects)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "link failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The flag has to reach the linker, or the rest of this test is vacuous.
+    let image = fs::read(&exe).expect("cannot read the linked binary");
+    let stripped = !image.windows(UNUSED.len()).any(|w| w == UNUSED.as_bytes());
+    assert!(
+        stripped,
+        "`{UNUSED}` is still in the binary, so -dead_strip never reached the linker"
+    );
+
+    // And the section has to outlive the stripping.
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+        .expect("no embedded section survived the dead-stripping link");
+    assert_eq!(
+        paths.len(),
+        2,
+        "dead stripping removed embedded paths; got {paths:?}"
+    );
 }

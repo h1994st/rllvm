@@ -458,14 +458,15 @@ pub(crate) fn arg_exact_match_map() -> &'static CallbackMap {
             ArgInfo::new(0, CompilerArgsInfo::compile_link_unary),
         );
 
+        // Dead stripping used to be forbidden: rllvm's section is unreferenced,
+        // so ld64 discarded it and extraction found nothing. The section now
+        // carries `S_ATTR_NO_DEAD_STRIP` (see `utils::file_utils`), so it
+        // survives and the flag can reach the linker as the user wrote it.
         m.insert(
             "-Wl,-dead_strip",
-            ArgInfo::new(0, CompilerArgsInfo::warning_link_unary),
+            ArgInfo::new(0, CompilerArgsInfo::link_unary),
         );
-        m.insert(
-            "-dead_strip",
-            ArgInfo::new(0, CompilerArgsInfo::warning_link_unary),
-        );
+        m.insert("-dead_strip", ArgInfo::new(0, CompilerArgsInfo::link_unary));
 
         m
     })

@@ -734,16 +734,18 @@ mod tests {
     }
 
     #[test]
-    fn parsing_forbidden_flags() {
-        // Forbidden flags are collected, and kept out of the compile/link args
+    fn parsing_dead_strip_reaches_the_linker() {
+        // Dead stripping used to be dropped, because the embedded section was
+        // unreferenced and ld discarded it. The section now carries
+        // `S_ATTR_NO_DEAD_STRIP`, so the flag is passed through as written.
         let input = r#"-O2 -dead_strip -Wl,-dead_strip -o prog main.c"#;
         parse_and_assert(input, |args| {
-            args.forbidden_flags() == &["-dead_strip", "-Wl,-dead_strip"]
-                && !args.compile_args().iter().any(|x| x.contains("dead_strip"))
-                && !args.link_args().iter().any(|x| x.contains("dead_strip"))
+            args.forbidden_flags().is_empty()
+                && args.link_args().iter().any(|x| x == "-dead_strip")
+                && args.link_args().iter().any(|x| x == "-Wl,-dead_strip")
         });
 
-        // No forbidden flag in the command means nothing gets dropped
+        // Nothing else in the default tables is forbidden.
         let input = r#"-O2 -o prog main.c"#;
         parse_and_assert(input, |args| args.forbidden_flags().is_empty());
     }
