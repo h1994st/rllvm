@@ -86,3 +86,6 @@ target/
 
 ### Claude Code worktrees ###
 .claude/worktrees/
+
+# Build output from the cargo fixture used by the integration tests.
+tests/data/cargo_fixture/target/

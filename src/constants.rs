@@ -67,6 +67,14 @@ pub(crate) const DEFAULT_LINK_OUTPUT_FILENAME: &str = "a.out";
 /// Root that embedded bitcode paths are recorded relative to, when set.
 pub(crate) const BITCODE_ROOT_ENV_NAME: &str = "RLLVM_BITCODE_ROOT";
 
+/// Overrides `rustc_filepath`. Cargo owns the command line of a
+/// `RUSTC_WRAPPER`, so an environment variable is the only per-build override
+/// the rustc wrapper can offer.
+pub(crate) const RUSTC_ENV_NAME: &str = "RLLVM_REAL_RUSTC";
+
+/// Overrides `log_level`, for the same reason.
+pub(crate) const LOG_LEVEL_ENV_NAME: &str = "RLLVM_LOG_LEVEL";
+
 /// The default filepath of the configuration file
 pub(crate) const DEFAULT_CONF_FILEPATH_UNDER_HOME: &str = ".rllvm/config.toml";
 

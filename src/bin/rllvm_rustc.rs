@@ -1,6 +1,6 @@
 use std::{env, path::PathBuf};
 
-use rllvm::{compiler_wrapper::llvm::RustcWrapper, error::Error};
+use rllvm::{compiler_wrapper::llvm::RustcWrapper, config::try_rllvm_config, error::Error};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -19,25 +19,22 @@ fn main() -> Result<(), Error> {
         // RUSTC_WRAPPER mode: argv[1] is the real rustc path
         (PathBuf::from(&raw_args[1]), raw_args[2..].to_vec())
     } else {
-        // RUSTC mode: find rustc ourselves
-        let rustc = env::var("RLLVM_REAL_RUSTC")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| which::which("rustc").unwrap_or_else(|_| PathBuf::from("rustc")));
+        // RUSTC mode: `rustc_filepath` in the config, `$RLLVM_REAL_RUSTC` over
+        // that, and `PATH` when neither is set. Tolerates a missing config,
+        // because the wrapper still has useful work to do without one.
+        let configured = try_rllvm_config()
+            .ok()
+            .and_then(|config| config.rustc_filepath());
+        let rustc = configured
+            .unwrap_or_else(|| which::which("rustc").unwrap_or_else(|_| PathBuf::from("rustc")));
         (rustc, raw_args[1..].to_vec())
     };
 
-    // Set up logging from RLLVM_LOG_LEVEL env var
-    let log_level = match env::var("RLLVM_LOG_LEVEL")
-        .ok()
-        .and_then(|v| v.parse::<u8>().ok())
-        .unwrap_or(0)
-    {
-        0 => Level::ERROR,
-        1 => Level::WARN,
-        2 => Level::INFO,
-        3 => Level::DEBUG,
-        _ => Level::TRACE,
-    };
+    // `log_level` from the config, with `$RLLVM_LOG_LEVEL` over it. Cargo owns
+    // this command line, so there is no `--rllvm-verbose` to offer here.
+    let log_level = try_rllvm_config()
+        .map(|config| config.log_level())
+        .unwrap_or(Level::ERROR);
     // Diagnostics belong on stderr; stdout is the wrapped compiler's output.
     let _ = FmtSubscriber::builder()
         .with_max_level(log_level)

@@ -13,6 +13,8 @@ single `.bc` for the whole program back out of the finished binary.
 
 - **Drop-in compiler wrappers.** `export CC=rllvm-cc` and build. No separator, no
   shim script, no build-system plugin.
+- **Rust and cargo.** Wrap `cargo build` and extract from the binary,
+  dependency crates included.
 - **WebAssembly.** Whole-program bitcode from a linked `wasm32` module, not just
   from individual objects.
 - **Relocatable bitcode paths.** Objects normally pin themselves to the directory
@@ -94,6 +96,21 @@ rllvm-get-bc build/my_program
 
 See [`examples/cmake/`](examples/cmake/).
 
+### Rust and cargo
+
+```bash
+RUSTC_WRAPPER=rllvm-rustc cargo build
+rllvm-get-bc target/debug/my_program
+```
+
+Every crate in the graph contributes, so the extracted module covers
+dependencies as well as the binary's own code. A library crate works on its
+own:
+
+```bash
+rllvm-get-bc target/debug/deps/libmylib-<hash>.rlib
+```
+
 ### WebAssembly
 
 ```bash
@@ -137,6 +154,7 @@ lives at `$RLLVM_CONFIG` if set, otherwise `~/.rllvm/config.toml`.
 | `llvm_ar_filepath` | Yes | Absolute path to `llvm-ar` |
 | `llvm_link_filepath` | Yes | Absolute path to `llvm-link` |
 | `llvm_objcopy_filepath` | No | Absolute path to `llvm-objcopy`; preferred for embedding, with an internal fallback |
+| `rustc_filepath` | No | Absolute path to `rustc` (default: `rustc` on `PATH`) |
 | `bitcode_store_path` | No | Directory for intermediate bitcode files (must be absolute) |
 | `bitcode_root` | No | Record embedded paths relative to this root (default: absolute) |
 | `llvm_link_flags` | No | Extra flags for `llvm-link` |
@@ -172,6 +190,10 @@ executable ◄── linker ◄── object files
                               ▼
                         rllvm-get-bc ──► whole-program.bc
 ```
+
+`rllvm-rustc` does the same per crate. A crate that links carries the path in a
+marker object added to the link; a crate that produces an `.rlib` carries it in
+the archive's members, so a dependency brings its bitcode wherever it is used.
 
 ## Relationship to gllvm and wllvm
 

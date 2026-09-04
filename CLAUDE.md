@@ -24,7 +24,7 @@ To try the wrappers by hand, point `RLLVM_CONFIG` at a scratch file so you do no
 
 ## Architecture
 
-Four things to know before changing wrapper behaviour. The rest is discoverable from the code.
+Six things to know before changing wrapper behaviour. The rest is discoverable from the code.
 
 **The bitcode-path contract** (`wrapper.rs`, `utils/file_utils.rs`). Each source compiles to an object *and* a `.bc`, and the `.bc` path goes into a dedicated object-file section, **newline-terminated**. The linker *concatenates* those sections, and that concatenation is what records which translation units make up a binary. Break the separator and multi-file builds silently yield one garbage path; only `tests/integration.rs` catches it.
 
@@ -33,6 +33,10 @@ Four things to know before changing wrapper behaviour. The rest is discoverable 
 **Wrappers must behave like compilers.** Every flag the compiler could own reaches it, `-c`, `-v`, `--help` and `--version` included. Build systems identify the compiler with `$CC --version`, so answering it ourselves breaks configure scripts in ways that look nothing like an argument bug. Wrapper options are long-only and prefixed `--rllvm-`. Diagnostics go to stderr, never stdout.
 
 **Arity drives argument consumption** (`arg_parser.rs`, tables in `constants.rs`). The parser skips `arity` arguments regardless of what the handler does, so a wrong arity silently swallows the next one. The final fallback must stay total: `is_object_file()` returns `Ok(false)` for anything unrecognised, because it is asked about *every* unknown argument.
+
+**Mach-O sections must stay `no_dead_strip`** (`utils/file_utils.rs`). Nothing references the embedded section, so a dead-stripping link discards it and extraction silently finds nothing. Every writer has to set the attribute; the alternative is deleting `-dead_strip` from the user's link, which is what rllvm used to do.
+
+**The rustc wrapper cannot rely on `-o`** (`llvm/rustc_args.rs`). Cargo names outputs by directory and crate name, and assuming `-o` is #85. Crates that link take the path in an object added to the link, crates that archive have their members patched afterwards — never the finished binary, which breaks its Darwin code signature.
 
 Two things that look like bugs and are not: link mode compiles each translation unit more than once (#51), and embedding prefers `llvm-objcopy` over the `object`-crate rebuild because the rebuild drops load commands it does not model. Do not delete the objcopy path.
 

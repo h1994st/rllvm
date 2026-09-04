@@ -28,6 +28,9 @@ tracing-subscriber = {version = "~0.3", features = ["env-filter"]}
 owo-colors = "~4.1"
 thiserror = "~2.0"
 which = "~8.0.0"
+# Used by the rustc wrapper to stage marker objects and unpack archives;
+# RAII cleanup matters because those paths return early on error.
+tempfile = "~3"
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 glob = "~0.3.3"
@@ -62,7 +65,6 @@ path = "src/bin/rllvm_info.rs"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-tempfile = "3"
 
 [[bench]]
 name = "rllvm_benchmarks"
