@@ -4,10 +4,11 @@ name: Pages
 # workflow is not a required status check, so a pull request that never runs it
 # is still mergeable.
 #
-# `.release-please-manifest.json` is in the list because the masthead shows the
-# crate version, so a release changes the page while touching nothing else here.
-# It stands in for `Cargo.toml`, which `build.py` actually reads but which also
-# moves on dependency edits that leave the page identical.
+# The list is exactly what `build.py` reads. `.release-please-manifest.json` is
+# among them because the masthead shows the released version: a release changes
+# the page while touching nothing else here. `Cargo.toml` carries the same
+# number but also moves on dependency edits, which would redeploy an identical
+# page, so the generator reads the manifest instead.
 on:
   push:
     branches: ["main"]

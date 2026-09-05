@@ -12,12 +12,13 @@ Four things change on the way:
   can set them in the hero rather than repeating them in the body.
 * Relative links work on github.com and 404 on the site, which has no
   `examples/` or `LICENSE` to serve.
-* The version is read from Cargo.toml, so the header cannot claim a release
-  that was never cut.
+* The version comes from release-please's manifest, which records what was
+  actually released, so the header cannot claim a version that was never cut.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -27,7 +28,7 @@ BRANCH = "main"
 
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
-MANIFEST = ROOT / "Cargo.toml"
+RELEASE_MANIFEST = ROOT / ".release-please-manifest.json"
 OUTPUT = Path(__file__).resolve().parent / "index.md"
 
 # `[text](target)`, capturing the target. Bare enough to miss exotic markdown,
@@ -47,15 +48,19 @@ def rewrite(target: str) -> str:
 
 
 def crate_version() -> str:
-    """Read `version` from the `[package]` table."""
-    section = None
-    for line in MANIFEST.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("["):
-            section = stripped
-        elif section == "[package]" and stripped.startswith("version"):
-            return stripped.split("=", 1)[1].strip().strip("\"'")
-    raise SystemExit("no [package] version in Cargo.toml")
+    """Read the released version from release-please's manifest.
+
+    Not `Cargo.toml`, which carries the same number: the manifest holds nothing
+    but the version, so the Pages workflow can filter on the one file this
+    reads. Sourcing it from `Cargo.toml` would make the deploy trigger and the
+    content source different files, and a dependency bump would redeploy a page
+    that had not changed.
+    """
+    released = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
+    version = released.get(".")
+    if not isinstance(version, str):
+        raise SystemExit(f'no "." version string in {RELEASE_MANIFEST.name}')
+    return version
 
 
 def split_front(markdown: str) -> tuple[str, str, str, str]:
