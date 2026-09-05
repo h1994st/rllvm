@@ -738,26 +738,31 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
         }
     };
 
-    match object_file.section_by_name_bytes(section_name) {
-        Some(section) => {
-            let section_data = section.data()?;
-            let embedded_filepath_string = str::from_utf8(section_data)?.trim();
-
-            let mut embedded_filepaths: Vec<_> = embedded_filepath_string
-                .split('\n')
-                .map(PathBuf::from)
-                .collect();
-
-            // Sort
-            embedded_filepaths.sort();
-
-            // Deduplicate
-            embedded_filepaths.dedup();
-
-            Ok(embedded_filepaths)
+    // Every matching section, not just the first. `ld.bfd` emits two output
+    // sections when same-named input sections disagree on flags, which is
+    // exactly what an LTO marker's section and an `llvm-objcopy` section do.
+    // `section_by_name_bytes` would report one of them and lose the other.
+    let mut embedded_filepaths = vec![];
+    for section in object_file.sections() {
+        if section.name_bytes()? != section_name {
+            continue;
         }
-        None => Ok(vec![]),
+        embedded_filepaths.extend(
+            str::from_utf8(section.data()?)?
+                .trim()
+                .split('\n')
+                .filter(|entry| !entry.is_empty())
+                .map(PathBuf::from),
+        );
     }
+
+    // Sort
+    embedded_filepaths.sort();
+
+    // Deduplicate
+    embedded_filepaths.dedup();
+
+    Ok(embedded_filepaths)
 }
 
 /// Extract bitcode filepaths from an object file on disk.
@@ -1277,5 +1282,44 @@ mod tests {
         let mut clipped = synthetic_macho(DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME);
         clipped.truncate(MACHO_HEADER_64_SIZE + 4);
         assert!(!set_macho_no_dead_strip(&mut clipped));
+    }
+
+    #[test]
+    fn extraction_reads_every_section_with_the_matching_name() {
+        use object::Architecture;
+
+        // `ld.bfd` emits two output sections when same-named input sections
+        // disagree on flags -- an LTO marker's and one written by
+        // `llvm-objcopy`. Reading only the first loses half the build.
+        let mut obj = write::Object::new(
+            BinaryFormat::Elf,
+            Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        for path in ["/tmp/first.bc\n", "/tmp/second.bc\n"] {
+            let id = obj.add_section(
+                vec![],
+                ELF_SECTION_NAME.as_bytes().to_vec(),
+                SectionKind::Unknown,
+            );
+            let section = obj.section_mut(id);
+            section.set_data(path.as_bytes(), 1);
+            section.flags = SectionFlags::Elf {
+                sh_type: object::elf::SHT_PROGBITS,
+                sh_flags: object::elf::SectionFlags(0),
+            };
+        }
+        let data = obj.write().unwrap();
+        let parsed = File::parse(&*data).unwrap();
+
+        let paths = extract_bitcode_filepaths_from_parsed_object(&parsed).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/first.bc"),
+                PathBuf::from("/tmp/second.bc")
+            ],
+            "both sections must be read, not just the first"
+        );
     }
 }
