@@ -9,11 +9,12 @@ use std::{
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
     cache,
-    compiler_wrapper::llvm::lto_marker,
+    compiler_wrapper::llvm::{lto_marker, marker},
     config::try_rllvm_config,
     constants::DEFAULT_LINK_OUTPUT_FILENAME,
     diagnostics::print_warning,
     error::Error,
+    lto::{LtoFlavour, LtoMode, save_temps_flag},
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status, is_bitcode_file},
 };
 
@@ -25,6 +26,20 @@ pub enum CompilerKind {
     Clang,
     /// Clang++
     ClangXX,
+}
+
+/// What `save-temps` mode contributes to a link, and what it collects after.
+#[derive(Debug, Default)]
+pub struct SaveTempsPlan {
+    /// Extra arguments appended to the link command.
+    pub extra_args: Vec<String>,
+    /// The link output whose merged module to collect, if any.
+    pub collect_from: Option<PathBuf>,
+    /// Whether rllvm added the flag, and so owns the cleanup.
+    pub cleanup: bool,
+    /// Keeps the marker object's staging directory alive until the link
+    /// runs; the directory (and its contents) are removed once this drops.
+    _marker_dir: Option<tempfile::TempDir>,
 }
 
 /// A general interface that wraps different compilers
@@ -100,13 +115,102 @@ pub trait CompilerWrapper {
     /// Returns `true` if `silence` was called with `true`
     fn is_silent(&self) -> bool;
 
+    /// Decide what `save-temps` mode contributes to this invocation.
+    ///
+    /// Only an LTO link qualifies. ThinLTO never builds a whole-program
+    /// module, so it warns and contributes nothing rather than failing a build
+    /// over a mode the user set globally.
+    fn save_temps_plan(&self) -> Result<SaveTempsPlan, Error> {
+        let args = self.args();
+        if try_rllvm_config()?.lto_mode()? != LtoMode::SaveTemps
+            || !matches!(args.mode(), CompileMode::LTO)
+        {
+            return Ok(SaveTempsPlan::default());
+        }
+
+        if args.lto_flavour() == Some(LtoFlavour::Thin) {
+            print_warning(
+                "ThinLTO builds no whole-program module, so lto_mode = \"save-temps\" has \
+                 nothing to collect. Use lto_mode = \"marker\" for ThinLTO builds.",
+            );
+            return Ok(SaveTempsPlan::default());
+        }
+
+        let output_filename = match args.output_filename() {
+            "" => DEFAULT_LINK_OUTPUT_FILENAME,
+            name => name,
+        };
+        let output = PathBuf::from(output_filename);
+        // Made absolute (not canonicalized: the link has not produced it yet,
+        // so the path does not exist for `canonicalize` to resolve). A bare
+        // relative `-o prog` otherwise breaks two ways below: `<output>.rllvm.bc`
+        // is relative too, and embedding a relative bitcode path requires the
+        // file to already exist; and after the link, an output with no
+        // directory component makes `Path::parent` return `Some("")` rather
+        // than `None`, so a naive fallback to `.` never triggers and
+        // `collect_saved_module` fails to read the (nonexistent) empty path.
+        let output = if output.is_absolute() {
+            output
+        } else {
+            std::env::current_dir()?.join(output)
+        };
+
+        // A user who asked for save-temps owns the artifacts, so rllvm neither
+        // adds the flag twice nor deletes what it did not create.
+        let user_asked = args
+            .input_args()
+            .iter()
+            .any(|arg| arg == "-Wl,-save-temps" || arg == "-Wl,-plugin-opt=save-temps");
+
+        let mut extra_args = vec![];
+        if !user_asked {
+            extra_args.push(save_temps_flag(cfg!(target_vendor = "apple")).to_string());
+        }
+
+        // Staged in its own temporary directory rather than next to the
+        // output: the marker source and object are never removed by the
+        // compile that produces them, and the output directory is not ours to
+        // litter.
+        let marker_dir = tempfile::tempdir()?;
+        let bitcode = PathBuf::from(format!("{}.rllvm.bc", output.display()));
+        let marker = marker::build_marker_object(&bitcode, marker_dir.path())?;
+        extra_args.push(marker.to_string_lossy().into_owned());
+
+        Ok(SaveTempsPlan {
+            extra_args,
+            collect_from: Some(output),
+            cleanup: !user_asked,
+            _marker_dir: Some(marker_dir),
+        })
+    }
+
+    /// Execute the given command with extra arguments appended.
+    fn build_target_with(&self, extra_args: &[String]) -> Result<Option<i32>, Error> {
+        let mut args = self.command()?;
+        args.extend(extra_args.iter().cloned());
+        let mode = self.args().mode();
+
+        self.execute_command(&args, mode)
+    }
+
     /// Run the compiler
     fn run(&mut self) -> Result<Option<i32>, Error> {
-        if let Some(code) = self.build_target()?
+        // `save-temps` works around the link rather than after a compile: the
+        // module it wants is one the linker produces, and the marker naming
+        // that module has to be among the link's inputs.
+        let plan = self.save_temps_plan()?;
+
+        if let Some(code) = self.build_target_with(&plan.extra_args)?
             && code != 0
         {
             return Ok(Some(code));
         }
+
+        if let Some(output) = plan.collect_from {
+            lto_marker::collect_saved_module(&output, plan.cleanup)?;
+            return Ok(Some(0));
+        }
+
         if self.args().is_bitcode_generation_skipped()? {
             return Ok(Some(0));
         }
@@ -143,10 +247,7 @@ pub trait CompilerWrapper {
 
     /// Execute the given command and build the target
     fn build_target(&self) -> Result<Option<i32>, Error> {
-        let args = self.command()?;
-        let mode = self.args().mode();
-
-        self.execute_command(&args, mode)
+        self.build_target_with(&[])
     }
 
     /// Generate bitcode files for all input files

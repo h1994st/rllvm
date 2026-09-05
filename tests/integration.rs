@@ -2543,3 +2543,101 @@ fn lto_cxx_build_with_std_flag_succeeds() {
         "the mangled `add` symbol is missing from:\n{symbols}"
     );
 }
+
+/// `lto_mode = "save-temps"` collects the module the linker's own LTO
+/// pipeline merged, instead of recording per-unit paths with a marker.
+#[test]
+fn save_temps_mode_records_the_linker_merged_module() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["--", "-flto", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--", "-flto", "-o"])
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(link.status().unwrap().success(), "save-temps link failed");
+
+    let merged = tmp.path().join("prog.rllvm.bc");
+    assert!(merged.exists(), "the merged module was not collected");
+    assert_bitcode_magic(&merged);
+
+    // The binary names it, so extraction needs no discovery convention.
+    let extracted = tmp.path().join("prog.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-m")
+        .arg("-o")
+        .arg(&extracted)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed under save-temps");
+    let manifest = fs::read_to_string(tmp.path().join("prog.bc.manifest")).unwrap();
+    assert!(
+        manifest.trim().ends_with("prog.rllvm.bc"),
+        "the binary must name the merged module:\n{manifest}"
+    );
+}
+
+/// ThinLTO never builds a whole-program module, so `save-temps` has nothing
+/// to collect. The build must still succeed rather than fail over a mode the
+/// user set globally.
+///
+/// The warning lives in `save_temps_plan`, which only runs for a link
+/// (`CompileMode::LTO`: no source files on the command line, only objects).
+/// Compiling and linking in one invocation stays `CompileMode::Compiling`
+/// regardless of `-flto`, so -- like the sibling test above -- this compiles
+/// each source to an object first and links them in a separate step.
+#[test]
+fn save_temps_mode_warns_that_thin_lto_has_no_merged_module() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["--", "-flto=thin", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("thin");
+    let mut link = rllvm("rllvm-cc");
+    link.env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--", "-flto=thin", "-o"])
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    let output = link.output().expect("Failed to run rllvm-cc");
+    assert!(output.status.success(), "the link must still succeed");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ThinLTO builds no whole-program module"),
+        "expected a warning naming the limitation:\n{stderr}"
+    );
+}

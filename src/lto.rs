@@ -137,6 +137,64 @@ pub fn marker_compile_args(compile_args: &[String]) -> Vec<String> {
     result
 }
 
+/// The linker flag that makes an LTO link keep its intermediate modules.
+///
+/// ld64 has its own spelling. Every ELF linker accepts gold's, including lld:
+/// `-Wl,-plugin-opt=save-temps` was measured producing byte-identical file
+/// names under ld.lld and ld.bfd.
+pub fn save_temps_flag(target_is_darwin: bool) -> &'static str {
+    if target_is_darwin {
+        "-Wl,-save-temps"
+    } else {
+        "-Wl,-plugin-opt=save-temps"
+    }
+}
+
+/// Whether `filename` is the merged module an LTO link saved for `output_name`.
+///
+/// The last stage before codegen, on both linker families: it is the module
+/// the linker actually generated code from, and it is the only stage that
+/// exists everywhere. ld64's earliest module is already internalized, while
+/// lld and bfd expose a pre-internalize `preopt`, so no earlier stage is
+/// comparable across linkers.
+pub fn is_saved_module(output_name: &str, filename: &str, target_is_darwin: bool) -> bool {
+    if target_is_darwin {
+        filename == format!("{output_name}.lto.opt.bc")
+    } else {
+        // `<output>.<partition>.5.precodegen.bc`, one partition by default and
+        // more under `--lto-partitions`.
+        filename.starts_with(&format!("{output_name}.")) && filename.ends_with(".precodegen.bc")
+    }
+}
+
+/// Whether `filename` is a save-temps artifact this link produced.
+///
+/// Used to clean up after a link rllvm added the flag to. The patterns are the
+/// measured ones and deliberately nothing wider: this deletes files, and a
+/// user file that merely starts with the output's name must survive.
+pub fn is_save_temps_artifact(output_name: &str, filename: &str) -> bool {
+    let Some(rest) = filename.strip_prefix(&format!("{output_name}.")) else {
+        return false;
+    };
+    // The module rllvm keeps, under the name rllvm chose.
+    if rest == "rllvm.bc" {
+        return false;
+    }
+    matches!(
+        rest,
+        "lto.bc" | "lto.opt.bc" | "lto.o" | "index.bc" | "index.dot" | "resolution.txt"
+    ) || rest.ends_with(".preopt.bc")
+        || rest.ends_with(".promote.bc")
+        || rest.ends_with(".internalize.bc")
+        || rest.ends_with(".import.bc")
+        || rest.ends_with(".opt.bc")
+        || rest.ends_with(".precodegen.bc")
+        || rest.ends_with(".thinlto.o")
+        || rest
+            .strip_prefix("lto.o")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +317,45 @@ mod tests {
             .map(String::from)
             .collect::<Vec<String>>();
         assert_eq!(marker_compile_args(&compile_args), compile_args);
+    }
+
+    #[test]
+    fn save_temps_flag_matches_the_linker_family() {
+        // ld64 has its own spelling; every ELF linker accepts gold's, and
+        // ld.lld and ld.bfd were measured producing identical file names.
+        assert_eq!(save_temps_flag(true), "-Wl,-save-temps");
+        assert_eq!(save_temps_flag(false), "-Wl,-plugin-opt=save-temps");
+    }
+
+    #[test]
+    fn saved_module_is_recognised_per_linker() {
+        assert!(is_saved_module("prog", "prog.lto.opt.bc", true));
+        assert!(!is_saved_module("prog", "prog.lto.bc", true));
+
+        assert!(is_saved_module("prog", "prog.0.5.precodegen.bc", false));
+        assert!(!is_saved_module("prog", "prog.0.4.opt.bc", false));
+        assert!(!is_saved_module("other", "prog.0.5.precodegen.bc", false));
+    }
+
+    #[test]
+    fn cleanup_spares_the_module_rllvm_keeps_and_the_user_s_files() {
+        // Deleting is destructive, so the patterns are the measured ones and
+        // nothing wider.
+        for litter in [
+            "prog.lto.bc",
+            "prog.lto.o",
+            "prog.lto.o1",
+            "prog.0.0.preopt.bc",
+            "prog.0.2.internalize.bc",
+            "prog.index.bc",
+            "prog.index.dot",
+            "prog.resolution.txt",
+            "prog.0.thinlto.o",
+        ] {
+            assert!(is_save_temps_artifact("prog", litter), "{litter}");
+        }
+        for keep in ["prog.rllvm.bc", "prog.bc", "prog", "prog.c", "progress.bc"] {
+            assert!(!is_save_temps_artifact("prog", keep), "{keep}");
+        }
     }
 }
