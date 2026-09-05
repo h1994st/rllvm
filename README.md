@@ -232,6 +232,13 @@ the same workflow: set `CC`/`CXX`, build, extract. It has since added
 WebAssembly support, a Rust wrapper, relocatable bitcode paths, and merge
 strategies.
 
+The name follows the same convention: `g` for Go, `w` for whole-program-llvm,
+`r` for Rust.
+
+[rules_rllvm](https://github.com/h1994st/rules_rllvm) borrowed the name for the
+idea, not the implementation. It is pure Bazel rules and runs none of these
+binaries, so there `r` expands to `rules` — the name is recursive.
+
 If gllvm or wllvm already work for you, there is no urgency to switch.
 
 ## License
