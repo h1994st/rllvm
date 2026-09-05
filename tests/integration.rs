@@ -1631,8 +1631,15 @@ fn lto_ldflags_are_appended_when_linking_with_lto() {
     fs::write(&src, "int main(void) { return 0; }\n").unwrap();
     let obj = tmp.path().join("main.o");
 
+    // `lto_ldflags` reaching the link is orthogonal to `lto_mode` -- it lives
+    // in `command()`/`link_object_files`, not in the skip decision. This test
+    // predates `lto_mode` and was written when `-flto` always skipped bitcode
+    // generation; pin to `skip` so it keeps exercising exactly that, unrelated
+    // path rather than tripping over the default `marker` mode's bitcode
+    // artifact, which Task 5's tests cover instead.
     let status = Command::new(cargo_bin("rllvm-cc"))
         .env("RLLVM_CONFIG", &cfg)
+        .env("RLLVM_LTO_MODE", "skip")
         .args(["-flto", "-c", "-o"])
         .arg(&obj)
         .arg(&src)
@@ -1644,6 +1651,7 @@ fn lto_ldflags_are_appended_when_linking_with_lto() {
     let exe = tmp.path().join("prog");
     let output = Command::new(cargo_bin("rllvm-cc"))
         .env("RLLVM_CONFIG", &cfg)
+        .env("RLLVM_LTO_MODE", "skip")
         .args(["-flto", "-o"])
         .arg(&exe)
         .arg(&obj)
@@ -2247,7 +2255,11 @@ fn lto_reports_that_bitcode_generation_is_skipped() {
     fs::write(&src, "int helper(int x) { return x + 1; }\n").unwrap();
     let object = tmp.path().join("a.o");
 
+    // This test predates `lto_mode` and covers the skip path specifically --
+    // #97's loud warning is only emitted in `skip` mode now. The default
+    // `marker` mode does not skip at all (Task 5's tests cover that path).
     let output = rllvm("rllvm-cc")
+        .env("RLLVM_LTO_MODE", "skip")
         .args(["-flto", "-c", "-o"])
         .arg(&object)
         .arg(&src)
