@@ -1,54 +1,13 @@
-//! Marker objects and archive patching for the rustc wrapper.
+//! Archive patching for the rustc wrapper.
 //!
-//! rustc gives rllvm two injection points and no third: `-C link-arg` for
-//! crate types that link, and the finished archive for crate types that do
-//! not. Both end up carrying the same crate-level bitcode path.
+//! rustc archives rlibs and staticlibs itself, so there is no link to
+//! intercept. rllvm embeds the bitcode path into every member of the finished
+//! archive so that whichever member the linker pulls in contributes the whole
+//! crate's bitcode path.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{fs, path::Path, process::Command};
 
 use crate::{config::try_rllvm_config, error::Error, utils::embed_bitcode_filepath_to_object_file};
-
-/// Compile an empty translation unit and embed the bitcode path into it.
-///
-/// The object goes to rustc as `-C link-arg`, so the linker concatenates its
-/// section along with every other object's, and `rllvm-get-bc` finds the path
-/// in the finished binary.
-///
-/// Compiled rather than synthesised with the `object` crate on purpose: a
-/// synthesised Mach-O drops the platform load command, which makes the linker
-/// warn about every object rllvm touches. Compiled rather than assembled from
-/// a `.s` because that would need a section directive per object format.
-pub(crate) fn build_marker_object(bitcode: &Path, dir: &Path) -> Result<PathBuf, Error> {
-    let source = dir.join("rllvm_marker.c");
-    // A C translation unit may not be empty, and the declaration must not
-    // define a symbol that could collide at link time.
-    fs::write(
-        &source,
-        b"typedef int rllvm_marker_empty_translation_unit;\n",
-    )?;
-
-    let marker = dir.join("rllvm_marker.o");
-    let clang = try_rllvm_config()?.clang_filepath().clone();
-    let status = Command::new(&clang)
-        .arg("-c")
-        .arg(&source)
-        .arg("-o")
-        .arg(&marker)
-        .status()?;
-    if !status.success() {
-        return Err(Error::ExecutionFailure(format!(
-            "Failed to build the rllvm marker object with {clang:?}: exit_status={status}"
-        )));
-    }
-
-    embed_bitcode_filepath_to_object_file::<&Path>(bitcode, &marker, None)?;
-
-    Ok(marker)
-}
 
 /// Embed the bitcode path into every object member of an archive.
 ///
@@ -111,9 +70,9 @@ pub(crate) fn patch_archive(archive: &Path, bitcode: &Path) -> Result<usize, Err
 mod tests {
     use super::*;
 
-    use crate::utils::{
-        extract_bitcode_filepaths_from_object_file, extract_bitcode_filepaths_from_parsed_objects,
-    };
+    use std::path::PathBuf;
+
+    use crate::utils::extract_bitcode_filepaths_from_parsed_objects;
 
     /// A placeholder bitcode file. Embedding canonicalizes the path, so the
     /// file has to exist, but nothing ever reads its contents.
@@ -165,19 +124,6 @@ mod tests {
         assert!(status.success(), "packing the fixture archive failed");
 
         archive
-    }
-
-    #[test]
-    fn marker_object_carries_the_bitcode_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let bitcode = placeholder_bitcode(tmp.path());
-
-        let marker = build_marker_object(&bitcode, tmp.path()).expect("marker built");
-        let paths =
-            extract_bitcode_filepaths_from_object_file(&marker).expect("marker carries a section");
-
-        // An already-absolute path is recorded verbatim, not canonicalized.
-        assert_eq!(paths, vec![bitcode]);
     }
 
     #[test]

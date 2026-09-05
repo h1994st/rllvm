@@ -17,7 +17,7 @@ use std::{
     process::Command,
 };
 
-use super::{rustc_args, rustc_marker};
+use super::{marker, rustc_args, rustc_marker};
 use crate::{config::try_rllvm_config, error::Error, utils::embed_bitcode_filepath_to_object_file};
 
 /// Rustc wrapper that generates LLVM bitcode alongside normal compilation.
@@ -72,7 +72,7 @@ impl RustcWrapper {
             None
         };
         if let Some(dir) = &marker_dir {
-            let marker = rustc_marker::build_marker_object(&bitcode, dir.path())?;
+            let marker = marker::build_marker_object(&bitcode, dir.path())?;
             rewritten.push("-C".to_string());
             rewritten.push(format!("link-arg={}", marker.display()));
         }
