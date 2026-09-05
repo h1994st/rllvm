@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    compiler_wrapper::CompilerKind, error::Error, lto::marker_compile_args,
+    arg_parser::without_dependency_flags, compiler_wrapper::CompilerKind, error::Error,
     utils::embed_bitcode_filepath_to_object_file,
 };
 
@@ -29,7 +29,7 @@ use crate::{
 /// arguments carry the target, and the compiler has to be the one that accepts
 /// them: a C++ project's `compile_args` carry `-std=c++17`, which clang's C
 /// driver rejects. Dependency-generation flags are stripped first -- see
-/// [`marker_compile_args`] -- or the marker compile becomes the last writer of
+/// [`without_dependency_flags`] -- or the marker compile becomes the last writer of
 /// the user's dependency file.
 ///
 /// Compiled rather than synthesised with the `object` crate on purpose: a
@@ -60,7 +60,7 @@ pub(crate) fn build_marker_object(
 
     let marker = dir.join("rllvm_marker.o");
     let status = Command::new(compiler)
-        .args(marker_compile_args(compile_args))
+        .args(without_dependency_flags(compile_args))
         .arg("-c")
         .arg(&source)
         .arg("-o")

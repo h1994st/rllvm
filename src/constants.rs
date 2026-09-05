@@ -282,13 +282,13 @@ pub(crate) fn arg_exact_match_map() -> &'static CallbackMap {
         m.insert("-MM", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
         m.insert("-MF", ArgInfo::new(1, CompilerArgsInfo::dependency_binary));
         m.insert("-MJ", ArgInfo::new(1, CompilerArgsInfo::dependency_binary));
-        m.insert("-MG", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
-        m.insert("-MP", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
+        m.insert("-MG", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
+        m.insert("-MP", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-MT", ArgInfo::new(1, CompilerArgsInfo::dependency_binary));
         m.insert("-MQ", ArgInfo::new(1, CompilerArgsInfo::dependency_binary));
-        m.insert("-MD", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
-        m.insert("-MV", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
-        m.insert("-MMD", ArgInfo::new(0, CompilerArgsInfo::dependency_only));
+        m.insert("-MD", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
+        m.insert("-MV", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
+        m.insert("-MMD", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
 
         m.insert("-I", ArgInfo::new(1, CompilerArgsInfo::compile_binary));
         m.insert(
