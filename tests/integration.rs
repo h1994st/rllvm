@@ -2579,6 +2579,21 @@ fn save_temps_mode_records_the_linker_merged_module() {
     assert!(merged.exists(), "the merged module was not collected");
     assert_bitcode_magic(&merged);
 
+    // The collected module must actually be whole-program, not just some
+    // bitcode file that happened to be lying around.
+    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let output = Command::new(nm)
+        .arg(&merged)
+        .output()
+        .expect("llvm-nm failed");
+    let symbols = String::from_utf8_lossy(&output.stdout);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.contains(symbol),
+            "{symbol} missing from the collected module:\n{symbols}"
+        );
+    }
+
     // The binary names it, so extraction needs no discovery convention.
     let extracted = tmp.path().join("prog.bc");
     let status = rllvm("rllvm-get-bc")
@@ -2594,6 +2609,59 @@ fn save_temps_mode_records_the_linker_merged_module() {
         manifest.trim().ends_with("prog.rllvm.bc"),
         "the binary must name the merged module:\n{manifest}"
     );
+}
+
+/// A relative `-o` (`cc -o prog *.o`, run from inside the build directory --
+/// the common case, and the one the test above avoids by always using an
+/// absolute `tmp.path().join(...)` output) must not crash before the link
+/// even runs.
+///
+/// `<output>.rllvm.bc` does not exist until `collect_saved_module` creates it
+/// after the link, so the marker's embedded path has to become absolute
+/// without ever requiring the file to already exist; and afterwards,
+/// `Path::parent` returns `Some("")`, not `None`, for a bare filename, so the
+/// collection step's directory lookup has to guard against that too. Revert
+/// either fix and this is the test that fails: `output.is_absolute()` is
+/// always true in the sibling tests above, so the fixed code path never runs
+/// there.
+#[test]
+fn save_temps_mode_collects_the_module_for_a_relative_output() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object_name = format!("{}.o", source.file_stem().unwrap().to_string_lossy());
+        let status = rllvm("rllvm-cc")
+            .current_dir(tmp.path())
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["--", "-flto", "-c", "-o"])
+            .arg(&object_name)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object_name);
+    }
+
+    let mut link = rllvm("rllvm-cc");
+    link.current_dir(tmp.path())
+        .env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--", "-flto", "-o", "prog"]);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(
+        link.status().unwrap().success(),
+        "save-temps link with a relative -o failed"
+    );
+
+    let merged = tmp.path().join("prog.rllvm.bc");
+    assert!(
+        merged.exists(),
+        "the merged module was not collected for a relative -o"
+    );
+    assert_bitcode_magic(&merged);
 }
 
 /// ThinLTO never builds a whole-program module, so `save-temps` has nothing

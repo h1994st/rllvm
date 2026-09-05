@@ -162,8 +162,17 @@ pub fn is_saved_module(output_name: &str, filename: &str, target_is_darwin: bool
         filename == format!("{output_name}.lto.opt.bc")
     } else {
         // `<output>.<partition>.5.precodegen.bc`, one partition by default and
-        // more under `--lto-partitions`.
-        filename.starts_with(&format!("{output_name}.")) && filename.ends_with(".precodegen.bc")
+        // more under `--lto-partitions`. A plain prefix-and-suffix match would
+        // also accept `prog.debug.0.5.precodegen.bc` for output `prog`, which
+        // collides with a sibling output that happens to share a prefix, so
+        // the partition segment is required to be digits and nothing else.
+        let Some(rest) = filename.strip_prefix(&format!("{output_name}.")) else {
+            return false;
+        };
+        let Some(partition) = rest.strip_suffix(".5.precodegen.bc") else {
+            return false;
+        };
+        !partition.is_empty() && partition.chars().all(|c| c.is_ascii_digit())
     }
 }
 
@@ -193,6 +202,37 @@ pub fn is_save_temps_artifact(output_name: &str, filename: &str) -> bool {
         || rest
             .strip_prefix("lto.o")
             .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether the user's own link arguments already ask the linker to keep its
+/// save-temps modules.
+///
+/// A user who did this owns the artifacts: rllvm must not add the flag a
+/// second time, and must not delete files it did not create. Checked against
+/// tokens rather than whole arguments because `-Wl,` groups several linker
+/// options behind one comma-separated argument -- `-Wl,-O2,-save-temps` is a
+/// common `LDFLAGS` shape that an exact-argument match misses entirely, and
+/// gold/lld also accept the option and its value as two separate tokens
+/// (`-Wl,-plugin-opt,save-temps`) as well as joined with `=`.
+pub fn user_requested_save_temps(args: &[String]) -> bool {
+    for arg in args {
+        let Some(rest) = arg.strip_prefix("-Wl,") else {
+            continue;
+        };
+        let tokens: Vec<&str> = rest.split(',').collect();
+        for (i, token) in tokens.iter().enumerate() {
+            if matches!(
+                *token,
+                "-save-temps" | "--save-temps" | "-plugin-opt=save-temps"
+            ) {
+                return true;
+            }
+            if *token == "-plugin-opt" && tokens.get(i + 1) == Some(&"save-temps") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -338,6 +378,22 @@ mod tests {
     }
 
     #[test]
+    fn saved_module_does_not_collide_with_a_sibling_output_sharing_a_prefix() {
+        // `prog` and `prog.debug` in the same directory: a plain prefix-and-
+        // suffix match would let `prog`'s link claim `prog.debug`'s module.
+        assert!(!is_saved_module(
+            "prog",
+            "prog.debug.0.5.precodegen.bc",
+            false
+        ));
+        assert!(is_saved_module(
+            "prog.debug",
+            "prog.debug.0.5.precodegen.bc",
+            false
+        ));
+    }
+
+    #[test]
     fn cleanup_spares_the_module_rllvm_keeps_and_the_user_s_files() {
         // Deleting is destructive, so the patterns are the measured ones and
         // nothing wider.
@@ -357,5 +413,31 @@ mod tests {
         for keep in ["prog.rllvm.bc", "prog.bc", "prog", "prog.c", "progress.bc"] {
             assert!(!is_save_temps_artifact("prog", keep), "{keep}");
         }
+    }
+
+    #[test]
+    fn user_requested_save_temps_recognises_every_measured_spelling() {
+        for args in [
+            vec!["-Wl,-save-temps".to_string()],
+            // A common `LDFLAGS` shape: several linker options behind one
+            // comma-separated `-Wl,` argument.
+            vec!["-Wl,-O2,-save-temps".to_string()],
+            vec!["-Wl,--save-temps".to_string()],
+            vec!["-Wl,-plugin-opt=save-temps".to_string()],
+            // gold/lld also accept the option and its value as two separate
+            // comma-joined tokens rather than joined with `=`.
+            vec!["-Wl,-plugin-opt,save-temps".to_string()],
+        ] {
+            assert!(user_requested_save_temps(&args), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn user_requested_save_temps_is_false_without_the_flag() {
+        let args = ["-flto", "-O2", "-Wl,-dead_strip"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>();
+        assert!(!user_requested_save_temps(&args));
     }
 }

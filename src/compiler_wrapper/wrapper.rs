@@ -14,7 +14,7 @@ use crate::{
     constants::DEFAULT_LINK_OUTPUT_FILENAME,
     diagnostics::print_warning,
     error::Error,
-    lto::{LtoFlavour, LtoMode, save_temps_flag},
+    lto::{LtoFlavour, LtoMode, save_temps_flag, user_requested_save_temps},
     utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status, is_bitcode_file},
 };
 
@@ -157,10 +157,7 @@ pub trait CompilerWrapper {
 
         // A user who asked for save-temps owns the artifacts, so rllvm neither
         // adds the flag twice nor deletes what it did not create.
-        let user_asked = args
-            .input_args()
-            .iter()
-            .any(|arg| arg == "-Wl,-save-temps" || arg == "-Wl,-plugin-opt=save-temps");
+        let user_asked = user_requested_save_temps(args.input_args());
 
         let mut extra_args = vec![];
         if !user_asked {
