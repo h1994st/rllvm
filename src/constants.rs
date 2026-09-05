@@ -75,6 +75,9 @@ pub(crate) const RUSTC_ENV_NAME: &str = "RLLVM_REAL_RUSTC";
 /// Overrides `log_level`, for the same reason.
 pub(crate) const LOG_LEVEL_ENV_NAME: &str = "RLLVM_LOG_LEVEL";
 
+/// Overrides `lto_mode`, for the same reason.
+pub(crate) const LTO_MODE_ENV_NAME: &str = "RLLVM_LTO_MODE";
+
 /// The default filepath of the configuration file
 pub(crate) const DEFAULT_CONF_FILEPATH_UNDER_HOME: &str = ".rllvm/config.toml";
 

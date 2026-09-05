@@ -43,6 +43,9 @@ pub mod error;
 /// Bitcode merge strategies (full link, partial link, archive).
 pub mod merge;
 
+/// Link-time optimization modes and bitcode-path markers.
+pub mod lto;
+
 /// Utility functions for command execution, file manipulation, and LLVM tools.
 pub mod utils;
 
