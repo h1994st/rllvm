@@ -10,11 +10,11 @@ pub(crate) use command_utils::{execute_command_for_status, execute_command_for_s
 
 /// File-related, especially object-file-related, utility functions
 mod file_utils;
-pub(crate) use file_utils::is_object_file;
 pub use file_utils::{
     embed_bitcode_filepath_to_object_file, extract_bitcode_filepaths_from_object_file,
     extract_bitcode_filepaths_from_parsed_object, extract_bitcode_filepaths_from_parsed_objects,
 };
+pub(crate) use file_utils::{is_bitcode_file, is_object_file, recorded_bitcode_filepath};
 
 /// LLVM-related utility functions
 mod llvm_utils;

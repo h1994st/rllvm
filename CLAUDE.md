@@ -24,9 +24,11 @@ To try the wrappers by hand, point `RLLVM_CONFIG` at a scratch file so you do no
 
 ## Architecture
 
-Six things to know before changing wrapper behaviour. The rest is discoverable from the code.
+Seven things to know before changing wrapper behaviour. The rest is discoverable from the code.
 
 **The bitcode-path contract** (`wrapper.rs`, `utils/file_utils.rs`). Each source compiles to an object *and* a `.bc`, and the `.bc` path goes into a dedicated object-file section, **newline-terminated**. The linker *concatenates* those sections, and that concatenation is what records which translation units make up a binary. Break the separator and multi-file builds silently yield one garbage path; only `tests/integration.rs` catches it.
+
+**LTO objects carry the path in the module** (`lto.rs`, `lto_marker.rs`). `-flto` leaves no section header to patch, so the path is `.ascii` module asm that `llvm-link` merges in and codegen emits — not a `used` global, whose NUL terminator corrupts the separator and whose alloc section makes `ld.bfd` emit a second `.rllvm_bc` that only the all-sections read in `file_utils.rs` recovers. Dispatch is on file content, not `-flto`: `-ffat-lto-objects` produces a real object. The path is escaped for two decoders, because it sits in a C string literal the compiler reads before the assembler does, and it goes through the same `bitcode_root` resolution as every other writer.
 
 **Section names are rllvm's own** (`constants.rs`): `__RLLVM,__rllvm_bc` on Mach-O, `.rllvm_bc` elsewhere. Never rename them to LLVM's generic ones — `wasm-ld` drops `.llvmbc` and `.llvmcmd` by name while concatenating every other custom section, so those names make WASM silently lose the paths.
 

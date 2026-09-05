@@ -17,10 +17,12 @@ use tracing::Level;
 use crate::{
     constants::{
         BITCODE_ROOT_ENV_NAME, DEFAULT_CONF_FILEPATH_UNDER_HOME,
-        DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME, LOG_LEVEL_ENV_NAME, RUSTC_ENV_NAME,
+        DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME, LOG_LEVEL_ENV_NAME, LTO_MODE_ENV_NAME,
+        RUSTC_ENV_NAME,
     },
     diagnostics::{check_version_compatibility, print_missing_tool_error},
     error::Error,
+    lto::LtoMode,
     utils::{execute_llvm_config, find_llvm_config},
 };
 
@@ -132,6 +134,10 @@ pub struct RLLVMConfig {
     /// Root that embedded bitcode paths are recorded relative to (Default: none)
     bitcode_root: Option<PathBuf>,
 
+    /// How to handle `-flto` builds: `marker`, `save-temps` or `skip`
+    /// (Default: `marker`)
+    lto_mode: Option<LtoMode>,
+
     /// Custom cache directory path (Default: `~/.rllvm/cache/`)
     cache_dir: Option<PathBuf>,
 }
@@ -242,6 +248,21 @@ impl RLLVMConfig {
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
             .or_else(|| self.rustc_filepath.clone())
+    }
+
+    /// Returns the configured LTO mode.
+    ///
+    /// `$RLLVM_LTO_MODE` wins over the configuration file, so one build can
+    /// switch modes without editing a config other builds share.
+    ///
+    /// An unrecognised value is an error rather than a fallback: silently
+    /// producing a binary nothing can be extracted from is the bug #96 exists
+    /// to fix.
+    pub fn lto_mode(&self) -> Result<LtoMode, Error> {
+        match env::var(LTO_MODE_ENV_NAME) {
+            Ok(value) if !value.is_empty() => value.parse(),
+            _ => Ok(self.lto_mode.unwrap_or_default()),
+        }
     }
 
     /// Returns the optional custom cache directory path.
@@ -495,6 +516,7 @@ impl RLLVMConfig {
             bitcode_store_path: None,
             llvm_link_flags: None,
             lto_ldflags: None,
+            lto_mode: None,
             bitcode_generation_flags: None,
             is_configure_only: None,
             log_level: None,
@@ -508,6 +530,7 @@ impl RLLVMConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::lto::LtoMode;
 
     /// Writes a config file containing the required tool paths plus `extra`,
     /// returning the owning temporary directory, its path, and the inferred
@@ -651,6 +674,22 @@ mod tests {
         assert!(config.llvm_objcopy_filepath().is_none());
         assert_eq!(config.clang_filepath(), inferred.clang_filepath());
         assert_eq!(config.llvm_link_filepath(), inferred.llvm_link_filepath());
+    }
+
+    #[test]
+    fn lto_mode_is_read_from_the_config_file() {
+        let (_dir, config_filepath, _) = write_config("lto_mode = 'save-temps'\n");
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+
+        assert_eq!(config.lto_mode().unwrap(), LtoMode::SaveTemps);
+    }
+
+    #[test]
+    fn lto_mode_defaults_to_marker_when_absent() {
+        let (_dir, config_filepath, _) = write_config("log_level = 0\n");
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+
+        assert_eq!(config.lto_mode().unwrap(), LtoMode::Marker);
     }
 
     #[test]

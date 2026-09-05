@@ -3,6 +3,10 @@
 mod clang_wrapper;
 pub use clang_wrapper::*;
 
+pub(crate) mod lto_marker;
+
+pub(crate) mod marker;
+
 mod rustc_args;
 mod rustc_marker;
 

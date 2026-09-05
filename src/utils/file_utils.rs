@@ -59,8 +59,36 @@ where
     }
 }
 
-/// Resolve the bitcode filepath to a string for embedding.
-fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
+/// Returns `true` if the file begins with LLVM bitcode magic.
+///
+/// `BC\xC0\xDE` is raw bitcode; `0x0B17C0DE` little-endian is the wrapper
+/// clang writes on Darwin. A file shorter than the magic is not bitcode, and
+/// not an error -- callers ask about whatever the compiler produced.
+pub(crate) fn is_bitcode_file<P>(filepath: P) -> Result<bool, Error>
+where
+    P: AsRef<Path>,
+{
+    use std::io::Read;
+
+    let mut head = [0u8; 4];
+    let mut file = fs::File::open(filepath.as_ref())?;
+    match file.read_exact(&mut head) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(head == [0x42, 0x43, 0xC0, 0xDE] || u32::from_le_bytes(head) == 0x0B17_C0DE)
+}
+
+/// The entry recorded for `bitcode_filepath`, without the trailing newline.
+///
+/// Shared by every writer: the section's contents must not depend on which
+/// path produced them. The LTO marker records the same string through
+/// [`crate::lto::marker_source`], so a binary mixing `-flto` and ordinary
+/// objects carries one form throughout rather than absolute entries for its
+/// LTO units and relative ones for the rest.
+pub(crate) fn recorded_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     let absolute_filepath = if bitcode_filepath.is_absolute() {
         bitcode_filepath.to_path_buf()
     } else {
@@ -77,7 +105,7 @@ fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     // Unset is the default and keeps the historical absolute form, so objects
     // produced by older versions stay readable. The reader distinguishes the two
     // by the leading separator, which is why no format flag is needed.
-    let recorded = try_rllvm_config()
+    Ok(try_rllvm_config()
         .ok()
         .and_then(|config| config.bitcode_root())
         .and_then(|root| {
@@ -86,12 +114,18 @@ fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
                 .ok()
                 .map(|relative| relative.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| absolute_filepath.to_string_lossy().into_owned());
+        .unwrap_or_else(|| absolute_filepath.to_string_lossy().into_owned()))
+}
 
+/// Resolve the bitcode filepath to a string for embedding.
+fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     // The linker concatenates these sections when it merges object files, so
     // every entry must be newline-terminated for the reader to split the
     // combined section back into individual paths.
-    Ok(format!("{recorded}\n"))
+    Ok(format!(
+        "{}\n",
+        recorded_bitcode_filepath(bitcode_filepath)?
+    ))
 }
 
 /// Encode an unsigned integer as a LEB128 byte sequence.
@@ -738,26 +772,31 @@ pub fn extract_bitcode_filepaths_from_parsed_object(
         }
     };
 
-    match object_file.section_by_name_bytes(section_name) {
-        Some(section) => {
-            let section_data = section.data()?;
-            let embedded_filepath_string = str::from_utf8(section_data)?.trim();
-
-            let mut embedded_filepaths: Vec<_> = embedded_filepath_string
-                .split('\n')
-                .map(PathBuf::from)
-                .collect();
-
-            // Sort
-            embedded_filepaths.sort();
-
-            // Deduplicate
-            embedded_filepaths.dedup();
-
-            Ok(embedded_filepaths)
+    // Every matching section, not just the first. `ld.bfd` emits two output
+    // sections when same-named input sections disagree on flags, which is
+    // exactly what an LTO marker's section and an `llvm-objcopy` section do.
+    // `section_by_name_bytes` would report one of them and lose the other.
+    let mut embedded_filepaths = vec![];
+    for section in object_file.sections() {
+        if section.name_bytes()? != section_name {
+            continue;
         }
-        None => Ok(vec![]),
+        embedded_filepaths.extend(
+            str::from_utf8(section.data()?)?
+                .trim()
+                .split('\n')
+                .filter(|entry| !entry.is_empty())
+                .map(PathBuf::from),
+        );
     }
+
+    // Sort
+    embedded_filepaths.sort();
+
+    // Deduplicate
+    embedded_filepaths.dedup();
+
+    Ok(embedded_filepaths)
 }
 
 /// Extract bitcode filepaths from an object file on disk.
@@ -1277,5 +1316,69 @@ mod tests {
         let mut clipped = synthetic_macho(DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME);
         clipped.truncate(MACHO_HEADER_64_SIZE + 4);
         assert!(!set_macho_no_dead_strip(&mut clipped));
+    }
+
+    #[test]
+    fn extraction_reads_every_section_with_the_matching_name() {
+        use object::Architecture;
+
+        // One object, two sections with the matching name -- what `ld.bfd`
+        // hands the reader when it cannot merge same-named input sections.
+        // Reading only the first loses half the build.
+        let mut obj = write::Object::new(
+            BinaryFormat::Elf,
+            Architecture::X86_64,
+            object::Endianness::Little,
+        );
+        for path in ["/tmp/first.bc\n", "/tmp/second.bc\n"] {
+            let id = obj.add_section(
+                vec![],
+                ELF_SECTION_NAME.as_bytes().to_vec(),
+                SectionKind::Unknown,
+            );
+            let section = obj.section_mut(id);
+            section.set_data(path.as_bytes(), 1);
+            section.flags = SectionFlags::Elf {
+                sh_type: object::elf::SHT_PROGBITS,
+                sh_flags: object::elf::SectionFlags(0),
+            };
+        }
+        let data = obj.write().unwrap();
+        let parsed = File::parse(&*data).unwrap();
+
+        let paths = extract_bitcode_filepaths_from_parsed_object(&parsed).unwrap();
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("/tmp/first.bc"),
+                PathBuf::from("/tmp/second.bc")
+            ],
+            "both sections must be read, not just the first"
+        );
+    }
+
+    #[test]
+    fn bitcode_is_detected_by_content_not_by_extension() {
+        // `-flto` and `-ffat-lto-objects` produce different things for the same
+        // flag, so the wrapper dispatches on what the compiler actually wrote.
+        let dir = tempfile::tempdir().unwrap();
+
+        let raw = dir.path().join("raw.o");
+        fs::write(&raw, [0x42, 0x43, 0xC0, 0xDE, 0x00]).unwrap();
+        assert!(is_bitcode_file(&raw).unwrap());
+
+        // The wrapper clang writes on Darwin.
+        let wrapped = dir.path().join("wrapped.o");
+        fs::write(&wrapped, 0x0B17_C0DEu32.to_le_bytes()).unwrap();
+        assert!(is_bitcode_file(&wrapped).unwrap());
+
+        let elf = dir.path().join("real.o");
+        fs::write(&elf, b"\x7fELF\x02\x01\x01\x00").unwrap();
+        assert!(!is_bitcode_file(&elf).unwrap());
+
+        // Shorter than the magic, and not an error.
+        let stub = dir.path().join("stub.o");
+        fs::write(&stub, b"BC").unwrap();
+        assert!(!is_bitcode_file(&stub).unwrap());
     }
 }
