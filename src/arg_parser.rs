@@ -5,6 +5,7 @@ use crate::{
     constants::{arg_exact_match_map, arg_patterns, is_object_file_name},
     diagnostics::print_warning,
     error::Error,
+    lto::{LtoFlavour, LtoMode},
     utils::*,
 };
 use regex::Regex;
@@ -58,7 +59,7 @@ pub struct CompilerArgsInfo {
     is_assembly: bool,
     is_compile_only: bool,
     is_emit_llvm: bool,
-    is_lto: bool,
+    lto_flavour: Option<LtoFlavour>,
     is_print_only: bool,
 }
 
@@ -233,13 +234,15 @@ impl CompilerArgsInfo {
         self
     }
 
-    /// Handle an LTO flag (`-flto`, `-flto=thin`).
-    pub fn lto<S>(&mut self, _flag: S, _args: &[S]) -> &'_ mut Self
+    /// Handle an LTO flag (`-flto`, `-flto=full`, `-flto=thin`).
+    pub fn lto<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
         S: AsRef<str>,
     {
-        // enable Link Time Optimization
-        self.is_lto = true;
+        self.lto_flavour = Some(match flag.as_ref().split_once('=') {
+            Some((_, "thin")) => LtoFlavour::Thin,
+            _ => LtoFlavour::Full,
+        });
         self
     }
 
@@ -497,7 +500,12 @@ impl CompilerArgsInfo {
 
     /// Returns `true` if link-time optimization is enabled.
     pub fn is_lto(&self) -> bool {
-        self.is_lto
+        self.lto_flavour.is_some()
+    }
+
+    /// Returns the LTO flavour, if the command line asked for one.
+    pub fn lto_flavour(&self) -> Option<LtoFlavour> {
+        self.lto_flavour
     }
 
     /// Returns `true` if print-only mode is enabled.
@@ -507,6 +515,25 @@ impl CompilerArgsInfo {
 
     /// Returns `true` if bitcode generation should be skipped for the current arguments.
     pub fn is_bitcode_generation_skipped(&self) -> Result<bool, Error> {
+        // `-flto` makes the compiler write bitcode where the object belongs,
+        // so there is no section to embed a path into. What follows depends on
+        // the mode: `marker` puts the path inside the module and skips
+        // nothing, `save-temps` does all its work at link time, and `skip`
+        // does nothing at all and has to say so.
+        let (lto_skipped, lto_reason, lto_report) = match try_rllvm_config()?.lto_mode()? {
+            LtoMode::Marker => (false, "", SkipReport::Quiet),
+            LtoMode::SaveTemps => (
+                self.is_lto(),
+                "the linker will save the merged module at link time",
+                SkipReport::Quiet,
+            ),
+            LtoMode::Skip => (
+                self.is_lto(),
+                "the compiler will generate bitcode during the link-time optimization",
+                SkipReport::Loud,
+            ),
+        };
+
         let conditions = [
             (
                 try_rllvm_config()?.is_configure_only(),
@@ -523,11 +550,7 @@ impl CompilerArgsInfo {
                 "the compiler will generate bitcode in emit-llvm mode",
                 SkipReport::Quiet,
             ),
-            (
-                self.is_lto,
-                "the compiler will generate bitcode during the link-time optimization",
-                SkipReport::Loud,
-            ),
+            (lto_skipped, lto_reason, lto_report),
             (
                 self.is_assembly,
                 "the input file(s) are written in assembly",
@@ -673,6 +696,7 @@ impl CompilerArgsInfo {
 #[cfg(test)]
 mod tests {
     use super::CompilerArgsInfo;
+    use crate::lto::LtoFlavour;
 
     fn parse_and_assert<F>(input: &str, check_func: F)
     where
@@ -696,6 +720,31 @@ mod tests {
 
         let input = r#"-pthread -c -Wno-unused-result -Wsign-compare -Wunreachable-code -DNDEBUG -g -fwrapv -O3 -Wall -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -march=x86-64 -mtune=generic -O3 -pipe -fno-plt -g -fdebug-prefix-map=/home/legend/makepkgs/python/src=/usr/src/debug -fno-semantic-interposition -flto=thin -g -std=c99 -Wextra -Wno-unused-result -Wno-unused-parameter -Wno-missing-field-initializers -Wstrict-prototypes -Werror=implicit-function-declaration -fprofile-instr-use=code.profclangd -I./Include/internal  -I. -I./Include -D_FORTIFY_SOURCE=2 -D_FORTIFY_SOURCE=2 -fPIC -DPy_BUILD_CORE -DSOABI='"cpython-38-x86_64-linux-gnu"'	-o Python/dynload_shlib.o ./Python/dynload_shlib.c"#;
         assert_lto(input);
+    }
+
+    #[test]
+    fn parsing_lto_records_the_full_flavour() {
+        // `save-temps` mode has to tell the two apart: ThinLTO never builds a
+        // whole-program module, so there is nothing for it to collect.
+        for input in ["-flto -c -o a.o a.c", "-flto=full -c -o a.o a.c"] {
+            parse_and_assert(input, |args| {
+                args.lto_flavour() == Some(LtoFlavour::Full) && args.is_lto()
+            });
+        }
+    }
+
+    #[test]
+    fn parsing_thin_lto_records_the_thin_flavour() {
+        parse_and_assert("-flto=thin -c -o a.o a.c", |args| {
+            args.lto_flavour() == Some(LtoFlavour::Thin) && args.is_lto()
+        });
+    }
+
+    #[test]
+    fn no_lto_flag_records_no_flavour() {
+        parse_and_assert("-c -o a.o a.c", |args| {
+            args.lto_flavour().is_none() && !args.is_lto()
+        });
     }
 
     #[test]

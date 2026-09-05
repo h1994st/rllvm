@@ -52,6 +52,19 @@ impl std::str::FromStr for LtoMode {
     }
 }
 
+/// Which flavour of link-time optimization the command line asked for.
+///
+/// The distinction is not cosmetic: full LTO merges every module into one,
+/// which the linker can be asked to save, and ThinLTO deliberately never
+/// builds such a module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LtoFlavour {
+    /// `-flto`, `-flto=full`.
+    Full,
+    /// `-flto=thin`.
+    Thin,
+}
+
 /// Escape a path for use inside an assembler string literal.
 fn escape_for_assembler(path: &str) -> String {
     // Backslashes first: escaping quotes first would then double the
