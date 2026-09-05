@@ -3,6 +3,7 @@
 use crate::{
     config::try_rllvm_config,
     constants::{arg_exact_match_map, arg_patterns, is_object_file_name},
+    diagnostics::print_warning,
     error::Error,
     utils::*,
 };
@@ -12,6 +13,20 @@ use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
 };
+
+/// Whether a skipped bitcode generation is worth putting in front of the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReport {
+    /// Routine. Either nothing reaches the link, or the invocation never had a
+    /// translation unit to compile. Reporting these would put a warning in
+    /// front of every preprocess, dependency scan and link, which is how
+    /// warnings stop being read.
+    Quiet,
+    /// The build still produces objects, they still get linked, and none of
+    /// them carries a bitcode path. Extraction from the result fails, and
+    /// nothing else says so until it does.
+    Loud,
+}
 
 /// Compile mode
 #[derive(Debug)]
@@ -496,41 +511,66 @@ impl CompilerArgsInfo {
             (
                 try_rllvm_config()?.is_configure_only(),
                 "we are in configure-only mode",
+                SkipReport::Quiet,
             ),
             (
                 self.input_files.is_empty(),
                 "the list of input files is empty",
+                SkipReport::Quiet,
             ),
             (
                 self.is_emit_llvm,
                 "the compiler will generate bitcode in emit-llvm mode",
+                SkipReport::Quiet,
             ),
             (
                 self.is_lto,
                 "the compiler will generate bitcode during the link-time optimization",
+                SkipReport::Loud,
             ),
             (
                 self.is_assembly,
                 "the input file(s) are written in assembly",
+                SkipReport::Quiet,
             ),
             (
                 self.is_assemble_only,
                 "we are only assembling, so cannot embed the path of the bitcode",
+                SkipReport::Quiet,
             ),
             (
                 self.is_dependency_only && !self.is_compile_only,
                 "we are only computing dependencies",
+                SkipReport::Quiet,
             ),
-            (self.is_preprocess_only, "we are only preprocessing"),
+            (
+                self.is_preprocess_only,
+                "we are only preprocessing",
+                SkipReport::Quiet,
+            ),
             (
                 self.is_print_only,
                 "we are in print-only mode, so cannot embed the path of the bitcode",
+                SkipReport::Quiet,
             ),
         ];
 
-        for (condition, reason) in conditions {
+        for (condition, reason, report) in conditions {
             if condition {
                 tracing::warn!("Skip bitcode generation: {}", reason);
+
+                // Deliberately not a `tracing::warn!`: the default log level is
+                // ERROR, so a log record is invisible to exactly the
+                // non-interactive build-system runs that most need to know the
+                // output cannot be extracted from later.
+                if matches!(report, SkipReport::Loud) {
+                    print_warning(&format!(
+                        "Bitcode generation is skipped because {reason}. \
+                         The linked output carries no bitcode paths, so \
+                         `rllvm-get-bc` will find nothing in it."
+                    ));
+                }
+
                 return Ok(true);
             }
         }

@@ -2233,3 +2233,60 @@ fn rustc_wrapper_honours_log_level_from_config() {
         "debug logging from the config did not reach the wrapper: {stderr}"
     );
 }
+
+/// `-flto` reports that bitcode generation is skipped, at the default log level.
+///
+/// The skip itself is legitimate: under LTO the object file already is bitcode.
+/// But the linked binary then carries no embedded paths, so `rllvm-get-bc`
+/// finds nothing. Reported only through `tracing`, that went unseen at the
+/// default level and the build looked like it had worked.
+#[test]
+fn lto_reports_that_bitcode_generation_is_skipped() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("a.c");
+    fs::write(&src, "int helper(int x) { return x + 1; }\n").unwrap();
+    let object = tmp.path().join("a.o");
+
+    let output = rllvm("rllvm-cc")
+        .args(["-flto", "-c", "-o"])
+        .arg(&object)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("link-time optimization"),
+        "the skip was not reported at the default log level: {stderr:?}"
+    );
+}
+
+/// The routine skips stay quiet.
+///
+/// Preprocessing, dependency generation and link-only invocations all skip
+/// bitcode generation and all happen constantly. Reporting them would put a
+/// warning in front of every build, which is how warnings stop being read.
+#[test]
+fn routine_skips_are_not_reported() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("a.c");
+    fs::write(&src, "int helper(int x) { return x + 1; }\n").unwrap();
+
+    let output = rllvm("rllvm-cc")
+        .arg("-E")
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(output.status.success(), "preprocessing failed");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("warning:"),
+        "preprocessing should not warn about skipped bitcode: {stderr:?}"
+    );
+}
