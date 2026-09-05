@@ -195,6 +195,13 @@ executable ◄── linker ◄── object files
 marker object added to the link; a crate that produces an `.rlib` carries it in
 the archive's members, so a dependency brings its bitcode wherever it is used.
 
+Link-time optimization is the exception. Under `-flto` the compiler emits
+bitcode in place of object files, so there is no section to record a path in and
+`rllvm-get-bc` finds nothing in the linked result. The wrappers print a warning
+when this happens. To get a whole-program module from an LTO build, ask the
+linker for the one it already produces: `-Wl,-save-temps` writes the merged
+module beside the binary.
+
 ## Relationship to gllvm and wllvm
 
 rllvm started as a Rust port of [gllvm](https://github.com/SRI-CSL/gllvm) (Go)
