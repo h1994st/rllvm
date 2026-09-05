@@ -100,6 +100,43 @@ __asm__(".section {ELF_SECTION_NAME},\"\",@progbits\n.ascii \"{path}\\n\"\n.prev
     )
 }
 
+/// Strips dependency-generation flags from a compile-argument list, for use
+/// when compiling the LTO marker.
+///
+/// `-MD`/`-MF` (and friends) reach `compile_args`, and the marker compile is
+/// otherwise the *last writer* of the dependency file they name -- it
+/// silently replaces the real prerequisites with the marker's own. The
+/// marker has no dependencies of its own to report, so these flags are
+/// simply dropped rather than translated.
+pub fn marker_compile_args(compile_args: &[String]) -> Vec<String> {
+    // Flags that take no argument.
+    const NULLARY: &[&str] = &["-M", "-MM", "-MD", "-MMD", "-MG", "-MP"];
+    // Flags that take an argument, either as the following token (`-MF
+    // file`) or joined into the same one (`-MFfile`).
+    const UNARY_PREFIXES: &[&str] = &["-MF", "-MT", "-MQ"];
+
+    let mut result = Vec::with_capacity(compile_args.len());
+    let mut args = compile_args.iter();
+    while let Some(arg) = args.next() {
+        if NULLARY.contains(&arg.as_str()) {
+            continue;
+        }
+        if let Some(&prefix) = UNARY_PREFIXES
+            .iter()
+            .find(|prefix| arg.starts_with(*prefix))
+        {
+            if arg == prefix {
+                // Separate-token form: the next token is the argument.
+                args.next();
+            }
+            // Otherwise the argument is joined into this same token.
+            continue;
+        }
+        result.push(arg.clone());
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +196,68 @@ mod tests {
             source.contains("#error"),
             "unsupported formats must not compile"
         );
+    }
+
+    /// A vector shaped like what `cc`/cargo actually pass: real compile
+    /// flags interleaved with the dependency-generation flags that must not
+    /// reach the marker compile.
+    fn cargo_shaped_compile_args() -> Vec<String> {
+        [
+            "-I",
+            "include",
+            "-DFOO=1",
+            "-MD",
+            "-MP",
+            "-MF",
+            "target/debug/build/foo-0/out/foo.d",
+            "-MT",
+            "target/debug/build/foo-0/out/foo.o",
+            "-O2",
+            "-std=c++17",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    #[test]
+    fn marker_compile_args_strips_separate_token_dependency_flags() {
+        let filtered = marker_compile_args(&cargo_shaped_compile_args());
+        assert_eq!(
+            filtered,
+            ["-I", "include", "-DFOO=1", "-O2", "-std=c++17"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<String>>(),
+            "{filtered:?}"
+        );
+    }
+
+    #[test]
+    fn marker_compile_args_strips_joined_dependency_flags() {
+        let compile_args = ["-c", "-MFfoo.d", "-MQfoo.o", "-MTfoo.o", "-O2"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>();
+        let filtered = marker_compile_args(&compile_args);
+        assert_eq!(
+            filtered,
+            ["-c", "-O2"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<String>>(),
+            "{filtered:?}"
+        );
+    }
+
+    #[test]
+    fn marker_compile_args_leaves_unrelated_flags_untouched() {
+        // A pure pass-through when there is nothing to strip -- the function
+        // must not just happen to work on inputs shaped like the other tests.
+        let compile_args = ["-O2", "-std=c11", "-Wall"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>();
+        assert_eq!(marker_compile_args(&compile_args), compile_args);
     }
 }

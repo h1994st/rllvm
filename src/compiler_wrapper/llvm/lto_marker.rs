@@ -8,31 +8,48 @@
 
 use std::{fs, path::Path, process::Command};
 
-use crate::{config::try_rllvm_config, error::Error, lto::marker_source};
+use crate::{
+    compiler_wrapper::CompilerKind,
+    config::try_rllvm_config,
+    error::Error,
+    lto::{marker_compile_args, marker_source},
+};
 
 /// Compile a marker module naming `bitcode` and merge it into `object`.
 ///
-/// `compile_args` are the user's own compile arguments, so the marker is built
-/// for the same target as the object. That matters twice over: the
-/// preprocessor picks the section directive from the target, and a matching
-/// datalayout keeps `llvm-link` from warning on every single compile.
+/// `compiler` and `kind` must be the wrapper's own compiler, not the
+/// `clang`/`clang++` from the config: a C++ build's `compile_args` carries
+/// `-std=c++17`, and clang's C driver rejects that flag outright, so a
+/// fixed `clang` cannot compile a C++ project's marker. `compile_args` are
+/// otherwise the user's own compile arguments, so the marker is built for
+/// the same target as the object; that matters twice over: the preprocessor
+/// picks the section directive from the target, and a matching datalayout
+/// keeps `llvm-link` from warning on every single compile. Dependency-
+/// generation flags are stripped first -- see [`marker_compile_args`] --
+/// or the marker compile becomes the last writer of the user's dependency
+/// file.
 pub(crate) fn inject_marker(
     object: &Path,
     bitcode: &Path,
     compile_args: &[String],
+    compiler: &Path,
+    kind: CompilerKind,
 ) -> Result<(), Error> {
-    let dir = object.parent().ok_or_else(|| {
-        Error::InvalidArguments(format!("Object path has no parent directory: {object:?}"))
-    })?;
-    let stem = object.file_name().unwrap_or_default().to_string_lossy();
-    let source = dir.join(format!(".{stem}.rllvm_marker.c"));
-    let marker = dir.join(format!(".{stem}.rllvm_marker.bc"));
+    // A dedicated temporary directory means every exit path -- including the
+    // early returns below -- cleans up the marker source and object; nothing
+    // is left in the user's build tree after a failed compile.
+    let workspace = tempfile::tempdir()?;
+    let extension = match kind {
+        CompilerKind::Clang => "c",
+        CompilerKind::ClangXX => "cpp",
+    };
+    let source = workspace.path().join(format!("rllvm_marker.{extension}"));
+    let marker = workspace.path().join("rllvm_marker.bc");
 
     fs::write(&source, marker_source(bitcode))?;
 
-    let config = try_rllvm_config()?;
-    let status = Command::new(config.clang_filepath())
-        .args(compile_args)
+    let status = Command::new(compiler)
+        .args(marker_compile_args(compile_args))
         .args(["-emit-llvm", "-c", "-o"])
         .arg(&marker)
         .arg(&source)
@@ -44,6 +61,7 @@ pub(crate) fn inject_marker(
         )));
     }
 
+    let config = try_rllvm_config()?;
     // Reading and writing the same path is safe: `llvm-link` parses both
     // inputs before it writes the output.
     let status = Command::new(config.llvm_link_filepath())
@@ -57,10 +75,6 @@ pub(crate) fn inject_marker(
             "Failed to merge the LTO marker into {object:?}: exit_status={status}"
         )));
     }
-
-    // Best effort: a leftover marker is untidy, not incorrect.
-    let _ = fs::remove_file(&source);
-    let _ = fs::remove_file(&marker);
 
     Ok(())
 }

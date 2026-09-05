@@ -2482,3 +2482,64 @@ fn lto_and_non_lto_objects_share_one_section() {
         "every translation unit must be recorded:\n{manifest}"
     );
 }
+
+/// `-std=c++17` reaches the marker compile through `compile_args`. A marker
+/// compiled with the C driver (`clang`, not `clang++`) rejects that flag
+/// outright with "invalid argument '-std=c++17' not allowed with 'C'", so
+/// this is a hard build failure unless the marker is compiled with the
+/// wrapper's own compiler. Every other LTO test in this file uses `rllvm-cc`
+/// on `.c` sources and cannot catch this class of bug.
+#[test]
+fn lto_cxx_build_with_std_flag_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("lto_cxx.cpp");
+    fs::write(
+        &src,
+        "int add(int a, int b) { return a + b; }\n\
+         int main() { return add(1, 2) - 3; }\n",
+    )
+    .unwrap();
+
+    let object = src.with_extension("o");
+    let status = rllvm("rllvm-cxx")
+        .args(["--", "-flto", "-std=c++17", "-c", "-o"])
+        .arg(&object)
+        .arg(&src)
+        .status()
+        .expect("Failed to run rllvm-cxx");
+    assert!(
+        status.success(),
+        "rllvm-cxx failed to compile with -flto -std=c++17"
+    );
+
+    let program = tmp.path().join("cxx_prog");
+    let status = rllvm("rllvm-cxx")
+        .args(["--", "-flto", "-std=c++17", "-o"])
+        .arg(&program)
+        .arg(&object)
+        .status()
+        .expect("Failed to run rllvm-cxx");
+    assert!(status.success(), "LTO link failed");
+
+    let bitcode = tmp.path().join("cxx_prog.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-o")
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed on the LTO binary");
+    assert_bitcode_magic(&bitcode);
+
+    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let output = Command::new(nm)
+        .arg(&bitcode)
+        .output()
+        .expect("llvm-nm failed");
+    let symbols = String::from_utf8_lossy(&output.stdout);
+    assert!(symbols.contains("main"), "main missing from:\n{symbols}");
+    assert!(
+        symbols.contains("add"),
+        "the mangled `add` symbol is missing from:\n{symbols}"
+    );
+}

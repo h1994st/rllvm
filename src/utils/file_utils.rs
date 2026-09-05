@@ -64,7 +64,7 @@ where
 /// `BC\xC0\xDE` is raw bitcode; `0x0B17C0DE` little-endian is the wrapper
 /// clang writes on Darwin. A file shorter than the magic is not bitcode, and
 /// not an error -- callers ask about whatever the compiler produced.
-pub fn is_bitcode_file<P>(filepath: P) -> Result<bool, Error>
+pub(crate) fn is_bitcode_file<P>(filepath: P) -> Result<bool, Error>
 where
     P: AsRef<Path>,
 {

@@ -241,6 +241,8 @@ pub trait CompilerWrapper {
                     &object_filepath,
                     &src_bitcode_filepath,
                     self.args().compile_args(),
+                    self.wrapped_compiler(),
+                    *self.compiler_kind(),
                 )?;
             } else {
                 embed_bitcode_filepath_to_object_file(
