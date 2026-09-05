@@ -9,11 +9,12 @@ use std::{
 use crate::{
     arg_parser::{CompileMode, CompilerArgsInfo},
     cache,
+    compiler_wrapper::llvm::lto_marker,
     config::try_rllvm_config,
     constants::DEFAULT_LINK_OUTPUT_FILENAME,
     diagnostics::print_warning,
     error::Error,
-    utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status},
+    utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status, is_bitcode_file},
 };
 
 /// Compiler type
@@ -231,8 +232,23 @@ pub trait CompilerWrapper {
                 bitcode_filepath
             };
 
-            // Embed the path of the bitcode to the corresponding object file
-            embed_bitcode_filepath_to_object_file(&src_bitcode_filepath, &object_filepath, None)?;
+            // Under `-flto` the artifact is a bitcode module with no section
+            // header to patch. Dispatch on content rather than on the flag:
+            // `-ffat-lto-objects` produces a real object despite `-flto`, and
+            // takes the ordinary path with no extra code.
+            if is_bitcode_file(&object_filepath)? {
+                lto_marker::inject_marker(
+                    &object_filepath,
+                    &src_bitcode_filepath,
+                    self.args().compile_args(),
+                )?;
+            } else {
+                embed_bitcode_filepath_to_object_file(
+                    &src_bitcode_filepath,
+                    &object_filepath,
+                    None,
+                )?;
+            }
         }
 
         // Log cache statistics if caching was used

@@ -101,6 +101,20 @@ fn find_llvm_dis() -> Option<PathBuf> {
     None
 }
 
+/// Finds llvm-nm in the same LLVM installation the wrappers use.
+fn find_llvm_nm() -> Option<PathBuf> {
+    let llvm_config = find_llvm_config()?;
+    let output = Command::new(&llvm_config).arg("--bindir").output().ok()?;
+    if output.status.success() {
+        let bindir = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        let llvm_nm = PathBuf::from(&bindir).join("llvm-nm");
+        if llvm_nm.exists() {
+            return Some(llvm_nm);
+        }
+    }
+    None
+}
+
 /// Finds llvm-config on the system (mirrors the crate's discovery logic).
 fn find_llvm_config() -> Option<PathBuf> {
     if let Ok(val) = std::env::var("LLVM_CONFIG") {
@@ -2300,5 +2314,171 @@ fn routine_skips_are_not_reported() {
     assert!(
         !stderr.contains("warning:"),
         "preprocessing should not warn about skipped bitcode: {stderr:?}"
+    );
+}
+
+/// Writes three C files that must all reach the extracted module: two leaf
+/// functions and a `main` that calls both.
+fn write_lto_sources(dir: &Path) -> Vec<PathBuf> {
+    let a = dir.join("lto_a.c");
+    let b = dir.join("lto_b.c");
+    let main = dir.join("lto_main.c");
+    fs::write(&a, "int a_fn(int x) { return x + 1; }\n").unwrap();
+    fs::write(&b, "int b_fn(int x) { return x * 2; }\n").unwrap();
+    fs::write(
+        &main,
+        "int a_fn(int); int b_fn(int);\nint main(void) { return a_fn(b_fn(3)) - 7; }\n",
+    )
+    .unwrap();
+    vec![a, b, main]
+}
+
+/// Compiles each source to an object with `rllvm-cc`, links them, extracts the
+/// bitcode, and returns the disassembled module's symbol listing.
+fn lto_build_and_extract(tmp: &Path, lto_flag: &str, extra_link: &[&str]) -> String {
+    let sources = write_lto_sources(tmp);
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .args(["--", lto_flag, "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.arg("--")
+        .arg(lto_flag)
+        .args(extra_link)
+        .arg("-o")
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    let status = link.status().expect("Failed to run rllvm-cc");
+    assert!(status.success(), "LTO link failed");
+
+    let bitcode = tmp.join("prog.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-o")
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed on the LTO binary");
+    assert_bitcode_magic(&bitcode);
+
+    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let output = Command::new(nm)
+        .arg(&bitcode)
+        .output()
+        .expect("llvm-nm failed");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn lto_full_binary_yields_whole_program_bitcode() {
+    let tmp = TempDir::new().unwrap();
+    let symbols = lto_build_and_extract(tmp.path(), "-flto", &[]);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.contains(symbol),
+            "{symbol} missing from:\n{symbols}"
+        );
+    }
+}
+
+#[test]
+fn lto_thin_binary_yields_whole_program_bitcode() {
+    let tmp = TempDir::new().unwrap();
+    let symbols = lto_build_and_extract(tmp.path(), "-flto=thin", &[]);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.contains(symbol),
+            "{symbol} missing from:\n{symbols}"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_vendor = "apple")]
+fn lto_marker_survives_dead_strip() {
+    // Nothing references the section, so a dead-stripping link discards it
+    // unless the directive says `no_dead_strip`.
+    let tmp = TempDir::new().unwrap();
+    let symbols = lto_build_and_extract(tmp.path(), "-flto", &["-Wl,-dead_strip"]);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.contains(symbol),
+            "{symbol} missing from:\n{symbols}"
+        );
+    }
+}
+
+#[test]
+fn lto_and_non_lto_objects_share_one_section() {
+    // `ld.bfd` emits two same-named sections when their flags disagree, and
+    // reading only the first loses the non-LTO half of the build.
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let plain = tmp.path().join("lto_c.c");
+    fs::write(&plain, "int c_fn(int x) { return x - 1; }\n").unwrap();
+    let main = tmp.path().join("lto_main.c");
+    fs::write(
+        &main,
+        "int a_fn(int); int b_fn(int); int c_fn(int);\n\
+         int main(void) { return a_fn(b_fn(3)) - c_fn(8); }\n",
+    )
+    .unwrap();
+
+    let mut objects = vec![];
+    for (source, flags) in [
+        (&sources[0], vec!["-flto"]),
+        (&sources[1], vec!["-flto"]),
+        (&main, vec!["-flto"]),
+        (&plain, vec![]),
+    ] {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .arg("--")
+            .args(&flags)
+            .args(["-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("mixed");
+    let mut link = rllvm("rllvm-cc");
+    link.args(["--", "-flto", "-o"]).arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(link.status().unwrap().success(), "mixed link failed");
+
+    let manifest_dir = tmp.path().join("mixed.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-m")
+        .arg("-o")
+        .arg(&manifest_dir)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed on the mixed binary");
+
+    let manifest = fs::read_to_string(tmp.path().join("mixed.bc.manifest")).unwrap();
+    assert_eq!(
+        manifest.lines().count(),
+        4,
+        "every translation unit must be recorded:\n{manifest}"
     );
 }

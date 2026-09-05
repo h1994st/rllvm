@@ -59,6 +59,28 @@ where
     }
 }
 
+/// Returns `true` if the file begins with LLVM bitcode magic.
+///
+/// `BC\xC0\xDE` is raw bitcode; `0x0B17C0DE` little-endian is the wrapper
+/// clang writes on Darwin. A file shorter than the magic is not bitcode, and
+/// not an error -- callers ask about whatever the compiler produced.
+pub fn is_bitcode_file<P>(filepath: P) -> Result<bool, Error>
+where
+    P: AsRef<Path>,
+{
+    use std::io::Read;
+
+    let mut head = [0u8; 4];
+    let mut file = fs::File::open(filepath.as_ref())?;
+    match file.read_exact(&mut head) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+        Err(err) => return Err(err.into()),
+    }
+
+    Ok(head == [0x42, 0x43, 0xC0, 0xDE] || u32::from_le_bytes(head) == 0x0B17_C0DE)
+}
+
 /// Resolve the bitcode filepath to a string for embedding.
 fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     let absolute_filepath = if bitcode_filepath.is_absolute() {
@@ -1321,5 +1343,30 @@ mod tests {
             ],
             "both sections must be read, not just the first"
         );
+    }
+
+    #[test]
+    fn bitcode_is_detected_by_content_not_by_extension() {
+        // `-flto` and `-ffat-lto-objects` produce different things for the same
+        // flag, so the wrapper dispatches on what the compiler actually wrote.
+        let dir = tempfile::tempdir().unwrap();
+
+        let raw = dir.path().join("raw.o");
+        fs::write(&raw, [0x42, 0x43, 0xC0, 0xDE, 0x00]).unwrap();
+        assert!(is_bitcode_file(&raw).unwrap());
+
+        // The wrapper clang writes on Darwin.
+        let wrapped = dir.path().join("wrapped.o");
+        fs::write(&wrapped, 0x0B17_C0DEu32.to_le_bytes()).unwrap();
+        assert!(is_bitcode_file(&wrapped).unwrap());
+
+        let elf = dir.path().join("real.o");
+        fs::write(&elf, b"\x7fELF\x02\x01\x01\x00").unwrap();
+        assert!(!is_bitcode_file(&elf).unwrap());
+
+        // Shorter than the magic, and not an error.
+        let stub = dir.path().join("stub.o");
+        fs::write(&stub, b"BC").unwrap();
+        assert!(!is_bitcode_file(&stub).unwrap());
     }
 }
