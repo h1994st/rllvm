@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.0](https://github.com/h1994st/rllvm/compare/v0.2.0...v0.3.0) (2026-09-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* `lto_mode` defaults to `marker`, so `-flto` builds now generate bitcode instead of skipping it, and `-flto` on COFF or WASM targets is now an error directing to `lto_mode = "skip"` where it previously linked with a warning.
+
+### Features
+
+* extract whole-program bitcode from LTO builds ([#99](https://github.com/h1994st/rllvm/issues/99)) ([31d1dfc](https://github.com/h1994st/rllvm/commit/31d1dfc41a91d99769041ed7c889d9abbb09dc87))
+
+
+### Bug Fixes
+
+* report the LTO bitcode skip where a build can see it ([#97](https://github.com/h1994st/rllvm/issues/97)) ([7a64931](https://github.com/h1994st/rllvm/commit/7a64931b29c65c0da6305ef1ecca1ca9c53c6cec))
+
 ## [0.2.0](https://github.com/h1994st/rllvm/compare/v0.1.9...v0.2.0) (2026-09-04)
 
 
