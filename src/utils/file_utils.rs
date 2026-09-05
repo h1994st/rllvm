@@ -81,8 +81,14 @@ where
     Ok(head == [0x42, 0x43, 0xC0, 0xDE] || u32::from_le_bytes(head) == 0x0B17_C0DE)
 }
 
-/// Resolve the bitcode filepath to a string for embedding.
-fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
+/// The entry recorded for `bitcode_filepath`, without the trailing newline.
+///
+/// Shared by every writer: the section's contents must not depend on which
+/// path produced them. The LTO marker records the same string through
+/// [`crate::lto::marker_source`], so a binary mixing `-flto` and ordinary
+/// objects carries one form throughout rather than absolute entries for its
+/// LTO units and relative ones for the rest.
+pub(crate) fn recorded_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     let absolute_filepath = if bitcode_filepath.is_absolute() {
         bitcode_filepath.to_path_buf()
     } else {
@@ -99,7 +105,7 @@ fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     // Unset is the default and keeps the historical absolute form, so objects
     // produced by older versions stay readable. The reader distinguishes the two
     // by the leading separator, which is why no format flag is needed.
-    let recorded = try_rllvm_config()
+    Ok(try_rllvm_config()
         .ok()
         .and_then(|config| config.bitcode_root())
         .and_then(|root| {
@@ -108,12 +114,18 @@ fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
                 .ok()
                 .map(|relative| relative.to_string_lossy().into_owned())
         })
-        .unwrap_or_else(|| absolute_filepath.to_string_lossy().into_owned());
+        .unwrap_or_else(|| absolute_filepath.to_string_lossy().into_owned()))
+}
 
+/// Resolve the bitcode filepath to a string for embedding.
+fn resolve_bitcode_filepath(bitcode_filepath: &Path) -> Result<String, Error> {
     // The linker concatenates these sections when it merges object files, so
     // every entry must be newline-terminated for the reader to split the
     // combined section back into individual paths.
-    Ok(format!("{recorded}\n"))
+    Ok(format!(
+        "{}\n",
+        recorded_bitcode_filepath(bitcode_filepath)?
+    ))
 }
 
 /// Encode an unsigned integer as a LEB128 byte sequence.
@@ -1310,9 +1322,9 @@ mod tests {
     fn extraction_reads_every_section_with_the_matching_name() {
         use object::Architecture;
 
-        // `ld.bfd` emits two output sections when same-named input sections
-        // disagree on flags -- an LTO marker's and one written by
-        // `llvm-objcopy`. Reading only the first loses half the build.
+        // One object, two sections with the matching name -- what `ld.bfd`
+        // hands the reader when it cannot merge same-named input sections.
+        // Reading only the first loses half the build.
         let mut obj = write::Object::new(
             BinaryFormat::Elf,
             Architecture::X86_64,

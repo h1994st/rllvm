@@ -17,7 +17,7 @@ use crate::{
     config::try_rllvm_config,
     error::Error,
     lto::{is_save_temps_artifact, is_saved_module, marker_compile_args, marker_source},
-    utils::link_bitcode_files,
+    utils::{link_bitcode_files, recorded_bitcode_filepath},
 };
 
 /// Compile a marker module naming `bitcode` and merge it into `object`.
@@ -51,7 +51,10 @@ pub(crate) fn inject_marker(
     let source = workspace.path().join(format!("rllvm_marker.{extension}"));
     let marker = workspace.path().join("rllvm_marker.bc");
 
-    fs::write(&source, marker_source(bitcode))?;
+    // The same entry `embed_bitcode_filepath_to_object_file` would write, so
+    // `bitcode_root` is honoured here too and one binary never mixes absolute
+    // entries for its LTO units with relative ones for the rest.
+    fs::write(&source, marker_source(&recorded_bitcode_filepath(bitcode)?))?;
 
     let status = Command::new(compiler)
         .args(marker_compile_args(compile_args))
@@ -116,8 +119,18 @@ pub(crate) fn collect_saved_module(output: &Path, cleanup: bool) -> Result<PathB
 
     match saved.len() {
         0 => {
+            // The link is over, so the litter is this link's and rllvm still
+            // owns it -- returning early without clearing it would leave the
+            // user's build tree full of save-temps modules on top of the error.
+            for path in litter {
+                let _ = fs::remove_file(path);
+            }
             return Err(Error::MissingFile(format!(
-                "The LTO link produced no merged module for {output:?}. Expected {}.",
+                "The LTO link produced no merged module for {output:?}. Expected {}. \
+                 The link's inputs are probably not LTO bitcode: `-flto` in LDFLAGS alone \
+                 is not enough if the objects were compiled without it. {output:?} now \
+                 records {destination:?}, which does not exist, so `rllvm-get-bc` will \
+                 fail on it.",
                 if darwin {
                     format!("{output_name}.lto.opt.bc")
                 } else {
@@ -125,8 +138,8 @@ pub(crate) fn collect_saved_module(output: &Path, cleanup: bool) -> Result<PathB
                 }
             )));
         }
-        // More than one means more than one LTO partition.
         1 => fs::rename(&saved[0], &destination)?,
+        // More than one means more than one LTO partition.
         _ => {
             let code = link_bitcode_files(&saved, destination.clone())?;
             if code != Some(0) {

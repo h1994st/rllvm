@@ -15,7 +15,10 @@ use crate::{
     diagnostics::print_warning,
     error::Error,
     lto::{LtoFlavour, LtoMode, save_temps_flag, user_requested_save_temps},
-    utils::{embed_bitcode_filepath_to_object_file, execute_command_for_status, is_bitcode_file},
+    utils::{
+        embed_bitcode_filepath_to_object_file, execute_command_for_status,
+        extract_bitcode_filepaths_from_object_file, is_bitcode_file, recorded_bitcode_filepath,
+    },
 };
 
 /// Compiler type
@@ -170,7 +173,17 @@ pub trait CompilerWrapper {
         // litter.
         let marker_dir = tempfile::tempdir()?;
         let bitcode = PathBuf::from(format!("{}.rllvm.bc", output.display()));
-        let marker = marker::build_marker_object(&bitcode, marker_dir.path())?;
+        // Built with this wrapper's own compiler and the user's compile
+        // arguments, so the marker matches the link's target. A host-native
+        // marker is not a link error: `-arch x86_64` on an arm64 host makes
+        // ld64 warn and carry on, and the finished binary then names nothing.
+        let marker = marker::build_marker_object(
+            &bitcode,
+            marker_dir.path(),
+            self.wrapped_compiler(),
+            *self.compiler_kind(),
+            args.compile_args(),
+        )?;
         extra_args.push(marker.to_string_lossy().into_owned());
 
         Ok(SaveTempsPlan {
@@ -204,7 +217,22 @@ pub trait CompilerWrapper {
         }
 
         if let Some(output) = plan.collect_from {
-            lto_marker::collect_saved_module(&output, plan.cleanup)?;
+            let module = lto_marker::collect_saved_module(&output, plan.cleanup)?;
+            // The module exists; nothing so far proves the binary names it.
+            // A marker built for the wrong target, a dead-stripped section, or
+            // a linker that dropped the input all leave a successful-looking
+            // build that `rllvm-get-bc` reads nothing out of -- which is the
+            // failure this mode exists to fix.
+            let recorded = extract_bitcode_filepaths_from_object_file(&output)?;
+            let expected = PathBuf::from(recorded_bitcode_filepath(&module)?);
+            if !recorded.contains(&expected) {
+                return Err(Error::MissingFile(format!(
+                    "The LTO link produced {module:?}, but {output:?} does not record it \
+                     (recorded: {recorded:?}). The marker object naming the module never \
+                     reached the linked output's bitcode-path section, so extraction would \
+                     find nothing."
+                )));
+            }
             return Ok(Some(0));
         }
 

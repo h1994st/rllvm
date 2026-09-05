@@ -213,8 +213,9 @@ per-unit paths. No per-unit compile. Full LTO only — ThinLTO builds no such
 module, and that case warns and collects nothing rather than failing the
 build. Needs a separate link step through `rllvm-cc`: a single-step `rllvm-cc
 -flto a.c b.c -o prog` is a compile, not an LTO link, so save-temps cannot
-hook it. The collected module is post-optimization — the module the linker
-generated code from.
+hook it. The inputs must be LTO bitcode: `-flto` in `LDFLAGS` alone produces no
+merged module, and rllvm errors. The collected module is post-optimization —
+the module the linker generated code from.
 
 `skip` generates nothing and warns — the old default behaviour.
 

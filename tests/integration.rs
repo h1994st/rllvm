@@ -2709,3 +2709,306 @@ fn save_temps_mode_warns_that_thin_lto_has_no_merged_module() {
         "expected a warning naming the limitation:\n{stderr}"
     );
 }
+
+/// A bitcode path containing a backslash and a double quote reaches the
+/// section byte for byte.
+///
+/// The marker interpolates the path into a C string literal inside
+/// `__asm__(...)`, so the bytes pass two decoders before they land in the
+/// section: the C compiler's, then the assembler's. Escaped for one layer
+/// only, a backslash is a hard build failure ("invalid escape sequence") and
+/// a quote closes the `.ascii` operand early -- and a path holding `\n` would
+/// put a real newline into the section, splitting one entry into two garbage
+/// paths.
+#[test]
+fn lto_marker_records_a_path_with_a_backslash_and_a_quote() {
+    let tmp = TempDir::new().unwrap();
+    let awkward = tmp.path().join(r#"od\d q"d"#);
+    fs::create_dir_all(&awkward).unwrap();
+
+    let a = awkward.join("a.c");
+    let main = awkward.join("m.c");
+    fs::write(&a, "int a_fn(int x) { return x + 1; }\n").unwrap();
+    fs::write(
+        &main,
+        "int a_fn(int);\nint main(void) { return a_fn(1) - 2; }\n",
+    )
+    .unwrap();
+
+    let mut objects = vec![];
+    for source in [&a, &main] {
+        let object = source.with_extension("o");
+        let output = rllvm("rllvm-cc")
+            .args(["--", "-flto", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .output()
+            .expect("Failed to run rllvm-cc");
+        assert!(
+            output.status.success(),
+            "compiling {source:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.args(["--", "-flto", "-o"]).arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(link.status().unwrap().success(), "LTO link failed");
+
+    let extracted = tmp.path().join("prog.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-m")
+        .arg("-o")
+        .arg(&extracted)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "extraction failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // What the compile actually wrote, against what the binary recorded.
+    let mut expected: Vec<PathBuf> = fs::read_dir(&awkward)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "bc"))
+        .collect();
+    expected.sort();
+    assert_eq!(expected.len(), 2, "expected one bitcode file per source");
+
+    let manifest = fs::read_to_string(tmp.path().join("prog.bc.manifest")).unwrap();
+    let mut recorded: Vec<PathBuf> = manifest.lines().map(PathBuf::from).collect();
+    recorded.sort();
+    assert_eq!(
+        recorded, expected,
+        "the recorded paths must match the bitcode files byte for byte"
+    );
+}
+
+/// An LTO object records a path relative to `bitcode_root`, like every other
+/// object rllvm writes.
+///
+/// The marker path bypassed the resolution every other writer goes through,
+/// so one binary could carry an absolute entry for its `-flto` units and a
+/// relative one for the rest -- working on the build machine and breaking in
+/// a relocated tree, which is what `relocated_build_tree_fails_without_bitcode_root`
+/// exists to prevent.
+#[test]
+fn lto_marker_records_a_path_relative_to_bitcode_root() {
+    let tmp = TempDir::new().unwrap();
+    let build_a = tmp.path().join("a");
+    fs::create_dir_all(&build_a).unwrap();
+
+    let a = build_a.join("lto_a.c");
+    let main = build_a.join("lto_main.c");
+    fs::write(&a, "int a_fn(int x) { return x + 1; }\n").unwrap();
+    fs::write(
+        &main,
+        "int a_fn(int);\nint main(void) { return a_fn(1) - 2; }\n",
+    )
+    .unwrap();
+
+    let mut objects = vec![];
+    for source in [&a, &main] {
+        let object = source.with_extension("o");
+        let output = rllvm("rllvm-cc")
+            .env("RLLVM_BITCODE_ROOT", &build_a)
+            .args(["--", "-flto", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .output()
+            .expect("Failed to run rllvm-cc");
+        assert!(
+            output.status.success(),
+            "compiling {source:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        objects.push(object);
+    }
+
+    let program = build_a.join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.env("RLLVM_BITCODE_ROOT", &build_a)
+        .args(["--", "-flto", "-o"])
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(link.status().unwrap().success(), "LTO link failed");
+
+    // The build directory moves; the binary and its bitcode travel together.
+    let build_b = tmp.path().join("b");
+    fs::rename(&build_a, &build_b).unwrap();
+
+    let extracted = tmp.path().join("prog.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(build_b.join("prog"))
+        .arg("--bitcode-root")
+        .arg(&build_b)
+        .arg("-o")
+        .arg(&extracted)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "an LTO build recorded an absolute path despite bitcode_root: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_bitcode_magic(&extracted);
+}
+
+/// Whether this machine can compile and link for `arch`.
+///
+/// The macOS SDK carries both architectures, so the answer is normally yes;
+/// probing rather than assuming keeps a stripped-down toolchain from failing
+/// the suite for a reason that has nothing to do with rllvm.
+#[cfg(target_vendor = "apple")]
+fn architecture_is_linkable(arch: &str) -> bool {
+    let Some(llvm_config) = find_llvm_config() else {
+        return false;
+    };
+    let Ok(output) = Command::new(&llvm_config).arg("--bindir").output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let bindir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("probe.c");
+    fs::write(&src, "int main(void) { return 0; }\n").unwrap();
+    Command::new(bindir.join("clang"))
+        .args(["-arch", arch, "-o"])
+        .arg(tmp.path().join("probe"))
+        .arg(&src)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// The `save-temps` marker object is built for the link's target, not the
+/// host.
+///
+/// A bare `clang -c` produces a host-native object, which a
+/// cross-architecture link discards with a warning -- "ignoring file ...,
+/// found architecture 'arm64', required architecture 'x86_64'". The link
+/// still succeeds and the merged module is still collected, so the build
+/// looks fine while the binary names nothing: issue #96's failure mode,
+/// restored. Every other `save-temps` test builds for the host and cannot see
+/// this.
+#[test]
+#[cfg(target_vendor = "apple")]
+fn save_temps_marker_is_built_for_the_link_target() {
+    let arch = if cfg!(target_arch = "aarch64") {
+        "x86_64"
+    } else {
+        "arm64"
+    };
+    if !architecture_is_linkable(arch) {
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["--", "-arch", arch, "-flto", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--", "-arch", arch, "-flto", "-o"])
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    let output = link.output().expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "the cross-architecture save-temps link failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let extracted = tmp.path().join("prog.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-m")
+        .arg("-o")
+        .arg(&extracted)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc found nothing in the binary");
+    let manifest = fs::read_to_string(tmp.path().join("prog.bc.manifest")).unwrap();
+    assert!(
+        manifest.trim().ends_with("prog.rllvm.bc"),
+        "the binary must name the merged module:\n{manifest}"
+    );
+}
+
+/// A `save-temps` link that merged nothing is an error, and the error says
+/// why.
+///
+/// `-flto` in `LDFLAGS` alone is not enough: objects compiled without it give
+/// the LTO pipeline nothing to merge. By then the marker has already gone
+/// into the link, so the binary names a `<output>.rllvm.bc` that was never
+/// produced -- which is why this stays an error rather than a warning.
+#[test]
+fn save_temps_mode_reports_a_link_that_merged_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        // No `-flto` here: ordinary objects.
+        let status = rllvm("rllvm-cc")
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["--", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--", "-flto", "-o"])
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    let output = link.output().expect("Failed to run rllvm-cc");
+    assert!(
+        !output.status.success(),
+        "a link that merged nothing must fail"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in ["not LTO bitcode", "LDFLAGS", "prog.rllvm.bc"] {
+        assert!(
+            stderr.contains(expected),
+            "the error must name {expected:?}:\n{stderr}"
+        );
+    }
+}
