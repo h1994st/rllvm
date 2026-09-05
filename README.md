@@ -160,6 +160,7 @@ lives at `$RLLVM_CONFIG` if set, otherwise `~/.rllvm/config.toml`.
 | `llvm_link_flags` | No | Extra flags for `llvm-link` |
 | `lto_ldflags` | No | Extra flags for link-time optimization |
 | `bitcode_generation_flags` | No | Extra flags for bitcode generation (e.g. `-flto`) |
+| `lto_mode` | No | How `-flto` builds record bitcode: `marker` (default), `save-temps`, `skip`; `RLLVM_LTO_MODE` overrides |
 | `is_configure_only` | No | Skip bitcode generation entirely (default: `false`) |
 | `cache_enabled` | No | Reuse bitcode across rebuilds; also `RLLVM_CACHE=1` (default: `false`) |
 | `log_level` | No | 0=error (default), 1=warn, 2=info, 3=debug, 4+=trace |
@@ -195,12 +196,32 @@ executable ◄── linker ◄── object files
 marker object added to the link; a crate that produces an `.rlib` carries it in
 the archive's members, so a dependency brings its bitcode wherever it is used.
 
-Link-time optimization is the exception. Under `-flto` the compiler emits
-bitcode in place of object files, so there is no section to record a path in and
-`rllvm-get-bc` finds nothing in the linked result. The wrappers print a warning
-when this happens. To get a whole-program module from an LTO build, ask the
-linker for the one it already produces: `-Wl,-save-temps` writes the merged
-module beside the binary.
+### LTO
+
+With `-flto` the compiler writes a bitcode module where an object file
+belongs, so there is no section to record a path in. `lto_mode` picks what
+happens instead.
+
+`marker` (default) compiles a marker module naming the bitcode and merges it
+into the LTO object with `llvm-link`. Covers full and thin LTO, ELF and
+Mach-O, C and C++, and mixes with objects built without `-flto`. Costs one
+extra compile and one `llvm-link` per translation unit.
+
+`save-temps` appends the linker's save-temps flag, then collects the
+whole-program module the LTO pipeline merged, recording its path instead of
+per-unit paths. No per-unit compile. Full LTO only — ThinLTO builds no such
+module, and that case warns and collects nothing rather than failing the
+build. Needs a separate link step through `rllvm-cc`: a single-step `rllvm-cc
+-flto a.c b.c -o prog` is a compile, not an LTO link, so save-temps cannot
+hook it. The collected module is post-optimization — the module the linker
+generated code from.
+
+`skip` generates nothing and warns — the old default behaviour.
+
+An LTO link pulls in only the archive members it uses, so an unused member's
+bitcode path never reaches the binary. COFF and WASM are not supported under
+`marker`; `-flto` there is an error directing to `lto_mode = "skip"`. Under
+`save-temps`, a link producing no merged module is an error.
 
 ## Relationship to gllvm and wllvm
 
