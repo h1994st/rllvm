@@ -189,19 +189,41 @@ pub fn is_save_temps_artifact(output_name: &str, filename: &str) -> bool {
     if rest == "rllvm.bc" {
         return false;
     }
-    matches!(
+    if matches!(
         rest,
         "lto.bc" | "lto.opt.bc" | "lto.o" | "index.bc" | "index.dot" | "resolution.txt"
-    ) || rest.ends_with(".preopt.bc")
-        || rest.ends_with(".promote.bc")
-        || rest.ends_with(".internalize.bc")
-        || rest.ends_with(".import.bc")
-        || rest.ends_with(".opt.bc")
-        || rest.ends_with(".precodegen.bc")
-        || rest.ends_with(".thinlto.o")
-        || rest
-            .strip_prefix("lto.o")
-            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    ) {
+        return true;
+    }
+    if rest
+        .strip_prefix("lto.o")
+        .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+    {
+        return true;
+    }
+
+    // `<output>.<task>.<stage>.<name>.bc` and `<output>.<N>.thinlto.o`: a bare
+    // suffix match would also accept `debug.0.0.preopt.bc` for output `prog`,
+    // which collides with a sibling output that happens to share a prefix, so
+    // every numeric segment is required to be digits and nothing else.
+    let segments: Vec<&str> = rest.split('.').collect();
+    match segments.as_slice() {
+        [task, stage, name, "bc"] => {
+            is_digits(task)
+                && is_digits(stage)
+                && matches!(
+                    *name,
+                    "preopt" | "promote" | "internalize" | "import" | "opt" | "precodegen"
+                )
+        }
+        [n, "thinlto", "o"] => is_digits(n),
+        _ => false,
+    }
+}
+
+/// Whether `s` is non-empty and every character is an ASCII digit.
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Whether the user's own link arguments already ask the linker to keep its
@@ -412,6 +434,19 @@ mod tests {
         }
         for keep in ["prog.rllvm.bc", "prog.bc", "prog", "prog.c", "progress.bc"] {
             assert!(!is_save_temps_artifact("prog", keep), "{keep}");
+        }
+    }
+
+    #[test]
+    fn cleanup_does_not_collide_with_a_sibling_output_sharing_a_prefix() {
+        // `prog` and `prog.debug` in the same directory: a bare suffix match
+        // would let `prog`'s cleanup delete `prog.debug`'s own intermediates.
+        for artifact in ["prog.debug.0.0.preopt.bc", "prog.debug.0.thinlto.o"] {
+            assert!(!is_save_temps_artifact("prog", artifact), "{artifact}");
+        }
+        // The same files are still recognised as litter for their own output.
+        for artifact in ["prog.debug.0.0.preopt.bc", "prog.debug.0.thinlto.o"] {
+            assert!(is_save_temps_artifact("prog.debug", artifact), "{artifact}");
         }
     }
 
