@@ -3,13 +3,26 @@ name: Pages
 # Path filters are safe here in a way they would not be in `ci.yml`: this
 # workflow is not a required status check, so a pull request that never runs it
 # is still mergeable.
+#
+# `.release-please-manifest.json` is in the list because the masthead shows the
+# crate version, so a release changes the page while touching nothing else here.
+# It stands in for `Cargo.toml`, which `build.py` actually reads but which also
+# moves on dependency edits that leave the page identical.
 on:
   push:
     branches: ["main"]
-    paths: ["README.md", "site/**", ".github/workflows/pages.yml"]
+    paths:
+      - "README.md"
+      - "site/**"
+      - ".release-please-manifest.json"
+      - ".github/workflows/pages.yml"
   pull_request:
     branches: ["main"]
-    paths: ["README.md", "site/**", ".github/workflows/pages.yml"]
+    paths:
+      - "README.md"
+      - "site/**"
+      - ".release-please-manifest.json"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
