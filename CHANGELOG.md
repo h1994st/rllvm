@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/h1994st/rllvm/compare/v0.3.0...v0.4.0) (2026-09-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* `rllvm::cache::compute_cache_key` is replaced by `manifest_key` and `content_key`. Library API only -- wrapper behaviour is unchanged for anyone not opting into the cache, which is off by default.
+
+### Bug Fixes
+
+* keep dependency files describing the user's object ([#108](https://github.com/h1994st/rllvm/issues/108)) ([230c2b5](https://github.com/h1994st/rllvm/commit/230c2b518e61d0900acd4ebb5fd0fbf78f1334ed))
+* key the bitcode cache on the compilation, not the source file ([#111](https://github.com/h1994st/rllvm/issues/111)) ([171d1e9](https://github.com/h1994st/rllvm/commit/171d1e9fec95e058fa1196dfd5eebcf232da192d))
+
 ## [0.3.0](https://github.com/h1994st/rllvm/compare/v0.2.0...v0.3.0) (2026-09-05)
 
 
