@@ -42,6 +42,45 @@ pub enum CompileMode {
     BitcodeGeneration,
 }
 
+/// Dependency-generation flags that take no argument.
+const DEPENDENCY_NULLARY_FLAGS: &[&str] = &["-M", "-MM", "-MD", "-MMD", "-MG", "-MP", "-MV"];
+
+/// Dependency-generation flags that take an argument, either as the following
+/// token (`-MF file`) or joined into the same one (`-MFfile`).
+const DEPENDENCY_UNARY_PREFIXES: &[&str] = &["-MF", "-MJ", "-MT", "-MQ"];
+
+/// Strips dependency-generation flags from a compile-argument list.
+///
+/// Only the compilation the user actually asked for may write the dependency
+/// file. Every other compilation the wrapper runs -- the `.bc`, the
+/// intermediate object in link mode, the LTO marker -- inherits `compile_args`
+/// and would otherwise be the *last writer* of the file `-MF` names, replacing
+/// the real prerequisites with its own. That is how editing a header stopped
+/// causing a rebuild: the file named the `.bc`, so `make` never learned the
+/// object depended on the header.
+pub fn without_dependency_flags(compile_args: &[String]) -> Vec<String> {
+    let mut result = Vec::with_capacity(compile_args.len());
+    let mut args = compile_args.iter();
+    while let Some(arg) = args.next() {
+        if DEPENDENCY_NULLARY_FLAGS.contains(&arg.as_str()) {
+            continue;
+        }
+        if let Some(&prefix) = DEPENDENCY_UNARY_PREFIXES
+            .iter()
+            .find(|prefix| arg.starts_with(*prefix))
+        {
+            if arg == prefix {
+                // Separate-token form: the next token is the argument.
+                args.next();
+            }
+            // Otherwise the argument is joined into this same token.
+            continue;
+        }
+        result.push(arg.clone());
+    }
+    result
+}
+
 /// Compiler argument information
 #[derive(Debug, Default)]
 pub struct CompilerArgsInfo {
@@ -288,10 +327,12 @@ impl CompilerArgsInfo {
     where
         S: AsRef<str>,
     {
-        self.compile_args.push(flag.as_ref().to_string());
-        self.compile_args.push(args[0].as_ref().to_string());
-        self.is_dependency_only = true;
-        self
+        // Deliberately identical to `compile_binary`. `-MF`, `-MJ`, `-MT` and
+        // `-MQ` name or retarget the dependency file; none of them stops the
+        // compilation, so unlike `-M`/`-MM` they must not set
+        // `is_dependency_only` -- doing so made a link-mode build carrying
+        // `-MD -MF x.d` skip bitcode generation entirely, and quietly.
+        self.compile_binary(flag, args)
     }
 
     /// Handle a binary compile flag (flag + one parameter).
@@ -695,7 +736,7 @@ impl CompilerArgsInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::CompilerArgsInfo;
+    use super::{CompilerArgsInfo, without_dependency_flags};
     use crate::lto::LtoFlavour;
 
     fn parse_and_assert<F>(input: &str, check_func: F)
@@ -952,5 +993,88 @@ mod tests {
         parse_and_assert("", |a| {
             a.input_files().is_empty() && a.object_files().is_empty() && !a.is_compile_only()
         });
+    }
+    fn cargo_shaped_compile_args() -> Vec<String> {
+        [
+            "-I",
+            "include",
+            "-DFOO=1",
+            "-MD",
+            "-MP",
+            "-MF",
+            "target/debug/build/foo-0/out/foo.d",
+            "-MT",
+            "target/debug/build/foo-0/out/foo.o",
+            "-O2",
+            "-std=c++17",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect()
+    }
+
+    #[test]
+    fn without_dependency_flags_strips_separate_token_dependency_flags() {
+        let filtered = without_dependency_flags(&cargo_shaped_compile_args());
+        assert_eq!(
+            filtered,
+            ["-I", "include", "-DFOO=1", "-O2", "-std=c++17"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<String>>(),
+            "{filtered:?}"
+        );
+    }
+
+    #[test]
+    fn without_dependency_flags_strips_joined_dependency_flags() {
+        let compile_args = ["-c", "-MFfoo.d", "-MQfoo.o", "-MTfoo.o", "-O2"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>();
+        let filtered = without_dependency_flags(&compile_args);
+        assert_eq!(
+            filtered,
+            ["-c", "-O2"]
+                .into_iter()
+                .map(String::from)
+                .collect::<Vec<String>>(),
+            "{filtered:?}"
+        );
+    }
+
+    #[test]
+    fn without_dependency_flags_strips_every_flag_the_tables_know() {
+        // `-MJ` and `-MV` were missing from the original list, so they reached
+        // the secondary compiles and rewrote whatever they named. Every
+        // dependency flag in `constants.rs` belongs here.
+        let compile_args = [
+            "-MJ",
+            "cdb.json",
+            "-MV",
+            "-MG",
+            "-MP",
+            "-MMD",
+            "-MJcdb.json",
+            "-O2",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<String>>();
+        assert_eq!(
+            without_dependency_flags(&compile_args),
+            vec![String::from("-O2")],
+        );
+    }
+
+    #[test]
+    fn without_dependency_flags_leaves_unrelated_flags_untouched() {
+        // A pure pass-through when there is nothing to strip -- the function
+        // must not just happen to work on inputs shaped like the other tests.
+        let compile_args = ["-O2", "-std=c11", "-Wall"]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<String>>();
+        assert_eq!(without_dependency_flags(&compile_args), compile_args);
     }
 }

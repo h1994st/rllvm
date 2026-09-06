@@ -7,7 +7,7 @@ use std::{
 };
 
 use crate::{
-    arg_parser::{CompileMode, CompilerArgsInfo},
+    arg_parser::{CompileMode, CompilerArgsInfo, without_dependency_flags},
     cache,
     compiler_wrapper::llvm::{lto_marker, marker},
     config::try_rllvm_config,
@@ -420,7 +420,10 @@ pub trait CompilerWrapper {
         let compiler_filepath = self.wrapped_compiler();
 
         let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
-        args.extend(self.args().compile_args().iter().cloned());
+        // Not `compile_args()` verbatim: the user's command already wrote the
+        // dependency file, and this compile would overwrite it with one that
+        // names the `.bc`.
+        args.extend(without_dependency_flags(self.args().compile_args()));
         // Add bitcode generation flags
         if let Some(bitcode_generation_flags) = try_rllvm_config()?.bitcode_generation_flags() {
             args.extend(bitcode_generation_flags.iter().cloned());
@@ -452,7 +455,9 @@ pub trait CompilerWrapper {
         let wrapped_compiler = self.wrapped_compiler();
 
         let mut args = vec![wrapped_compiler.to_string_lossy().into_owned()];
-        args.extend(self.args().compile_args().iter().cloned());
+        // Same reason as in `generate_bitcode_file`: this intermediate object
+        // must not become the last writer of the user's dependency file.
+        args.extend(without_dependency_flags(self.args().compile_args()));
         args.extend_from_slice(&[
             "-c".to_string(),
             "-o".to_string(),

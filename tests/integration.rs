@@ -3012,3 +3012,125 @@ fn save_temps_mode_reports_a_link_that_merged_nothing() {
         );
     }
 }
+
+/// The dependency file must describe the object the user asked for.
+///
+/// The wrapper runs the user's command and then compiles the source again for
+/// the `.bc`. Both honour `-MD`/`-MF`, so whichever runs last owns the file.
+/// When the `.bc` compile won, the depfile named the `.bc`, `make` never
+/// learned the object depended on the header, and editing a header rebuilt
+/// nothing -- a silently stale object.
+#[test]
+fn dependency_file_names_the_object_and_its_headers() {
+    let tmp = TempDir::new().unwrap();
+    let header = tmp.path().join("dep.h");
+    let source = tmp.path().join("dep.c");
+    let object = tmp.path().join("dep.o");
+    let depfile = tmp.path().join("dep.d");
+    fs::write(&header, "#define VALUE 1\n").unwrap();
+    fs::write(
+        &source,
+        "#include \"dep.h\"\nint dep_fn(void) { return VALUE; }\n",
+    )
+    .unwrap();
+
+    let status = rllvm("rllvm-cc")
+        .args(["--", "-MD", "-MF"])
+        .arg(&depfile)
+        .args(["-c", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc failed");
+
+    let deps = fs::read_to_string(&depfile).expect("no dependency file written");
+    let target = deps.split(':').next().unwrap_or_default().trim();
+    assert!(
+        target.ends_with("dep.o"),
+        "the depfile must name the object as its target, not an rllvm artifact:\n{deps}"
+    );
+    assert!(
+        deps.contains("dep.h"),
+        "the header must appear as a prerequisite, or a header edit rebuilds nothing:\n{deps}"
+    );
+}
+
+/// Link mode has a second writer of the same file.
+///
+/// Besides the `.bc` compile, `build_object_file` recompiles each source to a
+/// hidden intermediate object with the user's arguments, so it clobbers the
+/// dependency file too.
+#[test]
+fn link_mode_leaves_the_dependency_file_naming_the_object() {
+    let tmp = TempDir::new().unwrap();
+    let header = tmp.path().join("prog.h");
+    let source = tmp.path().join("prog.c");
+    let program = tmp.path().join("prog");
+    let depfile = tmp.path().join("prog.d");
+    fs::write(&header, "#define START 3\n").unwrap();
+    fs::write(
+        &source,
+        "#include \"prog.h\"\nint main(void) { return START - 3; }\n",
+    )
+    .unwrap();
+
+    let status = rllvm("rllvm-cc")
+        .args(["--", "-MD", "-MF"])
+        .arg(&depfile)
+        .arg("-o")
+        .arg(&program)
+        .arg(&source)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc link failed");
+
+    let deps = fs::read_to_string(&depfile).expect("no dependency file written");
+    assert!(
+        !deps.contains(".bc"),
+        "no rllvm artifact may appear as the depfile's target:\n{deps}"
+    );
+    assert!(
+        deps.contains("prog.h"),
+        "the header must appear as a prerequisite:\n{deps}"
+    );
+}
+
+/// `-MD` must not suppress bitcode generation.
+///
+/// `-M` and `-MM` stop after preprocessing and emit dependencies instead of an
+/// object, so skipping bitcode for them is right. `-MD` compiles normally and
+/// writes the depfile as a side effect. Classifying it with the former made a
+/// link-mode build carrying `-MD` produce a binary with no bitcode at all, and
+/// the skip was quiet, so nothing said so.
+#[test]
+fn dependency_flags_do_not_suppress_bitcode_in_link_mode() {
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("mdlink.c");
+    let program = tmp.path().join("mdlink");
+    let depfile = tmp.path().join("mdlink.d");
+    fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+
+    let status = rllvm("rllvm-cc")
+        .args(["--", "-MD", "-MF"])
+        .arg(&depfile)
+        .arg("-o")
+        .arg(&program)
+        .arg(&source)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc link failed");
+
+    let bitcode = tmp.path().join("mdlink.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-o")
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        status.success(),
+        "-MD must not suppress bitcode generation in link mode"
+    );
+    assert_bitcode_magic(&bitcode);
+}

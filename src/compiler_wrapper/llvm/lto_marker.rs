@@ -13,10 +13,11 @@ use std::{
 };
 
 use crate::{
+    arg_parser::without_dependency_flags,
     compiler_wrapper::CompilerKind,
     config::try_rllvm_config,
     error::Error,
-    lto::{is_save_temps_artifact, is_saved_module, marker_compile_args, marker_source},
+    lto::{is_save_temps_artifact, is_saved_module, marker_source},
     utils::{link_bitcode_files, recorded_bitcode_filepath},
 };
 
@@ -30,7 +31,7 @@ use crate::{
 /// the same target as the object; that matters twice over: the preprocessor
 /// picks the section directive from the target, and a matching datalayout
 /// keeps `llvm-link` from warning on every single compile. Dependency-
-/// generation flags are stripped first -- see [`marker_compile_args`] --
+/// generation flags are stripped first -- see [`without_dependency_flags`] --
 /// or the marker compile becomes the last writer of the user's dependency
 /// file.
 pub(crate) fn inject_marker(
@@ -57,7 +58,7 @@ pub(crate) fn inject_marker(
     fs::write(&source, marker_source(&recorded_bitcode_filepath(bitcode)?))?;
 
     let status = Command::new(compiler)
-        .args(marker_compile_args(compile_args))
+        .args(without_dependency_flags(compile_args))
         .args(["-emit-llvm", "-c", "-o"])
         .arg(&marker)
         .arg(&source)
