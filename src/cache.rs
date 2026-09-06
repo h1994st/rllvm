@@ -1,8 +1,18 @@
 //! Incremental bitcode cache to avoid recompilation of unchanged files.
 //!
-//! The cache hashes source file contents and compiler flags to produce a cache key.
-//! If a cached bitcode file exists with a matching key, the cached version is reused
-//! instead of re-running the compiler.
+//! An entry is keyed by the *compilation*, not by the source file, in two
+//! levels. The **manifest key** covers the command: the source path, the
+//! arguments in order, and the compiler's identity. The **content key** adds
+//! the contents of every file the compilation actually read.
+//!
+//! The second needs a dependency list, and clang writes one as a byproduct of
+//! a compile: on a miss the bitcode is generated with `-MD` pointing at a
+//! private depfile inside the cache directory, and the next build hashes the
+//! closure that depfile names. No extra process is spent on a hit.
+//!
+//! Hashing only the source's own bytes -- as this once did -- meant editing a
+//! header served bitcode that no longer matched the object, with the object
+//! itself always compiled fresh. The two disagreed silently.
 //!
 //! Enable via the `RLLVM_CACHE` environment variable (`RLLVM_CACHE=1`) or the
 //! `cache_enabled` field in `~/.rllvm/config.toml`.
@@ -60,40 +70,121 @@ pub fn cache_dir(config_cache_dir: Option<&Path>) -> Result<PathBuf, Error> {
     Ok(dir)
 }
 
-/// Computes the cache key for a source file and its compilation flags.
+/// Parses the prerequisites out of a `make`-style dependency file.
 ///
-/// The key is a hash of:
-/// - The source file contents
-/// - The sorted compile arguments
-/// - Any bitcode generation flags from the config
-pub fn compute_cache_key(
+/// The shape is `target: prereq prereq \<newline> prereq`. Line continuations
+/// are joined, the target is dropped, and `\ ` is an escaped space inside a
+/// path rather than a separator.
+pub fn parse_depfile(contents: &str) -> Vec<PathBuf> {
+    let joined = contents.replace("\\\r\n", " ").replace("\\\n", " ");
+    let Some((_target, prerequisites)) = joined.split_once(':') else {
+        return vec![];
+    };
+
+    let mut paths = vec![];
+    let mut current = String::new();
+    let mut chars = prerequisites.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars.peek() == Some(&' ') => {
+                current.push(' ');
+                chars.next();
+            }
+            c if c.is_whitespace() => {
+                if !current.is_empty() {
+                    paths.push(PathBuf::from(std::mem::take(&mut current)));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        paths.push(PathBuf::from(current));
+    }
+    paths
+}
+
+/// Hashes the compilation command: source path, arguments, and compiler.
+///
+/// The arguments are hashed **in order**. Sorting them, as this once did, made
+/// `-I a -I b` and `-I b -I a` the same key even though include order decides
+/// which header of a given name wins.
+///
+/// The compiler's size and mtime are included so that upgrading LLVM does not
+/// serve bitcode the previous one produced.
+pub fn manifest_key(
     src_filepath: &Path,
     compile_args: &[String],
     bitcode_generation_flags: Option<&Vec<String>>,
-) -> Result<u64, Error> {
-    let src_contents = fs::read(src_filepath).map_err(|err| {
-        tracing::error!("Failed to read source file {:?}: {}", src_filepath, err);
-        err
-    })?;
-
+    compiler: &Path,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
 
-    // Hash the source file contents
-    src_contents.hash(&mut hasher);
-
-    // Hash the compile arguments (sorted for determinism)
-    let mut sorted_args = compile_args.to_vec();
-    sorted_args.sort();
-    sorted_args.hash(&mut hasher);
-
-    // Hash the bitcode generation flags if any
+    src_filepath.hash(&mut hasher);
+    compile_args.hash(&mut hasher);
     if let Some(flags) = bitcode_generation_flags {
-        let mut sorted_flags = flags.clone();
-        sorted_flags.sort();
-        sorted_flags.hash(&mut hasher);
+        flags.hash(&mut hasher);
     }
 
-    Ok(hasher.finish())
+    compiler.hash(&mut hasher);
+    if let Ok(metadata) = fs::metadata(compiler) {
+        metadata.len().hash(&mut hasher);
+        if let Ok(modified) = metadata.modified()
+            && let Ok(since_epoch) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            since_epoch.as_nanos().hash(&mut hasher);
+        }
+    }
+
+    hasher.finish()
+}
+
+/// Returns the path of the private dependency file for a manifest key.
+///
+/// It lives in the cache directory, never in the build tree: the build tree's
+/// dependency file belongs to the user's own `-MD`.
+pub fn cached_depfile_path(cache_dir: &Path, manifest_key: u64) -> PathBuf {
+    cache_dir.join(format!("{manifest_key:016x}.d"))
+}
+
+/// Extends a manifest key with the contents of everything the compilation read.
+///
+/// Returns `None` when the closure is unknown or unreadable -- no depfile from
+/// a previous build, or a prerequisite that has since been deleted -- which the
+/// caller must treat as a miss.
+///
+/// A change that would alter the output always alters this key: it must change
+/// the command (already in `manifest_key`) or the contents of a file in the
+/// closure. A new `#include` cannot appear without editing a file already
+/// listed here.
+pub fn content_key(manifest_key: u64, depfile: &Path) -> Option<u64> {
+    let contents = fs::read_to_string(depfile).ok()?;
+    let prerequisites = parse_depfile(&contents);
+    if prerequisites.is_empty() {
+        return None;
+    }
+
+    let mut hasher = DefaultHasher::new();
+    manifest_key.hash(&mut hasher);
+    for path in &prerequisites {
+        let bytes = fs::read(path).ok()?;
+        path.hash(&mut hasher);
+        bytes.hash(&mut hasher);
+    }
+    Some(hasher.finish())
+}
+
+/// Records a miss for a compilation whose closure is not yet known.
+///
+/// The first build of a command has no dependency file, so it never reaches
+/// [`cache_lookup`]; without this the statistics would count only the misses
+/// that got as far as checking for a file, and report a flattering hit rate.
+pub fn record_miss(src_filepath: &Path) {
+    CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
+    tracing::info!(
+        "Cache miss: src={:?}, no recorded dependency closure yet",
+        src_filepath
+    );
 }
 
 /// Returns the path where a cached bitcode file would be stored.
@@ -176,57 +267,120 @@ mod tests {
     use super::*;
 
     #[test]
-    fn compute_cache_key_deterministic() {
+    fn manifest_key_is_deterministic() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("test.c");
-        fs::write(&src, "int main() { return 0; }").unwrap();
-
+        let compiler = dir.path().join("clang");
+        fs::write(&compiler, b"binary").unwrap();
         let args = vec!["-O2".to_string(), "-Wall".to_string()];
 
-        let key1 = compute_cache_key(&src, &args, None).unwrap();
-        let key2 = compute_cache_key(&src, &args, None).unwrap();
-        assert_eq!(key1, key2);
+        assert_eq!(
+            manifest_key(&src, &args, None, &compiler),
+            manifest_key(&src, &args, None, &compiler)
+        );
     }
 
     #[test]
-    fn compute_cache_key_changes_with_content() {
+    fn manifest_key_depends_on_argument_order() {
+        // This asserts the opposite of what it once did. Order is semantic:
+        // `-I a -I b` and `-I b -I a` find different headers of the same name,
+        // and treating them as one key served the wrong bitcode.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("test.c");
+        let compiler = dir.path().join("clang");
+        fs::write(&compiler, b"binary").unwrap();
+
+        let a_first = ["-I", "a", "-I", "b"].map(String::from).to_vec();
+        let b_first = ["-I", "b", "-I", "a"].map(String::from).to_vec();
+
+        assert_ne!(
+            manifest_key(&src, &a_first, None, &compiler),
+            manifest_key(&src, &b_first, None, &compiler)
+        );
+    }
+
+    #[test]
+    fn manifest_key_changes_with_flags() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("test.c");
+        let compiler = dir.path().join("clang");
+        fs::write(&compiler, b"binary").unwrap();
+
+        assert_ne!(
+            manifest_key(&src, &["-O2".to_string()], None, &compiler),
+            manifest_key(&src, &["-O3".to_string()], None, &compiler)
+        );
+    }
+
+    #[test]
+    fn manifest_key_changes_with_the_compiler() {
+        // An LLVM upgrade must not serve bitcode the old compiler produced.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("test.c");
+        let compiler = dir.path().join("clang");
         let args = vec!["-O2".to_string()];
 
-        fs::write(&src, "int main() { return 0; }").unwrap();
-        let key1 = compute_cache_key(&src, &args, None).unwrap();
+        fs::write(&compiler, b"old build").unwrap();
+        let before = manifest_key(&src, &args, None, &compiler);
 
-        fs::write(&src, "int main() { return 1; }").unwrap();
-        let key2 = compute_cache_key(&src, &args, None).unwrap();
+        fs::write(&compiler, b"a different, longer build").unwrap();
+        let after = manifest_key(&src, &args, None, &compiler);
 
-        assert_ne!(key1, key2);
+        assert_ne!(before, after);
     }
 
     #[test]
-    fn compute_cache_key_changes_with_flags() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("test.c");
-        fs::write(&src, "int main() { return 0; }").unwrap();
-
-        let key1 = compute_cache_key(&src, &["-O2".to_string()], None).unwrap();
-        let key2 = compute_cache_key(&src, &["-O3".to_string()], None).unwrap();
-
-        assert_ne!(key1, key2);
+    fn parse_depfile_handles_continuations_and_escaped_spaces() {
+        let contents = "out.bc: /src/a.c \\\n  /inc/b.h \\\n  /has\\ space/c.h\n";
+        assert_eq!(
+            parse_depfile(contents),
+            vec![
+                PathBuf::from("/src/a.c"),
+                PathBuf::from("/inc/b.h"),
+                PathBuf::from("/has space/c.h"),
+            ]
+        );
     }
 
     #[test]
-    fn compute_cache_key_arg_order_independent() {
+    fn parse_depfile_without_a_target_yields_nothing() {
+        assert!(parse_depfile("no colon here").is_empty());
+    }
+
+    #[test]
+    fn content_key_changes_when_a_prerequisite_changes() {
+        // The whole point: a header edit must move the key even though the
+        // source file and the command are untouched.
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("test.c");
-        fs::write(&src, "int main() { return 0; }").unwrap();
+        let source = dir.path().join("a.c");
+        let header = dir.path().join("b.h");
+        let depfile = dir.path().join("entry.d");
+        fs::write(&source, "#include \"b.h\"\n").unwrap();
+        fs::write(&header, "#define VALUE 1\n").unwrap();
+        fs::write(
+            &depfile,
+            format!("out.bc: {} {}\n", source.display(), header.display()),
+        )
+        .unwrap();
 
-        let key1 =
-            compute_cache_key(&src, &["-O2".to_string(), "-Wall".to_string()], None).unwrap();
-        let key2 =
-            compute_cache_key(&src, &["-Wall".to_string(), "-O2".to_string()], None).unwrap();
+        let before = content_key(7, &depfile).expect("closure is readable");
+        fs::write(&header, "#define VALUE 2\n").unwrap();
+        let after = content_key(7, &depfile).expect("closure is readable");
 
-        assert_eq!(key1, key2);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn content_key_is_none_when_the_closure_is_unusable() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // No depfile at all -- the first build of this command.
+        assert!(content_key(7, &dir.path().join("missing.d")).is_none());
+
+        // A prerequisite that has since been deleted.
+        let depfile = dir.path().join("stale.d");
+        fs::write(&depfile, "out.bc: /nonexistent/gone.h\n").unwrap();
+        assert!(content_key(7, &depfile).is_none());
     }
 
     #[test]

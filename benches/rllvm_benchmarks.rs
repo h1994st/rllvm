@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use object::{BinaryFormat, SectionKind, write};
 use rllvm::arg_parser::CompilerArgsInfo;
-use rllvm::cache::compute_cache_key;
+use rllvm::cache::{content_key, manifest_key};
 use rllvm::utils::{
     calculate_filepath_hash, embed_bitcode_filepath_to_object_file,
     extract_bitcode_filepaths_from_object_file, extract_bitcode_filepaths_from_parsed_object,
@@ -188,37 +188,48 @@ fn bench_cache_key(c: &mut Criterion) {
         .map(String::from)
         .collect();
 
-    group.bench_function("small_file", |b| {
-        b.iter(|| {
-            compute_cache_key(black_box(&small_src), black_box(&args), None)
-                .expect("cache key failed");
-        });
-    });
+    let compiler = dir.path().join("clang");
+    fs::write(&compiler, b"a stand-in for the compiler binary").unwrap();
 
-    group.bench_function("medium_file_10kb", |b| {
+    // A cache lookup costs one `manifest_key` plus one `content_key`. The
+    // first is trivial; the second reads and hashes every file the compilation
+    // touched, so it scales with the include closure, not with the source.
+    group.bench_function("manifest_key", |b| {
         b.iter(|| {
-            compute_cache_key(black_box(&medium_src), black_box(&args), None)
-                .expect("cache key failed");
-        });
-    });
-
-    group.bench_function("large_file_100kb", |b| {
-        b.iter(|| {
-            compute_cache_key(black_box(&large_src), black_box(&args), None)
-                .expect("cache key failed");
-        });
-    });
-
-    let extra_flags = vec!["-emit-llvm".to_string(), "-flto".to_string()];
-    group.bench_function("with_bitcode_flags", |b| {
-        b.iter(|| {
-            compute_cache_key(
+            manifest_key(
                 black_box(&small_src),
                 black_box(&args),
-                Some(black_box(&extra_flags)),
-            )
-            .expect("cache key failed");
+                None,
+                black_box(&compiler),
+            );
         });
+    });
+
+    let depfile = |name: &str, prerequisites: &[&PathBuf]| -> PathBuf {
+        let path = dir.path().join(name);
+        let listed: Vec<String> = prerequisites
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        fs::write(&path, format!("out.bc: {}\n", listed.join(" "))).unwrap();
+        path
+    };
+
+    let one = depfile("one.d", &[&small_src]);
+    let three = depfile("three.d", &[&small_src, &medium_src, &large_src]);
+    let wide: Vec<&PathBuf> = std::iter::repeat_n(&medium_src, 100).collect();
+    let hundred = depfile("hundred.d", &wide);
+
+    group.bench_function("content_key_one_prerequisite", |b| {
+        b.iter(|| content_key(black_box(7), black_box(&one)));
+    });
+
+    group.bench_function("content_key_three_prerequisites", |b| {
+        b.iter(|| content_key(black_box(7), black_box(&three)));
+    });
+
+    group.bench_function("content_key_hundred_prerequisites_10kb_each", |b| {
+        b.iter(|| content_key(black_box(7), black_box(&hundred)));
     });
 
     group.finish();

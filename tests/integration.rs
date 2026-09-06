@@ -3134,3 +3134,123 @@ fn dependency_flags_do_not_suppress_bitcode_in_link_mode() {
     );
     assert_bitcode_magic(&bitcode);
 }
+
+/// Writes a config with caching enabled and an isolated cache directory, so a
+/// cache test never shares state with `~/.rllvm/cache` or with another test.
+fn cache_config(dir: &Path) -> PathBuf {
+    let base = fs::read_to_string(shared_config_path()).unwrap();
+    let cache = dir.join("cache");
+    fs::create_dir_all(&cache).unwrap();
+    let path = dir.join("cache-config.toml");
+    fs::write(
+        &path,
+        format!(
+            "{base}cache_enabled = true\ncache_dir = '{}'\n",
+            cache.display()
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// A cached `.bc` must not survive a change to a header it includes.
+///
+/// The object is always compiled fresh, so a stale cache entry makes the
+/// binary and the bitcode extracted from it disagree silently -- the worst
+/// failure this tool has. Note the build must be an ordinary `-c`: `-emit-llvm`
+/// skips bitcode generation entirely, so it never reaches the cache.
+#[test]
+fn cache_tracks_changes_to_included_headers() {
+    let tmp = TempDir::new().unwrap();
+    let config = cache_config(tmp.path());
+    let header = tmp.path().join("val.h");
+    let source = tmp.path().join("cached.c");
+    fs::write(&source, "#include \"val.h\"\nint f(void) { return VAL; }\n").unwrap();
+
+    let build = |value: &str, tag: &str| -> Vec<u8> {
+        fs::write(&header, format!("#define VAL {value}\n")).unwrap();
+        let object = tmp.path().join(format!("cached_{tag}.o"));
+        let status = Command::new(cargo_bin("rllvm-cc"))
+            .env("RLLVM_CONFIG", &config)
+            .args(["--", "-c", "-o"])
+            .arg(&object)
+            .arg(&source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed");
+
+        let extracted = tmp.path().join(format!("cached_{tag}.bc"));
+        let status = Command::new(cargo_bin("rllvm-get-bc"))
+            .env("RLLVM_CONFIG", &config)
+            .arg(&object)
+            .arg("-o")
+            .arg(&extracted)
+            .status()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(status.success(), "rllvm-get-bc failed");
+        fs::read(&extracted).unwrap()
+    };
+
+    let first = build("111", "first");
+    let second = build("222", "second");
+    assert_ne!(
+        first, second,
+        "the cache served bitcode built against the old header"
+    );
+}
+
+/// Include search order decides which header of a given name wins, so two
+/// argument lists that differ only in that order are different compilations.
+#[test]
+fn cache_distinguishes_include_search_order() {
+    let tmp = TempDir::new().unwrap();
+    let config = cache_config(tmp.path());
+    let dir_a = tmp.path().join("a");
+    let dir_b = tmp.path().join("b");
+    fs::create_dir_all(&dir_a).unwrap();
+    fs::create_dir_all(&dir_b).unwrap();
+    fs::write(dir_a.join("which.h"), "#define WHICH 1\n").unwrap();
+    fs::write(dir_b.join("which.h"), "#define WHICH 2\n").unwrap();
+
+    let source = tmp.path().join("order.c");
+    fs::write(
+        &source,
+        "#include \"which.h\"\nint g(void) { return WHICH; }\n",
+    )
+    .unwrap();
+
+    let build = |first: &Path, second: &Path, tag: &str| -> Vec<u8> {
+        let object = tmp.path().join(format!("order_{tag}.o"));
+        let status = Command::new(cargo_bin("rllvm-cc"))
+            .env("RLLVM_CONFIG", &config)
+            .arg("--")
+            .arg("-I")
+            .arg(first)
+            .arg("-I")
+            .arg(second)
+            .args(["-c", "-o"])
+            .arg(&object)
+            .arg(&source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed");
+
+        let extracted = tmp.path().join(format!("order_{tag}.bc"));
+        let status = Command::new(cargo_bin("rllvm-get-bc"))
+            .env("RLLVM_CONFIG", &config)
+            .arg(&object)
+            .arg("-o")
+            .arg(&extracted)
+            .status()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(status.success(), "rllvm-get-bc failed");
+        fs::read(&extracted).unwrap()
+    };
+
+    let a_first = build(&dir_a, &dir_b, "ab");
+    let b_first = build(&dir_b, &dir_a, "ba");
+    assert_ne!(
+        a_first, b_first,
+        "the cache key ignored include order, so the second build reused the first's bitcode"
+    );
+}

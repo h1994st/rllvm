@@ -313,15 +313,27 @@ pub trait CompilerWrapper {
                 // generate the bitcode and directly use the source file
                 src_filepath
             } else if let Some(ref cache_dir) = cache_directory {
-                // Caching is enabled — check for a cache hit
-                let cache_key = cache::compute_cache_key(
+                // Caching is enabled — check for a cache hit. The manifest key
+                // identifies the command; the content key adds everything the
+                // last compile of that command read, which is what a header
+                // edit has to invalidate.
+                let manifest_key = cache::manifest_key(
                     &src_filepath,
                     self.args().compile_args(),
                     config.bitcode_generation_flags(),
-                )?;
+                    self.wrapped_compiler(),
+                );
+                let depfile = cache::cached_depfile_path(cache_dir, manifest_key);
+                let cached = match cache::content_key(manifest_key, &depfile) {
+                    Some(key) => cache::cache_lookup(cache_dir, &src_filepath, key),
+                    // No closure recorded yet: the first build of this command.
+                    None => {
+                        cache::record_miss(&src_filepath);
+                        None
+                    }
+                };
 
-                if let Some(cached_path) = cache::cache_lookup(cache_dir, &src_filepath, cache_key)
-                {
+                if let Some(cached_path) = cached {
                     // Cache hit — copy cached bitcode to expected output location
                     std::fs::copy(&cached_path, &bitcode_filepath).map_err(|err| {
                         tracing::error!(
@@ -334,17 +346,31 @@ pub trait CompilerWrapper {
                     })?;
                     bitcode_filepath
                 } else {
-                    // Cache miss — generate bitcode and store in cache
-                    if let Some(code) =
-                        self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
-                        && code != 0
+                    // Cache miss — generate the bitcode, recording what it
+                    // read so the next build can key on that closure.
+                    if let Some(code) = self.generate_bitcode_file_with_depfile(
+                        &src_filepath,
+                        &bitcode_filepath,
+                        Some(&depfile),
+                    )? && code != 0
                     {
                         return Ok(Some(code));
                     }
-                    if let Err(err) =
-                        cache::cache_store(cache_dir, &src_filepath, cache_key, &bitcode_filepath)
-                    {
-                        tracing::warn!("Failed to store bitcode in cache: {}", err);
+                    // Keyed on the closure the compile just reported, not on
+                    // whatever a previous build left behind.
+                    match cache::content_key(manifest_key, &depfile) {
+                        Some(key) => {
+                            if let Err(err) =
+                                cache::cache_store(cache_dir, &src_filepath, key, &bitcode_filepath)
+                            {
+                                tracing::warn!("Failed to store bitcode in cache: {}", err);
+                            }
+                        }
+                        None => tracing::warn!(
+                            "No usable dependency file at {:?}; not caching {:?}",
+                            depfile,
+                            src_filepath
+                        ),
                     }
                     bitcode_filepath
                 }
@@ -415,6 +441,24 @@ pub trait CompilerWrapper {
     where
         P: AsRef<Path>,
     {
+        self.generate_bitcode_file_with_depfile(src_filepath, bitcode_filepath, None)
+    }
+
+    /// Generate bitcode for one input file, optionally recording what it read.
+    ///
+    /// `depfile` is the cache's own dependency file, inside the cache
+    /// directory. `-MD` costs almost nothing during a compile that is
+    /// happening anyway, and it is what lets the next build know the include
+    /// closure without running the preprocessor itself.
+    fn generate_bitcode_file_with_depfile<P>(
+        &self,
+        src_filepath: P,
+        bitcode_filepath: P,
+        depfile: Option<&Path>,
+    ) -> Result<Option<i32>, Error>
+    where
+        P: AsRef<Path>,
+    {
         let src_filepath = src_filepath.as_ref();
         let bitcode_filepath = bitcode_filepath.as_ref();
         let compiler_filepath = self.wrapped_compiler();
@@ -427,6 +471,15 @@ pub trait CompilerWrapper {
         // Add bitcode generation flags
         if let Some(bitcode_generation_flags) = try_rllvm_config()?.bitcode_generation_flags() {
             args.extend(bitcode_generation_flags.iter().cloned());
+        }
+        // Ours, not the user's: their `-M*` flags were stripped above, and
+        // this file is written inside the cache directory.
+        if let Some(depfile) = depfile {
+            args.extend_from_slice(&[
+                "-MD".to_string(),
+                "-MF".to_string(),
+                depfile.to_string_lossy().into_owned(),
+            ]);
         }
         args.extend_from_slice(&[
             "-emit-llvm".to_string(),
