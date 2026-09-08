@@ -2544,6 +2544,147 @@ fn lto_cxx_build_with_std_flag_succeeds() {
     );
 }
 
+/// `-ffat-lto-objects` produces a real ELF object with the bitcode inside, so
+/// the wrapper's content-based dispatch sends it down the ordinary
+/// `llvm-objcopy` path rather than the marker path. Only `is_bitcode_file`'s
+/// own unit test covered that decision; nothing asserted that such a build
+/// stays extractable end to end.
+///
+/// Linux only: clang rejects `-ffat-lto-objects` on Darwin.
+#[test]
+#[cfg(target_os = "linux")]
+fn fat_lto_objects_stay_extractable_through_the_object_path() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .args(["--", "-flto", "-ffat-lto-objects", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+
+        // The premise of the test, not incidental detail: a fat object is an
+        // ELF object, which is what routes it to the objcopy path. A plain
+        // `-flto` object starts `BC\xc0\xde` and would take the marker path,
+        // making this a duplicate of the tests above without anyone noticing.
+        let bytes = fs::read(&object).unwrap();
+        assert_eq!(
+            &bytes[..4],
+            b"\x7fELF",
+            "expected a fat LTO object at {object:?}"
+        );
+
+        objects.push(object);
+    }
+
+    // Linked without `-flto`, so the linker takes the machine-code half and
+    // the embedded section rides through like any other object's. Linking the
+    // same objects *with* `-flto` loses it -- see the ignored test below.
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.args(["--", "-o"]).arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(link.status().unwrap().success(), "fat LTO link failed");
+
+    let bitcode = tmp.path().join("prog.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-o")
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        status.success(),
+        "rllvm-get-bc failed on the fat LTO binary"
+    );
+    assert_bitcode_magic(&bitcode);
+
+    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let output = Command::new(nm)
+        .arg("--defined-only")
+        .arg(&bitcode)
+        .output()
+        .expect("llvm-nm failed");
+    let symbols = String::from_utf8_lossy(&output.stdout);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.contains(symbol),
+            "{symbol} missing from:\n{symbols}"
+        );
+    }
+}
+
+/// The other half of `-ffat-lto-objects`: linking fat objects **with** `-flto`
+/// drops the embedded section, because the linker consumes the bitcode half of
+/// each object and the original object's non-alloc sections never reach the
+/// output. The build exits 0 and says nothing; extraction is where it surfaces.
+///
+/// Ignored until #115 is fixed. It asserts the behaviour rllvm should have, so
+/// it flips to passing on its own once the fix lands -- remove the `#[ignore]`
+/// then.
+#[test]
+#[ignore = "https://github.com/h1994st/rllvm/issues/115"]
+#[cfg(target_os = "linux")]
+fn fat_lto_objects_linked_with_lto_stay_extractable() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .args(["--", "-flto", "-ffat-lto-objects", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.args(["--", "-flto", "-o"]).arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(link.status().unwrap().success(), "fat LTO link failed");
+
+    let bitcode = tmp.path().join("prog.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-o")
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        status.success(),
+        "rllvm-get-bc found no bitcode in the fat LTO binary"
+    );
+    assert_bitcode_magic(&bitcode);
+
+    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let output = Command::new(nm)
+        .arg("--defined-only")
+        .arg(&bitcode)
+        .output()
+        .expect("llvm-nm failed");
+    let symbols = String::from_utf8_lossy(&output.stdout);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.contains(symbol),
+            "{symbol} missing from:\n{symbols}"
+        );
+    }
+}
+
 /// `lto_mode = "save-temps"` collects the module the linker's own LTO
 /// pipeline merged, instead of recording per-unit paths with a marker.
 #[test]
@@ -2608,6 +2749,88 @@ fn save_temps_mode_records_the_linker_merged_module() {
     assert!(
         manifest.trim().ends_with("prog.rllvm.bc"),
         "the binary must name the merged module:\n{manifest}"
+    );
+}
+
+/// `collect_saved_module` has an arm that `llvm-link`s several saved modules
+/// together, reached only when the link used more than one LTO partition. A
+/// default link saves exactly one module and takes the single-match arm, so
+/// the merge arm is dark even on Linux CI.
+///
+/// Linux only: `--lto-partitions` is an lld option, hence `-fuse-ld=lld`.
+#[test]
+#[cfg(target_os = "linux")]
+fn save_temps_merges_every_lto_partition() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["--", "-flto", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.env("RLLVM_LTO_MODE", "save-temps")
+        .args([
+            "--",
+            "-flto",
+            "-fuse-ld=lld",
+            "-Wl,--lto-partitions=2",
+            "-o",
+        ])
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    assert!(
+        link.status().unwrap().success(),
+        "two-partition save-temps link failed"
+    );
+
+    let merged = tmp.path().join("prog.rllvm.bc");
+    assert!(merged.exists(), "the merged module was not collected");
+    assert_bitcode_magic(&merged);
+
+    // Both partitions have to be in it. Keeping only one loses whichever
+    // translation units codegen assigned to the other.
+    // `--defined-only` is what makes this assertion load-bearing. lld puts
+    // `a_fn` in one partition and `b_fn`/`main` in the other, and a merge that
+    // kept only the first would still list the dropped symbol as an undefined
+    // reference -- so a bare `contains` passes with the merge arm removed.
+    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let output = Command::new(nm)
+        .arg("--defined-only")
+        .arg(&merged)
+        .output()
+        .expect("llvm-nm failed");
+    let symbols = String::from_utf8_lossy(&output.stdout);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.contains(symbol),
+            "{symbol} missing from the merged partitions:\n{symbols}"
+        );
+    }
+
+    // The per-partition modules are consumed by the merge, not left behind.
+    let leftovers: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with("precodegen.bc"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "save-temps partitions were left behind: {leftovers:?}"
     );
 }
 
