@@ -10,7 +10,7 @@ use which::which;
 
 #[cfg(not(target_vendor = "apple"))]
 use crate::constants::{LLVM_VERSION_MAX, LLVM_VERSION_MIN};
-use crate::utils::{execute_command_for_status, execute_command_for_stdout_string};
+use crate::utils::{execute_command_for_stdout_string, execute_llvm_tool};
 use crate::{config::try_rllvm_config, error::Error};
 
 /// Execute `llvm-config` with the given arguments and return stdout.
@@ -92,9 +92,6 @@ pub fn find_llvm_config() -> Result<PathBuf, Error> {
 }
 
 /// Link given bitcode files into one bitcode file
-///
-/// TODO: do we need to link bitcode files incrementally in case the command
-/// execeeds the limitation of `getconf ARG_MAX`?
 pub fn link_bitcode_files<P>(
     bitcode_filepaths: &[P],
     output_filepath: P,
@@ -121,15 +118,12 @@ where
             .map(|x| x.as_ref().to_string_lossy().into_owned()),
     );
 
-    execute_command_for_status(try_rllvm_config()?.llvm_link_filepath(), &args)
-        .map(|status| status.code())
+    execute_llvm_tool(try_rllvm_config()?.llvm_link_filepath(), &args).map(|status| status.code())
 }
 
 /// Archive given bitcode files into one archive file
 ///
-/// TODO:
-/// 1. do we need to archive files incrementally?
-/// 2. do we need to avoid absolute paths in the generated archive?
+/// TODO: do we need to avoid absolute paths in the generated archive?
 pub fn archive_bitcode_files<P>(
     bitcode_filepaths: &[P],
     output_filepath: P,
@@ -150,14 +144,16 @@ where
             .map(|x| x.as_ref().to_string_lossy().into_owned()),
     );
 
-    execute_command_for_status(try_rllvm_config()?.llvm_ar_filepath(), &args)
-        .map(|status| status.code())
+    execute_llvm_tool(try_rllvm_config()?.llvm_ar_filepath(), &args).map(|status| status.code())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler_wrapper::{CompilerKind, CompilerWrapper, llvm::ClangWrapper};
+    use crate::{
+        compiler_wrapper::{CompilerKind, CompilerWrapper, llvm::ClangWrapper},
+        constants::RESPONSE_FILE_ARGUMENT_THRESHOLD,
+    };
     use std::{
         fs,
         path::{Path, PathBuf},
@@ -194,30 +190,112 @@ mod tests {
 
         sources
             .iter()
-            .map(|(name, contents)| {
-                let source_path = dir.join(format!("{name}.c"));
-                fs::write(&source_path, contents).expect("Failed to write the source file");
-
-                let bitcode_path = dir.join(format!("{name}.bc"));
-                let args = [
-                    "-c",
-                    "-emit-llvm",
-                    "-o",
-                    bitcode_path.to_str().unwrap(),
-                    source_path.to_str().unwrap(),
-                ];
-
-                let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang)
-                    .expect("Failed to build the clang wrapper");
-                assert_eq!(
-                    cc.parse_args(&args).unwrap().run().unwrap(),
-                    Some(0),
-                    "Failed to generate bitcode for {name}.c"
-                );
-
-                bitcode_path
-            })
+            .map(|(name, contents)| build_bitcode_file(dir, name, contents))
             .collect()
+    }
+
+    /// Compile one source into a bitcode file beside it.
+    fn build_bitcode_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let source_path = dir.join(format!("{name}.c"));
+        fs::write(&source_path, contents).expect("Failed to write the source file");
+
+        let bitcode_path = dir.join(format!("{name}.bc"));
+        let args = [
+            "-c",
+            "-emit-llvm",
+            "-o",
+            bitcode_path.to_str().unwrap(),
+            source_path.to_str().unwrap(),
+        ];
+
+        let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang)
+            .expect("Failed to build the clang wrapper");
+        assert_eq!(
+            cc.parse_args(&args).unwrap().run().unwrap(),
+            Some(0),
+            "Failed to generate bitcode for {name}.c"
+        );
+
+        bitcode_path
+    }
+
+    /// Compile one empty module at a deliberately long path.
+    ///
+    /// `ARG_MAX` counts bytes, not arguments, so overflowing it takes paths
+    /// that are long as well as numerous: a few thousand short temp paths fit
+    /// comfortably. Four 200-byte components stay under the 255-byte component
+    /// limit and leave room under macOS's 1024-byte `PATH_MAX`.
+    ///
+    /// The module is empty so it defines no symbols, which is what lets the
+    /// same file be linked against itself thousands of times without
+    /// colliding. One compile keeps the test fast.
+    fn build_deeply_nested_empty_module(dir: &Path) -> PathBuf {
+        let mut nested = dir.to_path_buf();
+        for _ in 0..4 {
+            nested = nested.join("d".repeat(200));
+        }
+        fs::create_dir_all(&nested).expect("Failed to create the nested directory");
+
+        build_bitcode_file(&nested, "empty", "")
+    }
+
+    /// Number of copies that puts the command line past `ARG_MAX` on every
+    /// supported host: roughly 3.8 MB at the path length above, against a
+    /// 1 MB limit on macOS and 2 MB on Linux.
+    const OVERSIZED_ARGUMENT_COUNT: usize = 4096;
+
+    #[test]
+    fn links_more_bitcode_files_than_fit_in_an_argument_list() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let module = build_deeply_nested_empty_module(dir.path());
+        let bitcode_filepaths = vec![module; OVERSIZED_ARGUMENT_COUNT];
+        let output_pathbuf = dir.path().join("linked.bc");
+
+        assert_eq!(
+            link_bitcode_files(&bitcode_filepaths, output_pathbuf.clone()).unwrap(),
+            Some(0)
+        );
+        assert!(output_pathbuf.is_file());
+    }
+
+    #[test]
+    fn archives_more_bitcode_files_than_fit_in_an_argument_list() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let module = build_deeply_nested_empty_module(dir.path());
+        let bitcode_filepaths = vec![module; OVERSIZED_ARGUMENT_COUNT];
+        let output_pathbuf = dir.path().join("archived.bca");
+
+        assert_eq!(
+            archive_bitcode_files(&bitcode_filepaths, output_pathbuf.clone()).unwrap(),
+            Some(0)
+        );
+        assert!(output_pathbuf.is_file());
+    }
+
+    /// The response file is text, so a path containing whitespace or a quote
+    /// splits into two arguments unless it is escaped.
+    ///
+    /// This asserts on what `llvm-link` produced, not on the escaped string:
+    /// an assertion against `escape_response_file_argument`'s own output would
+    /// hold just as well if that output were wrong for LLVM's tokenizer.
+    #[test]
+    fn links_bitcode_files_whose_paths_need_escaping() {
+        let dir = tempfile::tempdir().expect("Failed to create temp dir");
+        let awkward = dir.path().join(r#"a dir with 'quotes' and "spaces""#);
+        fs::create_dir_all(&awkward).expect("Failed to create the awkward directory");
+
+        // Enough copies to cross the threshold, so the paths travel through the
+        // response file rather than the argument list. Empty, so the repetition
+        // defines no symbol twice.
+        let module = build_bitcode_file(&awkward, "escaped", "");
+        let bitcode_filepaths = vec![module; RESPONSE_FILE_ARGUMENT_THRESHOLD + 1];
+        let output_pathbuf = dir.path().join("escaped_out.bc");
+
+        assert_eq!(
+            link_bitcode_files(&bitcode_filepaths, output_pathbuf.clone()).unwrap(),
+            Some(0)
+        );
+        assert!(output_pathbuf.is_file());
     }
 
     #[test]
