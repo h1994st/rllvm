@@ -593,3 +593,19 @@ pub(crate) fn arg_patterns() -> &'static ArgPatternTable {
         ])
     })
 }
+
+/// Argument count past which an LLVM tool is invoked through a response file
+/// rather than a plain argument list.
+///
+/// `execve` rejects an argument list larger than `ARG_MAX`, which counts bytes.
+/// A count-based threshold is safe only if it holds when every argument is as
+/// long as the platform allows, which this one does:
+///
+/// | host  | `ARG_MAX` | `PATH_MAX` | 256 worst-case paths | margin |
+/// | ----- | --------- | ---------- | -------------------- | ------ |
+/// | macOS | 1 MB      | 1024       | 256 KB               | 4x     |
+/// | Linux | 2 MB      | 4096       | 1 MB                 | 2x     |
+///
+/// It is also well above the argument count of an ordinary project, so a
+/// typical build keeps the plain argument list.
+pub(crate) const RESPONSE_FILE_ARGUMENT_THRESHOLD: usize = 256;

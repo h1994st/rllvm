@@ -22,6 +22,10 @@ pub use llvm_utils::{
     archive_bitcode_files, execute_llvm_config, find_llvm_config, link_bitcode_files,
 };
 
+/// Response files for oversized LLVM tool invocations
+mod response_file;
+pub(crate) use response_file::execute_llvm_tool;
+
 /// Filepath-related utility functions
 mod path_utils;
 pub use path_utils::calculate_filepath_hash;
