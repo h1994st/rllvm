@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/h1994st/rllvm/compare/v0.4.0...v0.4.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* pass oversized llvm-link and llvm-ar invocations through a response file ([#113](https://github.com/h1994st/rllvm/issues/113)) ([5027fc4](https://github.com/h1994st/rllvm/commit/5027fc419191a57604e9385cb65ff0c2c2b11cf7)), closes [#112](https://github.com/h1994st/rllvm/issues/112)
+
 ## [0.4.0](https://github.com/h1994st/rllvm/compare/v0.3.0...v0.4.0) (2026-09-06)
 
 
