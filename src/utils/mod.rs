@@ -14,7 +14,9 @@ pub use file_utils::{
     embed_bitcode_filepath_to_object_file, extract_bitcode_filepaths_from_object_file,
     extract_bitcode_filepaths_from_parsed_object, extract_bitcode_filepaths_from_parsed_objects,
 };
-pub(crate) use file_utils::{is_bitcode_file, is_object_file, recorded_bitcode_filepath};
+pub(crate) use file_utils::{
+    has_fat_lto_bitcode, is_bitcode_file, is_object_file, recorded_bitcode_filepath,
+};
 
 /// LLVM-related utility functions
 mod llvm_utils;

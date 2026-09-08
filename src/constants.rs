@@ -57,6 +57,15 @@ pub(crate) const ELF_SECTION_NAME: &str = ".rllvm_bc";
 pub(crate) const COFF_SECTION_NAME: &str = ".rllvm_bc";
 pub(crate) const WASM_SECTION_NAME: &str = ".rllvm_bc";
 
+/// The section clang writes the bitcode into under `-ffat-lto-objects`.
+///
+/// Not rllvm's own: this is LLVM's name, and a fat object is recognised by
+/// carrying it. Both halves of such an object have to record the path, because
+/// which one the linker consumes is decided at link time -- GNU ld's plugin
+/// generates code from this section and discards the rest of the object, while
+/// lld defaults to `--no-fat-lto-objects` and links the machine code instead.
+pub(crate) const FAT_LTO_SECTION_NAME: &str = ".llvm.lto";
+
 /// Environment variables
 pub(crate) const DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME: &str = "RLLVM_CONFIG";
 pub(crate) const HOME_ENV_NAME: &str = "HOME";

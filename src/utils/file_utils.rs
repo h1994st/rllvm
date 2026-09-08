@@ -17,7 +17,7 @@ use crate::{
     config::try_rllvm_config,
     constants::{
         COFF_SECTION_NAME, DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME,
-        WASM_SECTION_NAME,
+        FAT_LTO_SECTION_NAME, WASM_SECTION_NAME,
     },
     error::Error,
     utils::execute_command_for_status,
@@ -79,6 +79,28 @@ where
     }
 
     Ok(head == [0x42, 0x43, 0xC0, 0xDE] || u32::from_le_bytes(head) == 0x0B17_C0DE)
+}
+
+/// Whether `filepath` is a fat LTO object: a real object that also carries the
+/// bitcode, as `-ffat-lto-objects` produces.
+///
+/// Such an object takes the ordinary embedding path because it is not itself
+/// bitcode, but that records the path only in the half a non-LTO link keeps.
+/// See [`FAT_LTO_SECTION_NAME`].
+pub(crate) fn has_fat_lto_bitcode<P>(filepath: P) -> Result<bool, Error>
+where
+    P: AsRef<Path>,
+{
+    let data = fs::read(filepath.as_ref())?;
+    // Anything unparseable is simply not a fat object; classification errors
+    // here would reject inputs the ordinary path handles fine.
+    let Ok(object) = File::parse(&*data) else {
+        return Ok(false);
+    };
+
+    Ok(object
+        .sections()
+        .any(|section| section.name() == Ok(FAT_LTO_SECTION_NAME)))
 }
 
 /// The entry recorded for `bitcode_filepath`, without the trailing newline.

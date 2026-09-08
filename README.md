@@ -205,7 +205,10 @@ happens instead.
 `marker` (default) compiles a marker module naming the bitcode and merges it
 into the LTO object with `llvm-link`. Covers full and thin LTO, ELF and
 Mach-O, C and C++, and mixes with objects built without `-flto`. Costs one
-extra compile and one `llvm-link` per translation unit.
+extra compile and one `llvm-link` per translation unit. A fat object
+(`-ffat-lto-objects`) records the path in both of its halves, because the
+linker decides which one it consumes: GNU ld generates code from the
+bitcode, while lld links the machine code.
 
 `save-temps` appends the linker's save-temps flag, then collects the
 whole-program module the LTO pipeline merged, recording its path instead of

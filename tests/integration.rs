@@ -2621,18 +2621,24 @@ fn fat_lto_objects_stay_extractable_through_the_object_path() {
     }
 }
 
-/// The other half of `-ffat-lto-objects`: linking fat objects **with** `-flto`
-/// drops the embedded section, because the linker consumes the bitcode half of
-/// each object and the original object's non-alloc sections never reach the
-/// output. The build exits 0 and says nothing; extraction is where it surfaces.
+/// The other half of `-ffat-lto-objects`: linking fat objects **with** `-flto`.
 ///
-/// Ignored until #115 is fixed. It asserts the behaviour rllvm should have, so
-/// it flips to passing on its own once the fix lands -- remove the `#[ignore]`
-/// then.
+/// Which half of a fat object the linker consumes is decided at link time.
+/// GNU ld's plugin generates code from the bitcode and discards the rest of
+/// the object, taking the embedded section with it; lld defaults to
+/// `--no-fat-lto-objects` and links the machine code, keeping it. Both are
+/// exercised, because recording only one half passes under one linker and
+/// fails under the other -- which is how #115 shipped.
 #[test]
-#[ignore = "https://github.com/h1994st/rllvm/issues/115"]
 #[cfg(target_os = "linux")]
 fn fat_lto_objects_linked_with_lto_stay_extractable() {
+    for linker in ["-fuse-ld=bfd", "-fuse-ld=lld"] {
+        fat_lto_link_records_every_unit(linker);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fat_lto_link_records_every_unit(linker: &str) {
     let tmp = TempDir::new().unwrap();
     let sources = write_lto_sources(tmp.path());
 
@@ -2651,11 +2657,14 @@ fn fat_lto_objects_linked_with_lto_stay_extractable() {
 
     let program = tmp.path().join("prog");
     let mut link = rllvm("rllvm-cc");
-    link.args(["--", "-flto", "-o"]).arg(&program);
+    link.args(["--", "-flto", linker, "-o"]).arg(&program);
     for object in &objects {
         link.arg(object);
     }
-    assert!(link.status().unwrap().success(), "fat LTO link failed");
+    assert!(
+        link.status().unwrap().success(),
+        "fat LTO link failed under {linker}"
+    );
 
     let bitcode = tmp.path().join("prog.bc");
     let status = rllvm("rllvm-get-bc")
@@ -2666,7 +2675,7 @@ fn fat_lto_objects_linked_with_lto_stay_extractable() {
         .expect("Failed to run rllvm-get-bc");
     assert!(
         status.success(),
-        "rllvm-get-bc found no bitcode in the fat LTO binary"
+        "rllvm-get-bc found no bitcode in the fat LTO binary linked with {linker}"
     );
     assert_bitcode_magic(&bitcode);
 
@@ -2680,7 +2689,7 @@ fn fat_lto_objects_linked_with_lto_stay_extractable() {
     for symbol in ["a_fn", "b_fn", "main"] {
         assert!(
             symbols.contains(symbol),
-            "{symbol} missing from:\n{symbols}"
+            "{symbol} missing under {linker}:\n{symbols}"
         );
     }
 }
