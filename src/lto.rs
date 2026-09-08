@@ -219,6 +219,15 @@ fn is_digits(s: &str) -> bool {
 /// through `-Xlinker <option>` and `-Xlinker=<option>`. Within the list,
 /// gold/lld accept `-plugin-opt` and its value as two separate tokens as well
 /// as joined with `=`, and both one and two leading dashes throughout.
+///
+/// Only linker-directed spellings count, and a bare driver `-save-temps` is
+/// deliberately not one of them.
+///
+/// Measured on ELF and Darwin under LLVM 22: a bare `-save-temps` on a link
+/// produces no linker temps at all -- the driver keeps its own `.i`/`.bc`/`.s`,
+/// named after the source, and forwards nothing to the LTO plugin. So it does
+/// not ask for the artifacts this cleanup removes, and matching it would
+/// suppress cleanup on links whose artifacts are rllvm's own. See #101.
 pub fn user_requested_save_temps(args: &[String]) -> bool {
     let mut tokens: Vec<&str> = vec![];
     let mut args = args.iter();
@@ -396,6 +405,19 @@ mod tests {
         }
         for keep in ["prog.rllvm.bc", "prog.bc", "prog", "prog.c", "progress.bc"] {
             assert!(!is_save_temps_artifact("prog", keep), "{keep}");
+        }
+
+        // A bare driver `-save-temps` -- the spelling `user_requested_save_temps`
+        // deliberately does not match -- keeps the driver's own intermediates.
+        // Measured on both platforms under LLVM 22: it produces these and no
+        // linker temps at all, so rllvm's cleanup can run without touching
+        // anything the user asked to keep. They are named after the *source*,
+        // which is why they survive even when the stem matches the output.
+        for driver_temp in ["prog.i", "prog.s", "prog.o", "a.i", "a.bc", "a.o", "a.s"] {
+            assert!(
+                !is_save_temps_artifact("prog", driver_temp),
+                "{driver_temp}"
+            );
         }
     }
 
