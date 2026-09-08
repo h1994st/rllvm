@@ -17,7 +17,8 @@ use crate::{
     lto::{LtoFlavour, LtoMode, save_temps_flag, user_requested_save_temps},
     utils::{
         embed_bitcode_filepath_to_object_file, execute_command_for_status,
-        extract_bitcode_filepaths_from_object_file, is_bitcode_file, recorded_bitcode_filepath,
+        extract_bitcode_filepaths_from_object_file, has_fat_lto_bitcode, is_bitcode_file,
+        recorded_bitcode_filepath,
     },
 };
 
@@ -402,6 +403,26 @@ pub trait CompilerWrapper {
                     &object_filepath,
                     None,
                 )?;
+
+                // A fat LTO object carries the bitcode alongside the machine
+                // code, and the section just embedded lives only in the latter.
+                // GNU ld's plugin generates code from the bitcode and drops the
+                // rest of the object, so the path has to be in both halves.
+                //
+                // The flag check comes first only to keep the content check off
+                // the common path: `has_fat_lto_bitcode` reads and parses the
+                // whole object, and `-ffat-lto-objects` emits nothing without
+                // `-flto`, so a build that never asked for LTO cannot produce
+                // one. Which half exists is still decided by content.
+                if self.args().lto_flavour().is_some() && has_fat_lto_bitcode(&object_filepath)? {
+                    lto_marker::inject_marker_into_fat_object(
+                        &object_filepath,
+                        &src_bitcode_filepath,
+                        self.args().compile_args(),
+                        self.wrapped_compiler(),
+                        *self.compiler_kind(),
+                    )?;
+                }
             }
         }
 
