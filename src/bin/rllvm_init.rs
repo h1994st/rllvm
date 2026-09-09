@@ -5,35 +5,11 @@ use std::{
 
 use clap::Parser;
 use rllvm::{
+    cli::InitArgs,
     config::config_filepath,
     error::Error,
     utils::{execute_llvm_config, find_llvm_config},
 };
-
-/// CLI arguments for rllvm-init
-#[derive(Parser, Debug)]
-#[command(
-    name = "rllvm-init",
-    about = "Auto-detect LLVM installation and generate rllvm configuration",
-    author = "Shengtuo Hu <h1994st@gmail.com>",
-    version
-)]
-struct InitArgs {
-    /// Output path for the generated config file
-    ///
-    /// Defaults to wherever the rest of the toolchain reads its configuration
-    /// from: `$RLLVM_CONFIG` when set, otherwise `~/.rllvm/config.toml`.
-    #[arg(short = 'o', long)]
-    output: Option<String>,
-
-    /// Print detected configuration without writing to disk
-    #[arg(long)]
-    dry_run: bool,
-
-    /// Override LLVM installation path (directory containing bin/llvm-config)
-    #[arg(long)]
-    llvm_prefix: Option<PathBuf>,
-}
 
 /// Detected LLVM tool paths
 struct DetectedTools {

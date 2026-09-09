@@ -103,6 +103,10 @@ RUSTC_WRAPPER=rllvm-rustc cargo build
 rllvm-get-bc target/debug/my_program
 ```
 
+`rllvm-rustc` answers the same `--rllvm-` options, but cargo owns a
+`RUSTC_WRAPPER`'s command line and cannot pass them, so under cargo the
+overrides are `RLLVM_REAL_RUSTC` and `RLLVM_LOG_LEVEL`.
+
 Every crate in the graph contributes, so the extracted module covers
 dependencies as well as the binary's own code. A library crate works on its
 own:

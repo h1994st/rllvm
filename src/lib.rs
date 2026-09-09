@@ -20,6 +20,11 @@
 #![warn(unreachable_pub)]
 
 /// Command-line argument parsing for compiler flag classification.
+/// Command-line definitions shared by the binaries and the completion
+/// generator. Not a supported interface.
+#[doc(hidden)]
+pub mod cli;
+
 pub mod arg_parser;
 
 /// Incremental bitcode cache for skipping recompilation of unchanged files.

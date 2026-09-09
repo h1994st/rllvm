@@ -4,26 +4,10 @@ use clap::Parser;
 use owo_colors::OwoColorize;
 use rllvm::{
     bitcode_info::{BitcodeInfo, analyze_bitcode},
+    cli::InfoArgs,
     error::Error,
     utils::extract_bitcode_filepaths_from_object_file,
 };
-
-/// Analyze LLVM bitcode files
-#[derive(Parser, Debug)]
-#[command(
-    name = "rllvm-info",
-    about = "Display information about LLVM bitcode files",
-    author = "Shengtuo Hu <h1994st@gmail.com>",
-    version
-)]
-struct InfoArgs {
-    /// Input file (bitcode .bc or object file with embedded bitcode)
-    input: PathBuf,
-
-    /// List all function names
-    #[arg(short = 'f', long)]
-    functions: bool,
-}
 
 /// Detect whether a file is an LLVM bitcode file by checking its magic bytes.
 fn is_bitcode_file(path: &PathBuf) -> Result<bool, Error> {
