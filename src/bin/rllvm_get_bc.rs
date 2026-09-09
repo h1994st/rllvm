@@ -2,53 +2,11 @@ use std::{fs, path::PathBuf};
 
 use clap::Parser;
 use object::Object;
-use rllvm::{config::try_rllvm_config, error::Error, merge::MergeStrategy, utils::*};
+use rllvm::{
+    cli::ExtractionArgs, config::try_rllvm_config, error::Error, merge::MergeStrategy, utils::*,
+};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
-
-/// Extraction arguments
-#[derive(Parser, Debug)]
-#[command(
-    name = "rllvm-get-bc",
-    about = "Extract a single bitcode file for the given input",
-    author = "Shengtuo Hu <h1994st@gmail.com>",
-    version
-)]
-struct ExtractionArgs {
-    /// Input filepath for bitcode extraction
-    input: PathBuf,
-
-    /// Output filepath of the extracted bitcode file
-    #[arg(short = 'o', long)]
-    output: Option<PathBuf>,
-
-    /// Build bitcode archive (only used for archive files, e.g., *.a).
-    /// Equivalent to --merge-strategy=archive. Deprecated in favor of --merge-strategy.
-    #[arg(short = 'b', long)]
-    build_bitcode_archive: bool,
-
-    /// Bitcode merge strategy: full (llvm-link all), partial (group by dir then link), archive (llvm-ar)
-    #[arg(long, value_enum)]
-    merge_strategy: Option<MergeStrategy>,
-
-    /// Save manifest of all filepaths of underlying bitcode files
-    #[arg(short = 'm', long)]
-    save_manifest: bool,
-
-    /// Directory that relative embedded bitcode paths resolve against
-    ///
-    /// Objects built with `RLLVM_BITCODE_ROOT` set record paths relative to that
-    /// root, so they survive the build tree being moved, copied out of a
-    /// container, or replayed from a compiler cache. Point this at wherever the
-    /// tree lives now. Absolute entries, which is what older objects contain,
-    /// are unaffected. Defaults to the current directory.
-    #[arg(long)]
-    bitcode_root: Option<PathBuf>,
-
-    /// Verbose mode
-    #[arg(short = 'v', long, action = clap::ArgAction::Count)]
-    verbose: u8,
-}
 
 pub fn main() -> Result<(), Error> {
     let args = ExtractionArgs::parse();

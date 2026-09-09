@@ -2820,6 +2820,158 @@ fn save_temps_link_warns_about_objects_built_under_marker() {
     );
 }
 
+/// Completions are generated from the same definitions the binaries parse
+/// with, so this asserts the property that broke: the script offers the flags
+/// that exist, and none of the ones removed in v0.1.7.
+#[test]
+fn completions_describe_the_wrapper_that_actually_ships() {
+    let output = rllvm("rllvm-completions")
+        .args(["--shell", "zsh", "--bin", "cc"])
+        .output()
+        .expect("Failed to run rllvm-completions");
+    assert!(output.status.success());
+    let script = String::from_utf8_lossy(&output.stdout);
+
+    for expected in [
+        "--rllvm-compiler",
+        "--rllvm-verbose",
+        "--rllvm-help",
+        "--rllvm-version",
+    ] {
+        assert!(
+            script.contains(expected),
+            "{expected} missing from:\n{script}"
+        );
+    }
+
+    // `-c` is compile-only and `-v` is the compiler's verbose flag. Offering
+    // either -- as the hand-written generator did -- completes a path where the
+    // build system expects an object.
+    for removed in ["'-c+[", "'-v[", "'--compiler=[", "'--verbose["] {
+        assert!(
+            !script.contains(removed),
+            "{removed} belongs to the compiler:\n{script}"
+        );
+    }
+}
+
+/// `rllvm-rustc` answers the two informational flags a person runs by hand.
+/// Cargo owns the rest of its command line, so it has no other options -- but
+/// it used to have none at all, and `--rllvm-version` fell through to the
+/// bitcode-path logic and complained about `--out-dir`.
+#[test]
+fn rustc_wrapper_answers_its_own_informational_flags() {
+    for flag in ["--rllvm-version", "--rllvm-help"] {
+        let output = rllvm("rllvm-rustc")
+            .arg(flag)
+            .output()
+            .expect("Failed to run rllvm-rustc");
+        assert!(output.status.success(), "{flag} failed");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("rllvm-rustc"),
+            "{flag} must answer for the wrapper:\n{stdout}"
+        );
+        assert!(
+            !stdout.contains("out-dir"),
+            "{flag} reached the bitcode-path logic:\n{stdout}"
+        );
+    }
+}
+
+/// `--rllvm-verbose` is shared with `rllvm-cc`, so it has to work here too --
+/// and be removed before rustc, which would reject it.
+#[test]
+fn rustc_wrapper_honours_verbose_without_passing_it_on() {
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("lib.rs");
+    fs::write(&source, "pub fn f() -> i32 { 1 }\n").unwrap();
+
+    let output = rllvm("rllvm-rustc")
+        .args(["--rllvm-verbose=3", "rustc", "--crate-type", "lib"])
+        .args(["--crate-name", "verbose_probe", "--out-dir"])
+        .arg(tmp.path())
+        .arg(&source)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+
+    assert!(
+        output.status.success(),
+        "the flag must not reach rustc:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        tmp.path().join("libverbose_probe.rlib").exists(),
+        "rustc still has to build the crate"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rllvm-rustc:"),
+        "level 3 must log the wrapper's own debug line:\n{stderr}"
+    );
+}
+
+/// `rllvm-get-bc` grew `--merge-strategy` and `--bitcode-root`; the
+/// hand-written generator never learned about either.
+#[test]
+fn completions_cover_every_extraction_option() {
+    let output = rllvm("rllvm-completions")
+        .args(["--shell", "zsh", "--bin", "get-bc"])
+        .output()
+        .expect("Failed to run rllvm-completions");
+    assert!(output.status.success());
+    let script = String::from_utf8_lossy(&output.stdout);
+
+    for expected in [
+        "--merge-strategy",
+        "--bitcode-root",
+        "--output",
+        "--save-manifest",
+    ] {
+        assert!(
+            script.contains(expected),
+            "{expected} missing from:\n{script}"
+        );
+    }
+}
+
+/// Every binary with a CLI of its own, for every shell, produces a script that
+/// names that binary. `rllvm-cxx` is the one that can go wrong quietly: it
+/// shares its argument struct with `rllvm-cc`, so an unnamed command would
+/// define `_rllvm-cc` in the file installed for `rllvm-cxx`.
+#[test]
+fn completions_are_generated_for_every_binary_and_shell() {
+    for bin in [
+        "cc",
+        "cxx",
+        "get-bc",
+        "init",
+        "info",
+        "rustc",
+        "completions",
+    ] {
+        for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+            let output = rllvm("rllvm-completions")
+                .args(["--shell", shell, "--bin", bin])
+                .output()
+                .expect("Failed to run rllvm-completions");
+            assert!(output.status.success(), "{bin}/{shell} failed");
+
+            let script = String::from_utf8_lossy(&output.stdout);
+            assert!(!script.trim().is_empty(), "{bin}/{shell} produced nothing");
+            assert!(
+                script.contains(&format!(
+                    "rllvm-{}",
+                    if bin == "get-bc" { "get-bc" } else { bin }
+                )),
+                "{bin}/{shell} does not name the binary:\n{script}"
+            );
+        }
+    }
+}
+
 /// `lto_mode = "save-temps"` collects the module the linker's own LTO
 /// pipeline merged, instead of recording per-unit paths with a marker.
 #[test]
