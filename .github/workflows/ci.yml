@@ -67,11 +67,17 @@ jobs:
           # Only paths that cannot reach the Rust build are listed. Anything
           # else -- including this workflow -- forces the full run, so a path
           # nobody thought about fails safe.
+          #
+          # The two workflows are exempt because neither builds anything:
+          # `pages.yml` renders the site, and `tap-bump.yml` only runs on a
+          # published release. They are named one by one rather than globbed as
+          # `.github/workflows/*`, which would exempt this file as well.
           code=false
           while IFS= read -r file; do
             [ -n "$file" ] || continue
             case "$file" in
-              *.md | site/* | .github/workflows/pages.yml | LICENSE) ;;
+              *.md | site/* | LICENSE) ;;
+              .github/workflows/pages.yml | .github/workflows/tap-bump.yml) ;;
               *)
                 code=true
                 break
