@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.2](https://github.com/h1994st/rllvm/compare/v0.4.1...v0.4.2) (2026-09-09)
+
+
+### Features
+
+* name the cause when a universal or mixed-mode build cannot record bitcode ([#120](https://github.com/h1994st/rllvm/issues/120)) ([6ce7d03](https://github.com/h1994st/rllvm/commit/6ce7d032eae402a34fb374180e77c3a664919770))
+
+
+### Bug Fixes
+
+* record the bitcode path in both halves of a fat LTO object ([#117](https://github.com/h1994st/rllvm/issues/117)) ([704938c](https://github.com/h1994st/rllvm/commit/704938ca4e96ef12c1f42e9a7f4d9040ccf231b0))
+
 ## [0.4.1](https://github.com/h1994st/rllvm/compare/v0.4.0...v0.4.1) (2026-09-08)
 
 
