@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6](https://github.com/h1994st/rllvm/compare/v0.4.5...v0.4.6) (2026-09-09)
+
+
+### Bug Fixes
+
+* run the tap bump as part of the release build ([#131](https://github.com/h1994st/rllvm/issues/131)) ([2efac89](https://github.com/h1994st/rllvm/commit/2efac89b07f986298e7c08dc07e18371d2a83523))
+
 ## [0.4.5](https://github.com/h1994st/rllvm/compare/v0.4.4...v0.4.5) (2026-09-09)
 
 
