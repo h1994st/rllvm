@@ -23,7 +23,8 @@ single `.bc` for the whole program back out of the finished binary.
   compiler cache.
 - **Merge strategies.** Link everything into one module, stage the merge by
   directory for large projects, or produce a bitcode archive.
-- **Single static binary.** No runtime to install; `cargo install rllvm`.
+- **Single static binary.** No runtime to install; `brew install h1994st/tap/rllvm`
+  or `cargo install rllvm`.
 - **Bitcode inspection.** `rllvm-info` reports what a module contains.
 
 ## Quick start
@@ -33,8 +34,11 @@ Install LLVM/Clang, then rllvm:
 ```bash
 brew install llvm                                    # macOS
 sudo apt install llvm llvm-dev clang libclang-dev    # Ubuntu / Debian
+```
 
-cargo install rllvm
+```bash
+brew install h1994st/tap/rllvm    # macOS and Linux, prebuilt
+cargo install rllvm               # from source
 ```
 
 Build something and extract its bitcode:
