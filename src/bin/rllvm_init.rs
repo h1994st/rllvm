@@ -23,15 +23,20 @@ struct DetectedTools {
     llvm_objcopy: Option<PathBuf>,
 }
 
-fn find_llvm_config_with_prefix(prefix: &Path) -> Result<PathBuf, Error> {
-    let candidate = prefix.join("bin").join("llvm-config");
-    if candidate.exists() {
-        return Ok(candidate.canonicalize()?);
-    }
-    // Maybe the prefix IS the bin directory
-    let candidate = prefix.join("llvm-config");
-    if candidate.exists() {
-        return Ok(candidate.canonicalize()?);
+/// Find `llvm-config` under `prefix`, and report the directory holding it.
+///
+/// The path is not canonicalized. A prefix given on the command line is often
+/// a stable symlink to a versioned directory -- Homebrew's
+/// `/opt/homebrew/opt/llvm` points at `../Cellar/llvm/<version>` -- and
+/// resolving it writes the version into the config, so the next upgrade of the
+/// toolchain leaves every recorded path dangling. Honouring the prefix as given
+/// is what keeps the configuration valid across one.
+fn find_llvm_config_with_prefix(prefix: &Path) -> Result<(PathBuf, PathBuf), Error> {
+    for bindir in [prefix.join("bin"), prefix.to_path_buf()] {
+        let candidate = bindir.join("llvm-config");
+        if candidate.exists() {
+            return Ok((candidate, bindir));
+        }
     }
     Err(Error::MissingFile(format!(
         "llvm-config not found under {:?}",
@@ -41,15 +46,16 @@ fn find_llvm_config_with_prefix(prefix: &Path) -> Result<PathBuf, Error> {
 
 fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
     // Step 1: Find llvm-config
-    let llvm_config = if let Some(prefix) = llvm_prefix {
+    let (llvm_config, prefix_bindir) = if let Some(prefix) = llvm_prefix {
         eprintln!(
             "Searching for LLVM in user-specified prefix: {}",
             prefix.display()
         );
-        find_llvm_config_with_prefix(prefix)?
+        let (llvm_config, bindir) = find_llvm_config_with_prefix(prefix)?;
+        (llvm_config, Some(bindir))
     } else {
         eprintln!("Auto-detecting LLVM installation...");
-        find_llvm_config()?
+        (find_llvm_config()?, None)
     };
     eprintln!("  Found llvm-config: {}", llvm_config.display());
 
@@ -58,7 +64,15 @@ fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
     eprintln!("  LLVM version: {}", llvm_version);
 
     // Step 3: Get bin directory and derive tool paths
-    let bindir = PathBuf::from(execute_llvm_config(&llvm_config, &["--bindir"])?);
+    //
+    // `llvm-config --bindir` resolves its own real location, so it answers with
+    // the versioned directory even when invoked through a symlink. Where the
+    // caller named a prefix, that prefix decides instead; otherwise there is
+    // nothing better to go on than what the tool reports.
+    let bindir = match prefix_bindir {
+        Some(bindir) => bindir,
+        None => PathBuf::from(execute_llvm_config(&llvm_config, &["--bindir"])?),
+    };
     eprintln!("  LLVM bindir: {}", bindir.display());
 
     let clang = bindir.join("clang");
@@ -219,4 +233,67 @@ fn main() -> Result<(), Error> {
     eprintln!("To customize, edit: {}", output_path.display());
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_llvm_config_with_prefix;
+    use std::fs;
+
+    fn stub_llvm_config(dir: &std::path::Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("llvm-config"), "").unwrap();
+    }
+
+    #[test]
+    fn finds_llvm_config_under_a_prefix_and_reports_its_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bindir = tmp.path().join("bin");
+        stub_llvm_config(&bindir);
+
+        let (llvm_config, found_bindir) = find_llvm_config_with_prefix(tmp.path()).unwrap();
+        assert_eq!(llvm_config, bindir.join("llvm-config"));
+        assert_eq!(found_bindir, bindir);
+    }
+
+    #[test]
+    fn accepts_a_prefix_that_is_itself_the_bin_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        stub_llvm_config(tmp.path());
+
+        let (llvm_config, bindir) = find_llvm_config_with_prefix(tmp.path()).unwrap();
+        assert_eq!(llvm_config, tmp.path().join("llvm-config"));
+        assert_eq!(bindir, tmp.path());
+    }
+
+    /// The reason the lookup does not canonicalize.
+    ///
+    /// A package manager points a stable prefix at a versioned directory --
+    /// Homebrew's `opt/llvm` at `Cellar/llvm/<version>` -- so resolving the
+    /// symlink writes the version into the config and the next upgrade of the
+    /// toolchain leaves every recorded path dangling.
+    #[test]
+    #[cfg(unix)]
+    fn keeps_a_symlinked_prefix_instead_of_resolving_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let versioned = tmp.path().join("Cellar").join("llvm").join("1.2.3");
+        stub_llvm_config(&versioned.join("bin"));
+
+        let stable = tmp.path().join("opt-llvm");
+        std::os::unix::fs::symlink(&versioned, &stable).unwrap();
+
+        let (llvm_config, bindir) = find_llvm_config_with_prefix(&stable).unwrap();
+        assert_eq!(llvm_config, stable.join("bin").join("llvm-config"));
+        assert_eq!(bindir, stable.join("bin"));
+        assert!(
+            !llvm_config.to_string_lossy().contains("1.2.3"),
+            "the version must not reach the recorded path: {llvm_config:?}"
+        );
+    }
+
+    #[test]
+    fn reports_a_prefix_that_holds_no_llvm_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(find_llvm_config_with_prefix(tmp.path()).is_err());
+    }
 }
