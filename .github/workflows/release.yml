@@ -321,3 +321,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-tap-bump:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/tap-bump.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
