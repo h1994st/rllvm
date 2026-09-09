@@ -58,6 +58,27 @@ const DEPENDENCY_UNARY_PREFIXES: &[&str] = &["-MF", "-MJ", "-MT", "-MQ"];
 /// the real prerequisites with its own. That is how editing a header stopped
 /// causing a rebuild: the file named the `.bc`, so `make` never learned the
 /// object depended on the header.
+/// The distinct architectures named by `-arch` in `compile_args`.
+///
+/// More than one is a universal build, which rllvm cannot produce bitcode for:
+/// clang rejects `-emit-llvm` with multiple `-arch` options, and the marker
+/// object a save-temps link builds comes out as a Mach-O universal file that
+/// the embedding step cannot parse. Both failures are worth naming before they
+/// happen -- neither message mentions architectures otherwise.
+pub fn universal_build_architectures(compile_args: &[String]) -> Vec<String> {
+    let mut architectures: Vec<String> = vec![];
+    let mut args = compile_args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "-arch"
+            && let Some(architecture) = args.next()
+            && !architectures.contains(architecture)
+        {
+            architectures.push(architecture.clone());
+        }
+    }
+    architectures
+}
+
 pub fn without_dependency_flags(compile_args: &[String]) -> Vec<String> {
     let mut result = Vec::with_capacity(compile_args.len());
     let mut args = compile_args.iter();
@@ -736,7 +757,7 @@ impl CompilerArgsInfo {
 
 #[cfg(test)]
 mod tests {
-    use super::{CompilerArgsInfo, without_dependency_flags};
+    use super::{CompilerArgsInfo, universal_build_architectures, without_dependency_flags};
     use crate::lto::LtoFlavour;
 
     fn parse_and_assert<F>(input: &str, check_func: F)
@@ -1076,5 +1097,29 @@ mod tests {
             .map(String::from)
             .collect::<Vec<String>>();
         assert_eq!(without_dependency_flags(&compile_args), compile_args);
+    }
+
+    #[test]
+    fn universal_build_architectures_reports_each_distinct_arch() {
+        let args = |s: &str| s.split(' ').map(String::from).collect::<Vec<String>>();
+
+        assert!(universal_build_architectures(&args("-c -O2")).is_empty());
+        assert_eq!(
+            universal_build_architectures(&args("-arch arm64 -c")),
+            vec!["arm64".to_string()]
+        );
+        assert_eq!(
+            universal_build_architectures(&args("-arch x86_64 -arch arm64 -c")),
+            vec!["x86_64".to_string(), "arm64".to_string()]
+        );
+        // A build system repeating one `-arch` is not a universal build.
+        assert_eq!(
+            universal_build_architectures(&args("-arch arm64 -O2 -arch arm64")),
+            vec!["arm64".to_string()]
+        );
+        // `-march=` is a different option and must not be mistaken for one.
+        assert!(universal_build_architectures(&args("-march=x86-64 -c")).is_empty());
+        // A trailing `-arch` with no value consumes nothing.
+        assert!(universal_build_architectures(&args("-c -arch")).is_empty());
     }
 }

@@ -2694,6 +2694,132 @@ fn fat_lto_link_records_every_unit(linker: &str) {
     }
 }
 
+/// A universal build fails in two different places with two different
+/// unhelpful messages -- `ExecutionFailure` from the bitcode compile, or
+/// `ObjectReadError("Unsupported file format")` from embedding into a marker
+/// object that came out universal. Neither says "architecture".
+///
+/// Darwin only: `-arch` is a Mach-O driver option.
+#[test]
+#[cfg(target_vendor = "apple")]
+fn universal_build_names_the_architectures_it_cannot_handle() {
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("u.c");
+    fs::write(&source, "int u_fn(int x) { return x + 1; }\n").unwrap();
+    let object = tmp.path().join("u.o");
+
+    // No `-flto` anywhere: the limitation is the bitcode compile, not LTO.
+    let output = rllvm("rllvm-cc")
+        .args(["--", "-arch", "x86_64", "-arch", "arm64", "-c", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        !output.status.success(),
+        "a universal build must not claim success"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in ["universal build", "x86_64", "arm64"] {
+        assert!(
+            stderr.contains(expected),
+            "the error must name {expected}:\n{stderr}"
+        );
+    }
+    // `marker` is not an escape from this -- the bitcode compile fails there
+    // too -- so the message must not send anyone there.
+    assert!(
+        !stderr.contains("lto_mode = \"marker\""),
+        "must not recommend a mode that fails the same way:\n{stderr}"
+    );
+}
+
+/// The same diagnostic from the other direction: under `save-temps` the link
+/// builds a marker object, and with two `-arch` values it comes out universal.
+#[test]
+#[cfg(target_vendor = "apple")]
+fn universal_save_temps_link_names_the_architectures() {
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("u.c");
+    fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+    let object = tmp.path().join("u.o");
+    assert!(
+        rllvm("rllvm-cc")
+            .args(["--", "-arch", "arm64", "-flto", "-c", "-o"])
+            .arg(&object)
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+
+    let output = rllvm("rllvm-cc")
+        .env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--", "-arch", "x86_64", "-arch", "arm64", "-flto", "-o"])
+        .arg(tmp.path().join("prog"))
+        .arg(&object)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        !output.status.success(),
+        "a universal link must not claim success"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in ["universal build", "x86_64", "arm64"] {
+        assert!(
+            stderr.contains(expected),
+            "the error must name {expected}:\n{stderr}"
+        );
+    }
+}
+
+/// Compiling under `marker` and linking under `save-temps` leaves the binary
+/// naming both the per-unit modules and the collected one, so extraction
+/// merges those translation units twice. The symptom appears in `rllvm-get-bc`
+/// -- a different tool from the one given the wrong mode -- so the link warns.
+#[test]
+fn save_temps_link_warns_about_objects_built_under_marker() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+
+    // Compiled under the default `marker` mode.
+    let mut objects = vec![];
+    for source in &sources {
+        let object = source.with_extension("o");
+        let status = rllvm("rllvm-cc")
+            .args(["--", "-flto", "-c", "-o"])
+            .arg(&object)
+            .arg(source)
+            .status()
+            .expect("Failed to run rllvm-cc");
+        assert!(status.success(), "rllvm-cc failed on {source:?}");
+        objects.push(object);
+    }
+
+    let program = tmp.path().join("prog");
+    let mut link = rllvm("rllvm-cc");
+    link.env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--", "-flto", "-o"])
+        .arg(&program);
+    for object in &objects {
+        link.arg(object);
+    }
+    let output = link.output().expect("Failed to run rllvm-cc");
+    assert!(output.status.success(), "the link must still succeed");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("per-unit bitcode path"),
+        "expected a warning naming the mode mismatch:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("merge those translation units twice"),
+        "the warning must say what goes wrong:\n{stderr}"
+    );
+}
+
 /// `lto_mode = "save-temps"` collects the module the linker's own LTO
 /// pipeline merged, instead of recording per-unit paths with a marker.
 #[test]
