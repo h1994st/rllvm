@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.4](https://github.com/h1994st/rllvm/compare/v0.4.3...v0.4.4) (2026-09-09)
+
+
+### Bug Fixes
+
+* keep the prefix rllvm-init was given instead of resolving it ([#125](https://github.com/h1994st/rllvm/issues/125)) ([8a5aaf6](https://github.com/h1994st/rllvm/commit/8a5aaf6c5ba5f8a48f2190468f908919bb53d923))
+
 ## [0.4.3](https://github.com/h1994st/rllvm/compare/v0.4.2...v0.4.3) (2026-09-09)
 
 
