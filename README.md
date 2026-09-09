@@ -192,6 +192,11 @@ executable ◄── linker ◄── object files
                         rllvm-get-bc ──► whole-program.bc
 ```
 
+Universal (multi-`-arch`) builds are not supported in any mode: clang cannot
+emit one IR file for two architectures. Build and extract one architecture at
+a time; `lipo` the results afterwards if needed, and note that `rllvm-get-bc`
+cannot read a combined universal binary.
+
 `rllvm-rustc` does the same per crate. A crate that links carries the path in a
 marker object added to the link; a crate that produces an `.rlib` carries it in
 the archive's members, so a dependency brings its bitcode wherever it is used.

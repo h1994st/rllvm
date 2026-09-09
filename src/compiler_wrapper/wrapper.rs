@@ -7,7 +7,9 @@ use std::{
 };
 
 use crate::{
-    arg_parser::{CompileMode, CompilerArgsInfo, without_dependency_flags},
+    arg_parser::{
+        CompileMode, CompilerArgsInfo, universal_build_architectures, without_dependency_flags,
+    },
     cache,
     compiler_wrapper::llvm::{lto_marker, marker},
     config::try_rllvm_config,
@@ -124,6 +126,24 @@ pub trait CompilerWrapper {
     /// Only an LTO link qualifies. ThinLTO never builds a whole-program
     /// module, so it warns and contributes nothing rather than failing a build
     /// over a mode the user set globally.
+    /// The error for a build naming more than one `-arch`.
+    ///
+    /// Measured: clang fails the bitcode compile with "cannot use 'ir' output
+    /// with multiple -arch options", and under `save-temps` the marker object
+    /// comes out universal and the embedding step reports only "Unsupported
+    /// file format". Neither names the cause. `lto_mode = "marker"` is not an
+    /// escape -- the bitcode compile fails there too, and it fails without
+    /// `-flto` at all -- so the message must not suggest one.
+    fn universal_build_error(architectures: &[String]) -> Error {
+        Error::UnsupportedBinaryFormat(format!(
+            "rllvm cannot produce bitcode for a universal build: clang rejects \
+             `-emit-llvm` with multiple `-arch` options ({}). Build one architecture \
+             at a time and extract from each per-architecture binary; `rllvm-get-bc` \
+             cannot read a `lipo`-combined universal binary either.",
+            architectures.join(", ")
+        ))
+    }
+
     fn save_temps_plan(&self) -> Result<SaveTempsPlan, Error> {
         let args = self.args();
         if try_rllvm_config()?.lto_mode()? != LtoMode::SaveTemps
@@ -178,6 +198,11 @@ pub trait CompilerWrapper {
         // arguments, so the marker matches the link's target. A host-native
         // marker is not a link error: `-arch x86_64` on an arm64 host makes
         // ld64 warn and carry on, and the finished binary then names nothing.
+        let architectures = universal_build_architectures(args.compile_args());
+        if architectures.len() > 1 {
+            return Err(Self::universal_build_error(&architectures));
+        }
+
         let marker = marker::build_marker_object(
             &bitcode,
             marker_dir.path(),
@@ -226,6 +251,22 @@ pub trait CompilerWrapper {
             // failure this mode exists to fix.
             let recorded = extract_bitcode_filepaths_from_object_file(&output)?;
             let expected = PathBuf::from(recorded_bitcode_filepath(&module)?);
+            // Anything else in the section was put there by objects compiled
+            // under `marker`, and `rllvm-get-bc` would merge those translation
+            // units a second time -- as "symbol multiply defined", from a tool
+            // and a command far away from the mode mismatch that caused it.
+            let per_unit: Vec<_> = recorded.iter().filter(|path| **path != expected).collect();
+            if !per_unit.is_empty() {
+                print_warning(&format!(
+                    "{output:?} records {} per-unit bitcode path(s) as well as the \
+                     collected module {module:?}. Those objects were compiled under \
+                     lto_mode = \"marker\" while this link ran under \"save-temps\", so \
+                     extraction will merge those translation units twice. Build and link \
+                     under one mode.",
+                    per_unit.len()
+                ));
+            }
+
             if !recorded.contains(&expected) {
                 return Err(Error::MissingFile(format!(
                     "The LTO link produced {module:?}, but {output:?} does not record it \
@@ -483,6 +524,14 @@ pub trait CompilerWrapper {
         let src_filepath = src_filepath.as_ref();
         let bitcode_filepath = bitcode_filepath.as_ref();
         let compiler_filepath = self.wrapped_compiler();
+
+        // Checked here rather than once up front so the user's own build still
+        // runs first: rllvm reports what it could not do, without deciding for
+        // the build system whether the object it asked for gets produced.
+        let architectures = universal_build_architectures(self.args().compile_args());
+        if architectures.len() > 1 {
+            return Err(Self::universal_build_error(&architectures));
+        }
 
         let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
         // Not `compile_args()` verbatim: the user's command already wrote the
