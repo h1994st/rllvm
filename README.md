@@ -29,17 +29,22 @@ single `.bc` for the whole program back out of the finished binary.
 
 ## Quick start
 
-Install LLVM/Clang, then rllvm:
+Install rllvm:
+
+```bash
+brew install h1994st/tap/rllvm    # macOS and Linux, prebuilt
+cargo install rllvm               # from source
+```
+
+rllvm drives an LLVM/Clang toolchain rather than bundling one, so it needs one
+to run:
 
 ```bash
 brew install llvm                                    # macOS
 sudo apt install llvm llvm-dev clang libclang-dev    # Ubuntu / Debian
 ```
 
-```bash
-brew install h1994st/tap/rllvm    # macOS and Linux, prebuilt
-cargo install rllvm               # from source
-```
+On first run rllvm writes a config with tool paths discovered from `llvm-config`.
 
 Build something and extract its bitcode:
 
@@ -59,7 +64,6 @@ cmake -B build && cmake --build build
 rllvm-get-bc build/my_program
 ```
 
-On first run rllvm writes a config with tool paths discovered from `llvm-config`.
 
 ## Usage
 
