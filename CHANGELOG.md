@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.4.5](https://github.com/h1994st/rllvm/compare/v0.4.4...v0.4.5) (2026-09-09)
+
+
+### Bug Fixes
+
+* bump the tap only for an actual release build ([#130](https://github.com/h1994st/rllvm/issues/130)) ([81a3e0f](https://github.com/h1994st/rllvm/commit/81a3e0f097ed2468ebb036adb5131024436382cf))
+* trigger the tap bump from the release build, not the release event ([#127](https://github.com/h1994st/rllvm/issues/127)) ([8dfa53e](https://github.com/h1994st/rllvm/commit/8dfa53e6d5a2f4f443e70769a0360d2a135bc122))
+
 ## [0.4.4](https://github.com/h1994st/rllvm/compare/v0.4.3...v0.4.4) (2026-09-09)
 
 
