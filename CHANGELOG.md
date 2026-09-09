@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.3](https://github.com/h1994st/rllvm/compare/v0.4.2...v0.4.3) (2026-09-09)
+
+
+### Bug Fixes
+
+* generate completions from the CLI the binaries parse with ([#122](https://github.com/h1994st/rllvm/issues/122)) ([886e17e](https://github.com/h1994st/rllvm/commit/886e17e273e234545fa928f9f2a8782b14f963dd))
+
 ## [0.4.2](https://github.com/h1994st/rllvm/compare/v0.4.1...v0.4.2) (2026-09-09)
 
 
