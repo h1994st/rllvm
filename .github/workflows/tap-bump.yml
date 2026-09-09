@@ -26,9 +26,16 @@ permissions:
 
 jobs:
   dispatch:
+    # `Release` also runs on `pull_request`, where cargo-dist builds artifacts
+    # without releasing anything. Only the `workflow_dispatch` run on `main` is
+    # a real release -- that is how `release-please.yml` starts one -- so every
+    # other completion is ignored rather than bumping the tap to a version it
+    # already has.
     if: >
       github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'workflow_dispatch' &&
+       github.event.workflow_run.head_branch == 'main')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
