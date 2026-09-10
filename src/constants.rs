@@ -108,6 +108,10 @@ pub(crate) fn arg_exact_match_map() -> &'static CallbackMap {
 
         m.insert("-", ArgInfo::new(0, CompilerArgsInfo::print_only));
         m.insert("-o", ArgInfo::new(1, CompilerArgsInfo::output_file));
+        m.insert(
+            "-object-file-name",
+            ArgInfo::new(1, CompilerArgsInfo::compile_binary),
+        );
         m.insert("-c", ArgInfo::new(0, CompilerArgsInfo::compile_only));
         m.insert("-E", ArgInfo::new(0, CompilerArgsInfo::preprocess_only));
         m.insert("-S", ArgInfo::new(0, CompilerArgsInfo::assemble_only));
@@ -531,6 +535,15 @@ pub(crate) fn arg_patterns() -> &'static ArgPatternTable {
     static ARG_PATTERNS: OnceLock<ArgPatternTable> = OnceLock::new();
     ARG_PATTERNS.get_or_init(|| {
         ArgPatternTable::new(vec![
+            // Clang treats `-object-file-name=` as debug-information metadata,
+            // not as the joined spelling of `-o`. It must win the overlapping
+            // prefix match and continue reaching compilation unchanged.
+            (
+                r"^-object-file-name=.*$",
+                0,
+                CompilerArgsInfo::compile_unary,
+            ),
+            (r"^-o.+$", 0, CompilerArgsInfo::joined_output_file),
             (r"^-MF.*$", 0, CompilerArgsInfo::compile_unary),
             (r"^-MJ.*$", 0, CompilerArgsInfo::compile_unary),
             (r"^-MQ.*$", 0, CompilerArgsInfo::compile_unary),

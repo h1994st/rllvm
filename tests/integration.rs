@@ -404,6 +404,111 @@ fn compilation_variants_with_compiler_override_keep_captured_bitcode() {
 }
 
 #[test]
+fn joined_output_compiles_and_extracts_like_separate_output() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("f.c"), "int value(void) { return 1; }\n").unwrap();
+
+    let joined = rllvm("rllvm-cc")
+        .args(["--", "-c", "f.c", "-ojoined.o"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("Failed to run rllvm-cc with joined output");
+    assert!(joined.success(), "rllvm-cc joined-output compile failed");
+
+    let joined_extract = rllvm("rllvm-get-bc")
+        .args(["joined.o", "-o", "joined.bc"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("Failed to extract joined-output bitcode");
+    assert!(joined_extract.success(), "joined-output extraction failed");
+    assert_valid_bitcode(&tmp.path().join("joined.bc"));
+
+    let separate = rllvm("rllvm-cc")
+        .args(["--", "-c", "f.c", "-o", "separate.o"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("Failed to run rllvm-cc with separate output");
+    assert!(
+        separate.success(),
+        "rllvm-cc separate-output compile failed"
+    );
+
+    let separate_extract = rllvm("rllvm-get-bc")
+        .args(["separate.o", "-o", "separate.bc"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("Failed to extract separate-output bitcode");
+    assert!(
+        separate_extract.success(),
+        "separate-output extraction failed"
+    );
+    assert_valid_bitcode(&tmp.path().join("separate.bc"));
+
+    assert_eq!(
+        fs::read(tmp.path().join("joined.bc")).unwrap(),
+        fs::read(tmp.path().join("separate.bc")).unwrap(),
+        "joined and separate output forms produced different bitcode"
+    );
+}
+
+#[test]
+fn joined_output_names_linked_executable_and_keeps_it_extractable() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("main.c"), "int main(void) { return 0; }\n").unwrap();
+
+    let linked = rllvm("rllvm-cc")
+        .args(["--", "main.c", "-ojoined"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("Failed to run rllvm-cc with joined link output");
+    assert!(linked.success(), "rllvm-cc joined-output link failed");
+
+    let executable = tmp.path().join("joined");
+    assert!(executable.exists(), "joined-output executable not created");
+    assert!(
+        Command::new(&executable).status().unwrap().success(),
+        "joined-output executable failed"
+    );
+
+    let extracted = rllvm("rllvm-get-bc")
+        .args(["joined", "-o", "joined.bc"])
+        .current_dir(tmp.path())
+        .status()
+        .expect("Failed to extract joined link output");
+    assert!(extracted.success(), "joined link output extraction failed");
+    assert_valid_bitcode(&tmp.path().join("joined.bc"));
+}
+
+#[test]
+fn separate_object_file_name_keeps_default_object_extractable() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("f.c"), "int value(void) { return 1; }\n").unwrap();
+
+    let output = rllvm("rllvm-cc")
+        .args(["--", "-c", "f.c", "-object-file-name", "debug.o"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("Failed to run rllvm-cc with separate -object-file-name");
+    assert!(
+        output.status.success(),
+        "rllvm-cc with separate -object-file-name failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let extract = rllvm("rllvm-get-bc")
+        .args(["f.o", "-o", "f.bc"])
+        .current_dir(tmp.path())
+        .output()
+        .expect("Failed to extract bitcode from the default object");
+    assert!(
+        extract.status.success(),
+        "default-object extraction failed: {}",
+        String::from_utf8_lossy(&extract.stderr)
+    );
+    assert_valid_bitcode(&tmp.path().join("f.bc"));
+}
+
+#[test]
 fn compile_multiple_c_files_and_link() {
     let tmp = TempDir::new().unwrap();
     let output_path = tmp.path().join("combined");

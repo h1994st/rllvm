@@ -209,6 +209,17 @@ impl CompilerArgsInfo {
         self
     }
 
+    /// Handle an output file joined to `-o` (`-oFILE`).
+    pub(crate) fn joined_output_file<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
+    where
+        S: AsRef<str>,
+    {
+        if let Some(filename) = flag.as_ref().strip_prefix("-o") {
+            self.output_filename = filename.to_string();
+        }
+        self
+    }
+
     /// Handle an object file argument and add it to link args.
     pub fn object_file<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
@@ -943,6 +954,41 @@ mod tests {
     fn parsing_output_filename() {
         parse_and_assert("-o prog main.c", |a| a.output_filename() == "prog");
         parse_and_assert("-c main.c", |a| a.output_filename().is_empty());
+    }
+
+    #[test]
+    fn parsing_joined_output_filename_preserves_compiler_arguments() {
+        parse_and_assert("-c main.c -ocustom.o", |a| {
+            a.output_filename() == "custom.o"
+                && a.input_args() == &["-c", "main.c", "-ocustom.o"]
+                && a.input_files() == &["main.c"]
+                && a.object_files().is_empty()
+                && a.compile_args().is_empty()
+                && a.link_args().is_empty()
+        });
+
+        parse_and_assert("-c main.c -ogenerated.c", |a| {
+            a.output_filename() == "generated.c" && a.input_files() == &["main.c"]
+        });
+
+        // This Clang option starts with `-o`, but names the object in debug
+        // information rather than selecting the compiler's output file.
+        parse_and_assert("-object-file-name=debug.o -c main.c", |a| {
+            a.output_filename().is_empty()
+                && a.input_args() == &["-object-file-name=debug.o", "-c", "main.c"]
+                && a.input_files() == &["main.c"]
+                && a.object_files().is_empty()
+                && a.compile_args() == &["-object-file-name=debug.o"]
+        });
+
+        parse_and_assert("-object-file-name debug.o -c main.c", |a| {
+            a.output_filename().is_empty()
+                && a.input_args() == &["-object-file-name", "debug.o", "-c", "main.c"]
+                && a.input_files() == &["main.c"]
+                && a.object_files().is_empty()
+                && a.compile_args() == &["-object-file-name", "debug.o"]
+                && a.link_args().is_empty()
+        });
     }
 
     #[test]
