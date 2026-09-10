@@ -928,6 +928,62 @@ fn link_without_output_flag_defaults_to_a_out() {
     assert_valid_bitcode(&bitcode_path);
 }
 
+#[test]
+fn get_bc_archive_replaces_output_only_after_success() {
+    let tmp = TempDir::new().unwrap();
+    let program = build_across_two_directories(&tmp);
+    let archive = tmp.path().join("program.bca");
+    let extract = |input: &Path| {
+        rllvm("rllvm-get-bc")
+            .arg(input)
+            .args(["--merge-strategy", "archive", "-o"])
+            .arg(&archive)
+            .output()
+            .unwrap()
+    };
+    let members = |path: &Path| {
+        let data = fs::read(path).unwrap();
+        object::read::archive::ArchiveFile::parse(&*data)
+            .unwrap()
+            .members()
+            .map(|member| member.unwrap().name().to_vec())
+            .collect::<Vec<_>>()
+    };
+    let output = extract(&program);
+    assert!(
+        output.status.success(),
+        "initial archive failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(members(&archive).len(), 2);
+
+    let single_object = tmp.path().join("a/a.o");
+    let bitcode_paths =
+        rllvm::utils::extract_bitcode_filepaths_from_object_file(&single_object).unwrap();
+    assert_eq!(bitcode_paths.len(), 1);
+    let output = extract(&single_object);
+    assert!(
+        output.status.success(),
+        "replacement archive failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected_name = bitcode_paths[0].file_name().unwrap().as_encoded_bytes();
+    assert_eq!(
+        members(&archive),
+        vec![expected_name.to_vec()],
+        "the replacement retained modules absent from the current input"
+    );
+
+    let before_failure = fs::read(&archive).unwrap();
+    fs::remove_file(&bitcode_paths[0]).unwrap();
+    let output = extract(&single_object);
+    assert!(
+        !output.status.success(),
+        "missing bitcode must fail extraction"
+    );
+    assert_eq!(fs::read(&archive).unwrap(), before_failure);
+}
+
 /// Compiles two sources that live in *different* directories and links them.
 ///
 /// Returns (executable, temp dir). `partial` groups bitcode by parent directory

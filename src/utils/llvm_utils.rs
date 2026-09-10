@@ -131,11 +131,21 @@ pub fn archive_bitcode_files<P>(
 where
     P: AsRef<Path>,
 {
-    let output_filepath = output_filepath.as_ref();
+    let output_filepath = std::path::absolute(output_filepath.as_ref())?;
+    let output_dir = output_filepath.parent().ok_or_else(|| {
+        Error::InvalidArguments(format!("Archive output has no parent: {output_filepath:?}"))
+    })?;
+    // `llvm-ar r` updates an existing archive without removing old members.
+    // Build a fresh archive beside the destination, then replace it only
+    // after success. The same filesystem makes the rename atomic.
+    let workspace = tempfile::Builder::new()
+        .prefix(".rllvm-archive-")
+        .tempdir_in(output_dir)?;
+    let staged_archive = workspace.path().join("archive.bca");
 
     let mut args = vec![
         "rs".to_string(),
-        output_filepath.to_string_lossy().into_owned(),
+        staged_archive.to_string_lossy().into_owned(),
     ];
     // Input bitcode files
     args.extend(
@@ -144,7 +154,11 @@ where
             .map(|x| x.as_ref().to_string_lossy().into_owned()),
     );
 
-    execute_llvm_tool(try_rllvm_config()?.llvm_ar_filepath(), &args).map(|status| status.code())
+    let status = execute_llvm_tool(try_rllvm_config()?.llvm_ar_filepath(), &args)?;
+    if status.success() {
+        std::fs::rename(&staged_archive, &output_filepath)?;
+    }
+    Ok(status.code())
 }
 
 #[cfg(test)]
