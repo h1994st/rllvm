@@ -225,6 +225,184 @@ fn compile_single_c_file_and_extract_bitcode() {
     assert_valid_bitcode(&bitcode_path);
 }
 
+/// Both compilations must finish before extraction: extracting the first early
+/// would hide a later compilation overwriting its embedded bitcode path.
+enum CompilationVariant {
+    Output,
+    OutputOnly,
+    StoreOutputOnly,
+    SharedStore,
+    ReusedOutput,
+    ConfiguredFlags,
+    Compiler,
+}
+
+fn assert_compilation_variants_keep_bitcode(variant: CompilationVariant) {
+    let shared_store = matches!(
+        variant,
+        CompilationVariant::SharedStore | CompilationVariant::StoreOutputOnly
+    );
+    let output_only = matches!(
+        variant,
+        CompilationVariant::OutputOnly | CompilationVariant::StoreOutputOnly
+    );
+    let reuse_output = matches!(
+        variant,
+        CompilationVariant::ReusedOutput
+            | CompilationVariant::ConfiguredFlags
+            | CompilationVariant::Compiler
+    );
+    let config_flags = matches!(variant, CompilationVariant::ConfiguredFlags);
+    let compiler_variant = matches!(variant, CompilationVariant::Compiler);
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("f.c");
+    fs::write(&source, if compiler_variant {
+        "#ifdef __cplusplus\n#define VALUE 2\n#else\n#define VALUE 1\n#endif\nint value(void) { return VALUE; }\n"
+    } else {
+        "int value(void) { return VALUE; }\n"
+    }).unwrap();
+    let store = tmp.path().join("store");
+    fs::create_dir(&store).unwrap();
+    let mut config = fs::read_to_string(shared_config_path()).unwrap();
+    if shared_store {
+        config.push_str(&format!("bitcode_store_path = '{}'\n", store.display()));
+    }
+    let config_path = tmp.path().join("config.toml");
+    let mut objects = Vec::new();
+    for (index, name) in ["one", "two"].iter().enumerate() {
+        let value = if output_only { 1 } else { index + 1 };
+        let output_dir = if shared_store {
+            tmp.path().join(name)
+        } else {
+            tmp.path().to_path_buf()
+        };
+        fs::create_dir_all(&output_dir).unwrap();
+        let object = output_dir.join(if reuse_output {
+            "same.o".into()
+        } else {
+            format!("{name}.o")
+        });
+        let definition = format!("-DVALUE={value}");
+        let mut command = rllvm("rllvm-cc");
+        let contents = if config_flags {
+            // The machine-code invocation also needs VALUE, but only the
+            // configured bitcode-generation flags vary between compilations.
+            command.arg("-DVALUE=0");
+            format!("{config}bitcode_generation_flags = ['-UVALUE', '{definition}']\n")
+        } else {
+            if compiler_variant {
+                let bindir = find_llvm_dis().unwrap().parent().unwrap().to_path_buf();
+                command
+                    .arg("--rllvm-compiler")
+                    .arg(bindir.join(if index == 0 { "clang" } else { "clang++" }));
+            } else {
+                command.arg(&definition);
+            }
+            config.clone()
+        };
+        fs::write(&config_path, contents).unwrap();
+        let output = command
+            .current_dir(tmp.path())
+            .env("RLLVM_CONFIG", &config_path)
+            .env("RLLVM_CACHE", "0")
+            .env_remove("RLLVM_BITCODE_ROOT")
+            .env_remove("RLLVM_LTO_MODE")
+            .args(["-c", "-o"])
+            .arg(&object)
+            .arg(&source)
+            .output()
+            .expect("Failed to compile variant");
+        assert!(
+            output.status.success(),
+            "variant compile failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Capture the first object before reusing its requested output. Its
+        // bitcode reference must remain valid after the next compilation.
+        let captured = tmp.path().join(format!("captured-{name}.o"));
+        fs::copy(object, &captured).unwrap();
+        objects.push(captured);
+    }
+
+    if output_only {
+        let paths: Vec<_> = objects
+            .iter()
+            .map(|object| rllvm::utils::extract_bitcode_filepaths_from_object_file(object).unwrap())
+            .collect();
+        assert_ne!(
+            paths[0], paths[1],
+            "distinct requested outputs share an artifact"
+        );
+    }
+    for (index, object) in objects.iter().enumerate() {
+        let bitcode = tmp.path().join(format!("extracted-{index}.bc"));
+        let output = rllvm("rllvm-get-bc")
+            .env("RLLVM_CONFIG", &config_path)
+            .env_remove("RLLVM_BITCODE_ROOT")
+            .arg(object)
+            .arg("-o")
+            .arg(&bitcode)
+            .output()
+            .expect("Failed to extract variant");
+        assert!(
+            output.status.success(),
+            "variant extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = Command::new(find_llvm_dis().expect("llvm-dis not found"))
+            .arg(&bitcode)
+            .args(["-o", "-"])
+            .output()
+            .expect("Failed to disassemble variant");
+        assert!(
+            output.status.success(),
+            "llvm-dis failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let ir = String::from_utf8_lossy(&output.stdout);
+        let expected = format!("ret i32 {}", if output_only { 1 } else { index + 1 });
+        assert!(
+            ir.contains(&expected),
+            "variant {index} lost its original bitcode; expected {expected}:\n{ir}"
+        );
+    }
+}
+
+#[test]
+fn compilation_variants_with_identical_flags_have_distinct_output_artifacts() {
+    assert_compilation_variants_keep_bitcode(CompilationVariant::OutputOnly);
+}
+
+#[test]
+fn compilation_variants_with_identical_flags_have_distinct_store_artifacts() {
+    assert_compilation_variants_keep_bitcode(CompilationVariant::StoreOutputOnly);
+}
+
+#[test]
+fn compilation_variants_in_one_directory_keep_bitcode() {
+    assert_compilation_variants_keep_bitcode(CompilationVariant::Output);
+}
+
+#[test]
+fn compilation_variants_in_shared_store_keep_bitcode() {
+    assert_compilation_variants_keep_bitcode(CompilationVariant::SharedStore);
+}
+
+#[test]
+fn compilation_variants_reusing_output_keep_captured_bitcode() {
+    assert_compilation_variants_keep_bitcode(CompilationVariant::ReusedOutput);
+}
+
+#[test]
+fn compilation_variants_with_configured_flags_keep_captured_bitcode() {
+    assert_compilation_variants_keep_bitcode(CompilationVariant::ConfiguredFlags);
+}
+
+#[test]
+fn compilation_variants_with_compiler_override_keep_captured_bitcode() {
+    assert_compilation_variants_keep_bitcode(CompilationVariant::Compiler);
+}
+
 #[test]
 fn compile_multiple_c_files_and_link() {
     let tmp = TempDir::new().unwrap();
