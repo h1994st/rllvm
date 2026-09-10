@@ -2500,6 +2500,58 @@ fn rustc_wrapper_embeds_into_a_linked_binary() {
     assert_bitcode_magic(&paths[0]);
 }
 
+fn assert_rustc_relative_output(out_dir: bool, relative_record: bool) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut command = rllvm("rllvm-rustc");
+    command.current_dir(&root).arg(which("rustc").unwrap());
+    let (program, bitcode) = if out_dir {
+        fs::create_dir(root.join("out")).unwrap();
+        command.args(["--crate-name", "program", "--out-dir", "out"]);
+        ("out/program", "out/program.bc")
+    } else {
+        command.args(["-o", "program"]);
+        ("program", "program.bc")
+    };
+    if relative_record {
+        command.env("RLLVM_BITCODE_ROOT", &root);
+    } else {
+        command.env_remove("RLLVM_BITCODE_ROOT");
+    }
+    let output = command.arg("main.rs").output().unwrap();
+    assert!(
+        output.status.success(),
+        "relative rustc output failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(Command::new(root.join(program)).status().unwrap().success());
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(root.join(program))
+        .expect("linked output must record its bitcode");
+    let expected = if relative_record {
+        PathBuf::from(bitcode)
+    } else {
+        root.join(bitcode)
+    };
+    assert_eq!(paths, vec![expected]);
+    assert_bitcode_magic(&root.join(bitcode));
+}
+
+#[test]
+fn rustc_relative_output_is_recorded_before_the_bitcode_exists() {
+    assert_rustc_relative_output(false, false);
+}
+
+#[test]
+fn rustc_relative_out_dir_is_recorded_before_the_bitcode_exists() {
+    assert_rustc_relative_output(true, false);
+}
+
+#[test]
+fn rustc_relative_output_respects_bitcode_root() {
+    assert_rustc_relative_output(false, true);
+}
+
 /// Recursively copy a directory, so the checked-in fixture never gains a
 /// `target/` and parallel test runs cannot race on one.
 fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {

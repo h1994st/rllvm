@@ -62,7 +62,9 @@ impl RustcWrapper {
         };
 
         let store = try_rllvm_config()?.bitcode_store_path().cloned();
-        let bitcode = rustc_args::bitcode_path(&args, store.as_deref())?;
+        // The marker is built before rustc creates this file. Make the path
+        // absolute without canonicalizing a file that does not exist yet.
+        let bitcode = std::path::absolute(rustc_args::bitcode_path(&args, store.as_deref())?)?;
 
         let owned: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
         let mut rewritten = rustc_args::rewrite_emit(&owned, &bitcode);
