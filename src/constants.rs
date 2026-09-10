@@ -165,7 +165,10 @@ pub(crate) fn arg_exact_match_map() -> &'static CallbackMap {
             ArgInfo::new(0, CompilerArgsInfo::compile_unary),
         );
 
-        m.insert("-pthread", ArgInfo::new(0, CompilerArgsInfo::link_unary));
+        m.insert(
+            "-pthread",
+            ArgInfo::new(0, CompilerArgsInfo::compile_link_unary),
+        );
         m.insert(
             "-nostdlibinc",
             ArgInfo::new(0, CompilerArgsInfo::compile_unary),

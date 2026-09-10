@@ -348,6 +348,79 @@ int main(void) {
     assert_valid_bitcode(&bitcode_path);
 }
 
+fn assert_pthread_compilation(compile_only: bool) {
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("threaded.c");
+    fs::write(
+        &source,
+        "int main(void) {\n#ifdef _REENTRANT\nreturn 0;\n#else\nreturn 23;\n#endif\n}\n",
+    )
+    .unwrap();
+    let program = tmp.path().join("threaded");
+    let artifact = if compile_only {
+        tmp.path().join("threaded.o")
+    } else {
+        program.clone()
+    };
+    let mut compile = rllvm("rllvm-cc");
+    compile.env("RLLVM_CACHE", "0").args(["-pthread", "-O1"]);
+    if compile_only {
+        compile.arg("-c");
+    }
+    let output = compile
+        .arg(&source)
+        .arg("-o")
+        .arg(&artifact)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "pthread compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    if compile_only {
+        let status = rllvm("rllvm-cc")
+            .arg("-pthread")
+            .arg(&artifact)
+            .arg("-o")
+            .arg(&program)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    assert_eq!(Command::new(&program).status().unwrap().code(), Some(0));
+
+    let bitcode = tmp.path().join("extracted.bc");
+    assert!(
+        rllvm("rllvm-get-bc")
+            .arg(&artifact)
+            .arg("-o")
+            .arg(&bitcode)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new(find_llvm_dis().unwrap())
+        .arg(&bitcode)
+        .args(["-o", "-"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let ir = String::from_utf8_lossy(&output.stdout);
+    assert!(ir.contains("ret i32 0"), "bitcode lost _REENTRANT: {ir}");
+}
+
+#[test]
+fn pthread_preserves_reentrant_in_object_and_bitcode() {
+    assert_pthread_compilation(true);
+}
+
+#[test]
+fn pthread_preserves_reentrant_in_linked_program_and_bitcode() {
+    assert_pthread_compilation(false);
+}
+
 #[test]
 fn compile_cxx_file_and_extract_bitcode() {
     let tmp = TempDir::new().unwrap();
