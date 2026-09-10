@@ -147,7 +147,8 @@ pub trait CompilerWrapper {
     fn save_temps_plan(&self) -> Result<SaveTempsPlan, Error> {
         let args = self.args();
         if try_rllvm_config()?.lto_mode()? != LtoMode::SaveTemps
-            || !matches!(args.mode(), CompileMode::LTO)
+            || try_rllvm_config()?.is_configure_only()
+            || !args.has_lto_link_phase()
         {
             return Ok(SaveTempsPlan::default());
         }
@@ -210,6 +211,9 @@ pub trait CompilerWrapper {
             *self.compiler_kind(),
             args.compile_args(),
         )?;
+        // An explicit source language remains active for subsequent inputs.
+        // Reset it only after the user's inputs, before our object file.
+        extra_args.extend(["-x".to_string(), "none".to_string()]);
         extra_args.push(marker.to_string_lossy().into_owned());
 
         Ok(SaveTempsPlan {

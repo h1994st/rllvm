@@ -3039,6 +3039,263 @@ fn save_temps_mode_records_the_linker_merged_module() {
     );
 }
 
+/// A combined source build must record the module produced by its LTO link.
+fn save_temps_source_link_and_extract(
+    output_name: Option<&str>,
+    with_object: bool,
+    language: Option<&str>,
+) {
+    let tmp = TempDir::new().unwrap();
+    let mut inputs = write_lto_sources(tmp.path());
+    if let Some(language) = language {
+        for input in &mut inputs {
+            if language == "c++" {
+                let source = fs::read_to_string(&*input)
+                    .unwrap()
+                    .replace("int a_fn", "extern \"C\" int a_fn")
+                    .replace("int b_fn", "extern \"C\" int b_fn");
+                fs::write(&*input, source).unwrap();
+            } else {
+                // The explicit language must still apply to the user's inputs.
+                let renamed = input.with_extension("cpp");
+                fs::rename(&*input, &renamed).unwrap();
+                *input = renamed;
+            }
+        }
+    }
+    if with_object {
+        let object = inputs[0].with_extension("o");
+        let output = rllvm("rllvm-cc")
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["-flto", "-c"])
+            .arg(&inputs[0])
+            .arg("-o")
+            .arg(&object)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        inputs[0] = object;
+    }
+
+    let mut build = rllvm(if language == Some("c++") {
+        "rllvm-cxx"
+    } else {
+        "rllvm-cc"
+    });
+    build
+        .current_dir(tmp.path())
+        .env("RLLVM_LTO_MODE", "save-temps")
+        .arg("-flto");
+    if let Some(language) = language {
+        build.args(["-x", language]);
+    }
+    build.args(&inputs);
+    if let Some(name) = output_name {
+        build.args(["-o", name]);
+    }
+    let output = build.output().unwrap();
+    assert!(
+        output.status.success(),
+        "source/link failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let name = output_name.unwrap_or("a.out");
+    let program = tmp.path().join(name);
+    assert!(Command::new(&program).status().unwrap().success());
+
+    let extracted = tmp.path().join("extracted.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .args(["-m", "-o"])
+        .arg(&extracted)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "source/link extraction failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_bitcode_magic(&extracted);
+    let manifest = fs::read_to_string(tmp.path().join("extracted.bc.manifest")).unwrap();
+    let paths: Vec<_> = manifest.lines().collect();
+    assert_eq!(
+        paths.len(),
+        1,
+        "expected only the merged module: {manifest}"
+    );
+    assert_eq!(
+        Path::new(paths[0]).canonicalize().unwrap(),
+        tmp.path()
+            .join(format!("{name}.rllvm.bc"))
+            .canonicalize()
+            .unwrap()
+    );
+    let output = Command::new(find_llvm_nm().expect("llvm-nm not found"))
+        .arg("--defined-only")
+        .arg(&extracted)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let symbols = String::from_utf8_lossy(&output.stdout);
+    for symbol in ["a_fn", "b_fn", "main"] {
+        assert!(
+            symbols.lines().any(|line| line
+                .split_whitespace()
+                .last()
+                .map(|name| name.trim_start_matches('_'))
+                == Some(symbol)),
+            "missing definition of {symbol}: {symbols}"
+        );
+    }
+}
+
+#[test]
+fn save_temps_source_link_records_module_for_relative_output() {
+    save_temps_source_link_and_extract(Some("prog"), false, None);
+}
+
+#[test]
+fn save_temps_source_link_records_module_for_default_output() {
+    save_temps_source_link_and_extract(None, false, None);
+}
+
+#[test]
+fn save_temps_source_link_includes_lto_object_definitions() {
+    save_temps_source_link_and_extract(Some("prog"), true, None);
+}
+
+#[test]
+fn save_temps_source_link_preserves_explicit_c_language() {
+    save_temps_source_link_and_extract(Some("prog"), false, Some("c"));
+}
+
+#[test]
+fn save_temps_source_link_preserves_explicit_cxx_language() {
+    save_temps_source_link_and_extract(Some("prog"), false, Some("c++"));
+}
+
+#[test]
+fn save_temps_source_link_warns_that_thin_lto_has_no_merged_module() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+    let output = rllvm("rllvm-cc")
+        .current_dir(tmp.path())
+        .env("RLLVM_LTO_MODE", "save-temps")
+        .arg("-flto=thin")
+        .args(&sources)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "ThinLTO source/link failed: {stderr}"
+    );
+    assert!(
+        stderr.contains("ThinLTO builds no whole-program module"),
+        "missing ThinLTO diagnostic: {stderr}"
+    );
+    assert!(
+        Command::new(tmp.path().join("a.out"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!tmp.path().join("a.out.rllvm.bc").exists());
+}
+
+/// Modes that stop before linking must not receive a marker or linker flags.
+#[test]
+fn save_temps_does_not_intercept_non_linking_source_invocations() {
+    let mut failures = Vec::new();
+    for flag in [
+        "-c",
+        "-E",
+        "-S",
+        "-M",
+        "-MM",
+        "--version",
+        "--help",
+        "-###",
+        "-fsyntax-only",
+        "-print-prog-name=ld",
+        "--help-hidden",
+        "-dumpmachine",
+        "--analyze",
+        "-dumpversion",
+        "-emit-ast",
+        "-ccc-print-phases",
+        "-fdriver-only",
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path().join("main.c");
+        fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+        let output = rllvm("rllvm-cc")
+            .current_dir(tmp.path())
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .args(["--rllvm-verbose=3", "-flto", flag])
+            .arg(&source)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() || stderr.contains("rllvm_marker") {
+            failures.push(format!("{flag} failed or received a link marker: {stderr}"));
+            continue;
+        }
+        assert!(
+            !tmp.path().join("a.out").exists(),
+            "{flag} unexpectedly linked"
+        );
+        assert!(
+            !tmp.path().join("a.out.rllvm.bc").exists(),
+            "{flag} collected a module"
+        );
+        if flag == "-c" {
+            assert_bitcode_magic(&tmp.path().join("main.o"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn save_temps_does_not_intercept_configure_only_source_link() {
+    let tmp = TempDir::new().unwrap();
+    let sources = write_lto_sources(tmp.path());
+    let config = tmp.path().join("config.toml");
+    fs::write(
+        &config,
+        format!(
+            "{}\nis_configure_only = true\n",
+            fs::read_to_string(shared_config_path()).unwrap()
+        ),
+    )
+    .unwrap();
+    let output = rllvm("rllvm-cc")
+        .current_dir(tmp.path())
+        .env("RLLVM_CONFIG", config)
+        .env("RLLVM_LTO_MODE", "save-temps")
+        .args(["--rllvm-verbose=3", "-flto"])
+        .args(&sources)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "configure build failed: {stderr}");
+    assert!(
+        !stderr.contains("rllvm_marker"),
+        "configure build received a marker: {stderr}"
+    );
+    assert!(
+        Command::new(tmp.path().join("a.out"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(!tmp.path().join("a.out.rllvm.bc").exists());
+}
+
 /// `collect_saved_module` has an arm that `llvm-link`s several saved modules
 /// together, reached only when the link used more than one LTO partition. A
 /// default link saves exactly one module and takes the single-match arm, so
@@ -3177,12 +3434,8 @@ fn save_temps_mode_collects_the_module_for_a_relative_output() {
 /// ThinLTO never builds a whole-program module, so `save-temps` has nothing
 /// to collect. The build must still succeed rather than fail over a mode the
 /// user set globally.
-///
-/// The warning lives in `save_temps_plan`, which only runs for a link
-/// (`CompileMode::LTO`: no source files on the command line, only objects).
-/// Compiling and linking in one invocation stays `CompileMode::Compiling`
-/// regardless of `-flto`, so -- like the sibling test above -- this compiles
-/// each source to an object first and links them in a separate step.
+/// This exercises the separate-object link; the source/link regression above
+/// covers the same diagnostic when compilation and linking share a command.
 #[test]
 fn save_temps_mode_warns_that_thin_lto_has_no_merged_module() {
     let tmp = TempDir::new().unwrap();
