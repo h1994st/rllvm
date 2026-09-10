@@ -3654,6 +3654,63 @@ fn architecture_is_linkable(arch: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+#[test]
+#[cfg(target_vendor = "apple")]
+fn source_link_preserves_the_requested_architecture() {
+    use object::Object;
+
+    let (arch, expected) = if cfg!(target_arch = "aarch64") {
+        ("x86_64", object::Architecture::X86_64)
+    } else {
+        ("arm64", object::Architecture::Aarch64)
+    };
+    if !architecture_is_linkable(arch) {
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("main.c");
+    fs::write(&source, "int main(void) { return 0; }\n").unwrap();
+    let program = tmp.path().join("program");
+    let output = rllvm("rllvm-cc")
+        .args(["-arch", arch])
+        .arg(&source)
+        .arg("-o")
+        .arg(&program)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "cross-architecture source link failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = fs::read(&program).unwrap();
+    let object = object::File::parse(&*data).unwrap();
+    assert_eq!(object.architecture(), expected);
+
+    let bitcode = tmp.path().join("program.bc");
+    assert!(
+        rllvm("rllvm-get-bc")
+            .arg(&program)
+            .arg("-o")
+            .arg(&bitcode)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = Command::new(find_llvm_dis().unwrap())
+        .arg(&bitcode)
+        .args(["-o", "-"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let ir = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        ir.contains(&format!("target triple = \"{arch}-apple-")),
+        "bitcode target does not match {arch}: {ir}"
+    );
+}
+
 /// The `save-temps` marker object is built for the link's target, not the
 /// host.
 ///
