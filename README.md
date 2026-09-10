@@ -231,11 +231,13 @@ bitcode, while lld links the machine code.
 whole-program module the LTO pipeline merged, recording its path instead of
 per-unit paths. No per-unit compile. Full LTO only — ThinLTO builds no such
 module, and that case warns and collects nothing rather than failing the
-build. Needs a separate link step through `rllvm-cc`: a single-step `rllvm-cc
--flto a.c b.c -o prog` is a compile, not an LTO link, so save-temps cannot
-hook it. The inputs must be LTO bitcode: `-flto` in `LDFLAGS` alone produces no
-merged module, and rllvm errors. The collected module is post-optimization —
-the module the linker generated code from.
+build. Works with separate links and combined source-and-link commands such
+as `rllvm-cc -flto a.c b.c -o prog`, including sources mixed with LTO objects.
+Compile-only, preprocessing, assembly-output, dependency-only, query, and
+configure-only invocations do not collect a module. The link must receive LTO
+bitcode: `-flto` in `LDFLAGS` alone produces no merged module when all objects
+were compiled without LTO, and rllvm errors. The collected module is
+post-optimization — the module the linker generated code from.
 
 `skip` generates nothing and warns — the old default behaviour.
 

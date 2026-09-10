@@ -697,6 +697,36 @@ impl CompilerArgsInfo {
         mode
     }
 
+    /// Whether this invocation has an LTO link phase, including source builds.
+    pub(crate) fn has_lto_link_phase(&self) -> bool {
+        self.is_lto()
+            && !self.is_compile_only
+            && !self.is_preprocess_only
+            && !self.is_assemble_only
+            && !self.is_dependency_only
+            && !self.is_print_only
+            && !self.is_assembly
+            // These driver modes are passed through without their own parser
+            // state, but must not cause save-temps to stage a marker or collect.
+            && !self.compile_args.iter().any(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--help"
+                        | "-help"
+                        | "--help-hidden"
+                        | "-###"
+                        | "-fsyntax-only"
+                        | "-dumpmachine"
+                        | "-dumpversion"
+                        | "--analyze"
+                        | "-emit-ast"
+                        | "-ccc-print-phases"
+                        | "-fdriver-only"
+                ) || arg.starts_with("-print-")
+            })
+            && (!self.input_files.is_empty() || !self.link_args.is_empty())
+    }
+
     /// Derive (source, object, bitcode) filepath triples for all input files.
     pub fn artifact_filepaths(&self) -> Result<Vec<(PathBuf, PathBuf, PathBuf)>, Error> {
         let config = try_rllvm_config()?;
