@@ -3593,6 +3593,68 @@ fn lto_cxx_build_with_std_flag_succeeds() {
     );
 }
 
+/// eBPF is not a target rllvm knows about, and does not need to be: a BPF
+/// object is an ELF, so the ordinary embedding applies. What makes it work is
+/// that `.rllvm_bc` is non-alloc under a name no BPF tool claims -- libbpf
+/// reports `skipping unrecognized data section` and loads the object as
+/// before.
+///
+/// The recorded module has to be BPF IR, not the host's. A wrapper that
+/// dropped `--target` from the bitcode compile would still produce a valid
+/// `.bc`, extract cleanly, and be useless.
+#[test]
+fn bpf_objects_record_bitcode_for_the_bpf_target() {
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("prog.c");
+    fs::write(
+        &source,
+        "#define SEC(n) __attribute__((section(n), used))\n\
+         SEC(\"tracepoint/syscalls/sys_enter_execve\")\n\
+         int handle_execve(void *ctx) { return 0; }\n\
+         char _license[] SEC(\"license\") = \"GPL\";\n",
+    )
+    .unwrap();
+
+    let object = tmp.path().join("prog.o");
+    let status = rllvm("rllvm-cc")
+        .args(["--", "--target=bpf", "-O2", "-c", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc failed for the bpf target");
+
+    // ELF `e_machine` at offset 18; EM_BPF is 247. Asserting the object really
+    // is BPF keeps this from passing as an ordinary host build if `--target`
+    // ever stops reaching the compiler.
+    let bytes = fs::read(&object).unwrap();
+    assert_eq!(
+        u16::from_le_bytes([bytes[18], bytes[19]]),
+        247,
+        "expected an EM_BPF object at {object:?}"
+    );
+
+    let bitcode = tmp.path().join("prog.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&object)
+        .arg("-o")
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "rllvm-get-bc failed on the bpf object");
+    assert_bitcode_magic(&bitcode);
+
+    let info = rllvm("rllvm-info")
+        .arg(&bitcode)
+        .output()
+        .expect("Failed to run rllvm-info");
+    let info = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        info.contains("Target triple: bpf"),
+        "the recorded module must target bpf:\n{info}"
+    );
+}
+
 /// `-ffat-lto-objects` produces a real ELF object with the bitcode inside, so
 /// the wrapper's content-based dispatch sends it down the ordinary
 /// `llvm-objcopy` path rather than the marker path. Only `is_bitcode_file`'s
