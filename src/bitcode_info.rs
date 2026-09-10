@@ -128,8 +128,7 @@ fn parse_ir(ir: &str, file_path: PathBuf, file_size: u64) -> BitcodeInfo {
             }
 
             // Basic block label: "label:" or "N:" at the start of the line (not indented)
-            // In LLVM IR, labels are not indented and end with ':'
-            if !line.starts_with(' ') && !line.starts_with('\t') && trimmed.ends_with(':') {
+            if is_basic_block_label(line) {
                 current_bb_count += 1;
                 continue;
             }
@@ -160,6 +159,31 @@ fn parse_ir(ir: &str, file_path: PathBuf, file_size: u64) -> BitcodeInfo {
         total_basic_blocks,
         total_instructions,
     }
+}
+
+/// Return whether an LLVM IR line defines a basic block.
+///
+/// `llvm-dis` can append a predecessor comment after the label's colon. Quoted
+/// labels can themselves contain colons or semicolons, so the delimiter must be
+/// found before looking for a trailing comment.
+fn is_basic_block_label(line: &str) -> bool {
+    if line.starts_with(' ') || line.starts_with('\t') || line.starts_with(';') {
+        return false;
+    }
+
+    let mut quoted = false;
+    for (index, character) in line.char_indices() {
+        match character {
+            '"' => quoted = !quoted,
+            ':' if !quoted => {
+                let suffix = line[index + 1..].trim_start();
+                return suffix.is_empty() || suffix.starts_with(';');
+            }
+            _ => {}
+        }
+    }
+
+    false
 }
 
 /// Extract the function name from a `define` line.
@@ -270,5 +294,26 @@ else:
         assert_eq!(info.functions[0].name, "branch");
         assert_eq!(info.functions[0].basic_block_count, 3);
         assert_eq!(info.functions[0].instruction_count, 3);
+    }
+
+    #[test]
+    fn parse_ir_counts_pred_comments_and_quoted_labels() {
+        let ir = r#"
+define i32 @branch(i1 %cond) {
+  br i1 %cond, label %6, label %"quoted;label"
+
+6:                                                ; preds = %1
+  br label %"quoted:label"
+
+"quoted;label":                                   ; preds = %1
+  br label %"quoted:label"
+
+"quoted:label":                                   ; preds = %"quoted;label", %6
+  ret i32 0
+}
+"#;
+        let info = parse_ir(ir, PathBuf::from("test.bc"), 256);
+        assert_eq!(info.functions.len(), 1);
+        assert_eq!(info.functions[0].basic_block_count, 4);
     }
 }

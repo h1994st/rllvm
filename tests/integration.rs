@@ -1100,6 +1100,50 @@ fn info_reports_on_bitcode_and_on_object_files() {
     );
 }
 
+/// `llvm-dis` appends predecessor comments to explicit block labels, while the
+/// entry block can be implicit.
+#[test]
+fn info_counts_implicit_entry_and_pred_labeled_blocks() {
+    let tmp = TempDir::new().unwrap();
+    let source_path = tmp.path().join("branch.c");
+    let bitcode_path = tmp.path().join("branch.bc");
+    fs::write(
+        &source_path,
+        "int value(int x) { if (x) return 1; return 2; }\n",
+    )
+    .unwrap();
+
+    let clang = find_llvm_config()
+        .map(|config| config.parent().unwrap().join("clang"))
+        .expect("clang not found");
+    let output = Command::new(clang)
+        .args(["-O0", "-emit-llvm", "-c", "-o"])
+        .arg(&bitcode_path)
+        .arg(&source_path)
+        .output()
+        .expect("clang failed");
+    assert!(
+        output.status.success(),
+        "clang failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output = rllvm("rllvm-info")
+        .arg(&bitcode_path)
+        .output()
+        .expect("Failed to run rllvm-info");
+    assert!(
+        output.status.success(),
+        "rllvm-info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Basic blocks : 4"),
+        "rllvm-info reported the wrong block count: {stdout}"
+    );
+}
+
 /// A file that is neither bitcode nor an object must fail cleanly, not panic.
 #[test]
 fn info_rejects_a_file_that_is_neither_bitcode_nor_object() {
