@@ -34,7 +34,7 @@ impl ClangWrapper {
             compiler_kind,
             is_silent: false,
             is_parse_args_called: false,
-            args: CompilerArgsInfo::default(),
+            args: CompilerArgsInfo::for_compiler(compiler_path),
         })
     }
 }
@@ -137,13 +137,14 @@ impl CompilerWrapperBuilder for ClangWrapperBuilder {
             }
         };
 
+        let args = CompilerArgsInfo::for_compiler(&compiler_path);
         Ok(ClangWrapper {
             name: self.name.clone(),
             wrapped_compiler: compiler_path,
             compiler_kind: self.compiler_kind,
             is_silent: self.is_silent.unwrap_or(false),
             is_parse_args_called: false,
-            args: CompilerArgsInfo::default(),
+            args,
         })
     }
 
@@ -182,6 +183,60 @@ mod tests {
             .compiler_kind(kind)
             .build()
             .expect("failed to build the wrapper")
+    }
+
+    // Unit-test configuration is inferred from LLVM, never the user's config.
+    // Exercise only public wrapper APIs, as an external library caller would.
+    fn assert_public_artifact_paths_match_generated_object(mut wrapper: ClangWrapper) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let source = tmp.path().join("value.c");
+        let object = tmp.path().join("value.o");
+        std::fs::write(&source, "int value(void) { return 1; }\n").unwrap();
+        wrapper
+            .parse_args(&[
+                "-x",
+                "c",
+                "-c",
+                source.to_str().unwrap(),
+                "-o",
+                object.to_str().unwrap(),
+            ])
+            .unwrap();
+        assert_eq!(wrapper.run().unwrap(), Some(0));
+        let artifacts = wrapper.args().artifact_filepaths().unwrap();
+        assert_eq!(artifacts.len(), 1);
+        let embedded = crate::utils::extract_bitcode_filepaths_from_object_file(&object).unwrap();
+        assert_eq!(
+            embedded,
+            vec![artifacts[0].2.clone()],
+            "public artifact query differs from the generated object's bitcode path"
+        );
+        assert!(artifacts[0].2.exists());
+    }
+
+    #[test]
+    fn public_artifact_paths_match_new_wrapper_output() {
+        assert_public_artifact_paths_match_generated_object(
+            ClangWrapper::new("rllvm", CompilerKind::Clang).unwrap(),
+        );
+    }
+
+    #[test]
+    fn public_artifact_paths_match_default_builder_output() {
+        assert_public_artifact_paths_match_generated_object(build(CompilerKind::Clang));
+    }
+
+    #[test]
+    fn public_artifact_paths_match_overridden_compiler_output() {
+        // Select clang++ through the override while keeping the builder's
+        // compiler kind at its default, so deriving from kind would be wrong.
+        let compiler = try_rllvm_config().unwrap().clangxx_filepath();
+        assert_public_artifact_paths_match_generated_object(
+            ClangWrapperBuilder::new()
+                .wrapped_compiler(compiler)
+                .build()
+                .unwrap(),
+        );
     }
 
     #[test]

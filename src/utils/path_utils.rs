@@ -9,22 +9,16 @@ use crate::error::Error;
 
 /// Derive the intermediate object and bitcode paths for one source file.
 ///
-/// Artifacts follow the **output**, not the source. Writing next to the source
-/// breaks read-only source trees (distro packaging, cached checkouts), and
-/// under `make -j` one source built by two targets derives the same paths in
-/// the same directory, so the two invocations race and the bitcode a given
-/// object points at may have been built with the other target's flags. The
-/// output directory is writable by construction — the build system chose it —
-/// and differs per target.
-///
-/// `output_dir` is where the compiler was asked to put its result. Names carry
-/// a hash of the absolute source path, so two sources sharing a stem in
-/// different directories do not collide once both land in one output
-/// directory.
+/// Artifacts follow the requested output directory, so source trees can remain
+/// read-only. Names distinguish the absolute source path and compilation
+/// identity (output target, working directory, compiler and ordered flags).
+/// The identity is preserved when the bitcode is moved into a shared store.
+/// This separates build variants; it is not a content-based cache key.
 pub(crate) fn derive_object_and_bitcode_filepath<P, Q>(
     src_filepath: P,
     output_dir: Q,
     is_compile_only: bool,
+    compilation_identity: &[String],
 ) -> Result<(PathBuf, PathBuf), Error>
 where
     P: AsRef<Path>,
@@ -56,8 +50,20 @@ where
             ))
         })?;
 
-    let src_filepath_hash = calculate_filepath_hash(src_filepath);
-    let artifact_stem = format!("{file_stem}_{src_filepath_hash:016x}");
+    let mut artifact_hash = calculate_filepath_hash(src_filepath);
+    // Length-prefix every field to distinguish argument boundaries and order.
+    // Keep this encoding stable: embedded paths may outlive toolchain upgrades.
+    for field in compilation_identity {
+        for byte in (field.len() as u64)
+            .to_le_bytes()
+            .iter()
+            .chain(field.as_bytes())
+        {
+            artifact_hash ^= u64::from(*byte);
+            artifact_hash = artifact_hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    let artifact_stem = format!("{file_stem}_{artifact_hash:016x}");
 
     // The bitcode file is hidden, and outlives the build: its absolute path is
     // embedded in the object and read back later by `rllvm-get-bc`.
@@ -129,7 +135,7 @@ mod tests {
         // Linking: both artifacts are internal and land beside the output, not
         // beside the source.
         let (object_filepath, bitcode_filepath) =
-            derive_object_and_bitcode_filepath(src_filepath, &output_dir, false)
+            derive_object_and_bitcode_filepath(src_filepath, &output_dir, false, &[])
                 .expect("Failed to derive filepaths");
         assert_eq!(object_filepath, output_dir.join(format!(".{stem}.o")));
         assert_eq!(bitcode_filepath, output_dir.join(format!(".{stem}.o.bc")));
@@ -137,7 +143,7 @@ mod tests {
         // Compile-only: the compiler writes `foo.o` into the current working
         // directory, which is where the bitcode path must be embedded.
         let (object_filepath, bitcode_filepath) =
-            derive_object_and_bitcode_filepath(src_filepath, &output_dir, true)
+            derive_object_and_bitcode_filepath(src_filepath, &output_dir, true, &[])
                 .expect("Failed to derive filepaths");
         assert_eq!(
             object_filepath,
@@ -157,10 +163,10 @@ mod tests {
         let second = env::temp_dir().join("b").join("util.c");
 
         let (first_object, first_bitcode) =
-            derive_object_and_bitcode_filepath(&first, &output_dir, false)
+            derive_object_and_bitcode_filepath(&first, &output_dir, false, &[])
                 .expect("Failed to derive filepaths");
         let (second_object, second_bitcode) =
-            derive_object_and_bitcode_filepath(&second, &output_dir, false)
+            derive_object_and_bitcode_filepath(&second, &output_dir, false, &[])
                 .expect("Failed to derive filepaths");
 
         assert_ne!(first_object, second_object);
@@ -207,6 +213,7 @@ mod tests {
             Path::new("relative/foo.c"),
             Path::new("/tmp"),
             true,
+            &[],
         );
         assert!(err.is_err(), "a relative source path must be rejected");
     }
@@ -214,7 +221,8 @@ mod tests {
     #[test]
     fn derive_rejects_a_path_without_a_file_stem() {
         // A path ending in `..` has no file stem.
-        let err = derive_object_and_bitcode_filepath(Path::new("/tmp/.."), Path::new("/tmp"), true);
+        let err =
+            derive_object_and_bitcode_filepath(Path::new("/tmp/.."), Path::new("/tmp"), true, &[]);
         assert!(err.is_err(), "a path with no file stem must be rejected");
     }
 }

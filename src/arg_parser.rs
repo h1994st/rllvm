@@ -105,6 +105,7 @@ pub fn without_dependency_flags(compile_args: &[String]) -> Vec<String> {
 /// Compiler argument information
 #[derive(Debug, Default)]
 pub struct CompilerArgsInfo {
+    wrapped_compiler: Option<PathBuf>,
     input_args: Vec<String>,
     input_files: Vec<String>,
     object_files: Vec<String>,
@@ -173,6 +174,15 @@ where
 }
 
 impl CompilerArgsInfo {
+    /// Bind artifact identity to the compiler selected by the wrapper. A
+    /// standalone parser leaves this unspecified.
+    pub(crate) fn for_compiler(compiler: &Path) -> Self {
+        Self {
+            wrapped_compiler: Some(compiler.to_path_buf()),
+            ..Self::default()
+        }
+    }
+
     /// Handle an input file argument.
     pub fn input_file<S>(&mut self, flag: S, _args: &[S]) -> &'_ mut Self
     where
@@ -678,22 +688,34 @@ impl CompilerArgsInfo {
 
     /// Derive (source, object, bitcode) filepath triples for all input files.
     pub fn artifact_filepaths(&self) -> Result<Vec<(PathBuf, PathBuf, PathBuf)>, Error> {
-        // Artifacts follow the output. With no `-o` the compiler writes into
-        // the working directory, so that is the output directory too.
+        let config = try_rllvm_config()?;
+        let working_dir = env::current_dir()?;
+        let output_filepath = working_dir.join(&self.output_filename);
         let output_dir = if self.output_filename.is_empty() {
-            env::current_dir()?
+            working_dir.clone()
         } else {
-            let output_filepath = PathBuf::from(&self.output_filename);
-            let output_filepath = if output_filepath.is_absolute() {
-                output_filepath
-            } else {
-                env::current_dir()?.join(output_filepath)
-            };
             output_filepath
                 .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or(env::current_dir()?)
+                .unwrap_or(&working_dir)
+                .to_path_buf()
         };
+        let extra_flags = config
+            .bitcode_generation_flags()
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut compilation_identity = vec![
+            working_dir.to_string_lossy().into_owned(),
+            output_filepath.to_string_lossy().into_owned(),
+            self.is_compile_only.to_string(),
+            self.wrapped_compiler
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            self.compile_args.len().to_string(),
+        ];
+        compilation_identity.extend(self.compile_args.iter().cloned());
+        compilation_identity.push(extra_flags.len().to_string());
+        compilation_identity.extend(extra_flags.iter().cloned());
 
         let mut artifacts = vec![];
         for src_file in &self.input_files {
@@ -705,6 +727,7 @@ impl CompilerArgsInfo {
                 &src_filepath,
                 &output_dir,
                 self.is_compile_only,
+                &compilation_identity,
             )?;
 
             // In compile-only mode an explicit `-o` names the object file the
@@ -721,25 +744,10 @@ impl CompilerArgsInfo {
             }
 
             // Update the bitcode filepath, if the bitcode store path is provided
-            if let Some(bitcode_store_path) = try_rllvm_config()?.bitcode_store_path() {
+            if let Some(bitcode_store_path) = config.bitcode_store_path() {
                 if bitcode_store_path.exists() {
-                    // Obtain a new bitcode filename based on the hash of the source filepath
-                    if bitcode_filepath.file_name().is_some() {
-                        let src_filepath_hash = calculate_filepath_hash(&src_filepath);
-                        let bitcode_file_stem =
-                            bitcode_filepath.file_stem().unwrap().to_string_lossy();
-                        let bitcode_file_ext =
-                            bitcode_filepath.extension().unwrap().to_string_lossy();
-
-                        let new_bitcode_filename =
-                            format!("{bitcode_file_stem}_{src_filepath_hash}.{bitcode_file_ext}");
-
-                        bitcode_filepath = bitcode_store_path.join(new_bitcode_filename);
-                    } else {
-                        tracing::warn!(
-                            "Cannot obtain the bitcode filename: {:?}",
-                            bitcode_filepath
-                        );
+                    if let Some(filename) = bitcode_filepath.file_name() {
+                        bitcode_filepath = bitcode_store_path.join(filename);
                     }
                 } else {
                     tracing::warn!(
