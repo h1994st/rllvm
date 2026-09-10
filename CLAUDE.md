@@ -80,7 +80,9 @@ multi-file extraction. Every writer uses the same `bitcode_root` resolution.
 
 Section names are rllvm's own: `__RLLVM,__rllvm_bc` on Mach-O, `.rllvm_bc`
 elsewhere. Do not rename them to LLVM's `.llvmbc` or `.llvmcmd`: wasm-ld discards
-those names. Every Mach-O writer must set `no_dead_strip`; preserve the user's
+those names. A name no toolchain claims is also what makes targets rllvm knows
+nothing about work: libbpf skips the section when loading and copies it through
+when linking, so eBPF needs no support of its own. Every Mach-O writer must set `no_dead_strip`; preserve the user's
 dead-stripping flags.
 
 Embedding prefers `llvm-objcopy`. The `object`-crate rebuild can lose unmodelled

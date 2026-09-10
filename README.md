@@ -15,7 +15,8 @@ single `.bc` for the whole program back out of the finished binary.
   builds that pass compiler arguments through GNU response files.
 - **Rust and Cargo.** Capture bitcode from the application and its wrapped
   dependency crates.
-- **WebAssembly.** Extract from linked `wasm32` modules as well as objects.
+- **WebAssembly and eBPF.** Extract from linked `wasm32` modules as well as
+  objects, and from BPF objects before or after `bpftool gen object`.
 - **LTO.** Capture per-source bitcode under full or ThinLTO, or collect a full-LTO
   linker's merged module.
 - **Relocatable paths.** Keep extraction working when the build tree and its
@@ -186,6 +187,23 @@ rllvm-get-bc app.wasm -o app.bc
 
 Linking needs `wasm-ld`, which ships with LLD rather than LLVM and must match
 your LLVM version. See [`examples/wasm/`](examples/wasm/).
+
+### eBPF
+
+BPF objects are ELF, so the ordinary wrappers apply:
+
+```bash
+rllvm-cc --target=bpf -O2 -g -c prog.c -o prog.o
+rllvm-get-bc prog.o -o prog.bc
+```
+
+The recorded module is BPF IR, and the object's BPF payload is unchanged.
+`libbpf` reports `skipping unrecognized data section .rllvm_bc` and loads the
+object as it would an unwrapped one.
+
+Objects combined by `bpftool gen object`, or by `libbpf`'s linker directly,
+keep every contributing path, so extraction from a linked object covers the
+whole program. That linker requires BTF, so compile with `-g`.
 
 ### Bitcode storage and relocation
 
