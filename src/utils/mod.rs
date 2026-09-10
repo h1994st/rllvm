@@ -24,9 +24,9 @@ pub use llvm_utils::{
     archive_bitcode_files, execute_llvm_config, find_llvm_config, link_bitcode_files,
 };
 
-/// Response files for oversized LLVM tool invocations
+/// GNU response-file classification and LLVM tool transport
 mod response_file;
-pub(crate) use response_file::execute_llvm_tool;
+pub(crate) use response_file::{execute_llvm_tool, expand_response_files};
 
 /// Filepath-related utility functions
 mod path_utils;

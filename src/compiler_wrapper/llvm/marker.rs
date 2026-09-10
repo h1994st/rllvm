@@ -6,14 +6,16 @@
 //! the finished binary names the module the linker saved.
 
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use crate::{
-    arg_parser::without_dependency_flags, compiler_wrapper::CompilerKind, error::Error,
-    utils::embed_bitcode_filepath_to_object_file,
+    arg_parser::without_dependency_flags,
+    compiler_wrapper::CompilerKind,
+    error::Error,
+    utils::{embed_bitcode_filepath_to_object_file, execute_llvm_tool},
 };
 
 /// Compile an empty translation unit and embed the bitcode path into it.
@@ -59,13 +61,17 @@ pub(crate) fn build_marker_object(
     )?;
 
     let marker = dir.join("rllvm_marker.o");
-    let status = Command::new(compiler)
-        .args(without_dependency_flags(compile_args))
-        .arg("-c")
-        .arg(&source)
-        .arg("-o")
-        .arg(&marker)
-        .status()?;
+    let mut args: Vec<OsString> = without_dependency_flags(compile_args)
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    args.extend([
+        OsString::from("-c"),
+        source.into_os_string(),
+        OsString::from("-o"),
+        marker.as_os_str().to_owned(),
+    ]);
+    let status = execute_llvm_tool(compiler, &args)?;
     if !status.success() {
         return Err(Error::ExecutionFailure(format!(
             "Failed to build the rllvm marker object with {compiler:?}: exit_status={status}"

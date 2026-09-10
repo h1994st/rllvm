@@ -7,6 +7,7 @@
 //! concatenates the resulting section exactly as it does for ordinary objects.
 
 use std::{
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -19,7 +20,10 @@ use crate::{
     constants::FAT_LTO_SECTION_NAME,
     error::Error,
     lto::{is_save_temps_artifact, is_saved_module, marker_source},
-    utils::{execute_command_for_status, link_bitcode_files, recorded_bitcode_filepath},
+    utils::{
+        execute_command_for_status, execute_llvm_tool, link_bitcode_files,
+        recorded_bitcode_filepath,
+    },
 };
 
 /// Compile a marker module naming `bitcode` and merge it into `object`.
@@ -97,12 +101,18 @@ fn build_marker_module(
     // entries for its LTO units with relative ones for the rest.
     fs::write(&source, marker_source(&recorded_bitcode_filepath(bitcode)?))?;
 
-    let status = Command::new(compiler)
-        .args(without_dependency_flags(compile_args))
-        .args(["-emit-llvm", "-c", "-o"])
-        .arg(&marker)
-        .arg(&source)
-        .status()?;
+    let mut args: Vec<OsString> = without_dependency_flags(compile_args)
+        .into_iter()
+        .map(OsString::from)
+        .collect();
+    args.extend([
+        OsString::from("-emit-llvm"),
+        OsString::from("-c"),
+        OsString::from("-o"),
+        marker.as_os_str().to_owned(),
+        source.into_os_string(),
+    ]);
+    let status = execute_llvm_tool(compiler, &args)?;
     if !status.success() {
         return Err(Error::ExecutionFailure(format!(
             "Failed to compile the LTO marker for {object:?}: exit_status={status}. \
@@ -211,10 +221,11 @@ pub(crate) fn inject_marker_into_fat_object(
     Ok(())
 }
 
-/// Move the module the LTO link saved to `<output>.rllvm.bc`.
+/// Collect the module the LTO link saved at `<output>.rllvm.bc`.
 ///
 /// `cleanup` removes the other save-temps artifacts. It is false when the user
-/// asked for save-temps themselves, because then the artifacts are theirs.
+/// asked for save-temps themselves, because then the artifacts are theirs
+/// and the collected module must be copied without removing the originals.
 pub(crate) fn collect_saved_module(output: &Path, cleanup: bool) -> Result<PathBuf, Error> {
     let darwin = cfg!(target_vendor = "apple");
     // `Path::parent` returns `Some("")`, not `None`, for a bare relative
@@ -262,7 +273,10 @@ pub(crate) fn collect_saved_module(output: &Path, cleanup: bool) -> Result<PathB
                 }
             )));
         }
-        1 => fs::rename(&saved[0], &destination)?,
+        1 if cleanup => fs::rename(&saved[0], &destination)?,
+        1 => {
+            fs::copy(&saved[0], &destination)?;
+        }
         // More than one means more than one LTO partition.
         _ => {
             let code = link_bitcode_files(&saved, destination.clone())?;
@@ -272,8 +286,10 @@ pub(crate) fn collect_saved_module(output: &Path, cleanup: bool) -> Result<PathB
                     saved.len()
                 )));
             }
-            for module in &saved {
-                let _ = fs::remove_file(module);
+            if cleanup {
+                for module in &saved {
+                    let _ = fs::remove_file(module);
+                }
             }
         }
     }
