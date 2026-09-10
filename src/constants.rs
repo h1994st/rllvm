@@ -282,7 +282,10 @@ pub(crate) fn arg_exact_match_map() -> &'static CallbackMap {
         m.insert("-D", ArgInfo::new(1, CompilerArgsInfo::compile_binary));
         m.insert("-U", ArgInfo::new(1, CompilerArgsInfo::compile_binary));
 
-        m.insert("-arch", ArgInfo::new(1, CompilerArgsInfo::compile_binary));
+        m.insert(
+            "-arch",
+            ArgInfo::new(1, CompilerArgsInfo::compile_link_binary),
+        );
 
         m.insert("-P", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-C", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
