@@ -998,30 +998,86 @@ fn get_bc_merge_strategies_all_produce_output() {
     assert_valid_bitcode(&tmp.path().join("partial.bc"));
 }
 
-/// `partial` must leave no intermediate `*_partial_N.bc` files behind.
+/// `partial` must not use predictable sibling paths for its intermediates.
 #[test]
-fn get_bc_partial_cleans_up_intermediates() {
+fn get_bc_partial_preserves_existing_sibling() {
     let tmp = TempDir::new().unwrap();
     let exe = build_across_two_directories(&tmp);
     let out = tmp.path().join("merged.bc");
+    let sibling = tmp.path().join("merged_partial_0.bc");
+    let sentinel = b"existing file must survive\n";
+    fs::write(&sibling, sentinel).unwrap();
 
-    let status = rllvm("rllvm-get-bc")
+    let output = rllvm("rllvm-get-bc")
         .arg(&exe)
         .args(["--merge-strategy", "partial", "-o"])
         .arg(&out)
-        .status()
+        .output()
         .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "partial merge failed");
+    assert!(
+        output.status.success(),
+        "partial merge failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
-    let leftovers: Vec<_> = fs::read_dir(tmp.path())
+    assert_valid_bitcode(&out);
+    assert_eq!(
+        fs::read(&sibling).expect("preexisting sibling was removed"),
+        sentinel
+    );
+}
+
+/// A failed partial link cleans up its workspace and leaves the requested
+/// output untouched when it already exists.
+#[test]
+fn get_bc_partial_error_cleans_owned_temps_and_preserves_output() {
+    let tmp = TempDir::new().unwrap();
+    let exe = build_across_two_directories(&tmp);
+    let b_bitcode = fs::read_dir(tmp.path().join("b"))
         .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| n.contains("_partial_"))
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.extension().is_some_and(|ext| ext == "bc"))
+        .expect("the wrapper did not produce bitcode for b.c");
+    fs::write(b_bitcode, b"not LLVM bitcode").unwrap();
+
+    let out = tmp.path().join("merged.bc");
+    let sentinel = b"existing output must survive\n";
+    fs::write(&out, sentinel).unwrap();
+    let sibling = tmp.path().join("merged_partial_0.bc");
+    let sibling_sentinel = b"existing sibling must survive an error\n";
+    fs::write(&sibling, sibling_sentinel).unwrap();
+
+    let temp_root = tmp.path().join("merge-temporaries");
+    fs::create_dir(&temp_root).unwrap();
+
+    let output = rllvm("rllvm-get-bc")
+        .env("TMPDIR", &temp_root)
+        .env("TMP", &temp_root)
+        .env("TEMP", &temp_root)
+        .arg(&exe)
+        .args(["--merge-strategy", "partial", "-o"])
+        .arg(&out)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        !output.status.success(),
+        "partial merge unexpectedly succeeded"
+    );
+    assert_eq!(fs::read(&out).unwrap(), sentinel);
+    assert_eq!(
+        fs::read(&sibling).expect("preexisting sibling was removed"),
+        sibling_sentinel
+    );
+    assert!(!tmp.path().join("merged_partial_1.bc").exists());
+
+    let temp_leftovers: Vec<_> = fs::read_dir(&temp_root)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
         .collect();
     assert!(
-        leftovers.is_empty(),
-        "partial left intermediates behind: {leftovers:?}"
+        temp_leftovers.is_empty(),
+        "partial left its temporary workspace behind: {temp_leftovers:?}"
     );
 }
 

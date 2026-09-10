@@ -69,12 +69,8 @@ fn partial_link_bitcode_files<P: AsRef<Path>>(
 
     tracing::info!("Partial: {} groups detected", groups.len());
 
+    let workspace = tempfile::tempdir()?;
     let mut intermediate_files: Vec<PathBuf> = Vec::new();
-    let output_stem = output_filepath
-        .file_stem()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let output_dir = output_filepath.parent().unwrap_or(Path::new("."));
 
     for (idx, (dir, files)) in groups.iter().enumerate() {
         tracing::debug!(
@@ -83,12 +79,10 @@ fn partial_link_bitcode_files<P: AsRef<Path>>(
             dir,
             files.len()
         );
-        let intermediate = output_dir.join(format!("{}_partial_{}.bc", output_stem, idx));
+        let intermediate = workspace.path().join(format!("partial_{idx}.bc"));
 
         let result = link_bitcode_files(files.as_slice(), intermediate.as_path())?;
         if result.is_some_and(|code| code != 0) {
-            // Clean up any intermediates produced so far.
-            cleanup_files(&intermediate_files);
             return Ok(result);
         }
 
@@ -98,12 +92,7 @@ fn partial_link_bitcode_files<P: AsRef<Path>>(
     // Final link of the per-group intermediates.
     let intermediates_as_paths: Vec<&Path> =
         intermediate_files.iter().map(|p| p.as_path()).collect();
-    let result = link_bitcode_files(&intermediates_as_paths, output_filepath);
-
-    // Clean up intermediate files.
-    cleanup_files(&intermediate_files);
-
-    result
+    link_bitcode_files(&intermediates_as_paths, output_filepath)
 }
 
 /// Group paths by their parent directory. Paths without a parent are grouped
@@ -118,20 +107,8 @@ fn group_by_parent_dir<P: AsRef<Path>>(paths: &[P]) -> BTreeMap<PathBuf, Vec<&Pa
     groups
 }
 
-fn cleanup_files(files: &[PathBuf]) {
-    for f in files {
-        if f.exists()
-            && let Err(e) = std::fs::remove_file(f)
-        {
-            tracing::warn!("Failed to clean up intermediate file {:?}: {}", f, e);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
     use super::*;
 
     #[test]
@@ -169,19 +146,5 @@ mod tests {
         let groups = group_by_parent_dir(&paths);
         assert_eq!(groups.len(), 1);
         assert!(groups.contains_key(&PathBuf::from("")));
-    }
-
-    #[test]
-    fn cleanup_files_removes_what_exists_and_tolerates_what_does_not() {
-        let dir = tempfile::tempdir().unwrap();
-        let present = dir.path().join("present.bc");
-        let absent = dir.path().join("absent.bc");
-        fs::write(&present, b"x").unwrap();
-
-        // The absent path must not panic or abort the cleanup of the rest.
-        cleanup_files(&[present.clone(), absent.clone()]);
-
-        assert!(!present.exists(), "existing intermediate was not removed");
-        assert!(!absent.exists());
     }
 }
