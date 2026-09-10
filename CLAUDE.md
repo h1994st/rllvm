@@ -1,72 +1,186 @@
-# CLAUDE.md
+# Engineering Guidance
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Repository guidance for coding agents.
 
-## Overview
+## Scope
 
-Compiler wrappers (`rllvm-cc`, `rllvm-cxx`, `rllvm-rustc`) that build whole-program LLVM bitcode alongside a normal build; `rllvm-get-bc` extracts it, `rllvm-info` inspects it. Helpers: `rllvm-init`, `rllvm-completions`.
+`rllvm-cc`, `rllvm-cxx`, and `rllvm-rustc` capture LLVM bitcode alongside normal
+builds. `rllvm-get-bc` extracts it; `rllvm-info` inspects a module. Helpers:
+`rllvm-init` and `rllvm-completions`.
 
-`rules_rllvm` is a separate Bazel-only project that does not use these binaries. Do not change anything here to serve it.
+`rules_rllvm` is a separate Bazel-only project that does not use these binaries.
+Do not change anything here to serve it.
 
 ## Commands
 
 ```bash
 cargo build
-cargo test --all                           # unit + integration
-cargo test parsing_lto                     # a single test by name
+cargo test --all
+cargo test parsing_lto                    # one test by name
 cargo clippy --all-targets -- -D warnings  # CI gate
-cargo fmt --all --check                    # CI gate
+cargo fmt --all --check                   # CI gate
 ```
 
-LLVM/Clang required: `brew install llvm` or `apt install llvm llvm-dev clang libclang-dev`.
+LLVM/Clang is required: `brew install llvm` or
+`apt install llvm llvm-dev clang libclang-dev`. Rust bitcode needs compatible
+LLVM readers; `rustc -vV` reports its LLVM version.
 
-To try the wrappers by hand, point `RLLVM_CONFIG` at a scratch file so you do not clobber `~/.rllvm/config.toml`. `--rllvm-verbose=3` logs every sub-command, which is the fastest way to see what the argument parser decided.
+For manual wrapper checks, set `RLLVM_CONFIG` to a scratch configuration so the
+run never changes `~/.rllvm/config.toml`. Put `--rllvm-verbose=3` before compiler
+arguments to log subcommands. Use temporary sources and out-of-tree builds when
+checking another repository, such as nghttp2.
 
-## Architecture
+## Contracts to preserve
 
-Seven things to know before changing wrapper behaviour. The rest is discoverable from the code.
+Source paths in this section are relative to `src/`.
 
-**The bitcode-path contract** (`wrapper.rs`, `utils/file_utils.rs`). Each source compiles to an object *and* a `.bc`, and the `.bc` path goes into a dedicated object-file section, **newline-terminated**. The linker *concatenates* those sections, and that concatenation is what records which translation units make up a binary. Break the separator and multi-file builds silently yield one garbage path; only `tests/integration.rs` catches it.
+### Compiler arguments
 
-**LTO objects carry the path in the module** (`lto.rs`, `lto_marker.rs`). `-flto` leaves no section header to patch, so the path is `.ascii` module asm that `llvm-link` merges in and codegen emits — not a `used` global, whose NUL terminator corrupts the separator and whose alloc section makes `ld.bfd` emit a second `.rllvm_bc` that only the all-sections read in `file_utils.rs` recovers. Dispatch is on file content, not `-flto`: `-ffat-lto-objects` produces a real object. The path is escaped for two decoders, because it sits in a C string literal the compiler reads before the assembler does, and it goes through the same `bitcode_root` resolution as every other writer.
+Every compiler-owned flag reaches the real compiler, including `-c`, `-v`,
+`--help`, and `--version`. Wrapper options are long-only and prefixed
+`--rllvm-`. Diagnostics go to stderr. Build systems use compiler stdout for
+identification, preprocessing, and queries.
 
-**Section names are rllvm's own** (`constants.rs`): `__RLLVM,__rllvm_bc` on Mach-O, `.rllvm_bc` elsewhere. Never rename them to LLVM's generic ones — `wasm-ld` drops `.llvmbc` and `.llvmcmd` by name while concatenating every other custom section, so those names make WASM silently lose the paths.
+`arg_parser.rs` separates compile and link arguments using the tables in
+`constants.rs`. Arity controls consumption independently of the handler: a wrong
+arity swallows the next argument. Flags needed in both phases, such as `-pthread`
+and `-arch`, must reach secondary compilations and relinks. Recognize `-oFILE`
+before filename patterns while preserving both forms of `-object-file-name`.
+The fallback stays total: `is_object_file()` returns `Ok(false)` for unrecognized
+arguments.
 
-**Wrappers must behave like compilers.** Every flag the compiler could own reaches it, `-c`, `-v`, `--help` and `--version` included. Build systems identify the compiler with `$CC --version`, so answering it ourselves breaks configure scripts in ways that look nothing like an argument bug. Wrapper options are long-only and prefixed `--rllvm-`. Diagnostics go to stderr, never stdout.
+### Response files and command transport
 
-**Arity drives argument consumption** (`arg_parser.rs`, tables in `constants.rs`). The parser skips `arity` arguments regardless of what the handler does, so a wrong arity silently swallows the next one. The final fallback must stay total: `is_object_file()` returns `Ok(false)` for anything unrecognised, because it is asked about *every* unknown argument.
+`utils/response_file.rs` follows Clang's GNU UTF-8 response syntax. Nested paths
+resolve from the process working directory; nonexistent `@` names remain literal
+so linker values such as `@rpath/...` survive. Repeated references are not cycles.
+Check tokenizer changes against real Clang, including quotes, escapes, BOMs, and
+whitespace.
 
-**Mach-O sections must stay `no_dead_strip`** (`utils/file_utils.rs`). Nothing references the embedded section, so a dead-stripping link discards it and extraction silently finds nothing. Every writer has to set the attribute; the alternative is deleting `-dead_strip` from the user's link, which is what rllvm used to do.
+`CompilerArgsInfo::input_args()` retains original argv for the real compiler;
+classification and internal consumers use expanded arguments. In particular,
+save-temps ownership must inspect `expanded_args()`.
 
-**The rustc wrapper cannot rely on `-o`** (`llvm/rustc_args.rs`). Cargo names outputs by directory and crate name, and assuming `-o` is #85. Crates that link take the path in an object added to the link, crates that archive have their members patched afterwards — never the finished binary, which breaks its Darwin code signature.
+Generated commands and marker compilations must handle OS argument-size limits
+through the shared transport helper. Preserve `OsStr` bytes and direct empty
+arguments: GNU response files discard quoted empties, so empty argv entries stay
+inline between response-file segments. Temporary files must outlive the child.
 
-Two things that look like bugs and are not: link mode compiles each translation unit more than once (#51), and embedding prefers `llvm-objcopy` over the `object`-crate rebuild because the rebuild drops load commands it does not model. Do not delete the objcopy path.
+### Artifact identity and recorded paths
 
-## Conventions
+`arg_parser.rs` and `utils/path_utils.rs` derive C/C++ artifacts from the source,
+requested output, compiler, and compilation settings. Keep separate variants
+distinct even in a shared `bitcode_store_path`. Wrapper constructors and builders
+must retain the actual compiler so public `args().artifact_filepaths()` queries
+match the paths generated by the wrapper. The public path hash stays stable.
 
-- Rust edition 2024, MSRV 1.88
-- Errors are a `thiserror` enum in `error.rs`; library code returns `Result` rather than exiting or panicking
-- Logging is `tracing`, not `log`
-- `constants.rs` is internal; anything `pub` in `utils/` is public API
+Each object's dedicated section records a **newline-terminated** bitcode path.
+Linkers concatenate these sections; losing the separator silently corrupts
+multi-file extraction. Every writer uses the same `bitcode_root` resolution.
 
-### Tests
+Section names are rllvm's own: `__RLLVM,__rllvm_bc` on Mach-O, `.rllvm_bc`
+elsewhere. Do not rename them to LLVM's `.llvmbc` or `.llvmcmd`: wasm-ld discards
+those names. Every Mach-O writer must set `no_dead_strip`; preserve the user's
+dead-stripping flags.
 
-Integration tests write their own config and pass it through `RLLVM_CONFIG`, so they never read `~/.rllvm/config.toml`. Route every spawned binary through the `rllvm()` helper.
+Embedding prefers `llvm-objcopy`. The `object`-crate rebuild can lose unmodelled
+load commands, so do not remove that preference.
 
-Name tests after the behaviour asserted, with no `test_` prefix (`parsing_lto`, `bitcode_store_path_relative_is_ignored`).
+### Cache validity and file ownership
 
-**Confirm a new test fails before its fix.** Several tests here have passed with the bug present. Check that the sabotage targets the layer that can actually break.
+`cache.rs` validates hits against fresh preprocessed input, current dependency
+contents, command/compiler identity, working directory, and environment. A prior
+depfile alone misses newly selected headers and changed `__has_include` results.
+If current inputs cannot be validated, generate uncached bitcode. This is not a
+general compiler cache for side inputs absent from preprocessing/dependencies.
 
-### Writing
+Only the user's original compilation may write its dependency outputs. Use
+`without_dependency_flags()` for secondary compilations and markers; cache
+validation uses private output and dependency files.
 
-Issues, PRs and comments: problem, cause, fix, verification. Nothing else. Cut narrative framing and paragraphs justifying what the diff already shows.
+Publish cache entries atomically. Partial merges own a unique temporary directory.
+Archive extraction builds a fresh archive beside the destination and replaces it
+only after success: `llvm-ar rs` against an existing output retains stale members.
+Cleanup must never remove preexisting files merely because their names match.
 
-These are published under the user's identity, so write in the project's voice — state what was done, never "if you want X". Offers belong in chat.
+### LTO
 
-### Commits
+Dispatch on object content, not just `-flto`: fat LTO produces a native object.
+For bitcode objects, `lto.rs` and `compiler_wrapper/llvm/lto_marker.rs` record paths
+through module assembly. Keep the `.ascii` newline and two-layer C/assembler
+escaping. A `used` global introduces NUL termination and allocation/section-merging
+problems. Fat objects need the path in both their native and bitcode halves.
 
-[Conventional Commits](https://www.conventionalcommits.org/): `<type>: <summary>` using the types already in the log. Keep the body short or empty. PR titles follow the same format.
+Save-temps eligibility includes combined source/link invocations. Queries,
+non-linking actions, and configure-only mode must not stage a linker marker.
+Build markers for the requested target/language, then reset `-x` to `none` before
+appending the marker object after the user's inputs. Universal builds remain
+unsupported.
 
-Releases derive from these commits, so the type is not cosmetic — see [RELEASING.md](RELEASING.md). Below 1.0, `feat:`/`fix:` bump the patch and **`feat!:` bumps the minor**. Mark breaking changes: v0.1.7 removed `-c` and `-v` from the CLI but shipped as `feat:`, so it went out as a patch, and that cannot be corrected after release.
+When the user requests linker temporaries, preserve them, including the selected
+module: copy it to the retained rllvm path rather than renaming it away. Full LTO
+provides a merged module; ThinLTO does not. Mixed marker/save-temps inputs require
+the existing diagnostic rather than silently merging a translation unit twice.
 
-Do not bump `version` by hand, and note that pushing a tag no longer releases.
+### Rust and inspection
+
+`compiler_wrapper/llvm/rustc_args.rs` handles both explicit `-o` and Cargo's
+`--out-dir`, crate name, and extra filename. Make future bitcode paths absolute
+without canonicalizing a file that rustc has not created yet. Linked crates carry
+paths through a marker; archive members are patched after compilation. Never patch
+a finished Rust binary: doing so invalidates its Darwin code signature.
+
+Cargo supplies the real compiler path in `RUSTC_WRAPPER` mode. Configured rustc and
+`RLLVM_REAL_RUSTC` selection apply to direct invocation. Metadata-only and
+procedural-macro invocations pass through without capture.
+
+Test `rllvm-info` against real `llvm-dis` output as well as literal fixtures.
+Basic-block labels can have quoted names and trailing predecessor comments; the
+entry block can be implicit. Inspecting a binary currently uses only its first
+recorded module, when available; whole-program inspection uses the extracted `.bc`.
+
+Link mode deliberately performs repeated compilations (#51). Changing that is a
+separate behavior/performance task, not incidental cleanup.
+
+## Tests and coordination
+
+- Integration tests use the `rllvm()` helper and isolated `RLLVM_CONFIG` files.
+  Never make a test depend on the developer's home configuration.
+- Name tests after behavior, without a `test_` prefix. Confirm new regressions
+  fail before their fix, at the layer that can actually break. Prefer native and
+  extracted behavior checks over merely asserting that a file exists.
+- Use separate worktrees and `fix/` or `feat/` branches for independent issue work.
+  Keep each issue's change reviewable in its own PR. Order dependent work and make
+  stacked PR bases explicit.
+- After a parent is squash-merged, rebase only the dependent commits onto current
+  `main`. Retargeting the PR alone can leave the parent's changes in its diff.
+- Parallel workers use separate Cargo target directories and bounded job counts.
+  Do not move a built target directory: integration binaries contain absolute
+  paths to the executables they invoke.
+- Performance measurements require coordinated, otherwise idle resources and
+  recorded build/cache conditions. Parallel correctness runs are not benchmarks.
+- Run checks appropriate to the change. Reuse valid results for unchanged code;
+  do not repeat full suites without a new change or unresolved concern.
+- Honor the requested stopping point. Clean up task-owned temporary files and
+  merged worktrees when requested, preserving uncommitted user work.
+
+## Conventions and documentation
+
+- Rust edition 2024, MSRV 1.88.
+- Library code returns `Result` using the `thiserror` enum in `error.rs`; avoid
+  exiting or panicking. Logging uses `tracing`.
+- `constants.rs` is internal. Public items in `utils/` are public API; use
+  `pub(crate)` for internal helpers.
+- The `docs/` directory is intentionally excluded.
+- `README.md` is the user-facing source of truth. `site/build.py` generates
+  `site/index.md`; do not edit or commit that generated page. Validate links and
+  site generation when changing the README.
+
+Issues, PRs, and comments use the project's voice: problem, cause, fix,
+verification. Follow the repository templates and omit conversational framing.
+
+Commits and PR titles use Conventional Commits (`fix:`, `feat:`, `docs:`, etc.).
+Keep commit bodies short, and leave them empty in most cases.
+Releases derive from these types; see [RELEASING.md](RELEASING.md). Below 1.0,
+`feat:`/`fix:` bump the patch and `feat!:` bumps the minor. Mark breaking changes.
+Do not bump `version` by hand. Pushing a tag does not trigger a release.

@@ -11,21 +11,17 @@ single `.bc` for the whole program back out of the finished binary.
 
 ## Features
 
-- **Drop-in compiler wrappers.** `export CC=rllvm-cc` and build. No separator, no
-  shim script, no build-system plugin.
-- **Rust and cargo.** Wrap `cargo build` and extract from the binary,
-  dependency crates included.
-- **WebAssembly.** Whole-program bitcode from a linked `wasm32` module, not just
-  from individual objects.
-- **Relocatable bitcode paths.** Objects normally pin themselves to the directory
-  that built them. Record paths relative to a root instead, and extraction keeps
-  working after the tree moves, comes out of a container, or is replayed from a
-  compiler cache.
-- **Merge strategies.** Link everything into one module, stage the merge by
-  directory for large projects, or produce a bitcode archive.
-- **Single static binary.** No runtime to install; `brew install h1994st/tap/rllvm`
-  or `cargo install rllvm`.
-- **Bitcode inspection.** `rllvm-info` reports what a module contains.
+- **Drop-in C/C++ wrappers.** Set `CC=rllvm-cc CXX=rllvm-cxx` and build, including
+  builds that pass compiler arguments through GNU response files.
+- **Rust and Cargo.** Capture bitcode from the application and its wrapped
+  dependency crates.
+- **WebAssembly.** Extract from linked `wasm32` modules as well as objects.
+- **LTO.** Capture per-source bitcode under full or ThinLTO, or collect a full-LTO
+  linker's merged module.
+- **Relocatable paths.** Keep extraction working when the build tree and its
+  bitcode files move together.
+- **Merge and inspect.** Link modules, stage a merge by directory, or produce a
+  bitcode archive; inspect the result with `rllvm-info`.
 
 ## Quick start
 
@@ -33,7 +29,7 @@ Install rllvm:
 
 ```bash
 brew install h1994st/tap/rllvm    # macOS and Linux, prebuilt
-cargo install rllvm               # from source
+cargo install rllvm              # from source
 ```
 
 rllvm drives an LLVM/Clang toolchain rather than bundling one, so it needs one
@@ -45,6 +41,7 @@ sudo apt install llvm llvm-dev clang libclang-dev    # Ubuntu / Debian
 ```
 
 On first run rllvm writes a config with tool paths discovered from `llvm-config`.
+Set `RLLVM_CONFIG` to use a different configuration file.
 
 Build something and extract its bitcode:
 
@@ -64,19 +61,37 @@ cmake -B build && cmake --build build
 rllvm-get-bc build/my_program
 ```
 
-
 ## Usage
 
 ### Extracting
 
 ```bash
-rllvm-get-bc hello                          # executable  -> hello.bc
-rllvm-get-bc libfoo.a                       # archive     -> libfoo.a.bc
-rllvm-get-bc -b libfoo.a                    # bitcode archive -> libfoo.bca
-rllvm-get-bc --merge-strategy partial prog  # stage the merge by directory
-rllvm-get-bc -m hello                       # also write hello.bc.manifest
-rllvm-get-bc -o out.bc hello
+rllvm-get-bc hello                             # executable -> hello.bc
+rllvm-get-bc libfoo.a                          # archive -> libfoo.a.bc
+rllvm-get-bc --merge-strategy archive libfoo.a  # bitcode archive -> libfoo.bca
+rllvm-get-bc --merge-strategy partial hello    # merge by directory, then combine
+rllvm-get-bc -m hello                          # also write hello.bc.manifest
+rllvm-get-bc -o out.bc hello                   # choose the output path
 ```
+
+Outputs default to the current directory. `-m` writes the contributing bitcode
+paths to a manifest beside the input. `-b` remains a shorthand for archive mode.
+Archive extraction replaces an existing output with the current modules, so
+modules removed from the input do not remain in the archive.
+
+Extraction includes the objects and archive members that carry rllvm metadata.
+Wrap every compilation whose code you need to capture; prebuilt native inputs
+do not acquire bitcode merely by being linked into a wrapped build.
+
+### Inspecting bitcode
+
+```bash
+rllvm-info hello.bc       # target, function, basic-block and instruction counts
+rllvm-info -f hello.bc    # also list functions and their counts
+```
+
+Inspect the extracted `.bc` for a whole-program view. Given an object or binary,
+`rllvm-info` inspects only its first recorded module, when that file is available.
 
 ### Wrapper flags
 
@@ -85,14 +100,36 @@ with a compiler flag. Everything else — including `-c`, `-v`, `--help` and
 `--version` — goes straight to the compiler, because build systems identify the
 compiler by running `$CC --version`.
 
-```
---rllvm-compiler <PATH>   Override the wrapped compiler path
---rllvm-verbose[=LEVEL]   Log verbosity; bare flag is level 1, max 4
---rllvm-help              Print help for the wrapper
---rllvm-version           Print the wrapper version
+```text
+--rllvm-compiler <PATH>   Override clang/clang++ (C/C++ wrappers only)
+--rllvm-verbose[=LEVEL]   Log verbosity; bare flag is 1, level 4 enables trace
+--rllvm-help             Print help for the wrapper
+--rllvm-version          Print the wrapper version
 ```
 
-A `--` separator is still accepted, so existing shim scripts keep working.
+Place wrapper options before compiler arguments. Use `=` when supplying a
+verbosity level; diagnostics go to stderr:
+
+```bash
+rllvm-cc --rllvm-verbose=3 -pthread -c hello.c -ohello.o
+```
+
+Both `-o hello.o` and `-ohello.o` are accepted. A `--` separator is still
+supported for existing shim scripts.
+
+### Response files
+
+`rllvm-cc` and `rllvm-cxx` accept GNU-style UTF-8 compiler response files:
+
+```bash
+printf '%s\n' '-O2 -c hello.c -ohello.o' > compile.rsp
+rllvm-cc @compile.rsp
+rllvm-get-bc hello.o
+```
+
+Quoting and nested `@file` references follow Clang's GNU response syntax. Relative
+response paths resolve from the compiler's working directory. Large generated
+compiler and LLVM-tool commands also use response files when needed.
 
 ### CMake toolchain file
 
@@ -104,29 +141,44 @@ rllvm-get-bc build/my_program
 
 See [`examples/cmake/`](examples/cmake/).
 
-### Rust and cargo
+### Rust and Cargo
 
 ```bash
 RUSTC_WRAPPER=rllvm-rustc cargo build
 rllvm-get-bc target/debug/my_program
 ```
 
-`rllvm-rustc` answers the same `--rllvm-` options, but cargo owns a
-`RUSTC_WRAPPER`'s command line and cannot pass them, so under cargo the
-overrides are `RLLVM_REAL_RUSTC` and `RLLVM_LOG_LEVEL`.
-
-Every crate in the graph contributes, so the extracted module covers
-dependencies as well as the binary's own code. A library crate works on its
-own:
+Wrapped dependency crates contribute their recorded modules when their archive
+members reach the link. A library crate can also be extracted directly:
 
 ```bash
-rllvm-get-bc target/debug/deps/libmylib-<hash>.rlib
+rllvm-get-bc 'target/debug/deps/libmylib-<hash>.rlib'
 ```
+
+Replace `<hash>` with the actual artifact hash. Direct invocation also supports
+relative output paths:
+
+```bash
+rllvm-rustc main.rs -o app
+rllvm-get-bc app -o app.bc
+```
+
+For direct invocation, `RLLVM_REAL_RUSTC` overrides `rustc_filepath` in the config,
+with `rustc` on `PATH` as the fallback. Under `RUSTC_WRAPPER`, Cargo supplies the
+compiler path. Use `RLLVM_LOG_LEVEL=3` for wrapper diagnostics under Cargo;
+`--rllvm-verbose=3`, `--rllvm-help`, and `--rllvm-version` are available when
+invoking the wrapper yourself.
+
+`cargo check` and procedural-macro crates pass through without bitcode capture.
+Prebuilt dependencies, including the supplied standard library, are not rebuilt
+by the wrapper. Use LLVM tools compatible with the LLVM version reported by
+`rustc -vV` when extracting Rust bitcode.
 
 ### WebAssembly
 
 ```bash
-rllvm-cc --target=wasm32-unknown-unknown -c -o lib.o lib.c
+rllvm-cc --target=wasm32-unknown-unknown -c lib.c -o lib.o
+rllvm-cc --target=wasm32-unknown-unknown -c main.c -o main.o
 rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry \
     -o app.wasm lib.o main.o
 rllvm-get-bc app.wasm -o app.bc
@@ -135,7 +187,15 @@ rllvm-get-bc app.wasm -o app.bc
 Linking needs `wasm-ld`, which ships with LLD rather than LLVM and must match
 your LLVM version. See [`examples/wasm/`](examples/wasm/).
 
-### Relocatable bitcode paths
+### Bitcode storage and relocation
+
+C/C++ bitcode files are hidden files beside the requested output by default.
+Their names distinguish the source, output, compiler, and compilation settings,
+so separate build variants keep separate bitcode. Set `bitcode_store_path` to an
+absolute directory to collect them centrally.
+
+Extraction requires the recorded `.bc` files. Preserve them along with the
+objects or binaries, including when restoring outputs from a compiler cache.
 
 By default an object records the **absolute** path of its bitcode, which pins it
 to the directory that built it. Set a root to record paths relative to it, then
@@ -149,9 +209,63 @@ make
 rllvm-get-bc --bitcode-root /new/path/to/build prog -o prog.bc
 ```
 
-Objects built without a root keep absolute paths and are unaffected — the
-extractor tells the two apart by the leading separator, so both forms can appear
-in the same binary.
+Choose a root containing the bitcode files, including a central store if used.
+Absolute and relative entries can coexist; `--bitcode-root` resolves only the
+relative ones. Setting a root changes recorded paths, not where bitcode is stored.
+
+### Bitcode caching
+
+The optional C/C++ cache reuses the extra bitcode compilation across rebuilds:
+
+```bash
+RLLVM_CACHE=1 cmake --build build   # build must already use the wrappers
+```
+
+Caching is off by default. `RLLVM_CACHE=1` enables it and `RLLVM_CACHE=0` disables
+it, overriding `cache_enabled`. The default cache directory is `~/.rllvm/cache`;
+set `cache_dir` to use another location.
+
+The native compilation still runs. Each lookup preprocesses the current inputs
+and checks their dependencies, command, compiler, working directory, and
+environment before reusing bitcode. Cache hits therefore still incur
+preprocessing work. If validation cannot produce a usable key, rllvm generates
+bitcode without caching that result.
+
+Disable caching for changing compiler side inputs that preprocessing does not
+capture, such as optimization profiles. Keep compilation inputs stable while a
+build runs.
+
+### LTO
+
+Set `lto_mode` in the config or override it with `RLLVM_LTO_MODE`:
+
+| Mode | Captured bitcode | Support |
+| --- | --- | --- |
+| `marker` (default) | Per-source modules, recorded in the LTO objects | Full and ThinLTO; ELF and Mach-O; C and C++ |
+| `save-temps` | The full-LTO linker's merged, post-optimization module | Separate links and combined source/link invocations |
+| `skip` | No additional bitcode capture; emits a warning | Use when capture is intentionally disabled for LTO |
+
+For a combined full-LTO build:
+
+```bash
+RLLVM_LTO_MODE=save-temps rllvm-cc -flto hello.c -o hello
+rllvm-get-bc hello -o hello.bc
+```
+
+Use the same mode during compilation and linking. `marker` also supports a mix
+of LTO and ordinary objects; fat LTO objects record the bitcode path in both
+halves so either linker path can retain it.
+
+`save-temps` requires actual LTO inputs: adding `-flto` only at the link step
+cannot produce a merged module from ordinary objects. ThinLTO has no single
+merged module to collect, so this mode warns and skips collection for ThinLTO;
+use `marker` for ThinLTO builds.
+Compiler queries and invocations that do not link do not collect a module.
+Linker temporary files explicitly requested by the user are preserved.
+
+COFF and WebAssembly do not support `marker` mode; an LTO invocation there reports
+an error directing to `skip`. A `save-temps` link that produces no merged module
+is also an error.
 
 ## Configuration
 
@@ -166,16 +280,17 @@ lives at `$RLLVM_CONFIG` if set, otherwise `~/.rllvm/config.toml`.
 | `llvm_ar_filepath` | Yes | Absolute path to `llvm-ar` |
 | `llvm_link_filepath` | Yes | Absolute path to `llvm-link` |
 | `llvm_objcopy_filepath` | No | Absolute path to `llvm-objcopy`; preferred for embedding, with an internal fallback |
-| `rustc_filepath` | No | Absolute path to `rustc` (default: `rustc` on `PATH`) |
-| `bitcode_store_path` | No | Directory for intermediate bitcode files (must be absolute) |
+| `rustc_filepath` | No | Compiler for direct Rust invocation; `RLLVM_REAL_RUSTC` overrides; defaults to `rustc` on `PATH` |
+| `bitcode_store_path` | No | Directory for bitcode files (must be absolute; created if missing) |
 | `bitcode_root` | No | Record embedded paths relative to this root (default: absolute) |
 | `llvm_link_flags` | No | Extra flags for `llvm-link` |
 | `lto_ldflags` | No | Extra flags for link-time optimization |
 | `bitcode_generation_flags` | No | Extra flags for bitcode generation (e.g. `-flto`) |
 | `lto_mode` | No | How `-flto` builds record bitcode: `marker` (default), `save-temps`, `skip`; `RLLVM_LTO_MODE` overrides |
-| `is_configure_only` | No | Skip bitcode generation entirely (default: `false`) |
-| `cache_enabled` | No | Reuse bitcode across rebuilds; also `RLLVM_CACHE=1` (default: `false`) |
-| `log_level` | No | 0=error (default), 1=warn, 2=info, 3=debug, 4+=trace |
+| `is_configure_only` | No | Skip extra C/C++ bitcode work (default: `false`) |
+| `cache_enabled` | No | Reuse C/C++ bitcode across rebuilds; overridden by `RLLVM_CACHE` (default: `false`) |
+| `cache_dir` | No | Cache directory (default: `~/.rllvm/cache`) |
+| `log_level` | No | 0=error (default), 1=warn, 2=info, 3=debug, 4+=trace; `RLLVM_LOG_LEVEL` overrides |
 
 ```toml
 llvm_config_filepath = '/opt/homebrew/opt/llvm/bin/llvm-config'
@@ -186,13 +301,17 @@ llvm_link_filepath = '/opt/homebrew/opt/llvm/bin/llvm-link'
 log_level = 3
 ```
 
+`rllvm-init --dry-run` shows a detected configuration without writing it.
+Use `rllvm-init --llvm-prefix /path/to/llvm` to choose a toolchain and `-o` to
+choose the configuration file to write.
+
 ## How it works
 
-The wrappers run clang normally and, for each source, also emit a `.bc`. The
-absolute path of that `.bc` is written into a custom section of the object file,
-newline-terminated. The linker concatenates those sections, so the finished
-binary carries a list of every translation unit that went into it.
-`rllvm-get-bc` reads that list and links the bitcode into one module.
+The C/C++ wrappers run Clang normally and also emit a `.bc` for each captured
+source. Its absolute or root-relative path is written into a custom object
+section, newline-terminated. The linker concatenates those sections, preserving
+the recorded paths from the objects it includes. `rllvm-get-bc` reads the list,
+deduplicates it, and merges or archives the modules.
 
 ```
 source.c ──► rllvm-cc ──► object file (with embedded .bc path)
@@ -205,46 +324,12 @@ executable ◄── linker ◄── object files
 ```
 
 Universal (multi-`-arch`) builds are not supported in any mode: clang cannot
-emit one IR file for two architectures. Build and extract one architecture at
-a time; `lipo` the results afterwards if needed, and note that `rllvm-get-bc`
-cannot read a combined universal binary.
+emit one IR file for two architectures. Build and extract one architecture at a
+time. `rllvm-get-bc` cannot read a combined universal binary.
 
 `rllvm-rustc` does the same per crate. A crate that links carries the path in a
 marker object added to the link; a crate that produces an `.rlib` carries it in
 the archive's members, so a dependency brings its bitcode wherever it is used.
-
-### LTO
-
-With `-flto` the compiler writes a bitcode module where an object file
-belongs, so there is no section to record a path in. `lto_mode` picks what
-happens instead.
-
-`marker` (default) compiles a marker module naming the bitcode and merges it
-into the LTO object with `llvm-link`. Covers full and thin LTO, ELF and
-Mach-O, C and C++, and mixes with objects built without `-flto`. Costs one
-extra compile and one `llvm-link` per translation unit. A fat object
-(`-ffat-lto-objects`) records the path in both of its halves, because the
-linker decides which one it consumes: GNU ld generates code from the
-bitcode, while lld links the machine code.
-
-`save-temps` appends the linker's save-temps flag, then collects the
-whole-program module the LTO pipeline merged, recording its path instead of
-per-unit paths. No per-unit compile. Full LTO only — ThinLTO builds no such
-module, and that case warns and collects nothing rather than failing the
-build. Works with separate links and combined source-and-link commands such
-as `rllvm-cc -flto a.c b.c -o prog`, including sources mixed with LTO objects.
-Compile-only, preprocessing, assembly-output, dependency-only, query, and
-configure-only invocations do not collect a module. The link must receive LTO
-bitcode: `-flto` in `LDFLAGS` alone produces no merged module when all objects
-were compiled without LTO, and rllvm errors. The collected module is
-post-optimization — the module the linker generated code from.
-
-`skip` generates nothing and warns — the old default behaviour.
-
-An LTO link pulls in only the archive members it uses, so an unused member's
-bitcode path never reaches the binary. COFF and WASM are not supported under
-`marker`; `-flto` there is an error directing to `lto_mode = "skip"`. Under
-`save-temps`, a link producing no merged module is an error.
 
 ## Relationship to gllvm and wllvm
 
@@ -257,9 +342,8 @@ strategies.
 The name follows the same convention: `g` for Go, `w` for whole-program-llvm,
 `r` for Rust.
 
-[rules_rllvm](https://github.com/h1994st/rules_rllvm) borrowed the name for the
-idea, not the implementation. It is pure Bazel rules and runs none of these
-binaries, so there `r` expands to `rules` — the name is recursive.
+[rules_rllvm](https://github.com/h1994st/rules_rllvm) provides separate,
+Bazel-native extraction rules and does not use these binaries.
 
 If gllvm or wllvm already work for you, there is no urgency to switch.
 
