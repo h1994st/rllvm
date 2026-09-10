@@ -3,12 +3,13 @@
 //! An entry is keyed by the *compilation*, not by the source file, in two
 //! levels. The **manifest key** covers the command: the source path, the
 //! arguments in order, and the compiler's identity. The **content key** adds
-//! the contents of every file the compilation actually read.
+//! the current preprocessed input and the contents of its dependencies.
 //!
-//! The second needs a dependency list, and clang writes one as a byproduct of
-//! a compile: on a miss the bitcode is generated with `-MD` pointing at a
-//! private depfile inside the cache directory, and the next build hashes the
-//! closure that depfile names. No extra process is spent on a hit.
+//! Every lookup runs the preprocessor with a private dependency file. A prior
+//! dependency closure cannot detect a newly appearing shadow header or a
+//! changed `__has_include` result. Environment and working directory also
+//! participate in the validated key. Legacy entries are left on disk but are
+//! not reused under this key scheme.
 //!
 //! Hashing only the source's own bytes -- as this once did -- meant editing a
 //! header served bitcode that no longer matched the object, with the object
@@ -153,10 +154,8 @@ pub fn cached_depfile_path(cache_dir: &Path, manifest_key: u64) -> PathBuf {
 /// a previous build, or a prerequisite that has since been deleted -- which the
 /// caller must treat as a miss.
 ///
-/// A change that would alter the output always alters this key: it must change
-/// the command (already in `manifest_key`) or the contents of a file in the
-/// closure. A new `#include` cannot appear without editing a file already
-/// listed here.
+/// This alone is insufficient to validate a cache hit: include resolution
+/// and negative include probes may change without editing a prerequisite.
 pub fn content_key(manifest_key: u64, depfile: &Path) -> Option<u64> {
     let contents = fs::read_to_string(depfile).ok()?;
     let prerequisites = parse_depfile(&contents);
@@ -174,15 +173,41 @@ pub fn content_key(manifest_key: u64, depfile: &Path) -> Option<u64> {
     Some(hasher.finish())
 }
 
-/// Records a miss for a compilation whose closure is not yet known.
+/// Hashes a fresh preprocessing result, its dependency contents, and the
+/// compiler's environment. Raw dependency bytes also preserve changes omitted
+/// by preprocessing, such as macro definitions used by debug information.
+pub(crate) fn current_content_key(
+    manifest_key: u64,
+    preprocessed: &Path,
+    depfile: &Path,
+) -> Option<u64> {
+    let input = fs::read(preprocessed).ok()?;
+    // Some input languages do not support -E and produce no output. Bypass
+    // the cache for them instead of accepting an empty validation result.
+    if input.is_empty() {
+        return None;
+    }
+    let mut hasher = DefaultHasher::new();
+    "rllvm-current-input-v1".hash(&mut hasher);
+    content_key(manifest_key, depfile)?.hash(&mut hasher);
+    input.hash(&mut hasher);
+    env::current_dir().ok()?.hash(&mut hasher);
+    // Be conservative about compiler-specific variables, including ones a
+    // configured compiler launcher may interpret. Values are never logged.
+    let mut environment: Vec<_> = env::vars_os().collect();
+    environment.sort_unstable();
+    environment.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// Records a miss for a compilation whose current input cannot be validated.
 ///
-/// The first build of a command has no dependency file, so it never reaches
-/// [`cache_lookup`]; without this the statistics would count only the misses
-/// that got as far as checking for a file, and report a flattering hit rate.
+/// Such compilations never reach [`cache_lookup`], but must still count
+/// towards the cache's miss statistics.
 pub fn record_miss(src_filepath: &Path) {
     CACHE_MISSES.fetch_add(1, Ordering::Relaxed);
     tracing::info!(
-        "Cache miss: src={:?}, no recorded dependency closure yet",
+        "Cache miss: src={:?}, current input could not be validated",
         src_filepath
     );
 }
@@ -222,7 +247,10 @@ pub fn cache_store(
     bitcode_filepath: &Path,
 ) -> Result<PathBuf, Error> {
     let cached_path = cached_bitcode_path(cache_dir, src_filepath, cache_key);
-    fs::copy(bitcode_filepath, &cached_path).map_err(|err| {
+    // Publish a complete file by rename so concurrent readers never observe
+    // a truncated entry and concurrent writers cannot interleave their bytes.
+    let staging = tempfile::NamedTempFile::new_in(cache_dir)?;
+    fs::copy(bitcode_filepath, staging.path()).map_err(|err| {
         tracing::error!(
             "Failed to store bitcode in cache: src={:?}, err={}",
             bitcode_filepath,
@@ -230,6 +258,7 @@ pub fn cache_store(
         );
         err
     })?;
+    staging.persist(&cached_path).map_err(|err| err.error)?;
     tracing::debug!(
         "Cached bitcode: src={:?}, cached={:?}",
         src_filepath,
@@ -414,6 +443,25 @@ mod tests {
         // Verify content was copied correctly
         let cached_content = fs::read(&stored).unwrap();
         assert_eq!(cached_content, b"fake bitcode content");
+    }
+
+    #[test]
+    fn cache_store_publishes_without_modifying_existing_readers() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("a.c");
+        let bitcode = dir.path().join("a.bc");
+        fs::write(&bitcode, b"first module").unwrap();
+        let cached = cache_store(dir.path(), &source, 7, &bitcode).unwrap();
+        let mut reader = fs::File::open(&cached).unwrap();
+        fs::write(&bitcode, b"replacement module").unwrap();
+        cache_store(dir.path(), &source, 7, &bitcode).unwrap();
+
+        let mut previous = Vec::new();
+        reader.read_to_end(&mut previous).unwrap();
+        assert_eq!(previous, b"first module");
+        assert_eq!(fs::read(cached).unwrap(), b"replacement module");
     }
 
     #[test]

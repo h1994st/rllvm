@@ -3841,6 +3841,133 @@ fn cache_config(dir: &Path) -> PathBuf {
     path
 }
 
+/// Rebuild the same command and compare native execution with extracted IR.
+fn assert_cached_value(dir: &Path, includes: &[&Path], cpath: Option<&Path>, value: i32) -> String {
+    let object = dir.join("value.o");
+    let depfile = dir.join("value.d");
+    let mut command = rllvm("rllvm-cc");
+    command
+        .env("RLLVM_CONFIG", dir.join("cache-config.toml"))
+        .env("RLLVM_CACHE", "1")
+        .env_remove("CPATH")
+        .arg("--rllvm-verbose=3")
+        .args(["-c", "-MD", "-MF"])
+        .arg(&depfile)
+        .arg("-o")
+        .arg(&object)
+        .arg(dir.join("value.c"));
+    for include in includes {
+        command.arg("-I").arg(include);
+    }
+    if let Some(cpath) = cpath {
+        command.env("CPATH", cpath);
+    }
+    let output = command.output().unwrap();
+    let log = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{log}");
+    let deps = fs::read_to_string(&depfile).unwrap();
+    assert!(
+        deps.starts_with(&format!("{}:", object.display())),
+        "cache validation overwrote the user's dependency target: {deps}"
+    );
+
+    let executable = dir.join("value");
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    assert!(
+        Command::new(clang)
+            .arg(&object)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(
+        Command::new(executable).status().unwrap().code(),
+        Some(value)
+    );
+
+    let bitcode = dir.join("value.bc");
+    assert!(
+        rllvm("rllvm-get-bc")
+            .arg(&object)
+            .arg("-o")
+            .arg(&bitcode)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let disassembled = Command::new(find_llvm_dis().unwrap())
+        .arg(bitcode)
+        .args(["-o", "-"])
+        .output()
+        .unwrap();
+    assert!(disassembled.status.success());
+    let ir = String::from_utf8_lossy(&disassembled.stdout);
+    assert!(
+        ir.contains(&format!("ret i32 {value}")),
+        "native object returns {value}, but extracted IR is stale:\n{ir}\n{log}"
+    );
+    log
+}
+
+#[test]
+fn cache_resolves_new_shadow_headers() {
+    let tmp = TempDir::new().unwrap();
+    cache_config(tmp.path());
+    let high = tmp.path().join("high");
+    let low = tmp.path().join("low");
+    fs::create_dir(&high).unwrap();
+    fs::create_dir(&low).unwrap();
+    fs::write(low.join("pick.h"), "#define PICK 11\n").unwrap();
+    fs::write(
+        tmp.path().join("value.c"),
+        "#include <pick.h>\nint main(void) { return PICK; }\n",
+    )
+    .unwrap();
+    assert_cached_value(tmp.path(), &[&high, &low], None, 11);
+    assert!(assert_cached_value(tmp.path(), &[&high, &low], None, 11).contains("Cache hit:"));
+    fs::write(high.join("pick.h"), "#define PICK 22\n").unwrap();
+    assert_cached_value(tmp.path(), &[&high, &low], None, 22);
+}
+
+#[test]
+fn cache_resolves_current_include_environment() {
+    let tmp = TempDir::new().unwrap();
+    cache_config(tmp.path());
+    let env_a = tmp.path().join("env_a");
+    let env_b = tmp.path().join("env_b");
+    fs::create_dir(&env_a).unwrap();
+    fs::create_dir(&env_b).unwrap();
+    fs::write(env_a.join("pick.h"), "#define PICK 31\n").unwrap();
+    fs::write(env_b.join("pick.h"), "#define PICK 42\n").unwrap();
+    fs::write(
+        tmp.path().join("value.c"),
+        "#include <pick.h>\nint main(void) { return PICK; }\n",
+    )
+    .unwrap();
+    assert_cached_value(tmp.path(), &[], Some(&env_a), 31);
+    assert!(assert_cached_value(tmp.path(), &[], Some(&env_a), 31).contains("Cache hit:"));
+    assert_cached_value(tmp.path(), &[], Some(&env_b), 42);
+}
+
+#[test]
+fn cache_resolves_previously_missing_has_include_headers() {
+    let tmp = TempDir::new().unwrap();
+    cache_config(tmp.path());
+    fs::write(
+        tmp.path().join("value.c"),
+        "#if __has_include(<optional.h>)\n#define PICK 22\n#else\n#define PICK 11\n#endif\nint main(void) { return PICK; }\n",
+    )
+    .unwrap();
+    assert_cached_value(tmp.path(), &[tmp.path()], None, 11);
+    assert!(assert_cached_value(tmp.path(), &[tmp.path()], None, 11).contains("Cache hit:"));
+    // The header is only probed, never included, so even a fresh depfile
+    // has the same closure before and after its appearance.
+    fs::write(tmp.path().join("optional.h"), "").unwrap();
+    assert_cached_value(tmp.path(), &[tmp.path()], None, 22);
+}
+
 /// A cached `.bc` must not survive a change to a header it includes.
 ///
 /// The object is always compiled fresh, so a stale cache entry makes the
