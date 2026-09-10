@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.4.7](https://github.com/h1994st/rllvm/compare/v0.4.6...v0.4.7) (2026-09-10)
+
+
+### Bug Fixes
+
+* classify compiler response file arguments ([#163](https://github.com/h1994st/rllvm/issues/163)) ([ca74691](https://github.com/h1994st/rllvm/commit/ca746916845b8482d255d2c5463de6df0deb7ab7))
+* collect save-temps bitcode from source links ([bfb4954](https://github.com/h1994st/rllvm/commit/bfb495447ab63a10b95ad7181ae0d4474452bbac))
+* collect saved bitcode from combined LTO source links ([#161](https://github.com/h1994st/rllvm/issues/161)) ([bfb4954](https://github.com/h1994st/rllvm/commit/bfb495447ab63a10b95ad7181ae0d4474452bbac))
+* count LLVM block labels with predecessor comments ([#157](https://github.com/h1994st/rllvm/issues/157)) ([10edd1c](https://github.com/h1994st/rllvm/commit/10edd1cdd6f948378677cffeb16e0b7f56f06295))
+* isolate bitcode artifacts by compilation identity ([#153](https://github.com/h1994st/rllvm/issues/153)) ([0548b5d](https://github.com/h1994st/rllvm/commit/0548b5d25b1bb08dff2590daa0c322f2385bf3ef))
+* isolate partial merge intermediates ([#156](https://github.com/h1994st/rllvm/issues/156)) ([3bddbaa](https://github.com/h1994st/rllvm/commit/3bddbaa8d48f740ff021f626eb3283f2a6611a22))
+* parse joined output arguments ([#162](https://github.com/h1994st/rllvm/issues/162)) ([52904fa](https://github.com/h1994st/rllvm/commit/52904fa121b29b1c38092b6d8651e89b747dd463))
+* preserve architecture flags when relinking sources ([#155](https://github.com/h1994st/rllvm/issues/155)) ([5c1d7cc](https://github.com/h1994st/rllvm/commit/5c1d7cc4e8f521b54b1f73c34bcea4ca675cee3b))
+* preserve pthread flags during bitcode generation ([#154](https://github.com/h1994st/rllvm/issues/154)) ([e4489f1](https://github.com/h1994st/rllvm/commit/e4489f171660580dcba3985b5ad9645137f63aed))
+* replace bitcode archives instead of retaining stale members ([#160](https://github.com/h1994st/rllvm/issues/160)) ([2b97661](https://github.com/h1994st/rllvm/commit/2b976619f8b286780bea46dafef889e658d47501))
+* resolve future rustc bitcode paths without canonicalizing ([#159](https://github.com/h1994st/rllvm/issues/159)) ([3748b82](https://github.com/h1994st/rllvm/commit/3748b82270f746b1a09b9d6528cd24708f8e2546))
+* validate current inputs before reusing cached bitcode ([#158](https://github.com/h1994st/rllvm/issues/158)) ([0d1d78d](https://github.com/h1994st/rllvm/commit/0d1d78d17e67d8ffaad5530d7f702a7349c70bb4))
+
 ## [0.4.6](https://github.com/h1994st/rllvm/compare/v0.4.5...v0.4.6) (2026-09-09)
 
 
