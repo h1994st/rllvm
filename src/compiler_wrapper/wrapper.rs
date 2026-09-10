@@ -355,20 +355,17 @@ pub trait CompilerWrapper {
                 // generate the bitcode and directly use the source file
                 src_filepath
             } else if let Some(ref cache_dir) = cache_directory {
-                // Caching is enabled — check for a cache hit. The manifest key
-                // identifies the command; the content key adds everything the
-                // last compile of that command read, which is what a header
-                // edit has to invalidate.
-                let manifest_key = cache::manifest_key(
-                    &src_filepath,
-                    self.args().compile_args(),
-                    config.bitcode_generation_flags(),
-                    self.wrapped_compiler(),
-                );
-                let depfile = cache::cached_depfile_path(cache_dir, manifest_key);
-                let cached = match cache::content_key(manifest_key, &depfile) {
+                // Resolve today's input before accepting any cached module. A
+                // prior depfile misses shadow headers and negative include probes.
+                let key = match self.bitcode_cache_key(&src_filepath, cache_dir) {
+                    Ok(key) => key,
+                    Err(err) => {
+                        tracing::warn!("Cannot validate bitcode cache input: {}", err);
+                        None
+                    }
+                };
+                let cached = match key {
                     Some(key) => cache::cache_lookup(cache_dir, &src_filepath, key),
-                    // No closure recorded yet: the first build of this command.
                     None => {
                         cache::record_miss(&src_filepath);
                         None
@@ -388,31 +385,17 @@ pub trait CompilerWrapper {
                     })?;
                     bitcode_filepath
                 } else {
-                    // Cache miss — generate the bitcode, recording what it
-                    // read so the next build can key on that closure.
-                    if let Some(code) = self.generate_bitcode_file_with_depfile(
-                        &src_filepath,
-                        &bitcode_filepath,
-                        Some(&depfile),
-                    )? && code != 0
+                    if let Some(code) =
+                        self.generate_bitcode_file(&src_filepath, &bitcode_filepath)?
+                        && code != 0
                     {
                         return Ok(Some(code));
                     }
-                    // Keyed on the closure the compile just reported, not on
-                    // whatever a previous build left behind.
-                    match cache::content_key(manifest_key, &depfile) {
-                        Some(key) => {
-                            if let Err(err) =
-                                cache::cache_store(cache_dir, &src_filepath, key, &bitcode_filepath)
-                            {
-                                tracing::warn!("Failed to store bitcode in cache: {}", err);
-                            }
-                        }
-                        None => tracing::warn!(
-                            "No usable dependency file at {:?}; not caching {:?}",
-                            depfile,
-                            src_filepath
-                        ),
+                    if let Some(key) = key
+                        && let Err(err) =
+                            cache::cache_store(cache_dir, &src_filepath, key, &bitcode_filepath)
+                    {
+                        tracing::warn!("Failed to store bitcode in cache: {}", err);
                     }
                     bitcode_filepath
                 }
@@ -494,6 +477,42 @@ pub trait CompilerWrapper {
         self.link_object_files(&object_filepaths, output_filepath)
     }
 
+    /// Validate current preprocessing and dependency resolution in private
+    /// temporary files. Failure only disables caching for this compilation.
+    fn bitcode_cache_key(&self, source: &Path, cache_dir: &Path) -> Result<Option<u64>, Error> {
+        let config = try_rllvm_config()?;
+        let private = tempfile::tempdir_in(cache_dir)?;
+        let preprocessed = private.path().join("input.i");
+        let depfile = private.path().join("input.d");
+        let mut flags = self.args().compile_args().clone();
+        if let Some(extra) = config.bitcode_generation_flags() {
+            flags.extend(extra.iter().cloned());
+        }
+        let mut args = vec![self.wrapped_compiler().to_string_lossy().into_owned()];
+        args.extend(without_dependency_flags(&flags));
+        args.extend([
+            "-E".to_string(),
+            "-MD".to_string(),
+            "-MF".to_string(),
+            depfile.to_string_lossy().into_owned(),
+            "-o".to_string(),
+            preprocessed.to_string_lossy().into_owned(),
+            source.to_string_lossy().into_owned(),
+        ]);
+        self.execute_command(&args, CompileMode::BitcodeGeneration)?;
+        let manifest = cache::manifest_key(
+            source,
+            self.args().compile_args(),
+            config.bitcode_generation_flags(),
+            self.wrapped_compiler(),
+        );
+        Ok(cache::current_content_key(
+            manifest,
+            &preprocessed,
+            &depfile,
+        ))
+    }
+
     /// Generate bitcode file for one input file
     fn generate_bitcode_file<P>(
         &self,
@@ -508,10 +527,8 @@ pub trait CompilerWrapper {
 
     /// Generate bitcode for one input file, optionally recording what it read.
     ///
-    /// `depfile` is the cache's own dependency file, inside the cache
-    /// directory. `-MD` costs almost nothing during a compile that is
-    /// happening anyway, and it is what lets the next build know the include
-    /// closure without running the preprocessor itself.
+    /// `depfile`, when supplied, must be private to the caller. Cache lookup
+    /// uses a fresh preprocessing pass rather than reusing this dependency list.
     fn generate_bitcode_file_with_depfile<P>(
         &self,
         src_filepath: P,
