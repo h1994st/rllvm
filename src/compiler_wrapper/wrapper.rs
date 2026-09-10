@@ -18,7 +18,7 @@ use crate::{
     error::Error,
     lto::{LtoFlavour, LtoMode, save_temps_flag, user_requested_save_temps},
     utils::{
-        embed_bitcode_filepath_to_object_file, execute_command_for_status,
+        embed_bitcode_filepath_to_object_file, execute_command_for_status, execute_llvm_tool,
         extract_bitcode_filepaths_from_object_file, has_fat_lto_bitcode, is_bitcode_file,
         recorded_bitcode_filepath,
     },
@@ -182,7 +182,7 @@ pub trait CompilerWrapper {
 
         // A user who asked for save-temps owns the artifacts, so rllvm neither
         // adds the flag twice nor deletes what it did not create.
-        let user_asked = user_requested_save_temps(args.input_args());
+        let user_asked = user_requested_save_temps(args.expanded_args());
 
         let mut extra_args = vec![];
         if !user_asked {
@@ -301,7 +301,15 @@ pub trait CompilerWrapper {
                 "The number of arguments cannot be 0".into(),
             ));
         }
-        let status = execute_command_for_status(args[0].as_ref(), &args[1..])?;
+        // Keep the original compiler argv intact. Expanded arguments used by
+        // synthesized compilations may no longer fit execve, so retry those
+        // oversized commands through LLVM's GNU response-file transport.
+        let status = match execute_command_for_status(args[0].as_ref(), &args[1..]) {
+            Err(Error::Io(err)) if err.kind() == std::io::ErrorKind::ArgumentListTooLong => {
+                execute_llvm_tool(args[0].as_ref(), &args[1..])?
+            }
+            result => result?,
+        };
         if !self.is_silent() {
             tracing::debug!("[{:?}] exit_status={}", mode, status);
         }

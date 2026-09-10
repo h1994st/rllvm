@@ -107,6 +107,7 @@ pub fn without_dependency_flags(compile_args: &[String]) -> Vec<String> {
 pub struct CompilerArgsInfo {
     wrapped_compiler: Option<PathBuf>,
     input_args: Vec<String>,
+    expanded_args: Vec<String>,
     input_files: Vec<String>,
     object_files: Vec<String>,
     output_filename: String,
@@ -451,13 +452,16 @@ impl CompilerArgsInfo {
         Ok(arg_info.arity)
     }
 
-    /// Parse a sequence of compiler arguments and classify them.
+    /// Classify compiler arguments after GNU response expansion, retaining
+    /// the original input arguments for the real compiler invocation.
     pub fn parse_args<S>(&mut self, args: &[S]) -> Result<&'_ mut Self, Error>
     where
         S: AsRef<str>,
     {
         let args: Vec<String> = args.iter().map(|x| x.as_ref().to_string()).collect();
-        self.input_args = args.clone();
+        self.input_args = args;
+        let args = expand_response_files(&self.input_args)?;
+        self.expanded_args = args.clone();
 
         let mut i = 0;
         while i < args.len() {
@@ -514,6 +518,11 @@ impl CompilerArgsInfo {
     /// Returns the original input arguments.
     pub fn input_args(&self) -> &Vec<String> {
         self.input_args.as_ref()
+    }
+
+    /// Arguments after GNU response expansion, for internal consumers.
+    pub(crate) fn expanded_args(&self) -> &[String] {
+        &self.expanded_args
     }
 
     /// Returns the list of input source files.
@@ -822,6 +831,146 @@ mod tests {
 
     fn assert_lto(input: &str) {
         parse_and_assert(input, |args| args.is_lto());
+    }
+
+    #[test]
+    fn response_file_classification_preserves_original_arguments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let response = tmp.path().join("args.rsp");
+        std::fs::write(&response, "-c source.c -ooutput.o -DVALUE=42").unwrap();
+        let original = vec![format!("@{}", response.display())];
+        let mut info = CompilerArgsInfo::default();
+        info.parse_args(&original).unwrap();
+        assert_eq!(info.input_args(), &original);
+        assert!(info.is_compile_only());
+        assert_eq!(info.input_files(), &["source.c"]);
+        assert_eq!(info.output_filename(), "output.o");
+        assert_eq!(info.compile_args(), &["-DVALUE=42"]);
+    }
+
+    #[test]
+    fn response_file_gnu_quotes_escapes_and_empty_tokens() {
+        let tmp = tempfile::tempdir().unwrap();
+        let response = tmp.path().join("args.rsp");
+        // Clang GNU response syntax escapes inside both quote styles and
+        // ignores standalone empty tokens. It accepts unfinished quotes.
+        std::fs::write(
+            &response,
+            concat!(
+                "\u{feff}-c 'source file.c' -o output\\ file.o ",
+                r#"-D'A=a\b' -D"B=a\b" -DC=a\ b -D"D=a\"b" -D'E=a\'b' "#,
+                r#"-DEMPTY= '' "" -DLITERAL=$(touch\ sentinel) "#,
+                "-DSPACE=a\u{000b}b\u{000c}c -DUNICODE=a\u{00a0}b -DLINE=a\\\nb\r\n\t-DUNCLOSED=\"hello world",
+            ),
+        ).unwrap();
+        let mut info = CompilerArgsInfo::default();
+        info.parse_args(&[format!("@{}", response.display())])
+            .unwrap();
+        assert_eq!(info.input_files(), &["source file.c"]);
+        assert_eq!(info.output_filename(), "output file.o");
+        assert_eq!(
+            info.compile_args(),
+            &[
+                "-DA=ab",
+                "-DB=ab",
+                "-DC=a b",
+                "-DD=a\"b",
+                "-DE=a'b",
+                "-DEMPTY=",
+                "-DLITERAL=$(touch sentinel)",
+                "-DSPACE=a\u{000b}b\u{000c}c",
+                "-DUNICODE=a\u{00a0}b",
+                "-DLINE=a\nb",
+                "-DUNCLOSED=hello world",
+            ]
+        );
+        std::fs::write(&response, "-DTAIL=end\\").unwrap();
+        let mut info = CompilerArgsInfo::default();
+        info.parse_args(&[format!("@{}", response.display())])
+            .unwrap();
+        assert_eq!(info.compile_args(), &["-DTAIL=end\\"]);
+    }
+
+    #[test]
+    fn response_file_repeated_references_are_not_cycles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = tmp.path().join("inner.rsp");
+        let outer = tmp.path().join("outer.rsp");
+        std::fs::write(&inner, "-DVALUE=42").unwrap();
+        std::fs::write(
+            &outer,
+            format!("@{} @{} -c source.c", inner.display(), inner.display()),
+        )
+        .unwrap();
+        let mut info = CompilerArgsInfo::default();
+        info.parse_args(&[format!("@{}", outer.display())]).unwrap();
+        assert_eq!(info.compile_args(), &["-DVALUE=42", "-DVALUE=42"]);
+        assert_eq!(info.input_files(), &["source.c"]);
+    }
+
+    #[test]
+    fn response_file_missing_name_stays_a_literal_argument() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = format!("@{}", tmp.path().join("missing.rsp").display());
+        let mut info = CompilerArgsInfo::default();
+        info.parse_args(std::slice::from_ref(&missing)).unwrap();
+        assert_eq!(info.compile_args(), &[missing]);
+    }
+
+    #[test]
+    fn response_file_directory_and_cycles_return_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = tmp.path().join("a.rsp");
+        let b = tmp.path().join("b.rsp");
+        let mut info = CompilerArgsInfo::default();
+        assert!(
+            info.parse_args(&[format!("@{}", tmp.path().display())])
+                .is_err()
+        );
+        std::fs::write(&a, format!("@{}", b.display())).unwrap();
+        std::fs::write(&b, format!("@{}", a.display())).unwrap();
+        let mut info = CompilerArgsInfo::default();
+        let err = info.parse_args(&[format!("@{}", a.display())]).unwrap_err();
+        assert!(err.to_string().contains("cycle"), "{err}");
+    }
+
+    #[test]
+    fn response_file_oversized_or_non_text_input_returns_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let response = tmp.path().join("args.rsp");
+        let file = std::fs::File::create(&response).unwrap();
+        file.set_len(65 * 1024 * 1024).unwrap();
+        let mut info = CompilerArgsInfo::default();
+        let err = info
+            .parse_args(&[format!("@{}", response.display())])
+            .unwrap_err();
+        assert!(err.to_string().contains("size"), "{err}");
+        for contents in [b"\xff\xfe".as_slice(), b"-DVALUE=1\0-c source.c"] {
+            std::fs::write(&response, contents).unwrap();
+            let mut info = CompilerArgsInfo::default();
+            assert!(
+                info.parse_args(&[format!("@{}", response.display())])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn response_file_excessive_nesting_returns_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..256 {
+            std::fs::write(
+                tmp.path().join(format!("{i}.rsp")),
+                format!("@{}", tmp.path().join(format!("{}.rsp", i + 1)).display()),
+            )
+            .unwrap();
+        }
+        std::fs::write(tmp.path().join("256.rsp"), "-c source.c").unwrap();
+        let mut info = CompilerArgsInfo::default();
+        let err = info
+            .parse_args(&[format!("@{}", tmp.path().join("0.rsp").display())])
+            .unwrap_err();
+        assert!(err.to_string().contains("depth"), "{err}");
     }
 
     #[test]

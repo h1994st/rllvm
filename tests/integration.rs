@@ -197,6 +197,491 @@ fn assert_valid_bitcode(bitcode_path: &Path) {
 // ---------------------------------------------------------------------------
 
 #[test]
+#[cfg(unix)]
+fn response_file_large_os_string_command_preserves_source_path() {
+    use rllvm::compiler_wrapper::{
+        CompilerWrapper, CompilerWrapperBuilder, llvm::ClangWrapperBuilder,
+    };
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let tmp = TempDir::new().unwrap();
+    // Darwin filesystems require UTF-8 names; Unix argv itself remains
+    // OsString so this also exercises the public command method's bounds.
+    let source = tmp.path().join(OsString::from_vec(
+        "source with space-é.c".as_bytes().to_vec(),
+    ));
+    fs::write(&source, "int value(void) { return 42; }\n").unwrap();
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let wrapper = ClangWrapperBuilder::new()
+        .wrapped_compiler(&clang)
+        .build()
+        .unwrap();
+    let mut args = vec![clang.into_os_string(), OsString::from("-fsyntax-only")];
+    for i in 0..32 {
+        args.push(OsString::from(format!(
+            "-DUNUSED_{i}={}",
+            "a".repeat(128 * 1024)
+        )));
+    }
+    args.push(source.into_os_string());
+    assert_eq!(
+        wrapper
+            .execute_command(&args, rllvm::arg_parser::CompileMode::Compiling)
+            .unwrap(),
+        Some(0)
+    );
+}
+
+fn assert_response_transport_preserves_empty_include_argument(before_response: bool) {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("source.c"),
+        "_Static_assert(FIRST == 42, \"first define must survive\");\nint value(void) { return FIRST; }\n",
+    ).unwrap();
+    let mut response = String::from("-DFIRST=42\n");
+    for i in 0..32 {
+        response.push_str(&format!("-DUNUSED_{i}={}\n", "a".repeat(128 * 1024)));
+    }
+    response.push_str("-c source.c -o result.o\n");
+    fs::write(tmp.path().join("args.rsp"), response).unwrap();
+    let args = if before_response {
+        ["-I", "", "@args.rsp"]
+    } else {
+        ["@args.rsp", "-I", ""]
+    };
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let oracle = Command::new(clang)
+        .current_dir(tmp.path())
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        oracle.status.success(),
+        "Clang empty-argument oracle failed: {}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    let output = rllvm("rllvm-cc")
+        .current_dir(tmp.path())
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "response transport lost an empty operand: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = rllvm("rllvm-get-bc")
+        .current_dir(tmp.path())
+        .args(["result.o", "-o", "extracted.bc"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "response transport changed the bitcode compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_bitcode(&tmp.path().join("extracted.bc"));
+}
+
+#[test]
+fn response_file_transport_preserves_empty_argument_before_response() {
+    assert_response_transport_preserves_empty_include_argument(true);
+}
+
+#[test]
+fn response_file_transport_preserves_empty_argument_after_response() {
+    assert_response_transport_preserves_empty_include_argument(false);
+}
+
+#[test]
+fn response_file_large_payload_reaches_synthesized_compilations() {
+    // Few arguments, but more bytes than typical host ARG_MAX limits. An
+    // argument-count-only response threshold cannot handle this command.
+    let mut defines = String::new();
+    for i in 0..32 {
+        defines.push_str(&format!("-DUNUSED_{i}={}\n", "a".repeat(128 * 1024)));
+    }
+    defines.push_str("-DVALUE=42\n");
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    for (flags, output_name, mode) in [
+        ("-c", "result.o", "marker"),
+        ("-c -flto", "result.o", "marker"),
+        ("", "result", "marker"),
+        ("-flto", "result", "save-temps"),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("source.c"),
+            "int main(void) { return VALUE - 42; }\n",
+        )
+        .unwrap();
+        let input = if mode == "save-temps" {
+            let output = Command::new(&clang)
+                .current_dir(tmp.path())
+                .args(["-flto", "-DVALUE=42", "-c", "source.c", "-o", "source.o"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            "source.o"
+        } else {
+            "source.c"
+        };
+        fs::write(
+            tmp.path().join("args.rsp"),
+            format!("{defines} {flags} {input} -o {output_name}"),
+        )
+        .unwrap();
+        let output = Command::new(&clang)
+            .current_dir(tmp.path())
+            .arg("@args.rsp")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "Clang large-response oracle failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = rllvm("rllvm-cc")
+            .env("RLLVM_LTO_MODE", mode)
+            .current_dir(tmp.path())
+            .arg("@args.rsp")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "large response ({flags}, {mode}) failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // An LTO object is bitcode, so link it before asking the object-file
+        // extractor to read the section emitted by native code generation.
+        let extract_input = if flags == "-c -flto" {
+            let output = rllvm("rllvm-cc")
+                .env("RLLVM_LTO_MODE", "marker")
+                .current_dir(tmp.path())
+                .args(["-flto", "result.o", "-o", "linked"])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            "linked"
+        } else {
+            output_name
+        };
+        let output = rllvm("rllvm-get-bc")
+            .current_dir(tmp.path())
+            .args([extract_input, "-o", "extracted.bc"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_valid_bitcode(&tmp.path().join("extracted.bc"));
+    }
+}
+
+#[test]
+fn response_file_compile_only_and_source_link_extract_bitcode() {
+    for compile_only in [true, false] {
+        let tmp = TempDir::new().unwrap();
+        fs::write(
+            tmp.path().join("source.c"),
+            "int main(void) { return 0; }\n",
+        )
+        .unwrap();
+        let output_name = if compile_only { "result.o" } else { "result" };
+        fs::write(
+            tmp.path().join("args.rsp"),
+            format!(
+                "{} source.c -o {output_name}",
+                if compile_only { "-c" } else { "" }
+            ),
+        )
+        .unwrap();
+        let output = rllvm("rllvm-cc")
+            .current_dir(tmp.path())
+            .arg("@args.rsp")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = rllvm("rllvm-get-bc")
+            .current_dir(tmp.path())
+            .args([output_name, "-o", "extracted.bc"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "response-file extraction failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_valid_bitcode(&tmp.path().join("extracted.bc"));
+    }
+}
+
+#[test]
+fn response_file_failures_finish_with_diagnostics() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("cycle.rsp"), "@./cycle.rsp").unwrap();
+    fs::write(tmp.path().join("bad.rsp"), b"\xff\xfe").unwrap();
+    for response in ["@cycle.rsp", "@missing.rsp", "@bad.rsp", "@."] {
+        let mut child = rllvm("rllvm-cc")
+            .current_dir(tmp.path())
+            .arg(response)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("response-file failure hung: {response}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            !output.status.success(),
+            "{response} unexpectedly succeeded"
+        );
+        let diagnostic = if response == "@missing.rsp" {
+            "@missing.rsp"
+        } else {
+            "response file"
+        };
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(diagnostic),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn response_file_lto_preserves_user_requested_linker_temporaries() {
+    let tmp = TempDir::new().unwrap();
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let mut saved_by_clang = Vec::new();
+    for oracle in [true, false] {
+        let dir = tmp.path().join(if oracle { "oracle" } else { "wrapper" });
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("source.c"), "int main(void) { return 0; }\n").unwrap();
+        let output = Command::new(&clang)
+            .current_dir(&dir)
+            .args(["-flto", "-c", "source.c", "-o", "source.o"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::write(
+            dir.join("args.rsp"),
+            format!(
+                "-flto {} source.o -o prog",
+                rllvm::lto::save_temps_flag(cfg!(target_vendor = "apple"))
+            ),
+        )
+        .unwrap();
+        let mut command = if oracle {
+            Command::new(&clang)
+        } else {
+            rllvm("rllvm-cc")
+        };
+        let output = command
+            .env("RLLVM_LTO_MODE", "save-temps")
+            .current_dir(&dir)
+            .arg("@args.rsp")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if oracle {
+            saved_by_clang = fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .filter(|name| rllvm::lto::is_save_temps_artifact("prog", &name.to_string_lossy()))
+                .collect();
+            assert!(
+                !saved_by_clang.is_empty(),
+                "Clang saved no linker artifacts"
+            );
+        } else {
+            assert_valid_bitcode(&dir.join("prog.rllvm.bc"));
+            for name in &saved_by_clang {
+                assert!(
+                    dir.join(name).exists(),
+                    "rllvm deleted user-requested temporary {name:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(target_vendor = "apple")]
+fn response_file_keeps_literal_macho_install_name() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(
+        tmp.path().join("source.c"),
+        "int value(void) { return 42; }\n",
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("args.rsp"),
+        "-dynamiclib source.c -install_name @rpath/libvalue.dylib -o libvalue.dylib",
+    )
+    .unwrap();
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let output = Command::new(clang)
+        .current_dir(tmp.path())
+        .arg("@args.rsp")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = rllvm("rllvm-cc")
+        .current_dir(tmp.path())
+        .arg("@args.rsp")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = rllvm("rllvm-get-bc")
+        .current_dir(tmp.path())
+        .args(["libvalue.dylib", "-o", "extracted.bc"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_bitcode(&tmp.path().join("extracted.bc"));
+}
+
+#[test]
+fn response_file_nested_quoted_arguments_match_clang() {
+    let tmp = TempDir::new().unwrap();
+    fs::create_dir(tmp.path().join("sub")).unwrap();
+    fs::write(
+        tmp.path().join("source file.c"),
+        concat!(
+            "_Static_assert(VALUE == 42, \"value\");\n",
+            "_Static_assert(sizeof(TEXT) == 12, \"text\");\n",
+            "const char *message = TEXT; int main(void) { return VALUE - 42; }\n",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("sub/outer.rsp"),
+        "@inner.rsp @defines.rsp @defines.rsp",
+    )
+    .unwrap();
+    // A containing-file-relative resolver selects this deliberately invalid file.
+    fs::write(tmp.path().join("sub/inner.rsp"), "missing.c").unwrap();
+    fs::write(
+        tmp.path().join("inner.rsp"),
+        r#"'source file.c' -o"result file" '' """#,
+    )
+    .unwrap();
+    fs::write(
+        tmp.path().join("defines.rsp"),
+        r#"-DVALUE=42 -DTEXT=\"hello\ world\""#,
+    )
+    .unwrap();
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let oracle = Command::new(&clang)
+        .current_dir(tmp.path())
+        .arg("@sub/outer.rsp")
+        .output()
+        .unwrap();
+    assert!(
+        oracle.status.success(),
+        "Clang response oracle failed: {}",
+        String::from_utf8_lossy(&oracle.stderr)
+    );
+    assert!(
+        Command::new(tmp.path().join("result file"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::remove_file(tmp.path().join("result file")).unwrap();
+    let output = rllvm("rllvm-cc")
+        .current_dir(tmp.path())
+        .arg("@sub/outer.rsp")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        Command::new(tmp.path().join("result file"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = rllvm("rllvm-get-bc")
+        .current_dir(tmp.path())
+        .args(["result file", "-o", "extracted.bc"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_bitcode(&tmp.path().join("extracted.bc"));
+    // Recompile extracted IR: defines must reach the bitcode compilation too.
+    let output = Command::new(clang)
+        .current_dir(tmp.path())
+        .args(["extracted.bc", "-o", "from-bc"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        Command::new(tmp.path().join("from-bc"))
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
 fn compile_single_c_file_and_extract_bitcode() {
     let tmp = TempDir::new().unwrap();
     let object_path = tmp.path().join("foo.o");
