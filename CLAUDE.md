@@ -174,9 +174,10 @@ separate behavior/performance task, not incidental cleanup.
 - Name Rust tests after behavior, without a `test_` prefix. Confirm new regressions
   fail before their fix, at the layer that can actually break. Prefer native and
   extracted behavior checks over merely asserting that a file exists.
-- Use separate worktrees and `fix/` or `feat/` branches for independent issue work.
-  Keep each issue's change reviewable in its own PR. Order dependent work and make
-  stacked PR bases explicit.
+- With only one job ongoing, use the current checkout; a separate worktree is
+  not required. Use separate worktrees for concurrent independent issue work.
+  Keep each issue on a `fix/` or `feat/` branch and reviewable in its own PR.
+  Order dependent work and make stacked PR bases explicit.
 - After a parent is squash-merged, rebase only the dependent commits onto current
   `main`. Retargeting the PR alone can leave the parent's changes in its diff.
 - Parallel workers use separate Cargo target directories and bounded job counts.

@@ -351,11 +351,35 @@ the archive's members, so a dependency brings its bitcode wherever it is used.
 
 ## Workflow benchmarks
 
-The [workflow benchmark guide](benchmarks/README.md) describes pinned C, C++, and
-Rust build/extraction comparisons, correctness gates, cache states, and offline
-reports. Run `uv sync --locked` and `uv run python -m benchmarks profiles` to
-start. The harness is a development utility; it is separate from the Criterion
-microbenchmarks run with `cargo bench`.
+The [baseline](benchmarks/baselines/2026-09-12-apple-m4/README.md) compares
+validated builds on an Apple M4 with LLVM 22.1.8, eight jobs, and three
+repetitions. Clean **build-only** time relative to native compilation:
+
+| Workload | Cache disabled | Primed C/C++ cache |
+|---|---:|---:|
+| nghttp2 C (CMake) | 1.84× | 1.61× |
+| nghttp2 C++ (CMake) | 1.83× | 1.20× |
+| Quiche (Cargo) | 1.59× | 1.50× |
+
+Values are median paired ratios; 1× means native build time. Configuration,
+extraction, inspection, priming, validation, and diagnostics are excluded.
+Cargo uses one codegen unit for target and host crates in both builds.
+Filesystem cache and desktop activity were uncontrolled.
+
+C/C++ capture adds a bitcode compilation and embeds its path in object files.
+Rust emits bitcode in the same rustc invocation; bitcode writes, marker
+compilations, and archive updates add work. The optional bitcode cache covers C/C++,
+including Rust projects' native dependencies. Hits skip bitcode compilation
+but still preprocess and hash inputs; misses also pay cache storage costs.
+Priming helped C++ most, while Rust compilation remains uncached.
+
+Unchanged C/C++ rebuilds stayed near native time. Extraction and inspection add
+work even when nothing recompiles: extraction merges modules with `llvm-link`,
+and repeated extraction repeats that work. Complete-workflow ratios therefore
+include more than compiler-wrapper overhead.
+
+See the [benchmark guide](benchmarks/README.md) for reproduction and coverage
+details. `cargo bench` runs the separate Criterion microbenchmarks.
 
 ## Relationship to gllvm and wllvm
 
