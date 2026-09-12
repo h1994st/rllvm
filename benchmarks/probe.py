@@ -132,15 +132,18 @@ def create_probe(
         "#include <unistd.h>\n#include <stdlib.h>\n#include <stdio.h>\n#include <fcntl.h>\n"
         "int main(int n,char **v){"
         f"int seal=open({literal(health.seal)},O_RDWR);"
-        'if(seal<0){perror("diagnostic health seal");return 126;}'
         f"char receipt[]={literal(health.directory + '/attempt-XXXXXX')};"
         "int record=mkstemp(receipt);"
         f"int directory=open({literal(health.directory)},O_RDONLY);"
         "if(record<0||directory<0||fsync(record)||fsync(directory)){"
-        'if(pwrite(seal,"!",1,0)!=1||fsync(seal))return 126;'
+        'if(seal<0||pwrite(seal,"!",1,0)!=1||fsync(seal))return 126;'
         "close(seal);if(record>=0)close(record);if(directory>=0)close(directory);"
         f"execv({literal(str(real))},v);return 126;}}"
-        "close(record);close(directory);close(seal);"
+        "close(record);close(directory);"
+        # A durable pending receipt independently records this failure even
+        # when the seal cannot be opened. Preserve the real child's execution.
+        f"if(seal<0){{execv({literal(str(real))},v);return 126;}}"
+        "close(seal);"
         "char **a=calloc((size_t)n+5,sizeof(char*));"
         "if(!a)return 126;"
         f"a[0]={literal(sys.executable)};a[1]={literal(str(runtime))};"
@@ -216,9 +219,10 @@ def summarize_events(
         failures.append("missing diagnostic command completion evidence")
     healthy_events, health_evidence, health_failures = check_health(health)
     failures.extend(health_failures)
-    if {
-        event.event_id for event in events
-    } != healthy_events.keys() - prior_event_ids:
+    identifiers = {event.event_id for event in events}
+    if len(identifiers) != len(events):
+        failures.append("duplicate supplied diagnostic event identities")
+    if identifiers != healthy_events.keys() - prior_event_ids:
         failures.append(
             "diagnostic event slice does not match durable health receipts"
         )
