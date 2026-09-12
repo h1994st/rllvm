@@ -1,0 +1,30 @@
+[project]
+name = "rllvm"
+version = "0.1.0"
+description = "Utility scripts for rllvm development and benchmarking"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Shengtuo Hu", email = "h1994st@gmail.com" }]
+requires-python = ">=3.14"
+dependencies = [
+    "typer>=0.27.2",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 79
+extend-exclude = ["docs", ".worktrees"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B"]
+
+[tool.ty.src]
+exclude = ["docs", ".worktrees"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.7",
+    "ty>=0.0.80",
+]
