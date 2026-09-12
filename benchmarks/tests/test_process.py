@@ -122,7 +122,6 @@ class TestProcess:
         assert result.max_process_rss_bytes is None
         assert result.resource_method == "not-available:spawn-failed"
         assert result.failure is not None
-        assert result.failure is not None
         assert result.failure.kind == "spawn"
         assert result.failure.errno == errno.ENOENT
         assert Path(result.stdout).read_text() == ""

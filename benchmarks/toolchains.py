@@ -132,13 +132,7 @@ class Toolchain:
             if candidate is None or not os.access(candidate, os.X_OK):
                 raise ToolchainError(f"required tool not found: {name}")
             path = Path(candidate).absolute()
-            args = (
-                ("-vV",)
-                if name == "rustc"
-                else ("--rllvm-version",)
-                if name in ("rllvm-cc", "rllvm-cxx", "rllvm-rustc")
-                else ("--version",)
-            )
+            args = version_arguments(name)
             result = checked(
                 Command((str(path), *args), Path.cwd(), env),
                 logs,
@@ -160,6 +154,14 @@ class Toolchain:
         return cls(
             host, tools, env, records=tuple(records), rust_host=rust_host
         )
+
+
+def version_arguments(name: str) -> tuple[str, ...]:
+    if name == "rustc":
+        return ("-vV",)
+    if name in ("rllvm-cc", "rllvm-cxx", "rllvm-rustc"):
+        return ("--rllvm-version",)
+    return ("--version",)
 
 
 def _compatible_llvm(tools: Mapping[str, Tool]) -> None:

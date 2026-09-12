@@ -9,7 +9,6 @@ No timings from validation, priming, diagnostics or filesystem work enter the
 
 import json
 import os
-import platform
 import random
 import re
 import time
@@ -25,7 +24,10 @@ from benchmarks.coverage import (
     cargo_coverage,
     cmake_coverage,
 )
-from benchmarks.fixtures import PreparedFixture
+from benchmarks.fixtures import FixtureError, PreparedFixture
+from benchmarks.host import host_metadata
+from benchmarks.log_storage import deduplicate_logs
+from benchmarks.preflight import verify_prepared
 from benchmarks.probe import prepare_diagnostics, read_events, summarize_events
 from benchmarks.process import Command, CommandFailed, Measurement, execute
 from benchmarks.recipes import EditRecord, Target
@@ -179,6 +181,44 @@ class _Run:
         self.behavior: dict[tuple[str, str], tuple[Measurement, ...]] = {}
         self.api: dict[tuple[str, str], tuple[Measurement, ...]] = {}
         self.targets = self.recipe.targets(tools.host)
+
+    def preflight(self) -> None:
+        if self.options.dry_run:
+            self.record(
+                "operations",
+                operation="identity-preflight",
+                planned=True,
+                wall_seconds=None,
+            )
+            return
+        start = time.monotonic()
+        observations: list[dict[str, Any]] = []
+        failure = None
+
+        def execute_check(command: Command) -> Measurement:
+            result = self.command(command, "identity-preflight", "validation")
+            assert result is not None
+            return result
+
+        try:
+            verify_prepared(
+                self.prepared, self.tools, execute_check, observations
+            )
+        except Exception as error:
+            failure = (
+                "prepared identity could not be validated; "
+                f"prepare again: {error}"
+            )
+            raise FixtureError(failure) from error
+        finally:
+            self.record(
+                "operations",
+                operation="identity-preflight",
+                planned=False,
+                wall_seconds=time.monotonic() - start,
+                observations=observations,
+                failure=failure,
+            )
 
     def envelope(self, **data) -> dict:
         self.sequence += 1
@@ -520,6 +560,9 @@ class _Run:
         if self.options.dry_run:
             return None
         start = time.monotonic()
+        validation_logs = (
+            self.root / "validation-logs" / sample["id"] / label / target.id
+        )
         validation = validate_target(
             target,
             self.build("native") / target.artifact,
@@ -528,11 +571,7 @@ class _Run:
                 output, artifact.parent / (output.name + ".manifest"), result
             ),
             self.tools,
-            logs=self.root
-            / "validation-logs"
-            / sample["id"]
-            / label
-            / target.id,
+            logs=validation_logs,
             env=self.env(arm),
             coverage=self.coverage(target, arm),
         )
@@ -542,7 +581,21 @@ class _Run:
             wall_seconds=time.monotonic() - start,
             target=target.id,
         )
+        storage_start = time.monotonic()
+        storage = deduplicate_logs(self.workspace, validation_logs)
+        self.record(
+            "operations",
+            operation="deduplicate-validation-logs",
+            wall_seconds=time.monotonic() - storage_start,
+            target=target.id,
+            logs=str(validation_logs),
+            **storage,
+        )
         for measurement in validation.records:
+            # The extractor already ran in the timed stream. Its retained
+            # validator evidence is not another command execution.
+            if measurement is result:
+                continue
             record = self.record(
                 "commands",
                 phase="target-validation",
@@ -1040,13 +1093,7 @@ def run_profile(
         "toolchain": toolchain.manifest(),
         "rllvm_provenance": options.rllvm_provenance,
         "provenance_note": "unspecified revisions remain unknown; binary hashes identify tools",
-        "host": {
-            "platform": platform.platform(),
-            "machine": platform.machine(),
-            "processor": platform.processor(),
-            "cpu_count": os.cpu_count(),
-            "load_start": os.getloadavg(),
-        },
+        "host": host_metadata(),
         "comparison_orders": comparison_orders(
             options.repetitions, options.seed
         ),
@@ -1088,6 +1135,7 @@ def run_profile(
                 raise ValueError("prepared source directory is missing")
             if not toolchain.path("rllvm-info"):
                 raise ValueError("rllvm-info is required")
+            runner.preflight()
             runner.run()
     except BaseException as error:
         interrupted = isinstance(error, KeyboardInterrupt | SystemExit)

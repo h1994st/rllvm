@@ -4,7 +4,7 @@ name: Pages
 # workflow is not a required status check, so a pull request that never runs it
 # is still mergeable.
 #
-# The list is exactly what `build.py` reads. `.release-please-manifest.json` is
+# The list covers generator inputs and its locked Python environment. `.release-please-manifest.json` is
 # among them because the masthead shows the released version: a release changes
 # the page while touching nothing else here. `Cargo.toml` carries the same
 # number but also moves on dependency edits, which would redeploy an identical
@@ -15,6 +15,9 @@ on:
     paths:
       - "README.md"
       - "site/**"
+      - ".python-version"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".release-please-manifest.json"
       - ".github/workflows/pages.yml"
   pull_request:
@@ -22,6 +25,9 @@ on:
     paths:
       - "README.md"
       - "site/**"
+      - ".python-version"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".release-please-manifest.json"
       - ".github/workflows/pages.yml"
   workflow_dispatch:
@@ -45,8 +51,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.12.13"
+
+      - name: Sync locked Python environment
+        run: uv sync --locked
+
       - name: Generate index from README
-        run: python3 site/build.py
+        run: uv run python site/build.py
 
       # `actions/configure-pages` is deliberately absent: its only job here
       # would be to infer `baseurl`, which `_config.yml` sets outright, and it

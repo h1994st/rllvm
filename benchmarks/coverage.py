@@ -325,6 +325,8 @@ def cargo_coverage(
     evidence: dict[str, str] = {}
     failures: list[str] = []
     artifact_found = False
+    source = source.resolve()
+    artifact = (build / target.artifact).resolve()
     for record in records:
         if record.returncode != 0:
             failures.append("Cargo build evidence reports a failed command")
@@ -347,9 +349,11 @@ def cargo_coverage(
                 host_tools.add(detail["src_path"])
                 continue
             filenames = data["filenames"]
-            selected = str(build / target.artifact) in filenames
+            selected = any(
+                Path(name).resolve() == artifact for name in filenames
+            )
             artifact_found |= selected
-            src = Path(detail["src_path"])
+            src = Path(detail["src_path"]).resolve()
             if src.is_relative_to(source) and (
                 detail["name"].replace("-", "_")
                 == project_package.replace("-", "_")

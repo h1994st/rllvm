@@ -11,7 +11,7 @@ from benchmarks.fixtures import PreparedFixture
 from benchmarks.recipes import Edit, Recipe
 from benchmarks.records import read_json
 from benchmarks.records import read_records as _read_records
-from benchmarks.tests.validation_support import tools_at
+from benchmarks.tests.validation_support import commit_fixture, tools_at
 from benchmarks.toolchains import Toolchain
 
 
@@ -85,17 +85,19 @@ def tiny(tmp_path):
         "static",
         Edit("lib/version.c", '"version"', '"version-rllvm-benchmark"'),
     )
-    return PreparedFixture(
-        "tiny",
-        source,
-        recipe,
-        "fixture",
-        "fixture",
-        {},
-        None,
-        tools,
-        (),
-        root / "fixture.json",
+    return commit_fixture(
+        PreparedFixture(
+            "tiny",
+            source,
+            recipe,
+            "fixture",
+            "fixture",
+            {},
+            None,
+            tools,
+            (),
+            root / "fixture.json",
+        )
     )
 
 
@@ -113,6 +115,12 @@ def test_real_scheduler_preserves_base_references_and_primes_only_base(tiny):
     assert len(samples) == 12
     assert all(s["valid"] for s in samples)
     commands = read_records(result.root / "commands.jsonl")
+    log_pairs = [
+        (c["measurement"]["stdout"], c["measurement"]["stderr"])
+        for c in commands
+        if c.get("measurement") is not None
+    ]
+    assert len(log_pairs) == len(set(log_pairs))
     edits = read_records(result.root / "operations.jsonl")
     for arm in (
         "native",
@@ -190,6 +198,7 @@ def test_failed_build_never_extracts_and_keeps_invalid_samples(tiny):
     from benchmarks.runner import RunOptions, run_profile
 
     (tiny.source / "tests/main.cpp").write_text("not valid C++\n")
+    tiny = commit_fixture(tiny)
     result = run_profile(
         tiny,
         tiny.toolchain,
@@ -225,7 +234,11 @@ def test_stale_library_ir_fails_even_when_both_api_probes_are_edited(tiny):
         f'else cp "$out" {json.dumps(str(tiny.source.parent / "old.bc"))}; fi;;\nesac\n'
     )
     shim.chmod(0o755)
-    tool = replace(tiny.toolchain.tools["rllvm-get-bc"], path=str(shim))
+    tool = Toolchain.discover(
+        ("rllvm-get-bc",),
+        tiny.source.parent / "shim-discovery",
+        paths={"rllvm-get-bc": shim},
+    ).tools["rllvm-get-bc"]
     tools = replace(
         tiny.toolchain,
         tools=tiny.toolchain.tools
@@ -266,6 +279,7 @@ def test_missing_independent_evidence_fails_successful_build(tiny):
             "${CMAKE_COMMAND} -E rm -f "
             "${CMAKE_BINARY_DIR}/compile_commands.json)\n"
         )
+    tiny = commit_fixture(tiny)
     result = run_profile(
         tiny,
         tiny.toolchain,
@@ -346,6 +360,7 @@ def test_interrupt_preserves_failed_command_and_releases_host_lock(tiny):
 
     with (tiny.source / "CMakeLists.txt").open("a") as output:
         output.write("execute_process(COMMAND /bin/sleep 30)\n")
+    tiny = commit_fixture(tiny)
     manifest = tiny.source.parent / "prepared.json"
     manifest.write_text(json.dumps(tiny.manifest()))
     script = tiny.source.parent / "run.py"
@@ -370,7 +385,7 @@ def test_interrupt_preserves_failed_command_and_releases_host_lock(tiny):
         while time.monotonic() < deadline:
             commands = root / "operations.jsonl"
             if commands.exists() and any(
-                r["operation"] == "command-start"
+                r["operation"] == "command-start" and r["phase"] == "configure"
                 for r in read_records(commands)
             ):
                 break
@@ -389,7 +404,8 @@ def test_interrupt_preserves_failed_command_and_releases_host_lock(tiny):
     assert result["status"] == "interrupted"
     assert result["errors"]
     records = read_records(root / "commands.jsonl")
-    assert records[0]["measurement"] is None and records[0]["error"]
+    interrupted = next(r for r in records if r["phase"] == "configure")
+    assert interrupted["measurement"] is None and interrupted["error"]
     assert len(read_records(root / "samples.jsonl")) == 12
     with RunLock():
         pass
@@ -478,6 +494,7 @@ def test_real_cargo_scheduler_keeps_artifact_and_bitcode_cache_states(tiny):
             ),
         ),
     )
+    prepared = commit_fixture(prepared)
     result = run_profile(
         prepared,
         tiny.toolchain,
@@ -539,6 +556,7 @@ def test_diagnostic_recording_failure_invalidates_every_sample(tiny):
             'file(WRITE "$ENV{RLLVM_BENCHMARK_EVENTS}/../clang/health-seal" "{")\n'
             "endif()\n"
         )
+    tiny = commit_fixture(tiny)
     result = run_profile(
         tiny,
         tiny.toolchain,
@@ -580,3 +598,91 @@ def test_repetitions_balance_positions_and_reuse_stable_command_paths(tiny):
         observations = [r["command"] for r in builds if r["arm"] == arm]
         assert observations == [observations[0]] * 4
     assert len(read_records(result.root / "samples.jsonl")) == 48
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        "source",
+        "staged-source",
+        "tool",
+        "proxy-version",
+        "lock",
+        "submodule",
+        "submodule-pin",
+    ],
+)
+def test_changed_preparation_identity_fails_before_measured_work(
+    tiny, changed
+):
+    import subprocess
+
+    from benchmarks.runner import RunOptions, run_profile
+
+    # Without preflight this real configure fails before any compilation;
+    # command records still prove that measured work was wrongly attempted.
+    (tiny.source / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n"
+        'message(FATAL_ERROR "identity regression reached configure")\n'
+    )
+    (tiny.source / "Cargo.lock").write_text("original lock\n")
+    version = tiny.source.parent / "probe-version"
+    version.write_text("original version\n")
+    probe = tiny.source.parent / "identity-probe"
+    probe.write_text("#!/bin/sh\ncat " + json.dumps(str(version)) + "\n")
+    probe.chmod(0o755)
+    discovered = Toolchain.discover(
+        ("identity-probe",),
+        tiny.source.parent / "identity-discovery",
+        paths={"identity-probe": probe},
+    )
+    tools = replace(
+        tiny.toolchain, tools=tiny.toolchain.tools | discovered.tools
+    )
+    tiny = replace(tiny, toolchain=tools)
+    if changed.startswith("submodule"):
+        dependency = tiny.source / "dependency"
+        dependency.mkdir()
+        (dependency / "value").write_text("original\n")
+        child = commit_fixture(replace(tiny, source=dependency))
+        tiny = replace(
+            tiny,
+            submodules={"dependency": child.commit},
+            recipe=replace(tiny.recipe, required_submodules=("dependency",)),
+        )
+    tiny = commit_fixture(tiny)
+    if changed in {"source", "staged-source"}:
+        (tiny.source / "lib/version.c").write_text("changed source\n")
+        if changed == "staged-source":
+            subprocess.run(
+                (tools.path("git"), "add", "."), cwd=tiny.source, check=True
+            )
+    elif changed == "tool":
+        probe.write_text("#!/bin/sh\necho replacement\n")
+    elif changed == "proxy-version":
+        version.write_text("changed version\n")
+    elif changed == "lock":
+        (tiny.source / "Cargo.lock").write_text("changed lock\n")
+    else:
+        (tiny.source / "dependency/value").write_text("changed dependency\n")
+        if changed == "submodule-pin":
+            commit_fixture(replace(tiny, source=tiny.source / "dependency"))
+    result = run_profile(
+        tiny,
+        tools,
+        RunOptions(
+            tiny.source.parent / "identity-run",
+            repetitions=1,
+            jobs=2,
+            diagnostics=False,
+        ),
+    )
+    assert result.status == "invalid"
+    assert "prepare again" in " ".join(result.errors)
+    assert all(
+        not s["complete"] for s in read_records(result.root / "samples.jsonl")
+    )
+    command_path = result.root / "commands.jsonl"
+    assert not command_path.exists() or all(
+        c["category"] != "timed" for c in read_records(command_path)
+    )

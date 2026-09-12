@@ -4,10 +4,12 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
+from benchmarks.fixtures import PreparedFixture
 from benchmarks.process import Command, checked
-from benchmarks.toolchains import Toolchain, child_environment
+from benchmarks.toolchains import Toolchain, child_environment, sha256
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ROOT = Path(__file__).resolve().parents[2]
@@ -43,6 +45,7 @@ def llvm_tool_paths() -> dict[str, Path]:
 
 def tools_at(root):
     names = (
+        "git",
         "clang",
         "clang++",
         "llvm-ar",
@@ -64,7 +67,9 @@ def tools_at(root):
     paths = llvm_tool_paths()
     paths.update(
         {
-            name: ROOT / "target/release" / name
+            name: ROOT
+            / os.environ.get("RLLVM_BENCH_TEST_BIN_DIR", "target/release")
+            / name
             for name in names
             if name.startswith("rllvm-")
         }
@@ -98,4 +103,36 @@ def environment(root, tools):
 def run(argv, root, env, label):
     return checked(
         Command(tuple(map(str, argv)), root, env), root / "logs", label
+    )
+
+
+def commit_fixture(prepared: PreparedFixture) -> PreparedFixture:
+    """Prepare intentional test inputs with honest current Git identities."""
+
+    def git(*args):
+        return subprocess.check_output(
+            (prepared.toolchain.path("git"), *args),
+            cwd=prepared.source,
+            env=dict(
+                prepared.toolchain.environment, GIT_CONFIG_GLOBAL=os.devnull
+            ),
+            stderr=subprocess.PIPE,
+            text=True,
+        ).strip()
+
+    if not (prepared.source / ".git").exists():
+        git("init", "-q")
+    git("config", "user.name", "Fixture")
+    git("config", "user.email", "fixture@example.invalid")
+    git("add", ".")
+    git("commit", "--allow-empty", "-qm", "fixture inputs")
+    commit = git("rev-parse", "HEAD")
+    lock = prepared.source / "Cargo.lock"
+    return replace(
+        prepared,
+        identity="fixture-" + commit,
+        commit=commit,
+        tree=git("rev-parse", "HEAD^{tree}"),
+        recipe=replace(prepared.recipe, commit=commit),
+        lock_sha256=sha256(lock) if lock.is_file() else None,
     )

@@ -371,13 +371,18 @@ class TestCargoValidation:
                 env,
                 "extract",
             )
+            source_alias = root / "source-alias"
+            source_alias.symlink_to(source, target_is_directory=True)
+            build_alias = root / "build-alias"
+            build_alias.symlink_to(root / "wrapped", target_is_directory=True)
             coverage = cargo_coverage(
                 target,
-                source,
-                root / "wrapped",
+                source_alias,
+                build_alias,
                 (evidence[1],),
                 project_package="coverage_project",
             )
+            assert not coverage.failures, coverage.failures
             boundaries = {
                 item.category: item.count for item in coverage.exclusions
             }

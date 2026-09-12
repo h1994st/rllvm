@@ -10,7 +10,7 @@ from benchmarks.cli import app
 from benchmarks.fixtures import PreparedFixture
 from benchmarks.recipes import Edit, Recipe
 from benchmarks.records import read_json, write_json
-from benchmarks.tests.validation_support import tools_at
+from benchmarks.tests.validation_support import commit_fixture, tools_at
 from benchmarks.toolchains import Toolchain
 
 runner = CliRunner()
@@ -198,17 +198,19 @@ def _tiny(tmp_path: Path) -> PreparedFixture:
         "static",
         Edit("lib/version.c", '"version"', '"version-rllvm-benchmark"'),
     )
-    return PreparedFixture(
-        "tiny",
-        source,
-        recipe,
-        "fixture",
-        "fixture",
-        {},
-        None,
-        tools,
-        (),
-        root / "prepared fixture.json",
+    return commit_fixture(
+        PreparedFixture(
+            "tiny",
+            source,
+            recipe,
+            "fixture",
+            "fixture",
+            {},
+            None,
+            tools,
+            (),
+            root / "prepared fixture.json",
+        )
     )
 
 
