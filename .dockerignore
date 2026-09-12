@@ -9,4 +9,6 @@ target/
 *.manifest
 *.pdb
 lcov.info
-docs/plans/
+docs/
+.ruff_cache/
+.superpowers/
