@@ -11,6 +11,10 @@ builds. `rllvm-get-bc` extracts it; `rllvm-info` inspects a module. Helpers:
 `rules_rllvm` is a separate Bazel-only project that does not use these binaries.
 Do not change anything here to serve it.
 
+Make the smallest coherent change that satisfies the request. Follow existing
+patterns, and introduce abstractions or dependencies only when needed for the
+requested behavior. Keep unrelated refactoring separate.
+
 ## Commands
 
 ```bash
@@ -61,6 +65,9 @@ uv run python site/build.py
 ## Contracts to preserve
 
 Source paths in this section are relative to `src/`.
+
+Preserve the contracts below. Current limitations may be changed by work
+explicitly scoped to address them.
 
 ### Compiler arguments
 
@@ -144,8 +151,9 @@ problems. Fat objects need the path in both their native and bitcode halves.
 Save-temps eligibility includes combined source/link invocations. Queries,
 non-linking actions, and configure-only mode must not stage a linker marker.
 Build markers for the requested target/language, then reset `-x` to `none` before
-appending the marker object after the user's inputs. Universal builds remain
-unsupported.
+appending the marker object after the user's inputs.
+
+Current limitation: universal builds are unsupported.
 
 When the user requests linker temporaries, preserve them, including the selected
 module: copy it to the retained rllvm path rather than renaming it away. Full LTO
@@ -166,11 +174,13 @@ procedural-macro invocations pass through without capture.
 
 Test `rllvm-info` against real `llvm-dis` output as well as literal fixtures.
 Basic-block labels can have quoted names and trailing predecessor comments; the
-entry block can be implicit. Inspecting a binary currently uses only its first
-recorded module, when available; whole-program inspection uses the extracted `.bc`.
+entry block can be implicit.
 
-Link mode deliberately performs repeated compilations (#51). Changing that is a
-separate behavior/performance task, not incidental cleanup.
+Current limitation: inspecting a binary uses only its first recorded module,
+when available; whole-program inspection uses the extracted `.bc`.
+
+Current limitation: link mode performs repeated compilations (#51). Changing
+that is a separate behavior/performance task, not incidental cleanup.
 
 ## Tests and coordination
 
@@ -181,8 +191,10 @@ separate behavior/performance task, not incidental cleanup.
   extracted behavior checks over merely asserting that a file exists.
 - With only one job ongoing, use the current checkout; a separate worktree is
   not required. Use separate worktrees for concurrent independent issue work.
-  Keep each issue on a `fix/` or `feat/` branch and reviewable in its own PR.
-  Order dependent work and make stacked PR bases explicit.
+  Name task branches according to
+  [Conventional Branch](https://conventionalbranch.org/). Keep each issue
+  reviewable in its own PR. Order dependent work and make stacked PR bases
+  explicit.
 - After a parent is squash-merged, rebase only the dependent commits onto current
   `main`. Retargeting the PR alone can leave the parent's changes in its diff.
 - Parallel workers use separate Cargo target directories and bounded job counts.
@@ -190,10 +202,17 @@ separate behavior/performance task, not incidental cleanup.
   paths to the executables they invoke.
 - Performance measurements require coordinated, otherwise idle resources and
   recorded build/cache conditions. Parallel correctness runs are not benchmarks.
-- Run checks appropriate to the change. Reuse valid results for unchanged code;
-  do not repeat full suites without a new change or unresolved concern.
-- Honor the requested stopping point. Clean up task-owned temporary files and
-  merged worktrees when requested, preserving uncommitted user work.
+- Run checks that validate the changed behavior. Reuse recorded passing results
+  when the relevant code and test conditions are unchanged. After a fix, rerun
+  affected checks; broaden testing only when a failure or unresolved concern
+  justifies it.
+- Carry authorized implementation work through relevant checks and PR submission
+  or update. Stop after handing off the PR unless asked to monitor CI or continue.
+- For CI repairs, confirm the affected CI check passes. For analysis and review,
+  report findings unless changes were requested.
+- Do not request approval again for steps already authorized.
+- Clean up task-owned temporary files and merged worktrees when requested,
+  preserving uncommitted user work.
 
 ## Conventions and documentation
 
@@ -203,6 +222,10 @@ separate behavior/performance task, not incidental cleanup.
 - `constants.rs` is internal. Public items in `utils/` are public API; use
   `pub(crate)` for internal helpers.
 - The `docs/` directory is intentionally excluded.
+- Use repository-relative paths or generic placeholders in published
+  documentation, issues, and PRs. Keep committed benchmark evidence limited to
+  compact summaries and provenance; store raw logs and build artifacts outside
+  Git.
 - `README.md` is the user-facing source of truth. `site/build.py` generates
   `site/index.md`; do not edit or commit that generated page. Validate links and
   site generation when changing the README.
