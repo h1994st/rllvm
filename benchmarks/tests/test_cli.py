@@ -64,6 +64,38 @@ def test_run_validation_preserves_unrelated_output_directory(
     assert sentinel.read_text() == "untouched"
 
 
+def test_prepare_reports_missing_tool_without_modifying_inputs(
+    tmp_path: Path,
+) -> None:
+    examples = tmp_path / "example inputs"
+    examples.mkdir()
+    tools = tmp_path / "empty tools"
+    tools.mkdir()
+    sentinel = tools / "preserve"
+    sentinel.write_text("unchanged")
+    output = tmp_path / "must not exist"
+    result = runner.invoke(
+        app,
+        [
+            "prepare",
+            "--profile",
+            "nghttp2-c-cmake",
+            "--examples-root",
+            str(examples),
+            "--dependencies-root",
+            str(tmp_path),
+            "--tool-root",
+            str(tools),
+            "--output",
+            str(output),
+        ],
+    )
+    assert result.exit_code != 0
+    assert "required tool not found" in result.stderr
+    assert sentinel.read_text() == "unchanged"
+    assert not output.exists()
+
+
 def test_run_rejects_invalid_counts_before_creating_output(
     tmp_path: Path,
 ) -> None:

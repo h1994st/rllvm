@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from benchmarks.records import append_record, write_json
+from benchmarks.records import append_record, read_records, write_json
 from benchmarks.report import ReportError, generate_report
 
 
@@ -17,6 +17,10 @@ def _run(
     targets: tuple[str, ...] = ("static",),
     jobs: int = 2,
     wrapped_cache_state: str = "disabled",
+    host_machine: str = "x86_64",
+    host_processor: str = "fixture-cpu",
+    host_identity: str = "fixture-host-a",
+    sdkroot: str = "/sdk/one",
     planned: bool = False,
 ) -> Path:
     root.mkdir()
@@ -45,7 +49,7 @@ def _run(
                             "user_cpu_seconds": wall / 2,
                             "system_cpu_seconds": 0.0,
                             "max_observed_process_rss_bytes": 1024,
-                            "complete": True,
+                            "complete": not planned,
                             "rss_scope": "maximum observed command high-water; not tree peak",
                         },
                         "validation:api": {
@@ -54,7 +58,7 @@ def _run(
                             "user_cpu_seconds": 0.1,
                             "system_cpu_seconds": 0.0,
                             "max_observed_process_rss_bytes": 512,
-                            "complete": True,
+                            "complete": not planned,
                             "rss_scope": "maximum observed command high-water; not tree peak",
                         },
                     },
@@ -76,7 +80,7 @@ def _run(
                 }
             )
     invalid = dict(samples[-1])
-    invalid.update(id="invalid", repetition=3, valid=False)
+    invalid.update(id="invalid", repetition=2, valid=False)
     phase_totals = samples[-1]["phase_totals"]
     assert isinstance(phase_totals, dict)
     clean_build = phase_totals["timed:clean-build"]
@@ -89,19 +93,74 @@ def _run(
     }
     invalid["errors"] = ["validation failed"]
     samples.append(invalid)
-    for sample in samples:
+    for sequence, sample in enumerate(samples, start=100):
+        sample["command_sequences"] = [sequence]
+        sample["gates"] = {
+            "commands": {"valid": True, "failures": [], "evidence": []},
+            "diagnostics": {
+                "valid": not planned,
+                "failures": ["dry run: diagnostic evidence unavailable"]
+                if planned
+                else [],
+                "evidence": [],
+            },
+        }
         append_record(root / "samples.jsonl", sample)
-    append_record(
-        root / "diagnostics.jsonl",
-        {
-            "schema_version": 1,
-            "phase": "cold",
-            "valid": False,
-            "failures": ["compiler count unavailable"],
-        },
-    )
-    for name in ("commands", "operations", "validations"):
-        (root / f"{name}.jsonl").write_text("")
+        append_record(
+            root / "commands.jsonl",
+            {
+                "schema_version": 1,
+                "sequence": sequence,
+                "repetition": sample["repetition"],
+                "arm": sample["arm"],
+                "state": sample["state"],
+                "phase": "clean-build",
+                "category": "timed",
+                "command": {"argv": ["build"], "cwd": "/build", "env": {}},
+                "measurement": None
+                if planned
+                else {
+                    "wall_seconds": sample["phase_totals"][
+                        "timed:clean-build"
+                    ]["wall_seconds"],
+                    "user_cpu_seconds": 1.0,
+                    "system_cpu_seconds": 0.0,
+                    "max_process_rss_bytes": 1024,
+                    "resource_method": "fixture",
+                },
+            },
+        )
+        append_record(
+            root / "operations.jsonl",
+            {
+                "schema_version": 1,
+                "sequence": sequence + 1000,
+                "operation": "command-start",
+                "command_sequence": sequence,
+            },
+        )
+        for gate, evidence in sample["gates"].items():
+            append_record(
+                root / "validations.jsonl",
+                {
+                    "schema_version": 1,
+                    "sequence": sequence + 2000,
+                    "sample": sample["id"],
+                    "gate": gate,
+                    **evidence,
+                },
+            )
+    for repetition in range(3):
+        append_record(
+            root / "diagnostics.jsonl",
+            {
+                "schema_version": 1,
+                "repetition": repetition,
+                "phase": "cold",
+                "valid": False,
+                "failures": ["compiler count unavailable"],
+            },
+        )
     recipe = {
         "profile_id": "fixture-cmake",
         "project": "fixture",
@@ -127,7 +186,12 @@ def _run(
                 "version": "clang 21",
             }
         },
-        "environment": {},
+        "environment": {
+            "PATH": "/usr/bin",
+            "SDKROOT": sdkroot,
+            "DEVELOPER_DIR": "/developer/one",
+            "RLLVM_CONFIG": str(root / "discovery/rllvm.toml"),
+        },
         "dependencies": [],
         "records": [],
         "generator": "Ninja",
@@ -168,6 +232,15 @@ def _run(
         "fixture": fixture,
         "toolchain": toolchain,
         "rllvm_provenance": {},
+        "host": {
+            "platform": "Linux-6.0",
+            "machine": host_machine,
+            "processor": host_processor,
+            "cpu_count": 8,
+            "stable_hardware": host_identity,
+            "load_start": [1.0, 1.0, 1.0],
+            "load_end": [2.0, 2.0, 2.0],
+        },
         "limitations": ["filesystem cache uncontrolled"],
         "records": {
             "commands": "commands.jsonl",
@@ -186,7 +259,7 @@ def _run(
         "result": {
             "root": str(root),
             "status": "planned" if planned else "invalid",
-            "failed_samples": 1,
+            "failed_samples": len(samples) if planned else 1,
             "sample_count": len(samples),
             "errors": [],
             "schema_version": 1,
@@ -217,6 +290,15 @@ def test_report_excludes_invalid_samples_and_retains_raw_evidence(
     assert "priming:prime-build" in markdown
     assert "project-owned" in markdown
     assert artifacts.csv.read_text().count("invalid") >= 1
+    structured = json.loads(artifacts.json.read_text())
+    summaries = {
+        item["treatment"]: item
+        for item in structured["summaries"]
+        if item["state"] == "clean"
+    }
+    assert summaries["native"]["median_timed_wall_seconds"] == 4
+    assert summaries["wrapped-uncached"]["median_timed_wall_seconds"] == 8
+    assert summaries["wrapped-uncached"]["median_paired_overhead_ratio"] == 2
     first = (artifacts.markdown.read_bytes(), artifacts.csv.read_bytes())
     again = generate_report((manifest,), tmp_path / "again")
     assert first == (again.markdown.read_bytes(), again.csv.read_bytes())
@@ -274,3 +356,120 @@ def test_planned_runs_have_no_ratios(tmp_path: Path) -> None:
     assert "planned dry run" in markdown
     assert "2.000x" not in markdown
     assert "unavailable (planned dry run)" in markdown
+
+
+@pytest.mark.parametrize(
+    "inconsistency", ["complete", "errors", "missing", "gate"]
+)
+def test_report_rejects_inconsistent_sample_validity(
+    tmp_path: Path, inconsistency: str
+) -> None:
+    manifest = _run(tmp_path / "run")
+    samples = read_records(manifest.parent / "samples.jsonl")
+    if inconsistency == "complete":
+        samples[0]["complete"] = False
+    elif inconsistency == "errors":
+        samples[0]["errors"] = ["retained failure"]
+    elif inconsistency == "missing":
+        samples[0]["missing_gates"] = ["diagnostics"]
+    else:
+        gates = samples[0]["gates"]
+        assert isinstance(gates, dict)
+        diagnostic = gates["diagnostics"]
+        assert isinstance(diagnostic, dict)
+        diagnostic.update(valid=False, failures=["diagnostic failure"])
+    (manifest.parent / "samples.jsonl").write_text(
+        "".join(json.dumps(sample) + "\n" for sample in samples)
+    )
+    with pytest.raises(ReportError, match="inconsistent sample validity"):
+        generate_report((manifest,), tmp_path / "report")
+
+
+@pytest.mark.parametrize(
+    "stream", ["commands", "operations", "validations", "diagnostics"]
+)
+def test_report_rejects_missing_reached_evidence(
+    tmp_path: Path, stream: str
+) -> None:
+    manifest = _run(tmp_path / "run")
+    (manifest.parent / f"{stream}.jsonl").unlink()
+    with pytest.raises(ReportError, match=f"missing {stream} evidence"):
+        generate_report((manifest,), tmp_path / "report")
+
+
+def test_report_accepts_missing_streams_for_early_failed_run(
+    tmp_path: Path,
+) -> None:
+    manifest = _run(tmp_path / "run")
+    samples = read_records(manifest.parent / "samples.jsonl")
+    for sample in samples:
+        sample.update(
+            valid=False,
+            complete=False,
+            gates={},
+            errors=["not reached: preflight failed"],
+            missing_gates=[],
+            command_sequences=[],
+            phase_totals={},
+            disk={},
+        )
+    (manifest.parent / "samples.jsonl").write_text(
+        "".join(json.dumps(sample) + "\n" for sample in samples)
+    )
+    for stream in ("commands", "operations", "validations", "diagnostics"):
+        (manifest.parent / f"{stream}.jsonl").unlink()
+    run = json.loads(manifest.read_text())
+    run["result"]["failed_samples"] = len(samples)
+    write_json(manifest, run)
+    report = generate_report((manifest,), tmp_path / "report")
+    assert "evidence stream" in report.markdown.read_text()
+
+
+@pytest.mark.parametrize(
+    ("field", "kwargs"),
+    [
+        ("host", {"host_machine": "aarch64", "host_processor": "other"}),
+        ("host:stable_hardware", {"host_identity": "fixture-host-b"}),
+        ("SDKROOT", {"sdkroot": "/sdk/two"}),
+    ],
+)
+def test_report_rejects_host_and_environment_mismatches(
+    tmp_path: Path, field: str, kwargs: dict[str, str]
+) -> None:
+    first = _run(tmp_path / "first")
+    typed_kwargs: Any = kwargs
+    second = _run(tmp_path / "second", **typed_kwargs)
+    with pytest.raises(ReportError, match=f"incompatible.*{field}"):
+        generate_report((first, second), tmp_path / "report")
+
+
+def test_report_ignores_transient_load_and_location_only_roots(
+    tmp_path: Path,
+) -> None:
+    first = _run(tmp_path / "first")
+    second = _run(tmp_path / "second")
+    data = json.loads(second.read_text())
+    data["host"]["load_start"] = [99.0, 98.0, 97.0]
+    data["host"]["load_end"] = [96.0, 95.0, 94.0]
+    write_json(second, data)
+    report = generate_report((first, second), tmp_path / "report")
+    structured = json.loads(report.json.read_text())
+    native = next(
+        item
+        for item in structured["summaries"]
+        if item["treatment"] == "native"
+    )
+    assert native["raw_timed_wall_seconds"] == [2, 4, 6, 2, 4, 6]
+
+
+def test_report_refuses_dangling_artifact_symlink(tmp_path: Path) -> None:
+    manifest = _run(tmp_path / "run")
+    output = tmp_path / "report"
+    output.mkdir()
+    external = tmp_path / "must-not-be-created"
+    artifact = output / "report.md"
+    artifact.symlink_to(external)
+    with pytest.raises(ReportError, match="artifact already exists"):
+        generate_report((manifest,), output)
+    assert artifact.is_symlink()
+    assert not external.exists()

@@ -4,6 +4,7 @@ import csv
 import io
 import json
 import math
+import os
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass
@@ -30,7 +31,8 @@ class _SavedRun:
     samples: tuple[dict[str, Any], ...]
     commands: tuple[dict[str, Any], ...]
     diagnostics: tuple[dict[str, Any], ...]
-    identity: tuple[object, ...]
+    missing_streams: tuple[str, ...]
+    identity: dict[str, object]
     profile: str
     token: int
 
@@ -53,19 +55,26 @@ def generate_report(
     except (KeyError, TypeError, ValueError) as error:
         raise ReportError(f"malformed workflow records: {error}") from error
     output = output.absolute()
+    if output.is_symlink():
+        raise ReportError(f"report output may not be a symlink: {output}")
     output.mkdir(parents=True, exist_ok=True)
     artifacts = ReportArtifacts(
         output / "report.md",
         output / "samples.csv",
         output / "report.json",
     )
-    existing = [path for path in artifacts.__dict__.values() if path.exists()]
-    if existing:
-        raise ReportError(f"report artifact already exists: {existing[0]}")
-    artifacts.markdown.write_text(markdown)
-    artifacts.csv.write_text(_csv(rows))
-    artifacts.json.write_text(
-        json.dumps(structured, indent=2, sort_keys=True) + "\n"
+    _publish(
+        output,
+        (
+            (artifacts.markdown.name, markdown.encode()),
+            (artifacts.csv.name, _csv(rows).encode()),
+            (
+                artifacts.json.name,
+                (
+                    json.dumps(structured, indent=2, sort_keys=True) + "\n"
+                ).encode(),
+            ),
+        ),
     )
     return artifacts
 
@@ -155,6 +164,13 @@ def _load_run(path: Path, token: int) -> _SavedRun:
         name: _optional_record_path(path, records[name], name)
         for name in expected_streams
     }
+    missing_streams = tuple(
+        sorted(
+            name
+            for name, stream_path in stream_paths.items()
+            if stream_path is None or not stream_path.exists()
+        )
+    )
     samples_path = stream_paths["samples"]
     assert samples_path is not None
     if not samples_path.is_file():
@@ -195,12 +211,24 @@ def _load_run(path: Path, token: int) -> _SavedRun:
                 f"duplicate sample id in {samples_path}: {identity}"
             )
         seen.add(identity)
+    failed_samples = sum(
+        not _computed_sample_valid(sample) for sample in samples
+    )
+    if result.get("failed_samples") != failed_samples:
+        raise ReportError(
+            f"workflow run has inconsistent failed sample count: {path}"
+        )
+    expected_run_valid = status == "valid" and failed_samples == 0
+    if manifest.get("valid") != expected_run_valid:
+        raise ReportError(f"workflow run has inconsistent validity: {path}")
+    _validate_evidence(samples, streams, missing_streams, path)
     identity = _workload_identity(manifest, fixture, recipe)
     return _SavedRun(
         manifest,
         samples,
         streams["commands"],
         diagnostics,
+        missing_streams,
         identity,
         profile,
         token,
@@ -237,6 +265,7 @@ def _validate_sample(sample: dict[str, Any], path: Path) -> None:
         "gates": dict,
         "errors": list,
         "missing_gates": list,
+        "command_sequences": list,
         "phase_totals": dict,
         "disk": dict,
         "cache_state": str,
@@ -259,13 +288,130 @@ def _validate_sample(sample: dict[str, Any], path: Path) -> None:
         raise ReportError(
             f"unknown sample treatment in {path}: {sample['arm']}"
         )
+    if not all(type(value) is int for value in sample["command_sequences"]):
+        raise ReportError(f"malformed sample command references in {path}")
+    if not all(isinstance(value, str) for value in sample["missing_gates"]):
+        raise ReportError(f"malformed sample missing gates in {path}")
+    for name, raw in sample["gates"].items():
+        if not isinstance(name, str) or not isinstance(raw, dict):
+            raise ReportError(f"malformed sample gate in {path}")
+        if not isinstance(raw.get("valid"), bool):
+            raise ReportError(f"malformed sample gate validity in {path}")
+        failures = raw.get("failures")
+        if not isinstance(failures, list):
+            raise ReportError(f"malformed sample gate failures in {path}")
+        if raw["valid"] != (not failures):
+            raise ReportError(
+                f"inconsistent sample gate validity for {sample['id']}/{name} "
+                f"in {path}"
+            )
+    if sample["valid"] != _computed_sample_valid(sample):
+        raise ReportError(
+            f"inconsistent sample validity for {sample['id']} in {path}"
+        )
+
+
+def _computed_sample_valid(sample: dict[str, Any]) -> bool:
+    return bool(
+        sample["complete"]
+        and sample["gates"]
+        and not sample["errors"]
+        and not sample["missing_gates"]
+        and all(gate["valid"] for gate in sample["gates"].values())
+    )
+
+
+def _validate_evidence(
+    samples: tuple[dict[str, Any], ...],
+    streams: dict[str, tuple[dict[str, Any], ...]],
+    missing: tuple[str, ...],
+    path: Path,
+) -> None:
+    command_references = {
+        sequence
+        for sample in samples
+        for sequence in sample["command_sequences"]
+    }
+    gate_references = {
+        (sample["id"], gate) for sample in samples for gate in sample["gates"]
+    }
+    required = set()
+    if command_references:
+        required.update(("commands", "operations"))
+    if gate_references:
+        required.add("validations")
+    if any(
+        sample["gates"].get("diagnostics", {}).get("valid") is True
+        for sample in samples
+    ):
+        required.add("diagnostics")
+    absent = sorted(required.intersection(missing))
+    if absent:
+        raise ReportError(
+            f"missing {absent[0]} evidence for reached work: {path}"
+        )
+    if command_references and not streams["operations"]:
+        raise ReportError(
+            f"missing operations evidence for reached work: {path}"
+        )
+
+    commands: dict[int, dict[str, Any]] = {}
+    for command in streams["commands"]:
+        sequence = command.get("sequence")
+        if type(sequence) is not int or sequence in commands:
+            raise ReportError(f"malformed command sequence evidence: {path}")
+        commands[sequence] = command
+    for sample in samples:
+        for sequence in sample["command_sequences"]:
+            command = commands.get(sequence)
+            if command is None:
+                raise ReportError(
+                    f"missing command reference {sequence} for "
+                    f"{sample['id']}: {path}"
+                )
+            for field in ("repetition", "arm", "state"):
+                if command.get(field) != sample[field]:
+                    raise ReportError(
+                        f"mismatched command reference {sequence} for "
+                        f"{sample['id']}: {path}"
+                    )
+
+    validations = {
+        (record.get("sample"), record.get("gate")): record
+        for record in streams["validations"]
+    }
+    unrecorded = sorted(gate_references - validations.keys())
+    if unrecorded:
+        sample_id, gate = unrecorded[0]
+        raise ReportError(
+            f"missing validation evidence for {sample_id}/{gate}: {path}"
+        )
+    for sample in samples:
+        for gate, value in sample["gates"].items():
+            if validations[sample["id"], gate].get("valid") != value["valid"]:
+                raise ReportError(
+                    f"inconsistent validation evidence for "
+                    f"{sample['id']}/{gate}: {path}"
+                )
+    diagnostic_repetitions = {
+        record.get("repetition") for record in streams["diagnostics"]
+    }
+    for sample in samples:
+        if (
+            sample["gates"].get("diagnostics", {}).get("valid") is True
+            and sample["repetition"] not in diagnostic_repetitions
+        ):
+            raise ReportError(
+                "missing diagnostics evidence for repetition "
+                f"{sample['repetition']}: {path}"
+            )
 
 
 def _workload_identity(
     manifest: dict[str, Any],
     fixture: dict[str, Any],
     recipe: dict[str, Any],
-) -> tuple[object, ...]:
+) -> dict[str, object]:
     toolchain = _mapping(manifest["toolchain"], "toolchain", Path("run"))
     tools = _mapping(toolchain.get("tools"), "tools", Path("run"))
     tool_identities = []
@@ -304,23 +450,47 @@ def _workload_identity(
                 else dependency.get("libs", ""),
             )
         )
-    return (
-        fixture.get("commit"),
-        fixture.get("tree"),
-        _canonical(fixture.get("submodules")),
-        fixture.get("lock_sha256"),
-        _canonical(normalized_recipe),
-        _canonical(targets),
-        tuple(tool_identities),
-        tuple(dependencies),
-        toolchain.get("host"),
-        toolchain.get("generator"),
-        toolchain.get("rust_host"),
-        _canonical(manifest.get("rllvm_provenance", {})),
-        options.get("jobs"),
-        options.get("extraction_repeats"),
-        options.get("diagnostics"),
+    host = _mapping(manifest.get("host"), "host", Path("run"))
+    environment = _mapping(
+        toolchain.get("environment"), "tool environment", Path("run")
     )
+    identity: dict[str, object] = {
+        "source:commit": fixture.get("commit"),
+        "source:tree": fixture.get("tree"),
+        "source:submodules": _canonical(fixture.get("submodules")),
+        "source:lock": fixture.get("lock_sha256"),
+        "configuration:recipe": _canonical(normalized_recipe),
+        "configuration:targets": _canonical(targets),
+        "tools": tuple(tool_identities),
+        "dependencies": tuple(dependencies),
+        "toolchain:host": toolchain.get("host"),
+        "toolchain:generator": toolchain.get("generator"),
+        "toolchain:rust-host": toolchain.get("rust_host"),
+        "rllvm-provenance": _canonical(manifest.get("rllvm_provenance", {})),
+        "options:jobs": options.get("jobs"),
+        "options:extraction-repeats": options.get("extraction_repeats"),
+        "options:diagnostics": options.get("diagnostics"),
+    }
+    # Load observations vary during a run and are scheduling noise, not stable
+    # machine identity. Every other host field participates, including future
+    # hardware identity fields added to schema v1.
+    identity.update(
+        {
+            f"host:{name}": value
+            for name, value in host.items()
+            if not name.startswith("load_")
+        }
+    )
+    # Discovery's RLLVM_CONFIG is replaced by each owned runner arm. Its path is
+    # location-only; all other allowlisted environment values reach build tools.
+    identity.update(
+        {
+            f"environment:{name}": value
+            for name, value in environment.items()
+            if name != "RLLVM_CONFIG"
+        }
+    )
+    return identity
 
 
 def _canonical(value: object) -> str:
@@ -328,15 +498,21 @@ def _canonical(value: object) -> str:
 
 
 def _validate_compatible_profiles(runs: tuple[_SavedRun, ...]) -> None:
-    identities: dict[str, tuple[object, ...]] = {}
+    identities: dict[str, dict[str, object]] = {}
     treatments: dict[tuple[str, str, str], tuple[object, ...]] = {}
     phase_sets: dict[tuple[str, str, str], tuple[str, ...]] = {}
     for run in runs:
         previous = identities.setdefault(run.profile, run.identity)
         if previous != run.identity:
+            changed = sorted(
+                key
+                for key in previous.keys() | run.identity.keys()
+                if previous.get(key) != run.identity.get(key)
+            )
             raise ReportError(
                 f"incompatible saved workloads for profile {run.profile}: "
-                "source, compiler, flags, targets, jobs, or configuration differ"
+                + ", ".join(changed)
+                + " differ"
             )
         for sample in run.samples:
             key = (run.profile, sample["state"], sample["arm"])
@@ -351,7 +527,7 @@ def _validate_compatible_profiles(runs: tuple[_SavedRun, ...]) -> None:
                     f"incompatible saved workloads for profile {run.profile}: "
                     "cache or artifact state differs"
                 )
-            if sample["valid"]:
+            if _computed_sample_valid(sample):
                 timed_phases = tuple(
                     sorted(
                         name
@@ -443,8 +619,7 @@ def _render(runs: tuple[_SavedRun, ...]) -> tuple[str, list[dict], dict]:
             valid = [
                 value
                 for _, sample, value, missing, planned in items
-                if sample["valid"]
-                and not planned
+                if _sample_is_eligible(sample, planned)
                 and missing is None
                 and value is not None
             ]
@@ -563,7 +738,7 @@ def _missing_reason(items: list[tuple]) -> str | None:
     for _, sample, _, missing, planned in items:
         if planned:
             reasons.append("planned dry run")
-        elif not sample["valid"]:
+        elif not _computed_sample_valid(sample):
             reasons.append("invalid sample")
         elif missing:
             reasons.append(missing)
@@ -574,8 +749,7 @@ def _paired_ratio(native: list[tuple], wrapped: list[tuple]) -> tuple:
     native_values = {
         (run.token, sample["repetition"]): value
         for run, sample, value, missing, planned in native
-        if sample["valid"]
-        and not planned
+        if _sample_is_eligible(sample, planned)
         and missing is None
         and value is not None
     }
@@ -583,8 +757,7 @@ def _paired_ratio(native: list[tuple], wrapped: list[tuple]) -> tuple:
     for run, sample, value, missing, planned in wrapped:
         base = native_values.get((run.token, sample["repetition"]))
         if (
-            sample["valid"]
-            and not planned
+            _sample_is_eligible(sample, planned)
             and missing is None
             and value is not None
             and base is not None
@@ -592,6 +765,10 @@ def _paired_ratio(native: list[tuple], wrapped: list[tuple]) -> tuple:
         ):
             ratios.append(value / base)
     return (statistics.median(ratios) if ratios else None, ratios)
+
+
+def _sample_is_eligible(sample: dict[str, Any], planned: bool) -> bool:
+    return not planned and _computed_sample_valid(sample)
 
 
 def _sample_row(
@@ -672,6 +849,7 @@ def _phase_section(runs: tuple[_SavedRun, ...]) -> list[str]:
 
 def _missing_metrics_section(runs: tuple[_SavedRun, ...]) -> list[str]:
     lines = ["## Missing metrics", ""]
+    absent_streams = False
     missing: dict[tuple[str, str, str, str], int] = defaultdict(int)
     fields = (
         "wall_seconds",
@@ -680,6 +858,12 @@ def _missing_metrics_section(runs: tuple[_SavedRun, ...]) -> list[str]:
         "max_process_rss_bytes",
     )
     for run in runs:
+        for stream in run.missing_streams:
+            absent_streams = True
+            lines.append(
+                f"- `{run.profile}` {stream} evidence stream absent: "
+                "run did not retain reached activity requiring that stream"
+            )
         for command in run.commands:
             phase = str(command.get("phase", "unknown"))
             measurement = command.get("measurement")
@@ -703,7 +887,7 @@ def _missing_metrics_section(runs: tuple[_SavedRun, ...]) -> list[str]:
             for field in fields:
                 if measurement.get(field) is None:
                     missing[run.profile, phase, field, reason] += 1
-    if not missing:
+    if not missing and not absent_streams:
         lines.append("No unavailable command metrics were recorded.")
     else:
         for (profile, phase, field, reason), count in sorted(missing.items()):
@@ -791,6 +975,45 @@ def _coverage_section(runs: tuple[_SavedRun, ...]) -> list[str]:
     lines.extend(f"- Coverage: {value}" for value in sorted(boundaries))
     lines.extend(f"- Limitation: {value}" for value in sorted(limitations))
     return lines + [""]
+
+
+def _publish(output: Path, values: tuple[tuple[str, bytes], ...]) -> None:
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory = os.open(output, directory_flags)
+    created: list[tuple[str, int]] = []
+    try:
+        try:
+            for name, _ in values:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                flags |= getattr(os, "O_NOFOLLOW", 0)
+                try:
+                    descriptor = os.open(name, flags, 0o644, dir_fd=directory)
+                except FileExistsError as error:
+                    raise ReportError(
+                        f"report artifact already exists: {output / name}"
+                    ) from error
+                created.append((name, descriptor))
+            for (_, data), (_, descriptor) in zip(
+                values, created, strict=True
+            ):
+                remaining = memoryview(data)
+                while remaining:
+                    written = os.write(descriptor, remaining)
+                    remaining = remaining[written:]
+                os.fsync(descriptor)
+        except BaseException:
+            for _, descriptor in created:
+                os.close(descriptor)
+            for name, _ in created:
+                os.unlink(name, dir_fd=directory)
+            raise
+        else:
+            for _, descriptor in created:
+                os.close(descriptor)
+            os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _csv(rows: list[dict]) -> str:
