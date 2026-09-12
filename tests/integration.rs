@@ -2984,6 +2984,112 @@ fn wasm_linked_module_carries_every_translation_unit() {
     assert_bitcode_magic(&bitcode);
 }
 
+/// GNU ld drops a standalone marker's nonallocated section when none of its
+/// allocated sections survive GC. Rust links pass that marker as a separate
+/// object, so losing it removes the executable's own module from extraction.
+#[test]
+#[cfg(target_os = "linux")]
+fn rustc_marker_survives_gnu_linker_gc() {
+    use object::{Object, ObjectSection};
+
+    if which("ld.bfd").is_err() {
+        eprintln!("skipping: GNU ld.bfd is unavailable");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let unused = tmp.path().join("unused.o");
+    fs::write(
+        tmp.path().join("unused.c"),
+        "int rllvm_unreferenced_gc_probe(void) { return 7; }\n",
+    )
+    .unwrap();
+    assert!(
+        Command::new(&clang)
+            .args(["-ffunction-sections", "-c"])
+            .arg(tmp.path().join("unused.c"))
+            .arg("-o")
+            .arg(&unused)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let source = tmp.path().join("main.rs");
+    fs::write(&source, "fn main() { println!(\"marker survived\"); }\n").unwrap();
+    let program = tmp.path().join("program");
+    let output = rllvm("rllvm-rustc")
+        .arg(which("rustc").unwrap())
+        .arg(&source)
+        .arg("-o")
+        .arg(&program)
+        .arg(format!("-Clinker={}", clang.display()))
+        .args([
+            "-Clink-arg=-fuse-ld=bfd",
+            "-Clink-arg=-Wl,--gc-sections,--print-gc-sections",
+        ])
+        .arg(format!("-Clink-arg={}", unused.display()))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "rustc link failed: {stderr}");
+    assert!(
+        stderr.contains("removing unused section '.text.rllvm_unreferenced_gc_probe'"),
+        "GNU ld did not garbage collect the unused function: {stderr}"
+    );
+    let native = Command::new(&program).output().unwrap();
+    assert!(native.status.success());
+    assert_eq!(native.stdout, b"marker survived\n");
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&program).unwrap();
+    assert_eq!(
+        paths.len(),
+        1,
+        "GNU ld dropped the Rust marker: {}",
+        stderr
+            .lines()
+            .filter(|line| line.contains("rllvm_marker"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let image = fs::read(&program).unwrap();
+    let parsed = object::File::parse(&*image).unwrap();
+    let section = parsed.section_by_name(".rllvm_bc").unwrap();
+    let object::SectionFlags::Elf { sh_flags, .. } = section.flags() else {
+        panic!("expected ELF metadata");
+    };
+    assert_eq!(
+        sh_flags & object::elf::SHF_ALLOC,
+        object::elf::SectionFlags(0)
+    );
+    assert!(section.data().unwrap().ends_with(b"\n"));
+    let bitcode = tmp.path().join("extracted.bc");
+    let extracted = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .arg("-o")
+        .arg(&bitcode)
+        .output()
+        .unwrap();
+    assert!(
+        extracted.status.success(),
+        "extraction failed: {}",
+        String::from_utf8_lossy(&extracted.stderr)
+    );
+    let ir = Command::new(find_llvm_dis().unwrap())
+        .arg(bitcode)
+        .args(["-o", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        ir.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ir.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&ir.stdout)
+            .lines()
+            .any(|line| line.starts_with("define ") && line.contains("@main("))
+    );
+}
+
 /// The embedded section survives a link that dead strips.
 ///
 /// rllvm's section is unreferenced, so `-dead_strip` is entitled to discard it.
@@ -2994,8 +3100,7 @@ fn wasm_linked_module_carries_every_translation_unit() {
 /// The stripped-symbol assertion is the load-bearing half. Without it the test
 /// passes while the flag is still being dropped, because a link that never
 /// dead strips trivially preserves the section. `-dead_strip` is an ld64 flag,
-/// so this is Mach-O only; ELF sections added by rllvm are non-allocatable and
-/// were never `--gc-sections` candidates.
+/// so this is Mach-O only; the GNU ld regression above covers ELF markers.
 #[test]
 #[cfg(target_os = "macos")]
 fn bitcode_survives_a_dead_stripping_link() {

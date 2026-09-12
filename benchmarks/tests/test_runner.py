@@ -510,7 +510,24 @@ def test_real_cargo_scheduler_keeps_artifact_and_bitcode_cache_states(tiny):
         "rlib",
         "staticlib",
     ]
-    assert result.valid, read_json(result.root / "run.json")
+    samples = read_records(result.root / "samples.jsonl")
+    assert result.valid, {
+        "run": read_json(result.root / "run.json"),
+        "failed_samples": [
+            {
+                "id": sample["id"],
+                "errors": sample["errors"],
+                "missing_gates": sample["missing_gates"],
+                "failed_gates": {
+                    name: gate
+                    for name, gate in sample["gates"].items()
+                    if not gate["valid"]
+                },
+            }
+            for sample in samples
+            if not sample["valid"]
+        ],
+    }
     commands = read_records(result.root / "commands.jsonl")
     cargo_artifacts = [
         json.loads(line)
@@ -538,7 +555,6 @@ def test_real_cargo_scheduler_keeps_artifact_and_bitcode_cache_states(tiny):
         assert (release / "libquiche.rlib").is_file()
         assert not tuple(release.rglob("libquiche*.dylib"))
         assert not tuple(release.rglob("libquiche*.so"))
-    samples = read_records(result.root / "samples.jsonl")
     assert len(samples) == 12 and all(s["valid"] for s in samples)
     assert all(
         s["cargo_artifact_state"] == "retained"
