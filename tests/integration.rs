@@ -2714,6 +2714,61 @@ fn rustc_wrapper_emits_and_embeds_bitcode() {
     assert_bitcode_magic(&paths[0]);
 }
 
+/// The Wasm reader reports Unknown even for rustc's relocatable objects.
+#[test]
+fn rustc_wasm_object_carries_extractable_bitcode() {
+    let rustc = which("rustc").expect("rustc not found");
+    let target = "wasm32-unknown-unknown";
+    let target_libdir = Command::new(&rustc)
+        .args(["--print=target-libdir", "--target", target])
+        .output()
+        .unwrap();
+    assert!(target_libdir.status.success());
+    if !Path::new(String::from_utf8_lossy(&target_libdir.stdout).trim()).is_dir() {
+        eprintln!("skipping: rustc target {target} is not installed");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("lib.rs");
+    fs::write(
+        &src,
+        "#![no_std]\n#[no_mangle]\npub extern \"C\" fn answer() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    let obj = tmp.path().join("lib.o");
+    let output = rllvm("rllvm-rustc")
+        .arg(&rustc)
+        .args(["--target", target, "--crate-type=lib", "--emit=obj", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Wasm object compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&obj)
+        .expect("Wasm object must record its bitcode path");
+    assert_eq!(paths, vec![obj.with_extension("bc")]);
+    assert_bitcode_magic(&paths[0]);
+
+    let bitcode = tmp.path().join("extracted.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&bitcode)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Wasm object extraction failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_bitcode(&bitcode);
+}
+
 /// Query invocations must skip bitcode generation entirely.
 #[test]
 fn rustc_wrapper_skips_bitcode_for_query_invocations() {
@@ -3039,6 +3094,112 @@ fn rustc_wrapper_embeds_into_a_linked_binary() {
         paths[0]
     );
     assert_bitcode_magic(&paths[0]);
+}
+
+/// Archive patching must leave a shared library from the same invocation usable.
+#[cfg(unix)]
+#[test]
+fn rustc_mixed_crate_types_preserve_loadable_shared_library() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let src = root.join("mixed.rs");
+    fs::write(
+        &src,
+        "#[no_mangle]\npub extern \"C\" fn answer() -> i32 { 42 }\n",
+    )
+    .unwrap();
+
+    // Load in a child process: a damaged Darwin code signature can kill the
+    // process, and a section-only assertion cannot detect that failure.
+    let loader_src = root.join("load.c");
+    fs::write(
+        &loader_src,
+        r#"#include <dlfcn.h>
+#include <stdio.h>
+int main(int argc, char **argv) {
+    if (argc != 2) return 1;
+    void *library = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+    if (!library) { fprintf(stderr, "%s\n", dlerror()); return 2; }
+    int (*answer)(void) = (int (*)(void))dlsym(library, "answer");
+    if (!answer) { fprintf(stderr, "%s\n", dlerror()); return 3; }
+    int result = answer();
+    dlclose(library);
+    printf("%d\n", result);
+    return result == 42 ? 0 : 4;
+}
+"#,
+    )
+    .unwrap();
+    let loader = root.join("load");
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let mut compile_loader = Command::new(clang);
+    compile_loader.arg(&loader_src).arg("-o").arg(&loader);
+    #[cfg(target_os = "linux")]
+    compile_loader.arg("-ldl");
+    let output = compile_loader.output().unwrap();
+    assert!(
+        output.status.success(),
+        "loader compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rustc = which("rustc").unwrap();
+    for wrapped in [false, true] {
+        let out_dir = root.join(if wrapped { "wrapped" } else { "native" });
+        fs::create_dir(&out_dir).unwrap();
+        let mut compile = if wrapped {
+            let mut command = rllvm("rllvm-rustc");
+            command.arg("--rllvm-verbose=3").arg(&rustc);
+            command
+        } else {
+            Command::new(&rustc)
+        };
+        let output = compile
+            .args(["--crate-name=mixed", "--crate-type=lib,staticlib,cdylib"])
+            .arg("--out-dir")
+            .arg(&out_dir)
+            .arg(&src)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mixed crate compilation failed (wrapped={wrapped}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let shared = out_dir.join(format!("libmixed{}", std::env::consts::DLL_SUFFIX));
+        let loaded = Command::new(&loader).arg(&shared).output().unwrap();
+        assert!(
+            loaded.status.success(),
+            "shared library could not execute (wrapped={wrapped}, {}): {}\ncompiler output: {}",
+            loaded.status,
+            String::from_utf8_lossy(&loaded.stderr),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&loaded.stdout).trim(), "42");
+
+        if wrapped {
+            for artifact in [
+                shared,
+                out_dir.join("libmixed.rlib"),
+                out_dir.join("libmixed.a"),
+            ] {
+                let bitcode = root.join("extracted.bc");
+                let output = rllvm("rllvm-get-bc")
+                    .arg(&artifact)
+                    .arg("-o")
+                    .arg(&bitcode)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "extraction from {artifact:?} failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_valid_bitcode(&bitcode);
+                fs::remove_file(bitcode).unwrap();
+            }
+        }
+    }
 }
 
 fn assert_rustc_relative_output(out_dir: bool, relative_record: bool) {
