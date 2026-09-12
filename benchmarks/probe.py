@@ -12,6 +12,7 @@ import sys
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
+from benchmarks.probe_health import HealthChannel, check_health, create_health
 from benchmarks.process import Command, Measurement, checked
 from benchmarks.records import read_json, write_json
 from benchmarks.toolchains import Tool, Toolchain, sha256
@@ -24,6 +25,7 @@ class Probe:
     real: str
     kind: str
     preparation: Measurement
+    health: HealthChannel
 
 
 @dataclass(frozen=True)
@@ -53,6 +55,8 @@ class DiagnosticSummary:
     failures: tuple[str, ...]
     event_ids: tuple[str, ...]
     unobserved: dict[str, str]
+    health_channels: tuple[HealthChannel, ...]
+    health_evidence: dict[str, str]
     scope: str = "observed tool/driver exec invocations; excludes hidden subprocesses and threads"
     schema_version: int = 1
 
@@ -70,6 +74,10 @@ class DiagnosticSession:
     toolchain: Toolchain
     environment: dict[str, str]
     probes: tuple[Probe, ...]
+
+    @property
+    def health(self) -> tuple[HealthChannel, ...]:
+        return tuple(probe.health for probe in self.probes)
 
 
 def create_probe(
@@ -99,6 +107,7 @@ def create_probe(
     for owned in (runtime, config, path, root / "shim.c"):
         if owned.exists():
             raise FileExistsError(owned)
+    health = create_health(root)
     shutil.copyfile(Path(__file__).with_name("probe_runtime.py"), runtime)
     write_json(
         config,
@@ -120,12 +129,23 @@ def create_probe(
 
     source = root / "shim.c"
     source.write_text(
-        "#include <unistd.h>\n#include <stdlib.h>\n#include <stdio.h>\n"
-        "int main(int n,char **v){char **a=calloc((size_t)n+4,sizeof(char*));"
+        "#include <unistd.h>\n#include <stdlib.h>\n#include <stdio.h>\n#include <fcntl.h>\n"
+        "int main(int n,char **v){"
+        f"int seal=open({literal(health.seal)},O_RDWR);"
+        'if(seal<0){perror("diagnostic health seal");return 126;}'
+        f"char receipt[]={literal(health.directory + '/attempt-XXXXXX')};"
+        "int record=mkstemp(receipt);"
+        f"int directory=open({literal(health.directory)},O_RDONLY);"
+        "if(record<0||directory<0||fsync(record)||fsync(directory)){"
+        'if(pwrite(seal,"!",1,0)!=1||fsync(seal))return 126;'
+        "close(seal);if(record>=0)close(record);if(directory>=0)close(directory);"
+        f"execv({literal(str(real))},v);return 126;}}"
+        "close(record);close(directory);close(seal);"
+        "char **a=calloc((size_t)n+5,sizeof(char*));"
         "if(!a)return 126;"
         f"a[0]={literal(sys.executable)};a[1]={literal(str(runtime))};"
         f"a[2]={literal(str(config))};"
-        "for(int i=0;i<n;i++)a[i+3]=v[i];"
+        "a[3]=receipt;for(int i=0;i<n;i++)a[i+4]=v[i];"
         'execv(a[0],a);perror("diagnostic probe runtime");return 126;}\n'
     )
     preparation = checked(
@@ -137,7 +157,7 @@ def create_probe(
         root / "logs",
         "prepare",
     )
-    return Probe(path, events, str(real), kind, preparation)
+    return Probe(path, events, str(real), kind, preparation, health)
 
 
 def read_events(directory: Path) -> tuple[Event, ...]:
@@ -181,6 +201,8 @@ def summarize_events(
     *,
     measurements: tuple[Measurement, ...] = (),
     cache_trace: bool = False,
+    health: tuple[HealthChannel, ...] = (),
+    prior_event_ids: frozenset[str] = frozenset(),
 ) -> DiagnosticSummary:
     """Summarize a parent-selected event slice, never changing the child env.
 
@@ -192,6 +214,27 @@ def summarize_events(
     failures: list[str] = []
     if not measurements:
         failures.append("missing diagnostic command completion evidence")
+    healthy_events, health_evidence, health_failures = check_health(health)
+    failures.extend(health_failures)
+    if {
+        event.event_id for event in events
+    } != healthy_events.keys() - prior_event_ids:
+        failures.append(
+            "diagnostic event slice does not match durable health receipts"
+        )
+    if not prior_event_ids <= healthy_events.keys():
+        failures.append(
+            "prior diagnostic event identities lack healthy receipts"
+        )
+    for event in events:
+        receipt_event = healthy_events.get(event.event_id, {})
+        if any(
+            receipt_event.get(key) != (list(value) if key == "argv" else value)
+            for key, value in asdict(event).items()
+        ):
+            failures.append(
+                f"diagnostic event differs from health evidence: {event.event_id}"
+            )
     queries = preprocess = bitcode = 0
     opaque = False
     for event in events:
@@ -258,6 +301,8 @@ def summarize_events(
             for kind in ("compiler-driver", "rustc", "llvm-link", "llvm-ar")
             if kind not in counts
         },
+        health,
+        health_evidence,
     )
 
 

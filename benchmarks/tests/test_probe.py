@@ -124,7 +124,11 @@ class ProbeTests(unittest.TestCase):
             if e.event_id not in previous
         )
         summary = summarize_events(
-            events, measurements=(warm,), cache_trace=True
+            events,
+            measurements=(warm,),
+            cache_trace=True,
+            health=session.health,
+            prior_event_ids=frozenset(previous),
         )
         self.assertTrue(summary.valid, summary.failures)
         self.assertEqual(summary.cache_hits.count, 1)
@@ -150,6 +154,80 @@ class ProbeTests(unittest.TestCase):
         summary = summarize_events(events)
         self.assertEqual(summary.counts, {"llvm-link": 1, "llvm-ar": 1})
         self.assertTrue(summary.unobserved["rustc"])
+
+    def test_hidden_event_failure_invalidates_successful_parent(self):
+        import sys
+
+        probe = self.probe(Path("/usr/bin/true"))
+        parent = run(
+            (
+                sys.executable,
+                "-c",
+                """
+import os, subprocess, sys
+bad = dict(os.environ, RLLVM_BENCHMARK_EVENTS=sys.argv[2])
+for env in (bad, os.environ):
+    child = subprocess.run([sys.argv[1]], env=env, capture_output=True)
+    assert child.returncode == 0
+""",
+                probe.path,
+                probe.events / "missing",
+            ),
+            self.root,
+            self.env,
+            "hidden-error",
+        )
+        self.assertEqual(Path(parent.stderr).read_bytes(), b"")
+        events = read_events(probe.events)
+        self.assertEqual(len(events), 1)
+        summary = summarize_events(
+            events, measurements=(parent,), health=(probe.health,)
+        )
+        self.assertFalse(summary.valid, summary)
+
+    def test_health_receipts_are_required_complete_and_cover_the_event_slice(
+        self,
+    ):
+        probe = self.probe(Path("/usr/bin/true"))
+        parent = run((probe.path,), self.root, self.env, "health-valid")
+        events = read_events(probe.events)
+        good = summarize_events(
+            events, measurements=(parent,), health=(probe.health,)
+        )
+        self.assertTrue(good.valid, good.failures)
+        self.assertFalse(
+            summarize_events(events, measurements=(parent,)).valid
+        )
+        self.assertFalse(
+            summarize_events(
+                (), measurements=(parent,), health=(probe.health,)
+            ).valid
+        )
+        pending = Path(probe.health.directory) / "attempt-interrupted"
+        pending.touch()
+        self.assertFalse(
+            summarize_events(
+                events, measurements=(parent,), health=(probe.health,)
+            ).valid
+        )
+
+    def test_unavailable_receipt_directory_poisons_independent_seal(self):
+        probe = self.probe(Path("/usr/bin/true"))
+        directory = Path(probe.health.directory)
+        parked = directory.with_name("parked-health")
+        directory.rename(parked)
+        parent = run((probe.path,), self.root, self.env, "health-unavailable")
+        parked.rename(directory)
+        # Restore the directory and collect another successful event: the lost
+        # invocation must remain visible even though its child returned zero.
+        later = run((probe.path,), self.root, self.env, "health-later")
+        events = read_events(probe.events)
+        self.assertEqual(len(events), 1)
+        result = summarize_events(
+            events, measurements=(parent, later), health=(probe.health,)
+        )
+        self.assertFalse(result.valid)
+        self.assertIn("health seal", " ".join(result.failures))
 
 
 def replace_status(measurement):

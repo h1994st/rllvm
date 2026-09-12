@@ -257,6 +257,14 @@ class ValidationTests(unittest.TestCase):
             ).valid
         )
 
+    def test_repeat_with_wrong_target_identity_is_rejected(self):
+        original = self.validate()
+        wrong = replace(original, target_id="another-target")
+        result = validate_extraction_set(
+            (self.target,), {"app": original}, repeated={"app": wrong}
+        )
+        self.assertFalse(result.valid, result)
+
 
 class CargoValidationTests(unittest.TestCase):
     def test_matched_cargo_capture_uses_raw_project_definitions(self):
@@ -432,6 +440,56 @@ class ConfigurationTests(unittest.TestCase):
                     root / "wrapped",
                 ).valid
             )
+
+    def test_missing_compiler_selection_does_not_establish_parity(self):
+        from benchmarks.process import Command
+        from benchmarks.recipes import get_recipe
+        from benchmarks.validation import validate_configuration
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = tools_at(root)
+            env = environment(root, tools)
+            Path(env["RLLVM_CONFIG"]).write_text("")
+            native = Command(
+                (tools.path("clang"), "-c", "source.c"), root / "native", env
+            )
+            wrapped = Command(
+                (tools.path("rllvm-cc"), "-c", "source.c"),
+                root / "wrapped",
+                env,
+            )
+            result = validate_configuration(
+                get_recipe("nghttp2-c-cmake"),
+                (native,),
+                (wrapped,),
+                tools,
+                root / "native",
+                root / "wrapped",
+            )
+            self.assertFalse(result.valid, result)
+
+            # Keep C explicit while removing only the C++ selector; toolchain
+            # discovery alone cannot establish the wrapper's C++ selection.
+            environment(root, tools)
+            config = Path(env["RLLVM_CONFIG"])
+            config.write_text(
+                "\n".join(
+                    line
+                    for line in config.read_text().splitlines()
+                    if not line.startswith("clangxx_filepath")
+                )
+            )
+            cxx_result = validate_configuration(
+                get_recipe("nghttp2-cxx-cmake"),
+                (native,),
+                (wrapped,),
+                tools,
+                root / "native",
+                root / "wrapped",
+            )
+            self.assertFalse(cxx_result.valid, cxx_result)
+            self.assertIn("clangxx_filepath", " ".join(cxx_result.failures))
 
 
 class BuildEvidenceTests(unittest.TestCase):

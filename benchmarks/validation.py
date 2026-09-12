@@ -324,6 +324,7 @@ def validate_extraction_set(
             other_identity = {(m.path, m.sha256) for m in other.modules}
             if (
                 not other.valid
+                or other.target_id != key
                 or identity != other_identity
                 or result.ir_definitions != other.ir_definitions
                 or result.ir_sha256 != other.ir_sha256
@@ -466,7 +467,19 @@ def validate_configuration(
             ("clang++", "clangxx_filepath"),
             ("rustc", "rustc_filepath"),
         ):
-            if (
+            required = (
+                name == "clang"
+                or (
+                    name == "clang++"
+                    and (recipe.cxx or recipe.build_system == "cargo")
+                )
+                or (name == "rustc" and recipe.build_system == "cargo")
+            )
+            if required and (name not in tools.tools or field not in data):
+                failures.append(
+                    f"missing explicit compiler selection evidence: {name} ({field})"
+                )
+            elif (
                 name in tools.tools
                 and field in data
                 and data[field] != tools.path(name)
