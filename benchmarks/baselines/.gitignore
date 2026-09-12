@@ -1,0 +1,2 @@
+# Keep full raw-record archives outside the repository.
+*.tar.*

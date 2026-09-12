@@ -349,6 +349,14 @@ time. `rllvm-get-bc` cannot read a combined universal binary.
 marker object added to the link; a crate that produces an `.rlib` carries it in
 the archive's members, so a dependency brings its bitcode wherever it is used.
 
+## Workflow benchmarks
+
+The [workflow benchmark guide](benchmarks/README.md) describes pinned C, C++, and
+Rust build/extraction comparisons, correctness gates, cache states, and offline
+reports. Run `uv sync --locked` and `uv run python -m benchmarks profiles` to
+start. The harness is a development utility; it is separate from the Criterion
+microbenchmarks run with `cargo bench`.
+
 ## Relationship to gllvm and wllvm
 
 rllvm started as a Rust port of [gllvm](https://github.com/SRI-CSL/gllvm) (Go)

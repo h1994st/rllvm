@@ -74,7 +74,8 @@ def split_front(markdown: str) -> tuple[str, str, str, str]:
 
     # Everything above the first `##` is the introduction the hero replaces.
     body_start = next(
-        (i for i, line in enumerate(lines) if line.startswith("## ")), len(lines)
+        (i for i, line in enumerate(lines) if line.startswith("## ")),
+        len(lines),
     )
     intro, body = lines[:body_start], lines[body_start:]
 
@@ -96,9 +97,13 @@ def yaml_quote(value: str) -> str:
 
 
 def main() -> int:
-    title, tagline, lead, body = split_front(README.read_text(encoding="utf-8"))
+    title, tagline, lead, body = split_front(
+        README.read_text(encoding="utf-8")
+    )
     if not tagline:
-        print("README has no tagline paragraph under the title", file=sys.stderr)
+        print(
+            "README has no tagline paragraph under the title", file=sys.stderr
+        )
         return 1
 
     body = LINK.sub(lambda match: rewrite(match.group(0)), body)

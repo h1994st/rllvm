@@ -77,7 +77,7 @@ pub enum LtoFlavour {
 /// So each layer gets its own escape: the assembler needs `\\` to emit one
 /// backslash, which the C source spells `\\\\`, and `\"` to emit one quote,
 /// which the C source spells `\\\"`.
-fn escape_for_assembler(path: &str) -> String {
+pub(crate) fn escape_for_assembler(path: &str) -> String {
     // Backslashes first: escaping quotes first would then re-escape the
     // backslashes this step introduces.
     path.replace('\\', r"\\\\").replace('"', r#"\\\""#)

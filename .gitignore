@@ -84,6 +84,13 @@ target/
 # End of https://www.toptal.com/developers/gitignore/api/rust,macos,visualstudiocode
 .worktrees/
 
+### Python utilities ###
+.venv/
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+
 ### Claude Code worktrees ###
 .claude/worktrees/
 

@@ -1,0 +1,23 @@
+{
+  "kind": "post-baseline-source-audit",
+  "projects": {
+    "nghttp2": {
+      "commit": "a49ccc728863e7d8e5da369552e889e95399bd37",
+      "status_porcelain": ""
+    },
+    "nghttp3": {
+      "commit": "f1e4328b9afd4982ee3e9fd822a605012e3d14b3",
+      "status_porcelain": ""
+    },
+    "ngtcp2": {
+      "commit": "72a85865dd3a4b33fe5830baf461ed50ebb7ad0e",
+      "status_porcelain": ""
+    },
+    "quiche": {
+      "commit": "c8da372daa06b7cb51aa23b1a55bfe395dcf3d46",
+      "status_porcelain": ""
+    }
+  },
+  "schema_version": 1,
+  "source_root_layout": "EXAMPLES_ROOT/PROJECT"
+}

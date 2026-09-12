@@ -30,6 +30,29 @@ run never changes `~/.rllvm/config.toml`. Put `--rllvm-verbose=3` before compile
 arguments to log subcommands. Use temporary sources and out-of-tree builds when
 checking another repository, such as nghttp2.
 
+## Python utilities
+
+Python 3.14+ is used for repository utility scripts, including benchmarks and site
+generation. Manage the environment with `uv`; this is a utility-script project.
+
+- Always use `uv add <package>` to add Python dependencies and
+  `uv add --dev <package>` for development dependencies. Let `uv` update
+  `pyproject.toml` and `uv.lock` together.
+- Always run Python through `uv run python`, never bare `python` or `python3`.
+- Use Typer for utility command-line interfaces.
+- Use pytest for Python tests, with pytest fixtures and plain assertions.
+- Ruff handles linting and formatting; ty handles type checking. Their
+  configurations live in `pyproject.toml`.
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+uv run ty check
+uv run python site/build.py
+```
+
 ## Contracts to preserve
 
 Source paths in this section are relative to `src/`.
@@ -148,7 +171,7 @@ separate behavior/performance task, not incidental cleanup.
 
 - Integration tests use the `rllvm()` helper and isolated `RLLVM_CONFIG` files.
   Never make a test depend on the developer's home configuration.
-- Name tests after behavior, without a `test_` prefix. Confirm new regressions
+- Name Rust tests after behavior, without a `test_` prefix. Confirm new regressions
   fail before their fix, at the layer that can actually break. Prefer native and
   extracted behavior checks over merely asserting that a file exists.
 - Use separate worktrees and `fix/` or `feat/` branches for independent issue work.

@@ -1,0 +1,213 @@
+{
+  "build_command": "cargo build --locked --release --bins -j2",
+  "dependencies": [
+    {
+      "library_sha256": {
+        "libev.4.dylib": "57d07b1b01b2300b6eb17aa5628b9eefc10ab2aa420487dd064db7b8e0f352d0",
+        "libev.a": "44de984a580d0c6e5f60b79478434916071c3aeec84de2cf8ce2285e92c82150"
+      },
+      "name": "libev",
+      "version": "4.33"
+    },
+    {
+      "library_sha256": {
+        "libcrypto.3.dylib": "bae675614cd791d37ec35416ea9f87edcc85407d020810504cf458119b63522c",
+        "libcrypto.a": "f7614ff9568acfceaf8fe328139e03a2f14eae6755e6fc7c3da52c97134470ee",
+        "libssl.3.dylib": "c6ee373222087cf31bc2f3817537d268b3c23e56b7fadd44bbf5c2317caed349",
+        "libssl.a": "a3065132277d7507ff9cbc5252f0d80c47d919efb5a403d9510b459cf3f32402"
+      },
+      "name": "openssl",
+      "version": "3.6.4"
+    },
+    {
+      "library_sha256": {
+        "libz.1.3.1.dylib": "6d6bc4f4a063845a868fdae82440be24e6ad249820efb7cebdb3d5919e9aea16",
+        "libz.a": "d5816bc8ac04a26cb8754f86e7c625f1587b7b9549d22615dc29b81e76b5627a"
+      },
+      "name": "zlib",
+      "version": "1.3.1"
+    },
+    {
+      "library_sha256": {
+        "libcares.2.19.5.dylib": "e5595a0c640a2341e2df5a0fedaa63e7e9afe99b01c9880338064e0746414518",
+        "libcares.a": "fbf614b2ad1adc103d92684d290750e316f655fabef55c667a8f880846cdc9d0"
+      },
+      "name": "libcares",
+      "version": "1.34.6"
+    }
+  ],
+  "kind": "workflow-baseline-provenance",
+  "known_limitations": [
+    "Tool hashes identify resolved executable files; Cargo/rustc proxies are additionally identified by version output.",
+    "Full commands, paths, flags, logs and original validation data are retained outside Git."
+  ],
+  "revision": "0b72a086185b3d4b55e4e5ea49b337a0db9a345f",
+  "rllvm_binary_sha256": {
+    "rllvm-cc": "5671871c7123765f5cd68c705807d3143c70b30b7cf32271cadb294d402024b8",
+    "rllvm-completions": "f7ec3f1cff335890ea19e60c33ad983fae7cbdf6ef7ef7289d8e45ba2517037b",
+    "rllvm-cxx": "8ccce25182bc4baf5b50020dc429daa7b5c98075bc18843dafc1d8db6b11801c",
+    "rllvm-get-bc": "2599465098c31a00ab3a506848d4bfc54f8180dbde1fc40f36812ab56915222e",
+    "rllvm-info": "e11e5b4fcd8f149b57a075813abded886ac366f1cc9da89a83e50b2a87d658c8",
+    "rllvm-init": "9617a8ddc33aad849da24ad073063192043345140ebc529674ea9ad726d15c6d",
+    "rllvm-rustc": "b51546474ef4a90eaf5de5d056ece1ede298c8740ce249c9efbb16faddc214dc"
+  },
+  "schema_version": 1,
+  "tools": {
+    "autoconf": {
+      "invocation_name": "autoconf",
+      "resolved_name": "autoconf",
+      "sha256": "6766e3225a3ac3b51b39c18149f94990c42c11793271f3c1e314bb29215dc4b8",
+      "version": "autoconf (GNU Autoconf) 2.73\nCopyright (C) 2026 Free Software Foundation, Inc.\nLicense GPLv3+/Autoconf: GNU GPL version 3 or later\n<https://gnu.org/licenses/gpl.html>, <https://gnu.org/licenses/exceptions.html>\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by David J. MacKenzie and Akim Demaille."
+    },
+    "automake": {
+      "invocation_name": "automake",
+      "resolved_name": "automake",
+      "sha256": "ac00c45e4b5f34dd452a1dd0a1f31e9e0967dc244cc4008b25aab491c779a937",
+      "version": "automake (GNU automake) 1.18.1\nFeatures: subsecond-mtime\n\nCopyright (C) 2025 Free Software Foundation, Inc.\nLicense GPLv2+: GNU GPL version 2 or later\n  <https://gnu.org/licenses/gpl-2.0.html>\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by Tom Tromey <tromey@redhat.com>\n       and Alexandre Duret-Lutz <adl@gnu.org>."
+    },
+    "autoreconf": {
+      "invocation_name": "autoreconf",
+      "resolved_name": "autoreconf",
+      "sha256": "8bf81bce870b88247ad5ef08fd579bc339c7422e1ef710028b24cc0393cdc529",
+      "version": "autoreconf (GNU Autoconf) 2.73\nCopyright (C) 2026 Free Software Foundation, Inc.\nLicense GPLv3+/Autoconf: GNU GPL version 3 or later\n<https://gnu.org/licenses/gpl.html>, <https://gnu.org/licenses/exceptions.html>\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\n\nWritten by David J. MacKenzie and Akim Demaille."
+    },
+    "cargo": {
+      "invocation_name": "cargo",
+      "resolved_name": "rustup",
+      "sha256": "ec1b9233e7f72990ecd8e62063fa7f6c3dfc2bec8e97f88bff165f9100ac696a",
+      "version": "cargo 1.98.0 (797e8a9bc 2026-08-05)"
+    },
+    "clang": {
+      "invocation_name": "clang",
+      "resolved_name": "clang-22",
+      "sha256": "68bb87f784f09da01b7aea0f70952fb23f606242cdc4f6ff3cc26c372af0706f",
+      "version": "Homebrew clang version 22.1.8\nTarget: arm64-apple-darwin25.6.0\nThread model: posix"
+    },
+    "clang++": {
+      "invocation_name": "clang++",
+      "resolved_name": "clang-22",
+      "sha256": "68bb87f784f09da01b7aea0f70952fb23f606242cdc4f6ff3cc26c372af0706f",
+      "version": "Homebrew clang version 22.1.8\nTarget: arm64-apple-darwin25.6.0\nThread model: posix"
+    },
+    "cmake": {
+      "invocation_name": "cmake",
+      "resolved_name": "cmake",
+      "sha256": "0e7b8ce34151f3b4e2d8fa2f62c04db0239cb331119020d49a95afe5386cd4a8",
+      "version": "cmake version 4.2.1\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."
+    },
+    "ctest": {
+      "invocation_name": "ctest",
+      "resolved_name": "ctest",
+      "sha256": "1801db0ad45937daa992194b56abceb20b739f47ede87942c17b07d895416f80",
+      "version": "ctest version 4.2.1\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."
+    },
+    "git": {
+      "invocation_name": "git",
+      "resolved_name": "git",
+      "sha256": "9b19807c702934b8c51fd2da8c2d38053bd7328536546e5a47eb3914dcc7bcde",
+      "version": "git version 2.54.0"
+    },
+    "llvm-ar": {
+      "invocation_name": "llvm-ar",
+      "resolved_name": "llvm-ar",
+      "sha256": "4fbcc8ed367b65b5b4c7fbec455bf2dced480f329321c0a0cca832908be0d92c",
+      "version": "Homebrew LLVM version 22.1.8\n  Optimized build."
+    },
+    "llvm-config": {
+      "invocation_name": "llvm-config",
+      "resolved_name": "llvm-config",
+      "sha256": "21800e01318d4726784f8675f6da0c445965e0c967b817b893288fee97eca023",
+      "version": "22.1.8"
+    },
+    "llvm-dis": {
+      "invocation_name": "llvm-dis",
+      "resolved_name": "llvm-dis",
+      "sha256": "7ade35df9a3f10de36924593b900a0b6666b7cc3f33f9d491b49d7820d7f2bfd",
+      "version": "Homebrew LLVM version 22.1.8\n  Optimized build."
+    },
+    "llvm-link": {
+      "invocation_name": "llvm-link",
+      "resolved_name": "llvm-link",
+      "sha256": "e683ac126c4afd3e0368c169886d8a84f07172cc55a215dfd1a9b4ed9deacd1d",
+      "version": "Homebrew LLVM version 22.1.8\n  Optimized build."
+    },
+    "llvm-nm": {
+      "invocation_name": "llvm-nm",
+      "resolved_name": "llvm-nm",
+      "sha256": "f73983e190fc90b58425a6ac305d957a40a2b1e5b8b98d19e7eb8069901dfec8",
+      "version": "llvm-nm, compatible with GNU nm\nHomebrew LLVM version 22.1.8\n  Optimized build."
+    },
+    "llvm-objcopy": {
+      "invocation_name": "llvm-objcopy",
+      "resolved_name": "llvm-objcopy",
+      "sha256": "815cdc08344cb3a51da9e63fd9f6ebc9c0692d26bc171191f88924f918696d97",
+      "version": "llvm-objcopy, compatible with GNU objcopy\nHomebrew LLVM version 22.1.8\n  Optimized build."
+    },
+    "llvm-ranlib": {
+      "invocation_name": "llvm-ranlib",
+      "resolved_name": "llvm-ar",
+      "sha256": "4fbcc8ed367b65b5b4c7fbec455bf2dced480f329321c0a0cca832908be0d92c",
+      "version": "Homebrew LLVM version 22.1.8\n  Optimized build."
+    },
+    "make": {
+      "invocation_name": "make",
+      "resolved_name": "make",
+      "sha256": "b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d57b1de242f610e9",
+      "version": "GNU Make 3.81\nCopyright (C) 2006  Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.\nThere is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A\nPARTICULAR PURPOSE.\n\nThis program built for i386-apple-darwin11.3.0"
+    },
+    "ninja": {
+      "invocation_name": "ninja",
+      "resolved_name": "ninja",
+      "sha256": "ce9de7e34681d5112ae3eb0b804546078d7b0ced0bed1a0ac581e11780ad1d95",
+      "version": "1.13.1"
+    },
+    "opt": {
+      "invocation_name": "opt",
+      "resolved_name": "opt",
+      "sha256": "15795d8062cbd29c6032fd85bc1f0a57069bf36f0b58d5ba04a8544510cccbe3",
+      "version": "Homebrew LLVM version 22.1.8\n  Optimized build.\n  Default target: arm64-apple-darwin25.6.0\n  Host CPU: apple-m4"
+    },
+    "pkg-config": {
+      "invocation_name": "pkg-config",
+      "resolved_name": "pkgconf",
+      "sha256": "39b6b8b701470ebf31a24972bc1fafc7da54a5c32215d972fdadaf21c7cfa91b",
+      "version": "3.0.7"
+    },
+    "rllvm-cc": {
+      "invocation_name": "rllvm-cc",
+      "resolved_name": "rllvm-cc",
+      "sha256": "5671871c7123765f5cd68c705807d3143c70b30b7cf32271cadb294d402024b8",
+      "version": "rllvm-cc 0.4.7"
+    },
+    "rllvm-cxx": {
+      "invocation_name": "rllvm-cxx",
+      "resolved_name": "rllvm-cxx",
+      "sha256": "8ccce25182bc4baf5b50020dc429daa7b5c98075bc18843dafc1d8db6b11801c",
+      "version": "rllvm-cxx 0.4.7"
+    },
+    "rllvm-get-bc": {
+      "invocation_name": "rllvm-get-bc",
+      "resolved_name": "rllvm-get-bc",
+      "sha256": "2599465098c31a00ab3a506848d4bfc54f8180dbde1fc40f36812ab56915222e",
+      "version": "rllvm-get-bc 0.4.7"
+    },
+    "rllvm-info": {
+      "invocation_name": "rllvm-info",
+      "resolved_name": "rllvm-info",
+      "sha256": "e11e5b4fcd8f149b57a075813abded886ac366f1cc9da89a83e50b2a87d658c8",
+      "version": "rllvm-info 0.4.7"
+    },
+    "rllvm-rustc": {
+      "invocation_name": "rllvm-rustc",
+      "resolved_name": "rllvm-rustc",
+      "sha256": "b51546474ef4a90eaf5de5d056ece1ede298c8740ce249c9efbb16faddc214dc",
+      "version": "rllvm-rustc 0.4.7"
+    },
+    "rustc": {
+      "invocation_name": "rustc",
+      "resolved_name": "rustup",
+      "sha256": "ec1b9233e7f72990ecd8e62063fa7f6c3dfc2bec8e97f88bff165f9100ac696a",
+      "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)\nbinary: rustc\ncommit-hash: 88d9e12ae178fab0fb5cc050a94da85685d449ea\ncommit-date: 2026-08-18\nhost: aarch64-apple-darwin\nrelease: 1.98.0\nLLVM version: 22.1.8"
+    }
+  }
+}

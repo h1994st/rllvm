@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+project(coverage C CXX)
+add_library(parts OBJECT second.c)
+add_library(unused STATIC unused.c)
+add_library(shared SHARED shared.c)
+add_executable(app main.cpp first.c $<TARGET_OBJECTS:parts>)
+target_link_libraries(app PRIVATE unused shared)

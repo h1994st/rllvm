@@ -1,0 +1,107 @@
+{
+  "files": {
+    "context/baseline-resource-start.json": {
+      "bytes": 2030,
+      "sha256": "bc01c8c7a7f599eeb336e6f160e8f78f7f5a55ab05db88924706c589127b548b"
+    },
+    "context/input-source-audit.json": {
+      "bytes": 559,
+      "sha256": "b9153a7c60453876baccf69479c963225926c95ba88de4decbb8fc810d8df80c"
+    },
+    "context/rllvm-build/record.json": {
+      "bytes": 2627,
+      "sha256": "ff1f53a014635542709ebc829f6fb99f98f3730e108ab8012d9715b2ec5c8bc4"
+    },
+    "context/rllvm-provenance.json": {
+      "bytes": 382,
+      "sha256": "25f3e2f80849235cd7588d2b28ad1c3474a5c722d52fe61c7068c49cad96de19"
+    },
+    "original-groups/baseline-c.json": {
+      "bytes": 398,
+      "sha256": "ac3c6bcd4ab776a08a73ceb00cc361b8c220a86806e491520e589c8fe91b1b11"
+    },
+    "original-groups/baseline-cargo.json": {
+      "bytes": 396,
+      "sha256": "c640a278aec29bb6b84ad61fa3ffae274cc44159468bc86ff0b0300fe437729a"
+    },
+    "original-groups/baseline-cxx.json": {
+      "bytes": 404,
+      "sha256": "c6c545b3c373d58a07d34c707e7bd5beecae88452cbdd1bb881825e3754e8adc"
+    },
+    "runs/nghttp2-c-cmake/commands.jsonl": {
+      "bytes": 50714919,
+      "sha256": "03c8dd2f232ae8159eefa25df1b7765fd90ccb06f7efdee2964fe55276b6e806"
+    },
+    "runs/nghttp2-c-cmake/diagnostics.jsonl": {
+      "bytes": 1722542,
+      "sha256": "c71068980794256a9c9417557d6cd247a518fc8de694cc72898110d23de52d7c"
+    },
+    "runs/nghttp2-c-cmake/operations.jsonl": {
+      "bytes": 1537679,
+      "sha256": "642876091accbc34937ec83c26882585fd715b2410959cf15aa0c85aabb2bee7"
+    },
+    "runs/nghttp2-c-cmake/run.json": {
+      "bytes": 87558,
+      "sha256": "f93672fed17c972fe5dd4aa58c699264d8ac0e1391c59de9dcfae6450b01c521"
+    },
+    "runs/nghttp2-c-cmake/samples.jsonl": {
+      "bytes": 44421616,
+      "sha256": "f18128129ef18dbb596339fb73989efd1ba81ebbfab4a65472ba9d05c22f8097"
+    },
+    "runs/nghttp2-c-cmake/validations.jsonl": {
+      "bytes": 44332419,
+      "sha256": "e28095f07248e3562eb2c080b6c672e5fa659c3e194ecc3688b3652eb527e848"
+    },
+    "runs/nghttp2-cxx-cmake/commands.jsonl": {
+      "bytes": 63838321,
+      "sha256": "1bd6525996c4ae57c002ff14c355392c09d2a5ba41accfe40f44c74235df5e16"
+    },
+    "runs/nghttp2-cxx-cmake/diagnostics.jsonl": {
+      "bytes": 2237286,
+      "sha256": "eb7db19d1d900b0e8619e84346540b5e0903156417be422e0c2a8cb5be45da44"
+    },
+    "runs/nghttp2-cxx-cmake/operations.jsonl": {
+      "bytes": 2411473,
+      "sha256": "a20d9717b4cd09fdbbe11eeee1a0dc2f2521af652cf32d82cce4c6036db1e923"
+    },
+    "runs/nghttp2-cxx-cmake/run.json": {
+      "bytes": 95539,
+      "sha256": "9c5429d6ffe39d2540567b8a44cfafc4346c7e62bd74b80096141387619012e0"
+    },
+    "runs/nghttp2-cxx-cmake/samples.jsonl": {
+      "bytes": 90252976,
+      "sha256": "0125fbeb072d86d5c3aacf7e6384dbd4bdb6a621cf9180cbd734cf0ee431e0bb"
+    },
+    "runs/nghttp2-cxx-cmake/validations.jsonl": {
+      "bytes": 90162574,
+      "sha256": "6a5b130ac4a1c74253cc387d2ffa0f00a1b94bdba84b4c4830fa4c3979124908"
+    },
+    "runs/quiche-cargo/commands.jsonl": {
+      "bytes": 375017711,
+      "sha256": "0bd25e8603db67c3d486f76e80dbc67868e48dd54cce06ad8dec48d1549d0477"
+    },
+    "runs/quiche-cargo/diagnostics.jsonl": {
+      "bytes": 7795301,
+      "sha256": "13fa728fee200da5b9c0e1678ebf6e636ba636a94cadf7dd4cc2e304174961e7"
+    },
+    "runs/quiche-cargo/operations.jsonl": {
+      "bytes": 1507775,
+      "sha256": "98b6191774a606e59fe291ee34c7152c0d1633a140744b622545bb10060d978e"
+    },
+    "runs/quiche-cargo/run.json": {
+      "bytes": 79492,
+      "sha256": "fe9adba5821702a5cee985266f2938d78c8f3c4ae3842387bfd93161c7e92b0f"
+    },
+    "runs/quiche-cargo/samples.jsonl": {
+      "bytes": 541753395,
+      "sha256": "206a3e2f792c2ef8a95d19a2bb1436ecdf3048d1351af61407bc26fdca77fa41"
+    },
+    "runs/quiche-cargo/validations.jsonl": {
+      "bytes": 540938956,
+      "sha256": "c1ee0d532da6551724fc0d48093ce23c0de286cbedc06928b64980e3caa28fb7"
+    }
+  },
+  "kind": "workflow-baseline-evidence",
+  "schema_version": 1,
+  "scope": "Original run manifests and all indexed JSONL streams; build trees and full LLVM/stdout logs remain outside Git."
+}
