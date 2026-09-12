@@ -63,7 +63,9 @@ class TestProcess:
 
         assert result.returncode == 0
         assert result.user_cpu_seconds is not None
-        assert result.user_cpu_seconds > 0.05
+        assert result.system_cpu_seconds is not None
+        # process_time() measures user + system CPU, with no fixed split.
+        assert result.user_cpu_seconds + result.system_cpu_seconds > 0.05
 
     def test_wait4_usage_includes_waited_descendants(self) -> None:
         child_script = (
@@ -80,7 +82,8 @@ class TestProcess:
             f"subprocess.run([sys.executable, '-c', {child_script!r}], "
             "check=True)\n"
             "usage = resource.getrusage(resource.RUSAGE_SELF)\n"
-            "print(json.dumps({'user_cpu_seconds': usage.ru_utime, "
+            "print(json.dumps({'cpu_seconds': "
+            "usage.ru_utime + usage.ru_stime, "
             "'max_rss': usage.ru_maxrss}))\n"
         )
 
@@ -92,13 +95,14 @@ class TestProcess:
 
         parent_usage = json.loads(Path(result.stdout).read_text())
         assert result.user_cpu_seconds is not None
+        assert result.system_cpu_seconds is not None
         assert result.max_process_rss_bytes is not None
         parent_rss_bytes = int(parent_usage["max_rss"])
         if sys.platform != "darwin":
             parent_rss_bytes *= 1024
         assert (
-            result.user_cpu_seconds
-            > float(parent_usage["user_cpu_seconds"]) + 0.05
+            result.user_cpu_seconds + result.system_cpu_seconds
+            > float(parent_usage["cpu_seconds"]) + 0.05
         )
         assert (
             result.max_process_rss_bytes > parent_rss_bytes + 16 * 1024 * 1024

@@ -18,8 +18,10 @@ create a tag by hand.
 2. **release-please opens a release PR** — "chore: release X.Y.Z" — and keeps it
    updated as more commits land. It contains the version bump and the CHANGELOG
    entry. Nothing is released while it sits open.
-3. **You review and merge that PR.** This is the decision point: merging it
-   means "ship this".
+3. **You approve workflows, review, and merge that PR.** Select **Approve
+   workflows to run** when prompted, including after release-please updates the
+   PR. CI requires this approval because release-please uses `GITHUB_TOKEN`.
+   Wait for the checks to pass before merging; merging means "ship this".
 4. **cargo-dist takes over automatically.** It builds all five targets, creates
    the tag, publishes the GitHub Release with the CHANGELOG entry plus install
    instructions, and publishes to crates.io.
