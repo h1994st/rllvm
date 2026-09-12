@@ -1,10 +1,12 @@
 import errno
 import json
 import os
+import resource
 import signal
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,7 +65,9 @@ class TestProcess:
 
         assert result.returncode == 0
         assert result.user_cpu_seconds is not None
-        assert result.user_cpu_seconds > 0.05
+        assert result.system_cpu_seconds is not None
+        # process_time() measures user + system CPU, with no fixed split.
+        assert result.user_cpu_seconds + result.system_cpu_seconds > 0.05
 
     def test_wait4_usage_includes_waited_descendants(self) -> None:
         child_script = (
@@ -80,8 +84,12 @@ class TestProcess:
             f"subprocess.run([sys.executable, '-c', {child_script!r}], "
             "check=True)\n"
             "usage = resource.getrusage(resource.RUSAGE_SELF)\n"
-            "print(json.dumps({'user_cpu_seconds': usage.ru_utime, "
-            "'max_rss': usage.ru_maxrss}))\n"
+            "descendants = resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+            "print(json.dumps({'cpu_seconds': "
+            "usage.ru_utime + usage.ru_stime + "
+            "descendants.ru_utime + descendants.ru_stime, "
+            "'max_rss': max(usage.ru_maxrss, descendants.ru_maxrss), "
+            "'descendant_max_rss': descendants.ru_maxrss}))\n"
         )
 
         result = execute(
@@ -90,18 +98,23 @@ class TestProcess:
             "descendants",
         )
 
-        parent_usage = json.loads(Path(result.stdout).read_text())
+        assert result.returncode == 0
+        observed_usage = json.loads(Path(result.stdout).read_text())
         assert result.user_cpu_seconds is not None
+        assert result.system_cpu_seconds is not None
         assert result.max_process_rss_bytes is not None
-        parent_rss_bytes = int(parent_usage["max_rss"])
-        if sys.platform != "darwin":
-            parent_rss_bytes *= 1024
-        assert (
-            result.user_cpu_seconds
-            > float(parent_usage["user_cpu_seconds"]) + 0.05
+        rss_unit = 1 if sys.platform == "darwin" else 1024
+        assert result.user_cpu_seconds + result.system_cpu_seconds >= float(
+            observed_usage["cpu_seconds"]
         )
         assert (
-            result.max_process_rss_bytes > parent_rss_bytes + 16 * 1024 * 1024
+            observed_usage["descendant_max_rss"] * rss_unit >= 64 * 1024 * 1024
+        )
+        # Linux preserves the pre-exec RSS peak, which can come from pytest.
+        # The parent's high-water may exceed even the allocating descendant's.
+        assert (
+            result.max_process_rss_bytes
+            >= observed_usage["max_rss"] * rss_unit
         )
         assert (
             "waited-command-and-reaped-descendants" in result.resource_method
@@ -257,3 +270,33 @@ class TestProcess:
         ).read_text() == "started\n"
         with RunLock(lock_path):
             pass
+
+
+@pytest.mark.parametrize(
+    ("platform", "expected_rss_bytes"),
+    [("darwin", 12345), ("linux", 12641280)],
+)
+def test_wait4_cpu_fields_and_rss_units_are_preserved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    expected_rss_bytes: int,
+) -> None:
+    process = SimpleNamespace(pid=123, returncode=None)
+    usage = resource.struct_rusage((1.25, 2.5, 12345, *([0] * 13)))
+    monkeypatch.setattr(
+        "benchmarks.process.subprocess.Popen", lambda *args, **kwargs: process
+    )
+    monkeypatch.setattr(
+        "benchmarks.process.os.wait4", lambda pid, options: (pid, 0, usage)
+    )
+    monkeypatch.setattr(
+        "benchmarks.process.sys", SimpleNamespace(platform=platform)
+    )
+
+    result = execute(Command(("command",), tmp_path, {}), tmp_path, "usage")
+
+    assert result.returncode == 0
+    assert result.user_cpu_seconds == 1.25
+    assert result.system_cpu_seconds == 2.5
+    assert result.max_process_rss_bytes == expected_rss_bytes
