@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.8](https://github.com/h1994st/rllvm/compare/v0.4.7...v0.4.8) (2026-09-12)
+
+
+### Features
+
+* benchmark build, extraction, and analysis workflows ([#170](https://github.com/h1994st/rllvm/issues/170)) ([a9b8691](https://github.com/h1994st/rllvm/commit/a9b8691c5179e07ed6316715937d011bb3c66250))
+
+
+### Bug Fixes
+
+* compare total CPU time in benchmark tests ([#173](https://github.com/h1994st/rllvm/issues/173)) ([2dc7224](https://github.com/h1994st/rllvm/commit/2dc72244336a39c6f52b01dc7d8d5cb40aee82b3))
+* preserve linked Rust artifacts in mixed crate builds ([#168](https://github.com/h1994st/rllvm/issues/168)) ([8d645e0](https://github.com/h1994st/rllvm/commit/8d645e076fe52f0faa6776d8e425ac77f39ddf49))
+* wrong docker ignore paths ([#172](https://github.com/h1994st/rllvm/issues/172)) ([c9d3721](https://github.com/h1994st/rllvm/commit/c9d37217d07f5ff4396d8c1ea69c3d86bb52aeb0))
+
 ## [0.4.7](https://github.com/h1994st/rllvm/compare/v0.4.6...v0.4.7) (2026-09-10)
 
 
