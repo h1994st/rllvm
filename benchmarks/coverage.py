@@ -148,6 +148,35 @@ def cmake_coverage(target: Target, source: Path, build: Path) -> Coverage:
     )
 
 
+def _autotools_commands(line: str) -> tuple[tuple[str, ...], ...]:
+    """Read observed compiler/archive command segments, never configure prose.
+
+    Shell expressions are not evaluated. Libtool's expanded command output is
+    authoritative; its shell launcher, depbase assignment and move are ignored.
+    """
+    line = re.sub(r"^libtool: (?:compile|link):\s*", "", line)
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    try:
+        tokens = list(lexer)
+    except ValueError:
+        return ()
+    segments: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for token in [*tokens, ";"]:
+        if token and set(token) <= set(";&|"):
+            if current and re.fullmatch(
+                r"(?:.*-)?(?:clang\+\+|clang|g\+\+|gcc|c\+\+|cc|cxx|ar)(?:-[0-9.]+)?",
+                Path(current[0]).name,
+            ):
+                segments.append(tuple(current))
+            current = []
+        else:
+            current.append(token)
+    return tuple(segments)
+
+
 def autotools_coverage(
     target: Target,
     source: Path,
@@ -175,52 +204,72 @@ def autotools_coverage(
             cwd /= record.argv[record.argv.index("-C") + 1]
         path = Path(record.stdout)
         evidence[str(path)] = sha256(path)
-        for line in path.read_text(errors="replace").splitlines():
-            entering = re.search(r"Entering directory ['`](.*)'", line)
-            if entering:
-                cwd = Path(entering[1])
+        directories: list[tuple[int, Path]] = []
+        initial_cwd = cwd
+        # Make prints continued recipes as physical lines. Join shell escaped
+        # newlines before tokenizing; this also retains Automake's depbase
+        # assignment followed by its compiler command and mv dependency step.
+        text = path.read_text(errors="replace").replace("\\\n", "")
+        for line in text.splitlines():
+            directory = re.search(
+                r"make(?:\[(\d+)\])?: (Entering|Leaving) directory ['`](.*)'",
+                line,
+            )
+            if directory:
+                level = int(directory[1] or 0)
+                entry = Path(directory[3])
+                if directory[2] == "Entering":
+                    if any(n >= level for n, _ in directories):
+                        failures.append(
+                            "ambiguous interleaved recursive make directories"
+                        )
+                    directories.append((level, entry))
+                else:
+                    if not directories or directories[-1] != (level, entry):
+                        failures.append(
+                            "unmatched recursive make leaving directory"
+                        )
+                    else:
+                        directories.pop()
+                cwd = directories[-1][1] if directories else initial_cwd
                 continue
-            line = re.sub(r"^libtool: (?:compile|link):\s*", "", line)
-            try:
-                args = shlex.split(line)
-            except ValueError:
-                continue
-            if not args:
-                continue
-            if any(a.startswith("@") for a in args):
-                failures.append(
-                    "response-file build evidence is unsupported in Autotools audit"
-                )
-                continue
-            if "-o" in args and args.index("-o") + 1 < len(args):
-                output = str((cwd / args[args.index("-o") + 1]).resolve())
-                inputs = [
-                    a
-                    for a in args
-                    if Path(a).suffix
-                    in (".c", ".cc", ".cpp", ".cxx", ".S", ".s")
-                ]
-                if "-c" in args and len(inputs) == 1:
-                    p = cwd / inputs[0]
-                    objects[output] = _source(
-                        p, "ASM" if p.suffix.lower() == ".s" else None
+            for args in _autotools_commands(line):
+                if any(a.startswith("@") for a in args):
+                    failures.append(
+                        "response-file build evidence is unsupported in Autotools audit"
                     )
-                elif "-c" not in args:
-                    links[output] = [
-                        str((cwd / a).resolve())
+                    continue
+                if "-o" in args and args.index("-o") + 1 < len(args):
+                    output = str((cwd / args[args.index("-o") + 1]).resolve())
+                    inputs = [
+                        a
                         for a in args
                         if Path(a).suffix
-                        in (".o", ".lo", ".a", ".la", ".so", ".dylib")
+                        in (".c", ".cc", ".cpp", ".cxx", ".S", ".s")
                     ]
-            elif "ar" in Path(args[0]).name:
-                archives = [i for i, a in enumerate(args) if a.endswith(".a")]
-                if archives:
-                    i = archives[0]
-                    links[str((cwd / args[i]).resolve())] = [
-                        str((cwd / a).resolve())
-                        for a in args[i + 1 :]
-                        if a.endswith(".o")
+                    if "-c" in args and len(inputs) == 1:
+                        p = cwd / inputs[0]
+                        objects[output] = _source(
+                            p, "ASM" if p.suffix.lower() == ".s" else None
+                        )
+                    elif "-c" not in args:
+                        links[output] = [
+                            str((cwd / a).resolve())
+                            for a in args
+                            if Path(a).suffix
+                            in (".o", ".lo", ".a", ".la", ".so", ".dylib")
+                        ]
+                elif "ar" in Path(args[0]).name:
+                    archives = [
+                        i for i, a in enumerate(args) if a.endswith(".a")
                     ]
+                    if archives:
+                        i = archives[0]
+                        links[str((cwd / args[i]).resolve())] = [
+                            str((cwd / a).resolve())
+                            for a in args[i + 1 :]
+                            if a.endswith(".o")
+                        ]
     required: dict[str, SourceInput] = {}
     artifact = str((build / target.artifact).resolve())
     if artifact not in links:

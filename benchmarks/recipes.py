@@ -431,6 +431,7 @@ class Recipe:
                 Command(
                     (
                         tools.path("make"),
+                        "--print-directory",
                         "-C",
                         directory,
                         f"-j{jobs}",
