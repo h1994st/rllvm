@@ -17,7 +17,7 @@ use std::{
     process::Command,
 };
 
-use object::{Object, ObjectKind};
+use object::{BinaryFormat, Object, ObjectKind};
 
 use super::{marker, rustc_args, rustc_marker};
 use crate::{
@@ -99,7 +99,7 @@ impl RustcWrapper {
         }
 
         if actions.archives || actions.object {
-            self.embed_into_outputs(&args, &bitcode)?;
+            self.embed_into_outputs(&args, &bitcode, actions)?;
         }
 
         Ok(Some(0))
@@ -119,7 +119,13 @@ impl RustcWrapper {
     /// Dispatches on what the artifact turns out to be rather than on the
     /// crate type: `--emit=obj` and `--emit=link` can both come from
     /// `--crate-type=lib`, and only the file says which happened.
-    fn embed_into_outputs(&self, args: &[&str], bitcode: &Path) -> Result<(), Error> {
+    fn embed_into_outputs(
+        &self,
+        args: &[&str],
+        bitcode: &Path,
+        actions: rustc_args::Actions,
+    ) -> Result<(), Error> {
+        let direct_object = actions.object && !actions.links && !actions.archives;
         for artifact in self.output_artifacts(args)? {
             if !artifact.exists() {
                 continue;
@@ -129,9 +135,12 @@ impl RustcWrapper {
             if object::read::archive::ArchiveFile::parse(&*data).is_ok() {
                 let patched = rustc_marker::patch_archive(&artifact, bitcode)?;
                 tracing::debug!("rustc: patched {patched} members of {artifact:?}");
-            } else if object::File::parse(&*data)
-                .is_ok_and(|object| object.kind() == ObjectKind::Relocatable)
-            {
+            } else if object::File::parse(&*data).is_ok_and(|object| {
+                object.kind() == ObjectKind::Relocatable
+                    // The Wasm reader reports Unknown for both objects and
+                    // linked modules, so only trust an explicit object emit.
+                    || (direct_object && object.format() == BinaryFormat::Wasm)
+            }) {
                 embed_bitcode_filepath_to_object_file::<&Path>(bitcode, &artifact, None)?;
                 tracing::debug!("rustc: embedded the bitcode path into {artifact:?}");
             } else {

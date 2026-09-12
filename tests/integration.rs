@@ -2714,6 +2714,61 @@ fn rustc_wrapper_emits_and_embeds_bitcode() {
     assert_bitcode_magic(&paths[0]);
 }
 
+/// The Wasm reader reports Unknown even for rustc's relocatable objects.
+#[test]
+fn rustc_wasm_object_carries_extractable_bitcode() {
+    let rustc = which("rustc").expect("rustc not found");
+    let target = "wasm32-unknown-unknown";
+    let target_libdir = Command::new(&rustc)
+        .args(["--print=target-libdir", "--target", target])
+        .output()
+        .unwrap();
+    assert!(target_libdir.status.success());
+    if !Path::new(String::from_utf8_lossy(&target_libdir.stdout).trim()).is_dir() {
+        eprintln!("skipping: rustc target {target} is not installed");
+        return;
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("lib.rs");
+    fs::write(
+        &src,
+        "#![no_std]\n#[no_mangle]\npub extern \"C\" fn answer() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    let obj = tmp.path().join("lib.o");
+    let output = rllvm("rllvm-rustc")
+        .arg(&rustc)
+        .args(["--target", target, "--crate-type=lib", "--emit=obj", "-o"])
+        .arg(&obj)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Wasm object compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&obj)
+        .expect("Wasm object must record its bitcode path");
+    assert_eq!(paths, vec![obj.with_extension("bc")]);
+    assert_bitcode_magic(&paths[0]);
+
+    let bitcode = tmp.path().join("extracted.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(&obj)
+        .arg("-o")
+        .arg(&bitcode)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "Wasm object extraction failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_valid_bitcode(&bitcode);
+}
+
 /// Query invocations must skip bitcode generation entirely.
 #[test]
 fn rustc_wrapper_skips_bitcode_for_query_invocations() {
