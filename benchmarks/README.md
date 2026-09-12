@@ -273,6 +273,15 @@ build artifacts; archival compression, when needed, must finish between serial
 measurements and must preserve evidence. Storage savings do not count as
 improved rllvm workflow timing.
 
+## Recorded baseline
+
+The [2026-09-12 Apple M4 baseline](baselines/2026-09-12-apple-m4/README.md)
+contains compact results from 108 validated samples across the three default
+profiles, with build-only and complete-workflow comparisons and provenance.
+Raw archives and verbose reports remain outside Git. Host activity, toolchain,
+cache conditions, and coverage limits are recorded with the results. These are
+observations, not a CI performance threshold.
+
 ## Extending and checking the harness
 
 Add a pinned `Recipe` in [recipes.py](recipes.py), declare all required tools,

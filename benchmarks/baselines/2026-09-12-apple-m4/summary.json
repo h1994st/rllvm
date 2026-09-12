@@ -1,0 +1,2527 @@
+{
+  "kind": "workflow-baseline-summary",
+  "profiles": {
+    "nghttp2-c-cmake": {
+      "build": {
+        "clean": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 1.8065402919892222,
+            "range_wall_seconds": [
+              1.7925850828178227,
+              1.84337875014171
+            ],
+            "raw_wall_seconds": [
+              1.7925850828178227,
+              1.8065402919892222,
+              1.84337875014171
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 2.1098220003406976,
+            "median_wall_seconds": 3.8892010420095176,
+            "range_wall_seconds": [
+              3.590475665871054,
+              3.915519000031054
+            ],
+            "raw_wall_seconds": [
+              3.590475665871054,
+              3.915519000031054,
+              3.8892010420095176
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.6052321272865313,
+            "median_wall_seconds": 2.8775151658337563,
+            "range_wall_seconds": [
+              2.8098665829747915,
+              3.3001462498214096
+            ],
+            "raw_wall_seconds": [
+              2.8775151658337563,
+              3.3001462498214096,
+              2.8098665829747915
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.8415707215162627,
+            "median_wall_seconds": 3.3268717089667916,
+            "range_wall_seconds": [
+              3.1639154171571136,
+              3.532097625080496
+            ],
+            "raw_wall_seconds": [
+              3.1639154171571136,
+              3.3268717089667916,
+              3.532097625080496
+            ]
+          }
+        },
+        "edited": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.15980891697108746,
+            "range_wall_seconds": [
+              0.1483099169563502,
+              0.17411537491716444
+            ],
+            "raw_wall_seconds": [
+              0.1483099169563502,
+              0.15980891697108746,
+              0.17411537491716444
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 1.6417659159479439,
+            "median_wall_seconds": 0.2662064169999212,
+            "range_wall_seconds": [
+              0.2623688329476863,
+              0.3120368339587003
+            ],
+            "raw_wall_seconds": [
+              0.3120368339587003,
+              0.2623688329476863,
+              0.2662064169999212
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.7787777137284266,
+            "median_wall_seconds": 0.2726175000425428,
+            "range_wall_seconds": [
+              0.26381037500686944,
+              0.28621466597542167
+            ],
+            "raw_wall_seconds": [
+              0.26381037500686944,
+              0.28621466597542167,
+              0.2726175000425428
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.5763176584019256,
+            "median_wall_seconds": 0.2376780000049621,
+            "range_wall_seconds": [
+              0.233783541014418,
+              0.2747717499732971
+            ],
+            "raw_wall_seconds": [
+              0.233783541014418,
+              0.2747717499732971,
+              0.2376780000049621
+            ]
+          }
+        },
+        "unchanged": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.01429433305747807,
+            "range_wall_seconds": [
+              0.013943125028163195,
+              0.02780579193495214
+            ],
+            "raw_wall_seconds": [
+              0.013943125028163195,
+              0.01429433305747807,
+              0.02780579193495214
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 0.9611529803232394,
+            "median_wall_seconds": 0.013907625107094646,
+            "range_wall_seconds": [
+              0.01373904081992805,
+              0.027166625019162893
+            ],
+            "raw_wall_seconds": [
+              0.027166625019162893,
+              0.01373904081992805,
+              0.013907625107094646
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 0.9729854752586388,
+            "median_wall_seconds": 0.014117249986156821,
+            "range_wall_seconds": [
+              0.013566458132117987,
+              0.014360624831169844
+            ],
+            "raw_wall_seconds": [
+              0.013566458132117987,
+              0.014360624831169844,
+              0.014117249986156821
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.007954945044412,
+            "median_wall_seconds": 0.0140540418215096,
+            "range_wall_seconds": [
+              0.013840125175192952,
+              0.02786958310753107
+            ],
+            "raw_wall_seconds": [
+              0.0140540418215096,
+              0.02786958310753107,
+              0.013840125175192952
+            ]
+          }
+        }
+      },
+      "commit": "a49ccc728863e7d8e5da369552e889e95399bd37",
+      "coverage": {
+        "shared": {
+          "module_counts": [
+            26
+          ],
+          "native_project_definition_counts": [
+            182
+          ]
+        },
+        "static": {
+          "module_counts": [
+            26
+          ],
+          "native_project_definition_counts": [
+            414
+          ]
+        },
+        "tests": {
+          "module_counts": [
+            39
+          ],
+          "native_project_definition_counts": [
+            382
+          ]
+        }
+      },
+      "diagnostics": [
+        {
+          "phase": "cold",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 449,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 458,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 453
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 380,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 842,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 384
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 3,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 848,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 3,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established",
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 6
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 15,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 867,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 19
+          },
+          "valid": true
+        },
+        {
+          "phase": "cold",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 449,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 458,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 453
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 380,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 842,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 384
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 3,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 848,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 3,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established",
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 6
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 15,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 867,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 19
+          },
+          "valid": true
+        },
+        {
+          "phase": "cold",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 449,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 458,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 453
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 380,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 842,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 384
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 3,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 848,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 3,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established",
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 6
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 15,
+              "llvm-ar": 1,
+              "llvm-link": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 867,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 19
+          },
+          "valid": true
+        }
+      ],
+      "ended_utc": "2026-09-12T05:46:07.336601+00:00",
+      "host": {
+        "cpu_count": 10,
+        "cpu_model": "Apple M4",
+        "hostname_sha256": "7dd300ee098f45ab64d67f68284db0766b041bd5a9e1848a1080a047d74bc8b2",
+        "load_end": [
+          5.1708984375,
+          4.5625,
+          3.873046875
+        ],
+        "load_start": [
+          3.20458984375,
+          2.78076171875,
+          2.86376953125
+        ],
+        "machine": "arm64",
+        "memory_bytes": 25769803776,
+        "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+        "processor": "arm",
+        "unavailable": {}
+      },
+      "jobs": 8,
+      "repetitions": 3,
+      "rllvm_provenance": {
+        "build_command": "cargo build --locked --release --bins -j2",
+        "build_record_sha256": "ff1f53a014635542709ebc829f6fb99f98f3730e108ab8012d9715b2ec5c8bc4",
+        "measurement_context": "coordinated baseline; all other agent builds/tests stopped before timing",
+        "profile": "release",
+        "revision": "0b72a086185b3d4b55e4e5ea49b337a0db9a345f"
+      },
+      "started_utc": "2026-09-12T05:35:57.037996+00:00",
+      "tree": "dd44a3598f1bf83ead62c839066ff4c0e53a66f9",
+      "valid_samples": 36,
+      "workflow": {
+        "clean": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 5.907621084013954,
+            "range_wall_seconds": [
+              5.818815332837403,
+              5.991346209309995
+            ],
+            "raw_wall_seconds": [
+              5.818815332837403,
+              5.907621084013954,
+              5.991346209309995
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 2.0809307079625525,
+            "median_wall_seconds": 12.29335012473166,
+            "range_wall_seconds": [
+              12.02246708306484,
+              12.821513124043122
+            ],
+            "raw_wall_seconds": [
+              12.821513124043122,
+              12.29335012473166,
+              12.02246708306484
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.9210753938242773,
+            "median_wall_seconds": 11.178382957121357,
+            "range_wall_seconds": [
+              10.94183058384806,
+              13.281282081501558
+            ],
+            "raw_wall_seconds": [
+              11.178382957121357,
+              13.281282081501558,
+              10.94183058384806
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.853814607725893,
+            "median_wall_seconds": 10.860614001285285,
+            "range_wall_seconds": [
+              10.86035829083994,
+              11.106845122762024
+            ],
+            "raw_wall_seconds": [
+              10.860614001285285,
+              10.86035829083994,
+              11.106845122762024
+            ]
+          }
+        },
+        "edited": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.15980891697108746,
+            "range_wall_seconds": [
+              0.1483099169563502,
+              0.17411537491716444
+            ],
+            "raw_wall_seconds": [
+              0.1483099169563502,
+              0.15980891697108746,
+              0.17411537491716444
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 10.110439939520326,
+            "median_wall_seconds": 1.6620459156110883,
+            "range_wall_seconds": [
+              1.6157384568359703,
+              1.6635112927760929
+            ],
+            "raw_wall_seconds": [
+              1.6635112927760929,
+              1.6157384568359703,
+              1.6620459156110883
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 10.20810449990308,
+            "median_wall_seconds": 1.6227438340429217,
+            "range_wall_seconds": [
+              1.6102650822140276,
+              1.6313461244571954
+            ],
+            "raw_wall_seconds": [
+              1.6102650822140276,
+              1.6313461244571954,
+              1.6227438340429217
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 10.04331395548403,
+            "median_wall_seconds": 1.5828274139203131,
+            "range_wall_seconds": [
+              1.5641672923229635,
+              1.6050111260265112
+            ],
+            "raw_wall_seconds": [
+              1.5641672923229635,
+              1.6050111260265112,
+              1.5828274139203131
+            ]
+          }
+        },
+        "unchanged": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.01429433305747807,
+            "range_wall_seconds": [
+              0.013943125028163195,
+              0.02780579193495214
+            ],
+            "raw_wall_seconds": [
+              0.013943125028163195,
+              0.01429433305747807,
+              0.02780579193495214
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 94.05223409512114,
+            "median_wall_seconds": 1.3444139589555562,
+            "range_wall_seconds": [
+              1.3423693338409066,
+              1.3521444168873131
+            ],
+            "raw_wall_seconds": [
+              1.3521444168873131,
+              1.3444139589555562,
+              1.3423693338409066
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 96.09939433029383,
+            "median_wall_seconds": 1.350126751465723,
+            "range_wall_seconds": [
+              1.3445203320588917,
+              1.3736767491791397
+            ],
+            "raw_wall_seconds": [
+              1.350126751465723,
+              1.3736767491791397,
+              1.3445203320588917
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 96.82725029559023,
+            "median_wall_seconds": 1.3707894152030349,
+            "range_wall_seconds": [
+              1.3500744570046663,
+              1.389417584752664
+            ],
+            "raw_wall_seconds": [
+              1.3500744570046663,
+              1.389417584752664,
+              1.3707894152030349
+            ]
+          }
+        }
+      }
+    },
+    "nghttp2-cxx-cmake": {
+      "build": {
+        "clean": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 8.553265667054802,
+            "range_wall_seconds": [
+              8.075658917194232,
+              14.225646208040416
+            ],
+            "raw_wall_seconds": [
+              8.075658917194232,
+              8.553265667054802,
+              14.225646208040416
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 1.9822248467712968,
+            "median_wall_seconds": 18.781715124845505,
+            "range_wall_seconds": [
+              15.629102125065401,
+              28.198429374955595
+            ],
+            "raw_wall_seconds": [
+              15.629102125065401,
+              18.781715124845505,
+              28.198429374955595
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.1977185215535298,
+            "median_wall_seconds": 10.244404709199443,
+            "range_wall_seconds": [
+              10.105249457992613,
+              16.791154416045174
+            ],
+            "raw_wall_seconds": [
+              10.105249457992613,
+              10.244404709199443,
+              16.791154416045174
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.8279010984495712,
+            "median_wall_seconds": 15.634523708140478,
+            "range_wall_seconds": [
+              15.218068375019357,
+              25.399267208995298
+            ],
+            "raw_wall_seconds": [
+              15.218068375019357,
+              15.634523708140478,
+              25.399267208995298
+            ]
+          }
+        },
+        "edited": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.20219354191794991,
+            "range_wall_seconds": [
+              0.19525883300229907,
+              0.22967383405193686
+            ],
+            "raw_wall_seconds": [
+              0.20219354191794991,
+              0.19525883300229907,
+              0.22967383405193686
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 1.831862495710297,
+            "median_wall_seconds": 0.3815102919470519,
+            "range_wall_seconds": [
+              0.35768733313307166,
+              0.39727929094806314
+            ],
+            "raw_wall_seconds": [
+              0.39727929094806314,
+              0.35768733313307166,
+              0.3815102919470519
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.6256913491728864,
+            "median_wall_seconds": 0.33912883303128183,
+            "range_wall_seconds": [
+              0.3287042919546366,
+              0.3644437079783529
+            ],
+            "raw_wall_seconds": [
+              0.3287042919546366,
+              0.33912883303128183,
+              0.3644437079783529
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.5650362460482026,
+            "median_wall_seconds": 0.3486137499567121,
+            "range_wall_seconds": [
+              0.31029391707852483,
+              0.3594478750601411
+            ],
+            "raw_wall_seconds": [
+              0.31029391707852483,
+              0.3486137499567121,
+              0.3594478750601411
+            ]
+          }
+        },
+        "unchanged": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.01779487496241927,
+            "range_wall_seconds": [
+              0.01767829107120633,
+              0.03140470781363547
+            ],
+            "raw_wall_seconds": [
+              0.01779487496241927,
+              0.01767829107120633,
+              0.03140470781363547
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 0.9913877391910898,
+            "median_wall_seconds": 0.01809350005351007,
+            "range_wall_seconds": [
+              0.017526041017845273,
+              0.030691000167280436
+            ],
+            "raw_wall_seconds": [
+              0.030691000167280436,
+              0.017526041017845273,
+              0.01809350005351007
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 0.9814998496763101,
+            "median_wall_seconds": 0.018222209066152573,
+            "range_wall_seconds": [
+              0.01746566710062325,
+              0.018420750042423606
+            ],
+            "raw_wall_seconds": [
+              0.01746566710062325,
+              0.018222209066152573,
+              0.018420750042423606
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 0.9832208328406065,
+            "median_wall_seconds": 0.01749629178084433,
+            "range_wall_seconds": [
+              0.01719912514090538,
+              0.035295375157147646
+            ],
+            "raw_wall_seconds": [
+              0.01749629178084433,
+              0.035295375157147646,
+              0.01719912514090538
+            ]
+          }
+        }
+      },
+      "commit": "a49ccc728863e7d8e5da369552e889e95399bd37",
+      "coverage": {
+        "h2load": {
+          "module_counts": [
+            12
+          ],
+          "native_project_definition_counts": [
+            235
+          ]
+        },
+        "nghttp": {
+          "module_counts": [
+            13
+          ],
+          "native_project_definition_counts": [
+            224
+          ]
+        },
+        "shared": {
+          "module_counts": [
+            26
+          ],
+          "native_project_definition_counts": [
+            182
+          ]
+        },
+        "static": {
+          "module_counts": [
+            26
+          ],
+          "native_project_definition_counts": [
+            414
+          ]
+        },
+        "tests": {
+          "module_counts": [
+            39
+          ],
+          "native_project_definition_counts": [
+            382
+          ]
+        }
+      },
+      "diagnostics": [
+        {
+          "phase": "cold",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 573,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 584,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 579
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 482,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1072,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 488
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 5,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1082,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 5,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established",
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 10
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 21,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1109,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 27
+          },
+          "valid": true
+        },
+        {
+          "phase": "cold",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 573,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 584,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 579
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 482,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1072,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 488
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 5,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1082,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 5,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established",
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 10
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 21,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1109,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 27
+          },
+          "valid": true
+        },
+        {
+          "phase": "cold",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 573,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 584,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 579
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 482,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1072,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 488
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 5,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1082,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 5,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established",
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 10
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 21,
+              "llvm-ar": 1,
+              "llvm-link": 5
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 1109,
+            "preprocess": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "queries": {
+              "count": null,
+              "reason": "response-file arguments hide compiler phase flags"
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "rustc": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 27
+          },
+          "valid": true
+        }
+      ],
+      "ended_utc": "2026-09-12T06:10:01.058253+00:00",
+      "host": {
+        "cpu_count": 10,
+        "cpu_model": "Apple M4",
+        "hostname_sha256": "7dd300ee098f45ab64d67f68284db0766b041bd5a9e1848a1080a047d74bc8b2",
+        "load_end": [
+          8.88623046875,
+          7.4501953125,
+          6.33056640625
+        ],
+        "load_start": [
+          3.9013671875,
+          4.3369140625,
+          3.84521484375
+        ],
+        "machine": "arm64",
+        "memory_bytes": 25769803776,
+        "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+        "processor": "arm",
+        "unavailable": {}
+      },
+      "jobs": 8,
+      "repetitions": 3,
+      "rllvm_provenance": {
+        "build_command": "cargo build --locked --release --bins -j2",
+        "build_record_sha256": "ff1f53a014635542709ebc829f6fb99f98f3730e108ab8012d9715b2ec5c8bc4",
+        "measurement_context": "coordinated baseline; all other agent builds/tests stopped before timing",
+        "profile": "release",
+        "revision": "0b72a086185b3d4b55e4e5ea49b337a0db9a345f"
+      },
+      "started_utc": "2026-09-12T05:47:19.811567+00:00",
+      "tree": "dd44a3598f1bf83ead62c839066ff4c0e53a66f9",
+      "valid_samples": 36,
+      "workflow": {
+        "clean": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 14.25153358397074,
+            "range_wall_seconds": [
+              13.723663209239021,
+              21.346006249077618
+            ],
+            "raw_wall_seconds": [
+              13.723663209239021,
+              14.25153358397074,
+              21.346006249077618
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 2.0809850249972492,
+            "median_wall_seconds": 31.549267957918346,
+            "range_wall_seconds": [
+              28.558737626532093,
+              42.439592292299494
+            ],
+            "raw_wall_seconds": [
+              28.558737626532093,
+              31.549267957918346,
+              42.439592292299494
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.611381466107947,
+            "median_wall_seconds": 22.96465708082542,
+            "range_wall_seconds": [
+              22.757668042788282,
+              31.098726543365046
+            ],
+            "raw_wall_seconds": [
+              22.757668042788282,
+              22.96465708082542,
+              31.098726543365046
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.9421943290225832,
+            "median_wall_seconds": 27.679247706662863,
+            "range_wall_seconds": [
+              27.19880595826544,
+              39.12289870809764
+            ],
+            "raw_wall_seconds": [
+              27.19880595826544,
+              27.679247706662863,
+              39.12289870809764
+            ]
+          }
+        },
+        "edited": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.20219354191794991,
+            "range_wall_seconds": [
+              0.19525883300229907,
+              0.22967383405193686
+            ],
+            "raw_wall_seconds": [
+              0.20219354191794991,
+              0.19525883300229907,
+              0.22967383405193686
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 19.294450319326142,
+            "median_wall_seconds": 3.943846459966153,
+            "range_wall_seconds": [
+              3.9012132494244725,
+              4.59967700089328
+            ],
+            "raw_wall_seconds": [
+              3.9012132494244725,
+              4.59967700089328,
+              3.943846459966153
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 19.220382068635068,
+            "median_wall_seconds": 3.9242712480481714,
+            "range_wall_seconds": [
+              3.886237127473578,
+              4.483947998844087
+            ],
+            "raw_wall_seconds": [
+              3.886237127473578,
+              4.483947998844087,
+              3.9242712480481714
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 19.011567068795994,
+            "median_wall_seconds": 3.8856350837741047,
+            "range_wall_seconds": [
+              3.8440160830505192,
+              3.976681377273053
+            ],
+            "raw_wall_seconds": [
+              3.8440160830505192,
+              3.8856350837741047,
+              3.976681377273053
+            ]
+          }
+        },
+        "unchanged": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.01779487496241927,
+            "range_wall_seconds": [
+              0.01767829107120633,
+              0.03140470781363547
+            ],
+            "raw_wall_seconds": [
+              0.01779487496241927,
+              0.01767829107120633,
+              0.03140470781363547
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 198.66659914377908,
+            "median_wall_seconds": 3.5353212910704315,
+            "range_wall_seconds": [
+              3.5352472909726202,
+              3.6974984609987587
+            ],
+            "raw_wall_seconds": [
+              3.5352472909726202,
+              3.5353212910704315,
+              3.6974984609987587
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 200.05377293882069,
+            "median_wall_seconds": 3.566052708774805,
+            "range_wall_seconds": [
+              3.55993187520653,
+              3.6451922052074224
+            ],
+            "raw_wall_seconds": [
+              3.55993187520653,
+              3.566052708774805,
+              3.6451922052074224
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 199.97510320966265,
+            "median_wall_seconds": 3.576576499734074,
+            "range_wall_seconds": [
+              3.5585319572128356,
+              3.7098175438586622
+            ],
+            "raw_wall_seconds": [
+              3.5585319572128356,
+              3.576576499734074,
+              3.7098175438586622
+            ]
+          }
+        }
+      }
+    },
+    "quiche-cargo": {
+      "build": {
+        "clean": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 39.05978770903312,
+            "range_wall_seconds": [
+              36.89402695791796,
+              41.37867337488569
+            ],
+            "raw_wall_seconds": [
+              36.89402695791796,
+              41.37867337488569,
+              39.05978770903312
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 1.6584782677829628,
+            "median_wall_seconds": 68.62563054193743,
+            "range_wall_seconds": [
+              58.36457520793192,
+              69.89145345799625
+            ],
+            "raw_wall_seconds": [
+              58.36457520793192,
+              68.62563054193743,
+              69.89145345799625
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.4978624233130753,
+            "median_wall_seconds": 61.47676166705787,
+            "range_wall_seconds": [
+              55.26217662496492,
+              62.44616029202007
+            ],
+            "raw_wall_seconds": [
+              55.26217662496492,
+              61.47676166705787,
+              62.44616029202007
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.5898197310239963,
+            "median_wall_seconds": 65.78463137499057,
+            "range_wall_seconds": [
+              56.58904270804487,
+              65.85353116691113
+            ],
+            "raw_wall_seconds": [
+              56.58904270804487,
+              65.78463137499057,
+              65.85353116691113
+            ]
+          }
+        },
+        "edited": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 9.026576458010823,
+            "range_wall_seconds": [
+              8.90103591606021,
+              9.51766841718927
+            ],
+            "raw_wall_seconds": [
+              8.90103591606021,
+              9.026576458010823,
+              9.51766841718927
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 2.0269947284742695,
+            "median_wall_seconds": 18.57411183300428,
+            "range_wall_seconds": [
+              18.134598332922906,
+              19.292263709008694
+            ],
+            "raw_wall_seconds": [
+              18.57411183300428,
+              18.134598332922906,
+              19.292263709008694
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.9961891745718272,
+            "median_wall_seconds": 18.01875420892611,
+            "range_wall_seconds": [
+              18.017442166106775,
+              18.748462750110775
+            ],
+            "raw_wall_seconds": [
+              18.017442166106775,
+              18.01875420892611,
+              18.748462750110775
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 2.0236089797670322,
+            "median_wall_seconds": 18.434271916979924,
+            "range_wall_seconds": [
+              18.01221620896831,
+              18.60084820794873
+            ],
+            "raw_wall_seconds": [
+              18.01221620896831,
+              18.60084820794873,
+              18.434271916979924
+            ]
+          }
+        },
+        "unchanged": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.2141824581194669,
+            "range_wall_seconds": [
+              0.19891516701318324,
+              0.3754851659759879
+            ],
+            "raw_wall_seconds": [
+              0.19891516701318324,
+              0.2141824581194669,
+              0.3754851659759879
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 1.1677901594652345,
+            "median_wall_seconds": 0.25463674985803664,
+            "range_wall_seconds": [
+              0.25012016692198813,
+              0.4331152499653399
+            ],
+            "raw_wall_seconds": [
+              0.4331152499653399,
+              0.25012016692198813,
+              0.25463674985803664
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.229347489021802,
+            "median_wall_seconds": 0.26006595813669264,
+            "range_wall_seconds": [
+              0.2501598331145942,
+              0.2633046670816839
+            ],
+            "raw_wall_seconds": [
+              0.2501598331145942,
+              0.2633046670816839,
+              0.26006595813669264
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 1.3080618069695604,
+            "median_wall_seconds": 0.26019333279691637,
+            "range_wall_seconds": [
+              0.25067783310078084,
+              0.43523912504315376
+            ],
+            "raw_wall_seconds": [
+              0.26019333279691637,
+              0.43523912504315376,
+              0.25067783310078084
+            ]
+          }
+        }
+      },
+      "commit": "c8da372daa06b7cb51aa23b1a55bfe395dcf3d46",
+      "coverage": {
+        "client": {
+          "module_counts": [
+            229
+          ],
+          "native_project_definition_counts": [
+            205
+          ]
+        },
+        "shared": {
+          "module_counts": [
+            215
+          ],
+          "native_project_definition_counts": [
+            170
+          ]
+        },
+        "static": {
+          "module_counts": [
+            278
+          ],
+          "native_project_definition_counts": [
+            472
+          ]
+        }
+      },
+      "diagnostics": [
+        {
+          "phase": "cold",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 280,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 1651,
+              "llvm-ar": 196,
+              "llvm-link": 3,
+              "rustc": 229
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 2084,
+            "preprocess": {
+              "count": 290,
+              "reason": null
+            },
+            "queries": {
+              "count": 706,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 2079
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 3,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 1374,
+              "llvm-ar": 196,
+              "llvm-link": 3,
+              "rustc": 229
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3886,
+            "preprocess": {
+              "count": 290,
+              "reason": null
+            },
+            "queries": {
+              "count": 706,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 1802
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 6,
+              "llvm-link": 3,
+              "rustc": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3898,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 9,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 12
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 0,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 12,
+              "llvm-ar": 4,
+              "llvm-link": 3,
+              "rustc": 6
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3923,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 12,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 25
+          },
+          "valid": true
+        },
+        {
+          "phase": "cold",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 280,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 1651,
+              "llvm-ar": 196,
+              "llvm-link": 3,
+              "rustc": 229
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 2084,
+            "preprocess": {
+              "count": 290,
+              "reason": null
+            },
+            "queries": {
+              "count": 706,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 2079
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 3,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 1374,
+              "llvm-ar": 196,
+              "llvm-link": 3,
+              "rustc": 229
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3886,
+            "preprocess": {
+              "count": 290,
+              "reason": null
+            },
+            "queries": {
+              "count": 706,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 1802
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 6,
+              "llvm-link": 3,
+              "rustc": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3898,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 9,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 12
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 1,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 12,
+              "llvm-ar": 4,
+              "llvm-link": 3,
+              "rustc": 6
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3923,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 12,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 25
+          },
+          "valid": true
+        },
+        {
+          "phase": "cold",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 280,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 1651,
+              "llvm-ar": 196,
+              "llvm-link": 3,
+              "rustc": 229
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 2084,
+            "preprocess": {
+              "count": 290,
+              "reason": null
+            },
+            "queries": {
+              "count": 706,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 2079
+          },
+          "valid": true
+        },
+        {
+          "phase": "primed",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 3,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 1374,
+              "llvm-ar": 196,
+              "llvm-link": 3,
+              "rustc": 229
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3886,
+            "preprocess": {
+              "count": 290,
+              "reason": null
+            },
+            "queries": {
+              "count": 706,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 1802
+          },
+          "valid": true
+        },
+        {
+          "phase": "unchanged",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 6,
+              "llvm-link": 3,
+              "rustc": 3
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3898,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 9,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {
+              "llvm-ar": "no invocation of this tool observed in the selected phase; routing coverage is not established"
+            },
+            "validated_event_count": 12
+          },
+          "valid": true
+        },
+        {
+          "phase": "edited",
+          "repetition": 2,
+          "summary": {
+            "bitcode_compilations": {
+              "count": 0,
+              "reason": null
+            },
+            "cache_hits": {
+              "count": null,
+              "reason": "requires successful separate cache replay with verbose wrapper trace"
+            },
+            "counts": {
+              "compiler-driver": 12,
+              "llvm-ar": 4,
+              "llvm-link": 3,
+              "rustc": 6
+            },
+            "failures": [],
+            "health_channel_count": 5,
+            "health_evidence_file_count": 3923,
+            "preprocess": {
+              "count": 0,
+              "reason": null
+            },
+            "queries": {
+              "count": 12,
+              "reason": null
+            },
+            "schema_version": 1,
+            "scope": "observed tool/driver exec invocations; excludes hidden subprocesses and threads",
+            "unobserved": {},
+            "validated_event_count": 25
+          },
+          "valid": true
+        }
+      ],
+      "ended_utc": "2026-09-12T07:39:23.492054+00:00",
+      "host": {
+        "cpu_count": 10,
+        "cpu_model": "Apple M4",
+        "hostname_sha256": "7dd300ee098f45ab64d67f68284db0766b041bd5a9e1848a1080a047d74bc8b2",
+        "load_end": [
+          5.4541015625,
+          5.39404296875,
+          4.716796875
+        ],
+        "load_start": [
+          4.9482421875,
+          6.50830078125,
+          6.072265625
+        ],
+        "machine": "arm64",
+        "memory_bytes": 25769803776,
+        "platform": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+        "processor": "arm",
+        "unavailable": {}
+      },
+      "jobs": 8,
+      "repetitions": 3,
+      "rllvm_provenance": {
+        "build_command": "cargo build --locked --release --bins -j2",
+        "build_record_sha256": "ff1f53a014635542709ebc829f6fb99f98f3730e108ab8012d9715b2ec5c8bc4",
+        "measurement_context": "coordinated baseline; all other agent builds/tests stopped before timing",
+        "profile": "release",
+        "revision": "0b72a086185b3d4b55e4e5ea49b337a0db9a345f"
+      },
+      "started_utc": "2026-09-12T06:11:27.511824+00:00",
+      "tree": "2ff0b3fb775b3dada3a3fdbca8534ef16d81f69f",
+      "valid_samples": 36,
+      "workflow": {
+        "clean": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 39.05978770903312,
+            "range_wall_seconds": [
+              36.89402695791796,
+              41.37867337488569
+            ],
+            "raw_wall_seconds": [
+              36.89402695791796,
+              41.37867337488569,
+              39.05978770903312
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 2.059102650067847,
+            "median_wall_seconds": 85.20293600251898,
+            "range_wall_seconds": [
+              75.81907070823945,
+              86.47219175193459
+            ],
+            "raw_wall_seconds": [
+              75.81907070823945,
+              85.20293600251898,
+              86.47219175193459
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 1.9678752979349343,
+            "median_wall_seconds": 78.02481433143839,
+            "range_wall_seconds": [
+              72.6028442918323,
+              79.01069174823351
+            ],
+            "raw_wall_seconds": [
+              72.6028442918323,
+              78.02481433143839,
+              79.01069174823351
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 2.0065983321027208,
+            "median_wall_seconds": 82.37177745718509,
+            "range_wall_seconds": [
+              74.03149295831099,
+              82.66799062583596
+            ],
+            "raw_wall_seconds": [
+              74.03149295831099,
+              82.37177745718509,
+              82.66799062583596
+            ]
+          }
+        },
+        "edited": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 9.026576458010823,
+            "range_wall_seconds": [
+              8.90103591606021,
+              9.51766841718927
+            ],
+            "raw_wall_seconds": [
+              8.90103591606021,
+              9.026576458010823,
+              9.51766841718927
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 3.8609560423336773,
+            "median_wall_seconds": 35.13352312333882,
+            "range_wall_seconds": [
+              34.85121491714381,
+              36.509125168668106
+            ],
+            "raw_wall_seconds": [
+              35.13352312333882,
+              34.85121491714381,
+              36.509125168668106
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 3.8489047862664725,
+            "median_wall_seconds": 34.74243333283812,
+            "range_wall_seconds": [
+              34.717976205050945,
+              35.82794371014461
+            ],
+            "raw_wall_seconds": [
+              34.717976205050945,
+              34.74243333283812,
+              35.82794371014461
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 3.9005785525444,
+            "median_wall_seconds": 35.371932873502374,
+            "range_wall_seconds": [
+              34.719189789611846,
+              35.91195716545917
+            ],
+            "raw_wall_seconds": [
+              34.719189789611846,
+              35.371932873502374,
+              35.91195716545917
+            ]
+          }
+        },
+        "unchanged": {
+          "native": {
+            "median_paired_ratio": null,
+            "median_wall_seconds": 0.2141824581194669,
+            "range_wall_seconds": [
+              0.19891516701318324,
+              0.3754851659759879
+            ],
+            "raw_wall_seconds": [
+              0.19891516701318324,
+              0.2141824581194669,
+              0.3754851659759879
+            ]
+          },
+          "wrapped-empty-cache": {
+            "median_paired_ratio": 78.23482381858587,
+            "median_wall_seconds": 17.37572462321259,
+            "range_wall_seconds": [
+              16.756526876008138,
+              17.62006820878014
+            ],
+            "raw_wall_seconds": [
+              17.62006820878014,
+              16.756526876008138,
+              17.37572462321259
+            ]
+          },
+          "wrapped-primed-cache": {
+            "median_paired_ratio": 78.92179203534904,
+            "median_wall_seconds": 16.973063081270084,
+            "range_wall_seconds": [
+              16.903663417324424,
+              17.251813164213672
+            ],
+            "raw_wall_seconds": [
+              17.251813164213672,
+              16.903663417324424,
+              16.973063081270084
+            ]
+          },
+          "wrapped-uncached": {
+            "median_paired_ratio": 78.81533490224687,
+            "median_wall_seconds": 17.216077040648088,
+            "range_wall_seconds": [
+              16.880862166872248,
+              17.99730812269263
+            ],
+            "raw_wall_seconds": [
+              17.99730812269263,
+              16.880862166872248,
+              17.216077040648088
+            ]
+          }
+        }
+      }
+    }
+  },
+  "records_archive": {
+    "bytes": 23224488,
+    "name": "records.tar.xz",
+    "sha256": "bfb736274ec8790b624c746e284630f5e5a7eafffdaf69abaea784ed5b5ddefd",
+    "storage": "Retained separately; excluded from Git"
+  },
+  "schema_version": 1
+}
