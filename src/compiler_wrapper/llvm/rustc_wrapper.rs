@@ -17,6 +17,8 @@ use std::{
     process::Command,
 };
 
+use object::{Object, ObjectKind};
+
 use super::{marker, rustc_args, rustc_marker};
 use crate::{
     compiler_wrapper::CompilerKind, config::try_rllvm_config, error::Error,
@@ -127,11 +129,18 @@ impl RustcWrapper {
             if object::read::archive::ArchiveFile::parse(&*data).is_ok() {
                 let patched = rustc_marker::patch_archive(&artifact, bitcode)?;
                 tracing::debug!("rustc: patched {patched} members of {artifact:?}");
-            } else if object::File::parse(&*data).is_ok() {
+            } else if object::File::parse(&*data)
+                .is_ok_and(|object| object.kind() == ObjectKind::Relocatable)
+            {
                 embed_bitcode_filepath_to_object_file::<&Path>(bitcode, &artifact, None)?;
                 tracing::debug!("rustc: embedded the bitcode path into {artifact:?}");
             } else {
-                tracing::debug!("rustc: {artifact:?} is neither an archive nor an object");
+                // Mixed crate types also report linked outputs. They already
+                // carry the linker marker; rewriting them can corrupt load
+                // commands or invalidate their code signatures.
+                tracing::debug!(
+                    "rustc: {artifact:?} is neither an archive nor a relocatable object"
+                );
             }
         }
 
