@@ -319,6 +319,14 @@ def test_dry_run_records_the_same_timed_commands_and_resets(tiny):
     )
     operations = read_records(result.root / "operations.jsonl")
     assert any(o["operation"] == "restore-source" for o in operations)
+    skipped = [
+        o
+        for o in operations
+        if o.get("planned")
+        and o["operation"]
+        in {"reset", "apply-edit", "restore-source", "probe-source"}
+    ]
+    assert skipped and all(o["wall_seconds"] is None for o in skipped)
     prime = next(c for c in commands if c["phase"] == "prime-build")
     assert prime["command"] == next(
         c["command"]
@@ -438,7 +446,7 @@ def test_real_cargo_scheduler_keeps_artifact_and_bitcode_cache_states(tiny):
     (crate / "examples").mkdir()
     (crate / "Cargo.toml").write_text(
         '[package]\nname="quiche"\nversion="0.1.0"\nedition="2024"\n'
-        '[lib]\ncrate-type=["rlib","staticlib","cdylib"]\n'
+        '[lib]\ncrate-type=["rlib","staticlib"]\n'
         "[features]\nffi=[]\n"
     )
     (source / "Cargo.lock").write_text(
@@ -477,7 +485,42 @@ def test_real_cargo_scheduler_keeps_artifact_and_bitcode_cache_states(tiny):
             source.parent / "run", repetitions=1, jobs=2, extraction_repeats=1
         ),
     )
+    import tomllib
+
+    assert tomllib.loads((crate / "Cargo.toml").read_text())["lib"][
+        "crate-type"
+    ] == [
+        "rlib",
+        "staticlib",
+    ]
     assert result.valid, read_json(result.root / "run.json")
+    commands = read_records(result.root / "commands.jsonl")
+    cargo_artifacts = [
+        json.loads(line)
+        for command in commands
+        if command["command"]["argv"][0] == tiny.toolchain.path("cargo")
+        for line in Path(command["measurement"]["stdout"])
+        .read_text()
+        .splitlines()
+        if line.startswith("{")
+        and json.loads(line).get("reason") == "compiler-artifact"
+    ]
+    assert cargo_artifacts
+    assert not any(
+        "cdylib" in artifact["target"]["crate_types"]
+        for artifact in cargo_artifacts
+    )
+    for arm in (
+        "native",
+        "wrapped-uncached",
+        "wrapped-empty-cache",
+        "wrapped-primed-cache",
+    ):
+        release = result.root / "arms" / arm / "build/release"
+        assert (release / "libquiche.a").is_file()
+        assert (release / "libquiche.rlib").is_file()
+        assert not tuple(release.rglob("libquiche*.dylib"))
+        assert not tuple(release.rglob("libquiche*.so"))
     samples = read_records(result.root / "samples.jsonl")
     assert len(samples) == 12 and all(s["valid"] for s in samples)
     assert all(

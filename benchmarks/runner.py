@@ -260,7 +260,9 @@ class _Run:
             valid=True,
             planned=self.options.dry_run,
             result=result,
-            wall_seconds=time.monotonic() - start,
+            wall_seconds=None
+            if self.options.dry_run
+            else time.monotonic() - start,
             **details,
         )
         return result
