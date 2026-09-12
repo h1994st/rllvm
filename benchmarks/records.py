@@ -108,7 +108,9 @@ def _encode(value: object) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     )
-    return f"{text}\n".encode()
+    # Filesystem argv can contain surrogateescaped bytes. Escape only these
+    # unencodable code points as JSON \uXXXX, preserving ordinary Unicode.
+    return f"{text}\n".encode(errors="backslashreplace")
 
 
 def _validate_record(value: object, location: str) -> None:
