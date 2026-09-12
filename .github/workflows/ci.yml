@@ -91,6 +91,13 @@ jobs:
   test:
     name: Build and Test (${{ matrix.os }})
     needs: [changes, fmt-check, clippy]
+    env:
+      # Only the release-please PR adds the real compiler/build-system suite.
+      FULL_PYTHON_TESTS: >-
+        ${{ github.event_name == 'pull_request'
+            && github.event.pull_request.user.login == 'github-actions[bot]'
+            && github.event.pull_request.head.repo.full_name == github.repository
+            && github.event.pull_request.head.ref == 'release-please--branches--main--components--rllvm' }}
     strategy:
       # One platform failing should not hide the results for the others.
       fail-fast: false
@@ -133,11 +140,11 @@ jobs:
         run: uv sync --locked
 
       - name: Install benchmark fixture build tools (Linux)
-        if: needs.changes.outputs.code == 'true' && runner.os == 'Linux'
+        if: needs.changes.outputs.code == 'true' && env.FULL_PYTHON_TESTS == 'true' && runner.os == 'Linux'
         run: sudo apt-get install -y cmake ninja-build autoconf automake libtool
 
       - name: Install benchmark fixture build tools (macOS)
-        if: needs.changes.outputs.code == 'true' && runner.os == 'macOS'
+        if: needs.changes.outputs.code == 'true' && env.FULL_PYTHON_TESTS == 'true' && runner.os == 'macOS'
         run: brew install cmake ninja autoconf automake libtool
 
       - name: Check Python formatting, lint, and types
@@ -147,14 +154,17 @@ jobs:
           uv run ruff check
           uv run ty check
 
-      # Includes small real LLVM/CMake/Autotools/Cargo correctness fixtures.
-      # Reuse the Build step's binaries; hosted CI is not a timing baseline.
-      - name: Run workflow benchmark correctness tests
+      - name: Run Python unit tests
         if: needs.changes.outputs.code == 'true'
+        run: uv run pytest
+
+      # Reuse the Build step's binaries; hosted CI is not a timing baseline.
+      - name: Run full Python integration tests
+        if: needs.changes.outputs.code == 'true' && env.FULL_PYTHON_TESTS == 'true'
         env:
           RLLVM_BENCH_TEST_BIN_DIR: target/debug
           CARGO_BUILD_JOBS: "2"
-        run: uv run pytest
+        run: uv run pytest -m full
 
   fmt-check:
     name: Format Check

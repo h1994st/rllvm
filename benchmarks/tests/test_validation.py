@@ -15,7 +15,7 @@ from benchmarks.tests.validation_support import (
     run,
     tools_at,
 )
-from benchmarks.toolchains import Toolchain
+from benchmarks.toolchains import Tool, Toolchain
 from benchmarks.validation import (
     Extraction,
     validate_autotools_configuration,
@@ -102,6 +102,7 @@ def _validation_context(request, tmp_path: Path) -> None:
     instance.coverage = cmake_coverage(target, source, root / "wrapped")
 
 
+@pytest.mark.full
 @pytest.mark.usefixtures("_validation_context")
 class TestValidation:
     root: Path
@@ -212,15 +213,6 @@ class TestValidation:
             (native,), (wrapped,), expected_suffix="-rllvm-benchmark"
         ).valid
 
-    def test_empty_or_nonnumeric_autotools_limit_rejects_success(self):
-        for value in ("", "unlimited", "0", "-1"):
-            directory = Path(tempfile.mkdtemp(dir=self.root))
-            (directory / "libtool").write_text(f'max_cmd_len="{value}"\n')
-            assert not validate_autotools_configuration(directory).valid
-        directory = Path(tempfile.mkdtemp(dir=self.root))
-        (directory / "libtool").write_text('max_cmd_len="262144"\n')
-        assert validate_autotools_configuration(directory).valid
-
     def test_missing_independent_build_evidence_is_not_success(self):
         (self.root / "empty").mkdir(exist_ok=True)
         coverage = cmake_coverage(
@@ -267,6 +259,7 @@ class TestValidation:
         assert not result.valid, result
 
 
+@pytest.mark.full
 class TestCargoValidation:
     def test_matched_cargo_capture_uses_raw_project_definitions(self):
         from benchmarks.coverage import cargo_coverage
@@ -407,15 +400,52 @@ class TestCargoValidation:
             )
 
 
+@pytest.fixture
+def configuration_tools(tmp_path: Path) -> Toolchain:
+    # These checks compare configured paths without executing any tools.
+    names = (
+        "clang",
+        "clang++",
+        "rustc",
+        "llvm-ar",
+        "llvm-link",
+        "llvm-config",
+        "llvm-objcopy",
+        "rllvm-cc",
+        "rllvm-cxx",
+    )
+    return Toolchain(
+        "linux",
+        {
+            name: Tool(
+                str(tmp_path / name), str(tmp_path / name), "0" * 64, ""
+            )
+            for name in names
+        },
+        {},
+    )
+
+
 class TestConfiguration:
-    def test_changed_compilation_flag_is_rejected(self):
+    def test_empty_or_nonnumeric_autotools_limit_rejects_success(
+        self, tmp_path: Path
+    ):
+        for value in ("", "unlimited", "0", "-1"):
+            directory = Path(tempfile.mkdtemp(dir=tmp_path))
+            (directory / "libtool").write_text(f'max_cmd_len="{value}"\n')
+            assert not validate_autotools_configuration(directory).valid
+        directory = Path(tempfile.mkdtemp(dir=tmp_path))
+        (directory / "libtool").write_text('max_cmd_len="262144"\n')
+        assert validate_autotools_configuration(directory).valid
+
+    def test_changed_compilation_flag_is_rejected(self, configuration_tools):
         from benchmarks.process import Command
         from benchmarks.recipes import get_recipe
         from benchmarks.validation import validate_configuration
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tools = tools_at(root)
+            tools = configuration_tools
             env = environment(root, tools)
             recipe = get_recipe("nghttp2-c-cmake")
             native = Command(
@@ -443,14 +473,16 @@ class TestConfiguration:
                 root / "wrapped",
             ).valid
 
-    def test_missing_compiler_selection_does_not_establish_parity(self):
+    def test_missing_compiler_selection_does_not_establish_parity(
+        self, configuration_tools
+    ):
         from benchmarks.process import Command
         from benchmarks.recipes import get_recipe
         from benchmarks.validation import validate_configuration
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            tools = tools_at(root)
+            tools = configuration_tools
             env = environment(root, tools)
             Path(env["RLLVM_CONFIG"]).write_text("")
             native = Command(
@@ -495,6 +527,7 @@ class TestConfiguration:
 
 
 class TestBuildEvidence:
+    @pytest.mark.full
     def test_verbose_make_follows_direct_objects_without_unused_archive(self):
         from benchmarks.coverage import autotools_coverage
 

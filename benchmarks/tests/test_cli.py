@@ -218,6 +218,7 @@ def _tiny(tmp_path: Path) -> PreparedFixture:
     )
 
 
+@pytest.mark.full
 def test_cli_smoke_and_offline_report_use_saved_records(
     tmp_path: Path,
 ) -> None:

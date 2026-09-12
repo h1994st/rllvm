@@ -123,6 +123,7 @@ class TestFixtures:
         assert original.source != alternate.source
         assert (alternate.source / "value").read_text() == "second\n"
 
+    @pytest.mark.full
     def test_lock_is_copied_without_resolution(self):
         # A dependency-free package lets the actual locked fetch run offline.
         (self.repository / "Cargo.toml").write_text(
