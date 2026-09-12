@@ -34,6 +34,7 @@ def _probe_context(request, tmp_path: Path) -> None:
     instance.child = child
 
 
+@pytest.mark.full
 @pytest.mark.usefixtures("_probe_context")
 class TestProbe:
     root: Path

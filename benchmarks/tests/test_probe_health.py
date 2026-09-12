@@ -9,6 +9,8 @@ from benchmarks.probe import create_probe, read_events, summarize_events
 from benchmarks.process import Command, execute
 from benchmarks.tests.validation_support import environment, run, tools_at
 
+pytestmark = pytest.mark.full
+
 
 @pytest.fixture
 def probe_context(tmp_path: Path):

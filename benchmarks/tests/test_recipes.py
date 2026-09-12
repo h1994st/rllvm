@@ -39,6 +39,7 @@ class TestToolchain:
         for forbidden in ("AWS_SECRET", "CFLAGS=", "RUSTC_WRAPPER=", "CC="):
             assert forbidden not in output
 
+    @pytest.mark.full
     def test_rustup_and_cxx_symlinks_keep_driver_dispatch(
         self, tmp_path: Path
     ):
@@ -75,6 +76,7 @@ class TestToolchain:
             )
 
 
+@pytest.mark.full
 class TestRecipe:
     @pytest.fixture(autouse=True)
     def _recipe_context(self, tmp_path: Path) -> None:

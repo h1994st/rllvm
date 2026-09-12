@@ -11,6 +11,8 @@ from benchmarks.recipes import Target
 from benchmarks.tests.validation_support import llvm_tool_paths
 from benchmarks.toolchains import child_environment
 
+pytestmark = pytest.mark.full
+
 
 @pytest.fixture
 def make_fixture(tmp_path):

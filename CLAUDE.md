@@ -41,12 +41,17 @@ generation. Manage the environment with `uv`; this is a utility-script project.
 - Always run Python through `uv run python`, never bare `python` or `python3`.
 - Use Typer for utility command-line interfaces.
 - Use pytest for Python tests, with pytest fixtures and plain assertions.
+- Keep default Python tests focused on basic correctness. Mark real compiler,
+  build-system, and complete workflow tests with `pytest.mark.full`; they are
+  excluded by default. CI selects them only for release-please PRs. Use test
+  doubles for external tools when the behavior under test needs only their data.
 - Ruff handles linting and formatting; ty handles type checking. Their
   configurations live in `pyproject.toml`.
 
 ```bash
 uv sync
 uv run pytest
+uv run pytest -m full  # opt-in compiler/build-system integration tests
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check

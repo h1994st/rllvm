@@ -16,7 +16,15 @@ package = false
 [tool.pytest]
 testpaths = ["benchmarks/tests"]
 pythonpath = ["."]
-addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "--import-mode=importlib",
+    "-m", "not full",
+]
+markers = [
+    "full: real compiler/build-system integration tests (opt in with -m full)",
+]
 
 [tool.ruff]
 line-length = 79

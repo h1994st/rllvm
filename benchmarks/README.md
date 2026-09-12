@@ -302,7 +302,13 @@ uv lock --check
 uv run python site/build.py
 ```
 
-Tests default to existing `target/release` rllvm binaries. To reuse a debug
-build, set `RLLVM_BENCH_TEST_BIN_DIR=target/debug`. The Linux/macOS CI Build
-and Test jobs use that override and run small LLVM-backed correctness fixtures
-with bounded jobs; CI has no timing thresholds or published performance ratios.
+`uv run pytest` runs basic correctness tests without LLVM or rllvm binaries.
+Real compiler, build-system, and complete workflow tests have the `full` marker
+and are excluded by default. Use `uv run pytest -m full` for those tests, or
+`uv run pytest -m ""` to run both groups.
+
+Full tests use existing `target/release` rllvm binaries. To reuse a debug build,
+set `RLLVM_BENCH_TEST_BIN_DIR=target/debug`. Linux/macOS CI runs the default
+suite on ordinary PRs and pushes; release-please PRs additionally run `full`
+tests using the debug binaries and bounded jobs. These are correctness checks;
+CI publishes no performance ratios.

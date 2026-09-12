@@ -14,6 +14,8 @@ from benchmarks.records import read_records as _read_records
 from benchmarks.tests.validation_support import commit_fixture, tools_at
 from benchmarks.toolchains import Toolchain
 
+pytestmark = pytest.mark.full
+
 
 def read_records(path: Path) -> list[dict[str, Any]]:
     return cast(list[dict[str, Any]], _read_records(path))
