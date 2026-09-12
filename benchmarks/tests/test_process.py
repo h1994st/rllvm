@@ -1,4 +1,5 @@
 import errno
+import json
 import os
 import signal
 import sys
@@ -47,7 +48,7 @@ class ProcessTests(unittest.TestCase):
         self.assertGreaterEqual(result.user_cpu_seconds, 0)
         self.assertGreaterEqual(result.system_cpu_seconds, 0)
         self.assertGreaterEqual(result.max_process_rss_bytes, 0)
-        self.assertIn("direct-child", result.resource_method)
+        self.assertIn("waited-command", result.resource_method)
         self.assertIsNone(result.failure)
 
     def test_cpu_consuming_child_has_per_process_cpu_usage(self) -> None:
@@ -67,6 +68,51 @@ class ProcessTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         assert result.user_cpu_seconds is not None
         self.assertGreater(result.user_cpu_seconds, 0.05)
+
+    def test_wait4_usage_includes_waited_descendants(self) -> None:
+        child_script = (
+            "import time\n"
+            "data = bytearray(64 * 1024 * 1024)\n"
+            "for offset in range(0, len(data), 4096):\n"
+            "    data[offset] = 1\n"
+            "start = time.process_time()\n"
+            "while time.process_time() - start < 0.15:\n"
+            "    pass\n"
+        )
+        parent_script = (
+            "import json, resource, subprocess, sys\n"
+            f"subprocess.run([sys.executable, '-c', {child_script!r}], "
+            "check=True)\n"
+            "usage = resource.getrusage(resource.RUSAGE_SELF)\n"
+            "print(json.dumps({'user_cpu_seconds': usage.ru_utime, "
+            "'max_rss': usage.ru_maxrss}))\n"
+        )
+
+        result = execute(
+            self.command(sys.executable, "-c", parent_script),
+            self.logs,
+            "descendants",
+        )
+
+        parent_usage = json.loads(Path(result.stdout).read_text())
+        assert result.user_cpu_seconds is not None
+        assert result.max_process_rss_bytes is not None
+        parent_rss_bytes = int(parent_usage["max_rss"])
+        if sys.platform != "darwin":
+            parent_rss_bytes *= 1024
+        self.assertGreater(
+            result.user_cpu_seconds,
+            float(parent_usage["user_cpu_seconds"]) + 0.05,
+        )
+        self.assertGreater(
+            result.max_process_rss_bytes,
+            parent_rss_bytes + 16 * 1024 * 1024,
+        )
+        self.assertIn(
+            "waited-command-and-reaped-descendants",
+            result.resource_method,
+        )
+        self.assertIn("not-simultaneous-tree-peak", result.resource_method)
 
     def test_missing_executable_is_a_structured_spawn_failure(self) -> None:
         command = self.command(
@@ -95,6 +141,56 @@ class ProcessTests(unittest.TestCase):
             checked(command, self.logs, "checked")
 
         self.assertEqual(raised.exception.result.returncode, 23)
+
+    def test_symlink_log_collision_preserves_unrelated_target(self) -> None:
+        self.logs.mkdir()
+        for stream in ("stdout", "stderr"):
+            with self.subTest(stream=stream):
+                label = f"collision-{stream}"
+                sentinel = self.root / f"unrelated-{stream}.log"
+                sentinel.write_text("preserve original")
+                collision = self.logs / f"{label}.{stream}.log"
+                collision.symlink_to(sentinel)
+
+                with self.assertRaises(FileExistsError):
+                    execute(
+                        self.command("sh", "-c", "printf replacement"),
+                        self.logs,
+                        label,
+                    )
+
+                other_stream = "stderr" if stream == "stdout" else "stdout"
+                other_log = self.logs / f"{label}.{other_stream}.log"
+                self.assertTrue(collision.is_symlink())
+                self.assertEqual(sentinel.read_text(), "preserve original")
+                self.assertFalse(other_log.exists())
+
+    def test_reused_label_preserves_prior_logs(self) -> None:
+        first = execute(
+            self.command(
+                "sh",
+                "-c",
+                "printf first-output; printf first-error >&2",
+            ),
+            self.logs,
+            "collision",
+        )
+        stdout_before = Path(first.stdout).read_bytes()
+        stderr_before = Path(first.stderr).read_bytes()
+
+        with self.assertRaises(FileExistsError):
+            execute(
+                self.command(
+                    "sh",
+                    "-c",
+                    "printf replacement; printf replaced-error >&2",
+                ),
+                self.logs,
+                "collision",
+            )
+
+        self.assertEqual(Path(first.stdout).read_bytes(), stdout_before)
+        self.assertEqual(Path(first.stderr).read_bytes(), stderr_before)
 
     def test_signal_exit_retains_negative_signal_returncode(self) -> None:
         command = self.command("sh", "-c", "kill -TERM $$")

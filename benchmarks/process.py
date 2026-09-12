@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 
 @dataclass(frozen=True)
@@ -57,7 +57,7 @@ class CommandFailed(RuntimeError):
 
 
 def execute(command: Command, logs: Path, label: str) -> Measurement:
-    """Run a command and return its exit status and direct-child usage."""
+    """Run a command and return its status and descendant-aware wait4 usage."""
     _validate_label(label)
     logs.mkdir(parents=True, exist_ok=True)
     stdout_path = logs / f"{label}.stdout.log"
@@ -65,7 +65,8 @@ def execute(command: Command, logs: Path, label: str) -> Measurement:
     started_utc = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     started = time.monotonic()
 
-    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+    stdout, stderr = _open_logs_exclusively(stdout_path, stderr_path)
+    with stdout, stderr:
         try:
             process = subprocess.Popen(
                 command.argv,
@@ -131,6 +132,19 @@ def _validate_label(label: str) -> None:
         raise ValueError("log label must be a nonempty filename component")
 
 
+def _open_logs_exclusively(
+    stdout_path: Path, stderr_path: Path
+) -> tuple[BinaryIO, BinaryIO]:
+    stdout = stdout_path.open("xb")
+    try:
+        stderr = stderr_path.open("xb")
+    except BaseException:
+        stdout.close()
+        stdout_path.unlink()
+        raise
+    return stdout, stderr
+
+
 def _terminate_and_reap(process: subprocess.Popen[Any]) -> None:
     process_group = process.pid
     try:
@@ -192,4 +206,8 @@ def _resource_method() -> str:
         unit = "darwin-bytes"
     else:
         unit = "linux-kib-times-1024"
-    return f"wait4:rusage-direct-child;ru_maxrss={unit}"
+    return (
+        "wait4:rusage-waited-command-and-reaped-descendants;"
+        f"ru_maxrss={unit};"
+        "rss_scope=max-process-high-water-not-simultaneous-tree-peak"
+    )
