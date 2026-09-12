@@ -2,10 +2,10 @@
 
 import os
 import subprocess
-import tempfile
-import unittest
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from benchmarks.fixtures import FixtureError, prepare_fixture
 from benchmarks.recipes import get_recipe
@@ -35,11 +35,11 @@ def repository_at(path: Path) -> str:
     return git(path, "rev-parse", "HEAD")
 
 
-class FixtureTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory(prefix="fixture space ")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+class TestFixtures:
+    @pytest.fixture(autouse=True)
+    def _fixture_context(self, tmp_path: Path) -> None:
+        self.root = tmp_path / "fixture space"
+        self.root.mkdir()
         self.repository = self.root / "input source"
         self.commit = repository_at(self.repository)
         self.workspace = Workspace.create(self.root / "owned")
@@ -64,24 +64,20 @@ class FixtureTests(unittest.TestCase):
         prepared = prepare_fixture(
             self.recipe, self.repository, self.workspace.root, self.tools
         )
-        self.assertEqual((prepared.source / "value").read_text(), "first\n")
-        self.assertEqual(
-            (self.repository / "value").read_text(), "uncommitted\n"
-        )
-        self.assertEqual(git(self.repository, "rev-parse", "HEAD"), head)
-        self.assertEqual(
-            git(self.repository, "status", "--porcelain=v1"), before
-        )
-        self.assertEqual(prepared.commit, self.commit)
-        self.assertTrue(prepared.preparation_records)
-        self.assertEqual(
-            type(prepared).from_manifest(read_json(prepared.manifest_path)),
-            prepared,
+        assert (prepared.source / "value").read_text() == "first\n"
+        assert (self.repository / "value").read_text() == "uncommitted\n"
+        assert git(self.repository, "rev-parse", "HEAD") == head
+        assert git(self.repository, "status", "--porcelain=v1") == before
+        assert prepared.commit == self.commit
+        assert prepared.preparation_records
+        assert (
+            type(prepared).from_manifest(read_json(prepared.manifest_path))
+            == prepared
         )
 
     def test_missing_required_gitlink_fails_without_profile_reduction(self):
         recipe = replace(self.recipe, required_submodules=("missing",))
-        with self.assertRaisesRegex(FixtureError, "required gitlink"):
+        with pytest.raises(FixtureError, match="required gitlink"):
             prepare_fixture(
                 recipe, self.repository, self.workspace.root, self.tools
             )
@@ -105,13 +101,9 @@ class FixtureTests(unittest.TestCase):
         prepared = prepare_fixture(
             recipe, self.repository, self.workspace.root, self.tools
         )
-        self.assertEqual(
-            (prepared.source / "dependency/value").read_text(), "first\n"
-        )
-        self.assertEqual(prepared.submodules["dependency"], pin)
-        self.assertEqual(
-            (checkout / "value").read_text(), "dirty dependency\n"
-        )
+        assert (prepared.source / "dependency/value").read_text() == "first\n"
+        assert prepared.submodules["dependency"] == pin
+        assert (checkout / "value").read_text() == "dirty dependency\n"
 
     def test_revision_override_is_a_distinct_snapshot_identity(self):
         (self.repository / "value").write_text("second\n")
@@ -127,9 +119,9 @@ class FixtureTests(unittest.TestCase):
             self.tools,
             revision=head,
         )
-        self.assertNotEqual(original.identity, alternate.identity)
-        self.assertNotEqual(original.source, alternate.source)
-        self.assertEqual((alternate.source / "value").read_text(), "second\n")
+        assert original.identity != alternate.identity
+        assert original.source != alternate.source
+        assert (alternate.source / "value").read_text() == "second\n"
 
     def test_lock_is_copied_without_resolution(self):
         # A dependency-free package lets the actual locked fetch run offline.
@@ -158,14 +150,12 @@ class FixtureTests(unittest.TestCase):
         prepared = prepare_fixture(
             recipe, self.repository, self.workspace.root, tools
         )
-        self.assertEqual(
-            (prepared.source / "Cargo.lock").read_bytes(), lock.read_bytes()
-        )
-        self.assertIsNotNone(prepared.lock_sha256)
-        self.assertFalse((self.repository / "Cargo.lock").exists())
-        self.assertTrue(
-            any("--locked" in r.argv for r in prepared.preparation_records)
-        )
+        assert (
+            prepared.source / "Cargo.lock"
+        ).read_bytes() == lock.read_bytes()
+        assert prepared.lock_sha256 is not None
+        assert not (self.repository / "Cargo.lock").exists()
+        assert any("--locked" in r.argv for r in prepared.preparation_records)
 
     def test_only_declared_submodules_are_prepared(self):
         dependency = self.root / "dependency"
@@ -194,9 +184,5 @@ class FixtureTests(unittest.TestCase):
         prepared = prepare_fixture(
             recipe, self.repository, self.workspace.root, self.tools
         )
-        self.assertEqual(
-            (prepared.source / "dependency/value").read_text(), "first\n"
-        )
-        self.assertFalse(
-            (prepared.source / "dependency/unused-tests/.git").exists()
-        )
+        assert (prepared.source / "dependency/value").read_text() == "first\n"
+        assert not (prepared.source / "dependency/unused-tests/.git").exists()

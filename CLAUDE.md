@@ -40,11 +40,13 @@ generation. Manage the environment with `uv`; this is a utility-script project.
   `pyproject.toml` and `uv.lock` together.
 - Always run Python through `uv run python`, never bare `python` or `python3`.
 - Use Typer for utility command-line interfaces.
+- Use pytest for Python tests, with pytest fixtures and plain assertions.
 - Ruff handles linting and formatting; ty handles type checking. Their
   configurations live in `pyproject.toml`.
 
 ```bash
 uv sync
+uv run pytest
 uv run ruff check .
 uv run ruff format --check .
 uv run ty check

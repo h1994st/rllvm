@@ -13,6 +13,11 @@ dependencies = [
 [tool.uv]
 package = false
 
+[tool.pytest]
+testpaths = ["benchmarks/tests"]
+pythonpath = ["."]
+addopts = ["--strict-config", "--strict-markers", "--import-mode=importlib"]
+
 [tool.ruff]
 line-length = 79
 extend-exclude = ["docs", ".worktrees"]
@@ -25,6 +30,7 @@ exclude = ["docs", ".worktrees"]
 
 [dependency-groups]
 dev = [
+    "pytest>=9.1.1",
     "ruff>=0.16.7",
     "ty>=0.0.80",
 ]

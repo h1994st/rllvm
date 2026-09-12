@@ -2,11 +2,12 @@
 
 import shutil
 import tempfile
-import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from benchmarks.coverage import cmake_coverage
+import pytest
+
+from benchmarks.coverage import Coverage, cmake_coverage
 from benchmarks.recipes import Target
 from benchmarks.tests.validation_support import (
     FIXTURES,
@@ -14,6 +15,7 @@ from benchmarks.tests.validation_support import (
     run,
     tools_at,
 )
+from benchmarks.toolchains import Toolchain
 from benchmarks.validation import (
     Extraction,
     validate_autotools_configuration,
@@ -23,85 +25,93 @@ from benchmarks.validation import (
 )
 
 
-class ValidationTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory(prefix="validation space ")
-        cls.root = Path(cls.temporary.name)
-        cls.tools = tools_at(cls.root)
-        cls.env = environment(cls.root, cls.tools)
-        cls.source = cls.root / "source"
-        shutil.copytree(FIXTURES / "coverage", cls.source)
-        cls.target = Target(
-            "app",
-            "app",
-            "executable",
-            ("project_",),
-            (),
-            ("main",),
-            (("{build}/app",),),
-            "app",
-            ("*.c", "*.cpp"),
-        )
-        for mode in ("native", "wrapped"):
-            build = cls.root / mode
-            query = build / ".cmake/api/v1/query/codemodel-v2"
-            query.parent.mkdir(parents=True)
-            query.touch()
-            run(
-                (
-                    cls.tools.path("cmake"),
-                    "-S",
-                    cls.source,
-                    "-B",
-                    build,
-                    "-G",
-                    "Ninja",
-                    "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-                    "-DCMAKE_BUILD_TYPE=Debug",
-                    "-DCMAKE_C_COMPILER="
-                    + cls.tools.path(
-                        "rllvm-cc" if mode == "wrapped" else "clang"
-                    ),
-                    "-DCMAKE_CXX_COMPILER="
-                    + cls.tools.path(
-                        "rllvm-cxx" if mode == "wrapped" else "clang++"
-                    ),
-                ),
-                cls.root,
-                cls.env,
-                mode + "-configure",
-            )
-            run(
-                (cls.tools.path("cmake"), "--build", build, "-j2"),
-                cls.root,
-                cls.env,
-                mode + "-build",
-            )
-        cls.output = cls.root / "app.bc"
+@pytest.fixture
+def _validation_context(request, tmp_path: Path) -> None:
+    root = tmp_path / "validation space"
+    root.mkdir()
+    tools = tools_at(root)
+    env = environment(root, tools)
+    source = root / "source"
+    shutil.copytree(FIXTURES / "coverage", source)
+    target = Target(
+        "app",
+        "app",
+        "executable",
+        ("project_",),
+        (),
+        ("main",),
+        (("{build}/app",),),
+        "app",
+        ("*.c", "*.cpp"),
+    )
+    for mode in ("native", "wrapped"):
+        build = root / mode
+        query = build / ".cmake/api/v1/query/codemodel-v2"
+        query.parent.mkdir(parents=True)
+        query.touch()
         run(
             (
-                cls.tools.path("rllvm-get-bc"),
-                "--save-manifest",
-                "-o",
-                cls.output,
-                cls.root / "wrapped/app",
+                tools.path("cmake"),
+                "-S",
+                source,
+                "-B",
+                build,
+                "-G",
+                "Ninja",
+                "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+                "-DCMAKE_BUILD_TYPE=Debug",
+                "-DCMAKE_C_COMPILER="
+                + tools.path("rllvm-cc" if mode == "wrapped" else "clang"),
+                "-DCMAKE_CXX_COMPILER="
+                + tools.path("rllvm-cxx" if mode == "wrapped" else "clang++"),
             ),
-            cls.root,
-            cls.env,
-            "extract",
+            root,
+            env,
+            mode + "-configure",
         )
-        cls.extraction = Extraction(
-            cls.output,
-            cls.root / "wrapped/app.bc.manifest",
+        run(
+            (tools.path("cmake"), "--build", build, "-j2"),
+            root,
+            env,
+            mode + "-build",
         )
-        cls.coverage = cmake_coverage(
-            cls.target, cls.source, cls.root / "wrapped"
-        )
+    output = root / "app.bc"
+    run(
+        (
+            tools.path("rllvm-get-bc"),
+            "--save-manifest",
+            "-o",
+            output,
+            root / "wrapped/app",
+        ),
+        root,
+        env,
+        "extract",
+    )
+    instance = request.instance
+    instance.root = root
+    instance.tools = tools
+    instance.env = env
+    instance.source = source
+    instance.target = target
+    instance.output = output
+    instance.extraction = Extraction(
+        output,
+        root / "wrapped/app.bc.manifest",
+    )
+    instance.coverage = cmake_coverage(target, source, root / "wrapped")
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.temporary.cleanup()
+
+@pytest.mark.usefixtures("_validation_context")
+class TestValidation:
+    root: Path
+    tools: Toolchain
+    env: dict[str, str]
+    source: Path
+    target: Target
+    output: Path
+    extraction: Extraction
+    coverage: Coverage
 
     def validate(self, **kwargs):
         directory = Path(tempfile.mkdtemp(dir=self.root))
@@ -119,18 +129,15 @@ class ValidationTests(unittest.TestCase):
 
     def test_real_cpp_capture_and_direct_object_sources(self):
         result = self.validate()
-        self.assertTrue(result.valid, result.failures)
-        self.assertEqual(
-            {Path(s.path).name for s in self.coverage.required},
-            {"main.cpp", "first.c", "second.c"},
-        )
-        self.assertTrue(
-            any("unused" in x.reason for x in self.coverage.exclusions)
-        )
-        self.assertTrue(
-            any("shared" in x.reason for x in self.coverage.exclusions)
-        )
-        self.assertEqual(result.module_count, 3)
+        assert result.valid, result.failures
+        assert {Path(s.path).name for s in self.coverage.required} == {
+            "main.cpp",
+            "first.c",
+            "second.c",
+        }
+        assert any("unused" in x.reason for x in self.coverage.exclusions)
+        assert any("shared" in x.reason for x in self.coverage.exclusions)
+        assert result.module_count == 3
 
     def test_missing_recorded_module_rejects_present_extraction(self):
         module = Path(self.extraction.manifest.read_text().splitlines()[0])
@@ -138,8 +145,8 @@ class ValidationTests(unittest.TestCase):
         module.unlink()
         try:
             result = self.validate()
-            self.assertFalse(result.valid)
-            self.assertIn("missing recorded module", " ".join(result.failures))
+            assert not result.valid
+            assert "missing recorded module" in " ".join(result.failures)
         finally:
             module.write_bytes(saved)
 
@@ -165,8 +172,8 @@ class ValidationTests(unittest.TestCase):
         result = self.validate(
             extracted=replace(self.extraction, output=output)
         )
-        self.assertFalse(result.valid)
-        self.assertIn("project_second", " ".join(result.failures))
+        assert not result.valid
+        assert "project_second" in " ".join(result.failures)
 
     def test_missing_direct_source_rejected_even_with_all_symbols(self):
         manifest = self.root / "incomplete.manifest"
@@ -175,23 +182,23 @@ class ValidationTests(unittest.TestCase):
         result = self.validate(
             extracted=replace(self.extraction, manifest=manifest)
         )
-        self.assertFalse(result.valid)
-        self.assertIn("source", " ".join(result.failures))
+        assert not result.valid
+        assert "source" in " ".join(result.failures)
 
     def test_missing_target_and_changed_repeat_are_rejected(self):
         result = self.validate()
         absent = validate_extraction_set((self.target,), {})
-        self.assertFalse(absent.valid)
+        assert not absent.valid
         good = validate_extraction_set(
             (self.target,), {"app": result}, repeated={"app": result}
         )
-        self.assertTrue(good.valid, good.failures)
-        self.assertEqual(good.union_module_count, 3)
+        assert good.valid, good.failures
+        assert good.union_module_count == 3
         changed = replace(result, ir_definitions=())
         bad = validate_extraction_set(
             (self.target,), {"app": result}, repeated={"app": changed}
         )
-        self.assertFalse(bad.valid)
+        assert not bad.valid
 
     def test_behavior_and_incremental_probe_require_actual_output(self):
         native = run(
@@ -200,31 +207,27 @@ class ValidationTests(unittest.TestCase):
         wrapped = run(
             (self.root / "wrapped/app",), self.root, self.env, "behavior-w"
         )
-        self.assertTrue(validate_behavior((native,), (wrapped,)).valid)
-        self.assertFalse(
-            validate_behavior(
-                (native,),
-                (wrapped,),
-                expected_suffix="-rllvm-benchmark",
-            ).valid
-        )
+        assert validate_behavior((native,), (wrapped,)).valid
+        assert not validate_behavior(
+            (native,), (wrapped,), expected_suffix="-rllvm-benchmark"
+        ).valid
 
     def test_empty_or_nonnumeric_autotools_limit_rejects_success(self):
         for value in ("", "unlimited", "0", "-1"):
             directory = Path(tempfile.mkdtemp(dir=self.root))
             (directory / "libtool").write_text(f'max_cmd_len="{value}"\n')
-            self.assertFalse(validate_autotools_configuration(directory).valid)
+            assert not validate_autotools_configuration(directory).valid
         directory = Path(tempfile.mkdtemp(dir=self.root))
         (directory / "libtool").write_text('max_cmd_len="262144"\n')
-        self.assertTrue(validate_autotools_configuration(directory).valid)
+        assert validate_autotools_configuration(directory).valid
 
     def test_missing_independent_build_evidence_is_not_success(self):
         (self.root / "empty").mkdir(exist_ok=True)
         coverage = cmake_coverage(
             self.target, self.source, self.root / "empty"
         )
-        self.assertFalse(coverage.complete)
-        self.assertTrue(coverage.failures)
+        assert not coverage.complete
+        assert coverage.failures
 
     def test_real_repeated_extraction_has_identical_ir_and_modules(self):
         output = self.root / "repeated.bc"
@@ -249,13 +252,11 @@ class ValidationTests(unittest.TestCase):
         result = validate_extraction_set(
             (self.target,), {"app": original}, repeated={"app": repeated}
         )
-        self.assertTrue(result.valid, result.failures)
+        assert result.valid, result.failures
         changed = replace(repeated, ir_sha256="changed body with same symbols")
-        self.assertFalse(
-            validate_extraction_set(
-                (self.target,), {"app": original}, repeated={"app": changed}
-            ).valid
-        )
+        assert not validate_extraction_set(
+            (self.target,), {"app": original}, repeated={"app": changed}
+        ).valid
 
     def test_repeat_with_wrong_target_identity_is_rejected(self):
         original = self.validate()
@@ -263,10 +264,10 @@ class ValidationTests(unittest.TestCase):
         result = validate_extraction_set(
             (self.target,), {"app": original}, repeated={"app": wrong}
         )
-        self.assertFalse(result.valid, result)
+        assert not result.valid, result
 
 
-class CargoValidationTests(unittest.TestCase):
+class TestCargoValidation:
     def test_matched_cargo_capture_uses_raw_project_definitions(self):
         from benchmarks.coverage import cargo_coverage
 
@@ -337,10 +338,10 @@ class CargoValidationTests(unittest.TestCase):
                 native_records=(evidence[0],),
                 wrapped_records=(evidence[1],),
             )
-            self.assertTrue(configuration.valid, configuration.failures)
+            assert configuration.valid, configuration.failures
             native_log = Path(evidence[0].stderr)
             original_log = native_log.read_text()
-            self.assertIn("--crate-name build_script_build", original_log)
+            assert "--crate-name build_script_build" in original_log
             native_log.write_text(
                 original_log.replace("codegen-units=1", "codegen-units=16", 1)
             )
@@ -354,7 +355,7 @@ class CargoValidationTests(unittest.TestCase):
                 native_records=(evidence[0],),
                 wrapped_records=(evidence[1],),
             )
-            self.assertFalse(mismatched.valid)
+            assert not mismatched.valid
             native_log.write_text(original_log)
             output = root / "cargo.bc"
             wrapped = root / "wrapped" / target.artifact
@@ -380,8 +381,8 @@ class CargoValidationTests(unittest.TestCase):
             boundaries = {
                 item.category: item.count for item in coverage.exclusions
             }
-            self.assertEqual(boundaries["dependency-crates"], 0)
-            self.assertEqual(boundaries["host-build-tools"], 1)
+            assert boundaries["dependency-crates"] == 0
+            assert boundaries["host-build-tools"] == 1
             result = validate_target(
                 target,
                 root / "native" / target.artifact,
@@ -394,16 +395,14 @@ class CargoValidationTests(unittest.TestCase):
                 env=env,
                 coverage=coverage,
             )
-            self.assertTrue(result.valid, result.failures)
-            self.assertEqual(
-                result.native_definitions, result.wrapped_definitions
-            )
-            self.assertTrue(
-                any("coverage_project" in s for s in result.native_definitions)
+            assert result.valid, result.failures
+            assert result.native_definitions == result.wrapped_definitions
+            assert any(
+                "coverage_project" in s for s in result.native_definitions
             )
 
 
-class ConfigurationTests(unittest.TestCase):
+class TestConfiguration:
     def test_changed_compilation_flag_is_rejected(self):
         from benchmarks.process import Command
         from benchmarks.recipes import get_recipe
@@ -428,18 +427,16 @@ class ConfigurationTests(unittest.TestCase):
                 root / "native",
                 root / "wrapped",
             )
-            self.assertFalse(result.valid)
+            assert not result.valid
             matching = replace(wrapped, argv=(tools.path("rllvm-cc"), "-O2"))
-            self.assertTrue(
-                validate_configuration(
-                    recipe,
-                    (native,),
-                    (matching,),
-                    tools,
-                    root / "native",
-                    root / "wrapped",
-                ).valid
-            )
+            assert validate_configuration(
+                recipe,
+                (native,),
+                (matching,),
+                tools,
+                root / "native",
+                root / "wrapped",
+            ).valid
 
     def test_missing_compiler_selection_does_not_establish_parity(self):
         from benchmarks.process import Command
@@ -467,7 +464,7 @@ class ConfigurationTests(unittest.TestCase):
                 root / "native",
                 root / "wrapped",
             )
-            self.assertFalse(result.valid, result)
+            assert not result.valid, result
 
             # Keep C explicit while removing only the C++ selector; toolchain
             # discovery alone cannot establish the wrapper's C++ selection.
@@ -488,11 +485,11 @@ class ConfigurationTests(unittest.TestCase):
                 root / "native",
                 root / "wrapped",
             )
-            self.assertFalse(cxx_result.valid, cxx_result)
-            self.assertIn("clangxx_filepath", " ".join(cxx_result.failures))
+            assert not cxx_result.valid, cxx_result
+            assert "clangxx_filepath" in " ".join(cxx_result.failures)
 
 
-class BuildEvidenceTests(unittest.TestCase):
+class TestBuildEvidence:
     def test_verbose_make_follows_direct_objects_without_unused_archive(self):
         from benchmarks.coverage import autotools_coverage
 
@@ -540,12 +537,11 @@ class BuildEvidenceTests(unittest.TestCase):
                 ("*.c",),
             )
             coverage = autotools_coverage(target, source, build, (record,))
-            self.assertTrue(coverage.complete, coverage.failures)
-            self.assertEqual(
-                tuple(Path(s.path).name for s in coverage.required),
-                ("main.c",),
+            assert coverage.complete, coverage.failures
+            assert tuple(Path(s.path).name for s in coverage.required) == (
+                "main.c",
             )
-            self.assertEqual(coverage.exclusions[0].count, 1)
+            assert coverage.exclusions[0].count == 1
 
     def test_munit_behavior_compares_results_but_retains_timing_logs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -575,28 +571,21 @@ class BuildEvidenceTests(unittest.TestCase):
                 )
                 for i, output in enumerate(outputs)
             )
-            self.assertTrue(
-                validate_behavior(
-                    (observations[0],), (observations[1],), kind="munit"
-                ).valid
-            )
+            assert validate_behavior(
+                (observations[0],), (observations[1],), kind="munit"
+            ).valid
             Path(observations[1].stdout).write_text(
                 outputs[1].replace("[ OK ]", "[ FAIL ]")
             )
-            self.assertFalse(
-                validate_behavior(
-                    (observations[0],), (observations[1],), kind="munit"
-                ).valid
-            )
+            assert not validate_behavior(
+                (observations[0],), (observations[1],), kind="munit"
+            ).valid
 
 
-class SymbolReaderTests(unittest.TestCase):
+class TestSymbolReader:
     def test_gnu_unique_definitions_are_not_undefined_references(self):
         from benchmarks.validation import _defined_symbols
 
-        self.assertEqual(
-            _defined_symbols(
-                "archive(member.o):\nproject_unique u 0 8\nproject_call T 8 c\nexternal U 0 0\n"
-            ),
-            {"project_unique", "project_call"},
-        )
+        assert _defined_symbols(
+            "archive(member.o):\nproject_unique u 0 8\nproject_call T 8 c\nexternal U 0 0\n"
+        ) == {"project_unique", "project_call"}

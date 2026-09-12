@@ -2,6 +2,8 @@
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 
 from benchmarks.process import Command, checked
@@ -9,6 +11,34 @@ from benchmarks.toolchains import Toolchain, child_environment
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def llvm_tool_paths() -> dict[str, Path]:
+    llvm_config = shutil.which("llvm-config")
+    if llvm_config is None:
+        raise RuntimeError("llvm-config is required for benchmark tests")
+    bindir = Path(
+        subprocess.check_output((llvm_config, "--bindir"), text=True).strip()
+    )
+    names = (
+        "clang",
+        "clang++",
+        "llvm-ar",
+        "llvm-ranlib",
+        "llvm-link",
+        "llvm-dis",
+        "llvm-nm",
+        "llvm-objcopy",
+        "opt",
+    )
+    paths = {name: bindir / name for name in names}
+    paths["llvm-config"] = Path(llvm_config)
+    missing = tuple(name for name, path in paths.items() if not path.is_file())
+    if missing:
+        raise RuntimeError(
+            "llvm-config tool directory is incomplete: " + ", ".join(missing)
+        )
+    return paths
 
 
 def tools_at(root):
@@ -31,15 +61,15 @@ def tools_at(root):
         "rllvm-rustc",
         "rllvm-get-bc",
     )
-    return Toolchain.discover(
-        names,
-        root / "tool-logs",
-        paths={
+    paths = llvm_tool_paths()
+    paths.update(
+        {
             name: ROOT / "target/release" / name
             for name in names
             if name.startswith("rllvm-")
-        },
+        }
     )
+    return Toolchain.discover(names, root / "tool-logs", paths=paths)
 
 
 def environment(root, tools):

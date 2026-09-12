@@ -1,10 +1,10 @@
 import json
 import multiprocessing
 import os
-import unittest
 from multiprocessing.connection import Connection
 from pathlib import Path
-from tempfile import TemporaryDirectory
+
+import pytest
 
 from benchmarks.workspace import (
     RunLock,
@@ -21,13 +21,10 @@ def hold_lock(path: str, connection: Connection) -> None:
         connection.recv()
 
 
-class WorkspaceTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.temporary_directory = TemporaryDirectory()
-        self.root = Path(self.temporary_directory.name)
-
-    def tearDown(self) -> None:
-        self.temporary_directory.cleanup()
+class TestWorkspace:
+    @pytest.fixture(autouse=True)
+    def _workspace_root(self, tmp_path: Path) -> None:
+        self.root = tmp_path
 
     def test_reset_directory_replaces_an_owned_descendant(self) -> None:
         workspace = Workspace.create(self.root / "workspace")
@@ -37,9 +34,9 @@ class WorkspaceTests(unittest.TestCase):
 
         reset = workspace.reset_directory("build")
 
-        self.assertEqual(reset, build)
-        self.assertTrue(build.is_dir())
-        self.assertFalse((build / "stale").exists())
+        assert reset == build
+        assert build.is_dir()
+        assert not (build / "stale").exists()
 
     def test_reset_file_removes_an_owned_file(self) -> None:
         workspace = Workspace.create(self.root / "workspace")
@@ -49,9 +46,9 @@ class WorkspaceTests(unittest.TestCase):
 
         reset = workspace.reset_file(Path("records") / "run.json")
 
-        self.assertEqual(reset, output)
-        self.assertFalse(output.exists())
-        self.assertTrue(output.parent.is_dir())
+        assert reset == output
+        assert not output.exists()
+        assert output.parent.is_dir()
 
     def test_reset_rejects_unrelated_existing_directory(self) -> None:
         unrelated = self.root / "unrelated"
@@ -63,10 +60,10 @@ class WorkspaceTests(unittest.TestCase):
             unrelated / ".rllvm-workflow-workspace.json",
         )
 
-        with self.assertRaises(WorkspaceError):
+        with pytest.raises(WorkspaceError):
             workspace.reset_directory("build")
 
-        self.assertEqual(sentinel.read_text(), "original")
+        assert sentinel.read_text() == "original"
 
     def test_reset_rejects_marker_outside_workspace_root(self) -> None:
         unrelated = self.root / "unrelated"
@@ -86,10 +83,10 @@ class WorkspaceTests(unittest.TestCase):
         )
         workspace = Workspace(unrelated, external_marker)
 
-        with self.assertRaises(WorkspaceError):
+        with pytest.raises(WorkspaceError):
             workspace.reset_directory("build")
 
-        self.assertEqual(sentinel.read_text(), "original")
+        assert sentinel.read_text() == "original"
 
     def test_create_rejects_unrelated_existing_directory(self) -> None:
         unrelated = self.root / "unrelated"
@@ -97,10 +94,10 @@ class WorkspaceTests(unittest.TestCase):
         sentinel = unrelated / "keep"
         sentinel.write_text("original")
 
-        with self.assertRaises(WorkspaceError):
+        with pytest.raises(WorkspaceError):
             Workspace.create(unrelated)
 
-        self.assertEqual(sentinel.read_text(), "original")
+        assert sentinel.read_text() == "original"
 
     def test_create_rejects_symlink_without_touching_target(self) -> None:
         target = self.root / "outside"
@@ -110,11 +107,11 @@ class WorkspaceTests(unittest.TestCase):
         link = self.root / "workspace"
         link.symlink_to(target, target_is_directory=True)
 
-        with self.assertRaises(WorkspaceError):
+        with pytest.raises(WorkspaceError):
             Workspace.create(link)
 
-        self.assertEqual(sentinel.read_text(), "original")
-        self.assertTrue(link.is_symlink())
+        assert sentinel.read_text() == "original"
+        assert link.is_symlink()
 
     def test_reset_directory_unlinks_leaf_symlink_only(self) -> None:
         workspace = Workspace.create(self.root / "workspace")
@@ -127,9 +124,9 @@ class WorkspaceTests(unittest.TestCase):
 
         reset = workspace.reset_directory("build")
 
-        self.assertEqual(sentinel.read_text(), "original")
-        self.assertFalse(reset.is_symlink())
-        self.assertTrue(reset.is_dir())
+        assert sentinel.read_text() == "original"
+        assert not reset.is_symlink()
+        assert reset.is_dir()
 
     def test_reset_rejects_parent_traversal_and_preserves_data(self) -> None:
         workspace = Workspace.create(self.root / "workspace")
@@ -138,10 +135,10 @@ class WorkspaceTests(unittest.TestCase):
         sentinel = outside / "keep"
         sentinel.write_text("original")
 
-        with self.assertRaises(WorkspaceError):
+        with pytest.raises(WorkspaceError):
             workspace.reset_directory(Path("..") / "outside")
 
-        self.assertEqual(sentinel.read_text(), "original")
+        assert sentinel.read_text() == "original"
 
     def test_reset_requires_a_valid_ownership_marker(self) -> None:
         workspace = Workspace.create(self.root / "workspace")
@@ -151,10 +148,10 @@ class WorkspaceTests(unittest.TestCase):
         sentinel.write_text("original")
         workspace.marker.write_text("{}")
 
-        with self.assertRaises(WorkspaceError):
+        with pytest.raises(WorkspaceError):
             workspace.reset_directory("build")
 
-        self.assertEqual(sentinel.read_text(), "original")
+        assert sentinel.read_text() == "original"
 
     def test_allocated_bytes_counts_hard_linked_inode_once(self) -> None:
         tree = self.root / "tree"
@@ -164,7 +161,7 @@ class WorkspaceTests(unittest.TestCase):
         os.link(data, tree / "hard-link")
         expected = tree.stat().st_blocks * 512 + data.stat().st_blocks * 512
 
-        self.assertEqual(allocated_bytes(tree), expected)
+        assert allocated_bytes(tree) == expected
 
     def test_contended_lock_does_not_truncate_holder_state(self) -> None:
         lock_path = self.root / "run.lock"
@@ -176,21 +173,21 @@ class WorkspaceTests(unittest.TestCase):
         )
         process.start()
         try:
-            self.assertEqual(parent_connection.recv(), "locked")
+            assert parent_connection.recv() == "locked"
             holder_state = lock_path.read_bytes()
 
-            with self.assertRaises(RunLockError):
+            with pytest.raises(RunLockError):
                 with RunLock(lock_path):
                     pass
 
-            self.assertEqual(lock_path.read_bytes(), holder_state)
+            assert lock_path.read_bytes() == holder_state
         finally:
             parent_connection.send("release")
             process.join(5)
             if process.is_alive():
                 process.kill()
                 process.join()
-        self.assertEqual(process.exitcode, 0)
+        assert process.exitcode == 0
 
     def test_lock_file_inode_is_stable_across_releases(self) -> None:
         lock_path = self.root / "run.lock"
@@ -200,8 +197,4 @@ class WorkspaceTests(unittest.TestCase):
         with RunLock(lock_path):
             second_inode = lock_path.stat().st_ino
 
-        self.assertEqual(second_inode, first_inode)
-
-
-if __name__ == "__main__":
-    unittest.main()
+        assert second_inode == first_inode

@@ -2,24 +2,25 @@
 
 import os
 import subprocess
-import tempfile
-import unittest
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from benchmarks.process import checked
 from benchmarks.recipes import get_recipe
+from benchmarks.tests.validation_support import llvm_tool_paths
 from benchmarks.toolchains import Toolchain, ToolchainError, child_environment
 
 
-class ToolchainTests(unittest.TestCase):
-    def test_unsupported_host_and_missing_tool_fail_actionably(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with self.assertRaisesRegex(ToolchainError, "macOS and Linux"):
-                Toolchain.discover((), root, host="win32")
-            with self.assertRaisesRegex(ToolchainError, "not found"):
-                Toolchain.discover(("absent-rllvm-tool-144",), root)
+class TestToolchain:
+    def test_unsupported_host_and_missing_tool_fail_actionably(
+        self, tmp_path: Path
+    ):
+        with pytest.raises(ToolchainError, match="macOS and Linux"):
+            Toolchain.discover((), tmp_path, host="win32")
+        with pytest.raises(ToolchainError, match="not found"):
+            Toolchain.discover(("absent-rllvm-tool-144",), tmp_path)
 
     def test_allowlist_drops_credentials_and_ambient_compiler_settings(self):
         env = child_environment(
@@ -36,49 +37,49 @@ class ToolchainTests(unittest.TestCase):
         command = ("/bin/sh", "-c", "/usr/bin/env")
         output = subprocess.check_output(command, env=env, text=True)
         for forbidden in ("AWS_SECRET", "CFLAGS=", "RUSTC_WRAPPER=", "CC="):
-            self.assertNotIn(forbidden, output)
+            assert forbidden not in output
 
-    def test_rustup_and_cxx_symlinks_keep_driver_dispatch(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            tools = Toolchain.discover(("clang++", "rustc"), root / "logs")
-            source = root / "main.cpp"
-            source.write_text(
-                "#include <iostream>\nint main(){std::cout<<42;}"
+    def test_rustup_and_cxx_symlinks_keep_driver_dispatch(
+        self, tmp_path: Path
+    ):
+        tools = Toolchain.discover(
+            ("clang++", "rustc"),
+            tmp_path / "logs",
+            paths=llvm_tool_paths(),
+        )
+        source = tmp_path / "main.cpp"
+        source.write_text("#include <iostream>\nint main(){std::cout<<42;}")
+        subprocess.run(
+            (tools.path("clang++"), str(source), "-o", str(tmp_path / "app")),
+            check=True,
+            capture_output=True,
+        )
+        assert subprocess.check_output((tmp_path / "app",)) == b"42"
+        assert "LLVM version:" in tools.tools["rustc"].version
+
+    def test_incompatible_llvm_reader_is_rejected(self, tmp_path: Path):
+        for name, version in (
+            ("rustc", "rustc 1.98\nhost: test\nLLVM version: 22.1.8"),
+            ("llvm-dis", "LLVM version 21.1.0"),
+        ):
+            script = tmp_path / name
+            script.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
+            script.chmod(0o755)
+        with pytest.raises(ToolchainError, match="LLVM.*22.*21"):
+            Toolchain.discover(
+                ("rustc", "llvm-dis"),
+                tmp_path / "logs",
+                paths={
+                    name: tmp_path / name for name in ("rustc", "llvm-dis")
+                },
             )
-            subprocess.run(
-                (tools.path("clang++"), str(source), "-o", str(root / "app")),
-                check=True,
-                capture_output=True,
-            )
-            self.assertEqual(subprocess.check_output((root / "app",)), b"42")
-            self.assertIn("LLVM version:", tools.tools["rustc"].version)
-
-    def test_incompatible_llvm_reader_is_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            for name, version in (
-                ("rustc", "rustc 1.98\nhost: test\nLLVM version: 22.1.8"),
-                ("llvm-dis", "LLVM version 21.1.0"),
-            ):
-                script = root / name
-                script.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
-                script.chmod(0o755)
-            with self.assertRaisesRegex(ToolchainError, "LLVM.*22.*21"):
-                Toolchain.discover(
-                    ("rustc", "llvm-dis"),
-                    root / "logs",
-                    paths={
-                        name: root / name for name in ("rustc", "llvm-dis")
-                    },
-                )
 
 
-class RecipeTests(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="recipe space ")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+class TestRecipe:
+    @pytest.fixture(autouse=True)
+    def _recipe_context(self, tmp_path: Path) -> None:
+        self.root = tmp_path / "recipe space"
+        self.root.mkdir()
         self.source = self.root / "source space"
         self.source.mkdir()
         self.tools = Toolchain.discover(
@@ -93,6 +94,7 @@ class RecipeTests(unittest.TestCase):
                 "rustc",
             ),
             self.root / "tool logs",
+            paths=llvm_tool_paths(),
         )
         self.env = child_environment(os.environ)
         self.env["RLLVM_CONFIG"] = str(self.root / "rllvm.toml")
@@ -122,10 +124,10 @@ class RecipeTests(unittest.TestCase):
             )
         ):
             checked(command, self.root / "logs", str(i))
-        self.assertEqual(subprocess.check_output((build / "main",)), b"42")
+        assert subprocess.check_output((build / "main",)) == b"42"
         cache = (build / "CMakeCache.txt").read_text()
-        self.assertIn(f"CMAKE_AR:FILEPATH={self.tools.path('llvm-ar')}", cache)
-        self.assertIn("CMAKE_BUILD_TYPE:STRING=RelWithDebInfo", cache)
+        assert f"CMAKE_AR:FILEPATH={self.tools.path('llvm-ar')}" in cache
+        assert "CMAKE_BUILD_TYPE:STRING=RelWithDebInfo" in cache
 
     def test_cargo_target_and_host_work_have_explicit_matched_codegen_units(
         self,
@@ -211,16 +213,14 @@ fn main() {
                 for line in Path(result.stderr).read_text().splitlines()
                 if "Running `" in line and "--crate-name" in line
             ]
-            self.assertGreaterEqual(len(invocations), 4)
-            self.assertTrue(all("codegen-units=1" in x for x in invocations))
-            self.assertTrue(
-                any(
-                    "--crate-name build_script_build" in x for x in invocations
-                )
+            assert len(invocations) >= 4
+            assert all("codegen-units=1" in x for x in invocations)
+            assert any(
+                "--crate-name build_script_build" in x for x in invocations
             )
-            self.assertEqual(
-                subprocess.check_output((build / "release/examples/client",)),
-                b"42\n",
+            assert (
+                subprocess.check_output((build / "release/examples/client",))
+                == b"42\n"
             )
 
     def test_semantic_edit_changes_compiled_version_and_restores_exact_bytes(
@@ -251,14 +251,14 @@ fn main() {
             check=True,
             capture_output=True,
         )
-        self.assertEqual(
-            subprocess.check_output((self.root / "app",)),
-            b"1.0-rllvm-benchmark\n",
+        assert (
+            subprocess.check_output((self.root / "app",))
+            == b"1.0-rllvm-benchmark\n"
         )
-        self.assertNotEqual(edit.before_sha256, edit.after_sha256)
-        self.assertIn("+", edit.patch)
+        assert edit.before_sha256 != edit.after_sha256
+        assert "+" in edit.patch
         recipe.edit.restore(self.source, edit)
-        self.assertEqual(path.read_text(), original)
+        assert path.read_text() == original
 
     def test_autotools_commands_preserve_compiler_paths_with_spaces(self):
         tools_directory = self.root / "compiler tools"
@@ -306,7 +306,7 @@ fn main() {
             (self.tools.path("llvm-ar"), "t", build / "lib/libvalue.a"),
             text=True,
         )
-        self.assertEqual(members.strip(), "value.o")
+        assert members.strip() == "value.o"
 
     def test_cmake_evidence_contains_direct_sources_and_link_dependencies(
         self,
@@ -331,9 +331,9 @@ fn main() {
 
         main = next(Path(evidence["codemodel"]).glob("target-main-*.json"))
         target = json.loads(main.read_text())
-        self.assertEqual([s["path"] for s in target["sources"]], ["main.c"])
-        self.assertTrue(target["dependencies"])
-        self.assertTrue(Path(evidence["compile_commands"]).is_file())
+        assert [s["path"] for s in target["sources"]] == ["main.c"]
+        assert target["dependencies"]
+        assert Path(evidence["compile_commands"]).is_file()
 
     def test_dependency_identity_requires_library_and_version_evidence(self):
         from benchmarks.toolchains import resolve_dependencies
@@ -362,10 +362,10 @@ fn main() {
         (dependency,) = resolve_dependencies(
             self.tools, ("libev",), {"libev": prefix}, self.root / "dep logs"
         )
-        self.assertEqual(dependency.version, "4.33")
-        self.assertIn(str(library.resolve()), dependency.libraries)
+        assert dependency.version == "4.33"
+        assert str(library.resolve()) in dependency.libraries
         library.unlink()
-        with self.assertRaisesRegex(ToolchainError, "missing libev library"):
+        with pytest.raises(ToolchainError, match="missing libev library"):
             resolve_dependencies(
                 self.tools,
                 ("libev",),
@@ -373,8 +373,8 @@ fn main() {
                 self.root / "dep retry logs",
             )
 
-    @unittest.skipUnless(
-        os.uname().sysname == "Darwin", "Darwin install names"
+    @pytest.mark.skipif(
+        os.uname().sysname != "Darwin", reason="Darwin install names"
     )
     def test_version_probe_loads_uninstalled_autotools_library(self):
         recipe = get_recipe("nghttp2-c-autotools")
@@ -419,4 +419,4 @@ fn main() {
             )
         ):
             result = checked(command, self.root / "logs", f"probe-{i}")
-        self.assertEqual(Path(result.stdout).read_text(), "1.0\n")
+        assert Path(result.stdout).read_text() == "1.0\n"
