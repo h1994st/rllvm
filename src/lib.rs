@@ -42,6 +42,9 @@ pub mod compiler_wrapper;
 /// Bitcode file analysis via `llvm-dis`.
 pub mod bitcode_info;
 
+/// Versioned module catalogs shared by capture inventory and materialization.
+pub mod catalog;
+
 /// Error types used throughout the crate.
 pub mod error;
 
