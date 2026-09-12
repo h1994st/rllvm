@@ -236,8 +236,10 @@ def run(
         provenance = _load_provenance(rllvm_provenance)
         workspace = Workspace.create(output)
         runs = []
+        unreached = []
         valid = True
-        for fixture in prepared:
+        interrupted = False
+        for index, fixture in enumerate(prepared):
             run_root = workspace.root / fixture.recipe.profile_id
             result = run_profile(
                 fixture,
@@ -262,13 +264,26 @@ def run(
                 }
             )
             valid &= result.valid or dry_run and result.status == "planned"
+            if result.status == "interrupted":
+                interrupted = True
+                unreached = [
+                    {
+                        "profile": remaining.recipe.profile_id,
+                        "fixture_identity": remaining.identity,
+                        "reason": "not reached: prior profile interrupted",
+                    }
+                    for remaining in prepared[index + 1 :]
+                ]
+                break
         group = workspace.root / "run-group.json"
         write_json(
             group,
             {
                 "schema_version": 1,
                 "kind": "workflow-run-group",
-                "status": "planned"
+                "status": "interrupted"
+                if interrupted
+                else "planned"
                 if dry_run and valid
                 else "valid"
                 if valid
@@ -281,9 +296,16 @@ def run(
                     "dry_run": dry_run,
                 },
                 "runs": runs,
+                "unreached": unreached,
             },
         )
         typer.echo(str(group))
+        if interrupted:
+            typer.echo(
+                f"benchmark interrupted; retained records: {group}",
+                err=True,
+            )
+            raise typer.Exit(130)
         if not valid:
             typer.echo(
                 f"benchmark result is invalid; retained records: {group}",

@@ -1,17 +1,21 @@
 import json
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 from typer.testing import CliRunner
 
 from benchmarks.cli import app
 from benchmarks.fixtures import PreparedFixture
-from benchmarks.recipes import Edit, Recipe
+from benchmarks.recipes import Edit, Recipe, get_recipe
 from benchmarks.records import read_json, write_json
+from benchmarks.runner import RunOptions, RunResult
 from benchmarks.tests.validation_support import commit_fixture, tools_at
 from benchmarks.toolchains import Toolchain
+from benchmarks.workspace import Workspace
 
 runner = CliRunner()
 
@@ -268,3 +272,90 @@ def test_cli_smoke_and_offline_report_use_saved_records(
     )
     assert report.exit_code == 0, report.stderr
     assert before == (second / "report.md").read_bytes()
+
+
+def test_run_stops_group_after_interrupted_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tools = Toolchain(sys.platform, {}, {})
+    manifests = []
+    for profile in ("first-profile", "second-profile"):
+        recipe = replace(
+            get_recipe("nghttp2-c-cmake"),
+            profile_id=profile,
+            required_submodules=(),
+        )
+        manifest = tmp_path / f"{profile}.json"
+        fixture = PreparedFixture(
+            profile,
+            tmp_path / f"{profile}-source",
+            recipe,
+            "fixture",
+            "fixture",
+            {},
+            None,
+            tools,
+            (),
+            manifest,
+        )
+        write_json(manifest, fixture.manifest())
+        manifests.append(manifest)
+
+    started = []
+
+    def interrupted_run(
+        prepared: PreparedFixture,
+        toolchain: Toolchain,
+        options: RunOptions,
+    ) -> RunResult:
+        del toolchain
+        started.append(prepared.recipe.profile_id)
+        workspace = Workspace.create(options.root)
+        write_json(
+            workspace.root / "run.json",
+            {
+                "schema_version": 1,
+                "kind": "workflow-run",
+                "status": "interrupted",
+            },
+        )
+        return RunResult(
+            workspace.root,
+            "interrupted",
+            1,
+            1,
+            ("KeyboardInterrupt",),
+        )
+
+    monkeypatch.setattr("benchmarks.cli.run_profile", interrupted_run)
+    output = tmp_path / "group output"
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "--manifest",
+            str(manifests[0]),
+            "--manifest",
+            str(manifests[1]),
+            "--smoke",
+            "--output",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 130
+    assert started == ["first-profile"]
+    group = read_json(output / "run-group.json")
+    assert group["status"] == "interrupted"
+    runs = cast(list[dict[str, Any]], group["runs"])
+    assert [item["profile"] for item in runs] == ["first-profile"]
+    assert Path(runs[0]["manifest"]).is_file()
+    unreached = cast(list[dict[str, Any]], group["unreached"])
+    assert unreached == [
+        {
+            "profile": "second-profile",
+            "fixture_identity": "second-profile",
+            "reason": "not reached: prior profile interrupted",
+        }
+    ]
+    assert not (output / "second-profile").exists()
+    assert "interrupted" in result.stderr

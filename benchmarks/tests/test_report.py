@@ -129,6 +129,7 @@ def _run(
                 "measurement": None
                 if planned
                 else {
+                    "returncode": 0,
                     "wall_seconds": sample["phase_totals"][
                         "timed:clean-build"
                     ]["wall_seconds"],
@@ -136,6 +137,7 @@ def _run(
                     "system_cpu_seconds": 0.0,
                     "max_process_rss_bytes": 1024,
                     "resource_method": "fixture",
+                    "failure": None,
                 },
             },
         )
@@ -548,3 +550,56 @@ def test_report_rejects_incomplete_or_failed_diagnostics(
     )
     with pytest.raises(ReportError, match="diagnostics evidence"):
         generate_report((manifest,), tmp_path / "report")
+
+
+@pytest.mark.parametrize(
+    "contradiction", ["missing", "failed", "spawn-failed"]
+)
+def test_report_rejects_unsuccessful_command_for_valid_sample(
+    tmp_path: Path, contradiction: str
+) -> None:
+    manifest = _run(tmp_path / "run")
+    commands = read_records(manifest.parent / "commands.jsonl")
+    measurement = commands[0]["measurement"]
+    assert isinstance(measurement, dict)
+    if contradiction == "missing":
+        commands[0]["measurement"] = None
+    elif contradiction == "failed":
+        measurement["returncode"] = 1
+    else:
+        measurement.update(
+            returncode=None,
+            failure={
+                "kind": "spawn-failed",
+                "exception_type": "FileNotFoundError",
+                "message": "compiler missing",
+                "errno": 2,
+            },
+        )
+    (manifest.parent / "commands.jsonl").write_text(
+        "".join(json.dumps(command) + "\n" for command in commands)
+    )
+    with pytest.raises(ReportError, match="valid sample.*command evidence"):
+        generate_report((manifest,), tmp_path / "report")
+
+
+def test_report_keeps_failed_command_for_invalid_sample_readable(
+    tmp_path: Path,
+) -> None:
+    manifest = _run(tmp_path / "run")
+    commands = read_records(manifest.parent / "commands.jsonl")
+    measurement = commands[-1]["measurement"]
+    assert isinstance(measurement, dict)
+    measurement["returncode"] = 1
+    (manifest.parent / "commands.jsonl").write_text(
+        "".join(json.dumps(command) + "\n" for command in commands)
+    )
+    report = generate_report((manifest,), tmp_path / "report")
+    structured = json.loads(report.json.read_text())
+    invalid = next(
+        sample
+        for sample in structured["samples"]
+        if sample["sample_id"] == "invalid"
+    )
+    assert not invalid["valid"]
+    assert invalid["timed_wall_seconds"] == 0.01

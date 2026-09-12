@@ -423,6 +423,19 @@ def _validate_evidence(
                         f"mismatched command reference {sequence} for "
                         f"{sample['id']}: {path}"
                     )
+            if _computed_sample_valid(sample):
+                measurement = command.get("measurement")
+                if (
+                    not isinstance(measurement, dict)
+                    or type(measurement.get("returncode")) is not int
+                    or measurement["returncode"] != 0
+                    or "failure" not in measurement
+                    or measurement["failure"] is not None
+                ):
+                    raise ReportError(
+                        f"valid sample {sample['id']} has unsuccessful command "
+                        f"evidence {sequence}: {path}"
+                    )
 
     validations = {
         (record.get("sample"), record.get("gate")): record
