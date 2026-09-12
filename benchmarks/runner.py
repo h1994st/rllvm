@@ -40,6 +40,10 @@ from benchmarks.validation import (
     validate_extraction_set,
     validate_target,
 )
+from benchmarks.workflow_contract import (
+    DIAGNOSTIC_PHASES,
+    required_sample_gates,
+)
 from benchmarks.workspace import RunLock, Workspace, allocated_bytes
 
 ARMS = (
@@ -792,7 +796,7 @@ class _Run:
                 "operations",
                 operation="diagnostic-replays",
                 root=str(directory),
-                states=["cold", "primed", "unchanged", "edited"],
+                states=list(DIAGNOSTIC_PHASES),
                 planned=True,
             )
             return Check(("dry run: diagnostic evidence unavailable",))
@@ -826,7 +830,7 @@ class _Run:
         prior: frozenset[str] = frozenset()
         failures = []
         try:
-            for phase in ("cold", "primed", "unchanged", "edited"):
+            for phase in DIAGNOSTIC_PHASES:
                 self.state = phase
                 start_index = len(self.commands)
                 phase_failures = []
@@ -975,22 +979,12 @@ class _Run:
         ]
         sample["command_sequences"] = [r["sequence"] for r in records]
         sample["phase_totals"] = _totals(records)
-        required = {
-            "commands",
-            "configuration",
-            "behavior",
-            "api",
-            "diagnostics",
-        }
-        required |= {"coverage:" + t.id for t in self.targets}
-        if sample["arm"] != "native":
-            required |= {"extraction-set"}
-            required |= {
-                f"repeat-set:{i}"
-                for i in range(self.options.extraction_repeats)
-            }
-            if sample["state"] == "edited":
-                required.add("edited_ir")
+        required = required_sample_gates(
+            sample["arm"],
+            sample["state"],
+            (target.id for target in self.targets),
+            self.options.extraction_repeats,
+        )
         missing = required - sample["gates"].keys()
         sample["missing_gates"] = sorted(missing)
         sample["valid"] = bool(

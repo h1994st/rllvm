@@ -6,6 +6,10 @@ import pytest
 
 from benchmarks.records import append_record, read_records, write_json
 from benchmarks.report import ReportError, generate_report
+from benchmarks.workflow_contract import (
+    DIAGNOSTIC_PHASES,
+    required_sample_gates,
+)
 
 
 def _run(
@@ -94,17 +98,22 @@ def _run(
     invalid["errors"] = ["validation failed"]
     samples.append(invalid)
     for sequence, sample in enumerate(samples, start=100):
+        required = required_sample_gates(
+            sample["arm"], sample["state"], targets, 2
+        )
+        gate_names = {"commands", "diagnostics"} if planned else required
         sample["command_sequences"] = [sequence]
         sample["gates"] = {
-            "commands": {"valid": True, "failures": [], "evidence": []},
-            "diagnostics": {
-                "valid": not planned,
+            name: {
+                "valid": not (planned and name == "diagnostics"),
                 "failures": ["dry run: diagnostic evidence unavailable"]
-                if planned
+                if planned and name == "diagnostics"
                 else [],
                 "evidence": [],
-            },
+            }
+            for name in gate_names
         }
+        sample["missing_gates"] = sorted(required - gate_names)
         append_record(root / "samples.jsonl", sample)
         append_record(
             root / "commands.jsonl",
@@ -150,17 +159,26 @@ def _run(
                     **evidence,
                 },
             )
-    for repetition in range(3):
-        append_record(
-            root / "diagnostics.jsonl",
-            {
-                "schema_version": 1,
-                "repetition": repetition,
-                "phase": "cold",
-                "valid": False,
-                "failures": ["compiler count unavailable"],
-            },
-        )
+    if not planned:
+        for repetition in range(3):
+            for phase in DIAGNOSTIC_PHASES:
+                append_record(
+                    root / "diagnostics.jsonl",
+                    {
+                        "schema_version": 1,
+                        "repetition": repetition,
+                        "phase": phase,
+                        "valid": True,
+                        "failures": [],
+                        "summary": {
+                            "schema_version": 1,
+                            "failures": [],
+                            "unobserved": {
+                                "rustc": "compiler count unavailable"
+                            },
+                        },
+                    },
+                )
     recipe = {
         "profile_id": "fixture-cmake",
         "project": "fixture",
@@ -403,12 +421,15 @@ def test_report_accepts_missing_streams_for_early_failed_run(
     manifest = _run(tmp_path / "run")
     samples = read_records(manifest.parent / "samples.jsonl")
     for sample in samples:
+        arm, state = sample["arm"], sample["state"]
+        assert isinstance(arm, str) and isinstance(state, str)
+        required = required_sample_gates(arm, state, ("static",), 2)
         sample.update(
             valid=False,
             complete=False,
             gates={},
             errors=["not reached: preflight failed"],
-            missing_gates=[],
+            missing_gates=sorted(required),
             command_sequences=[],
             phase_totals={},
             disk={},
@@ -473,3 +494,57 @@ def test_report_refuses_dangling_artifact_symlink(tmp_path: Path) -> None:
         generate_report((manifest,), output)
     assert artifact.is_symlink()
     assert not external.exists()
+
+
+def test_report_rejects_deleted_required_gate(tmp_path: Path) -> None:
+    manifest = _run(tmp_path / "run")
+    samples = read_records(manifest.parent / "samples.jsonl")
+    assert samples[0]["valid"] and samples[0]["complete"]
+    assert samples[0]["missing_gates"] == []
+    gates = samples[0]["gates"]
+    assert isinstance(gates, dict)
+    gates.pop("configuration")
+    (manifest.parent / "samples.jsonl").write_text(
+        "".join(json.dumps(sample) + "\n" for sample in samples)
+    )
+    with pytest.raises(
+        ReportError, match="missing required gate.*configuration"
+    ):
+        generate_report((manifest,), tmp_path / "report")
+
+
+@pytest.mark.parametrize(
+    "contradiction", ["missing-phases", "failed-phase", "failed-summary"]
+)
+def test_report_rejects_incomplete_or_failed_diagnostics(
+    tmp_path: Path, contradiction: str
+) -> None:
+    manifest = _run(tmp_path / "run")
+    diagnostics = read_records(manifest.parent / "diagnostics.jsonl")
+    if contradiction == "missing-phases":
+        diagnostics = [
+            record
+            for record in diagnostics
+            if record["repetition"] != 0 or record["phase"] == "cold"
+        ]
+    elif contradiction == "failed-phase":
+        record = next(
+            item
+            for item in diagnostics
+            if item["repetition"] == 0 and item["phase"] == "primed"
+        )
+        record.update(valid=False, failures=["saved diagnostic invalid"])
+    else:
+        record = next(
+            item
+            for item in diagnostics
+            if item["repetition"] == 0 and item["phase"] == "primed"
+        )
+        summary = record["summary"]
+        assert isinstance(summary, dict)
+        summary["failures"] = ["provider failure"]
+    (manifest.parent / "diagnostics.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in diagnostics)
+    )
+    with pytest.raises(ReportError, match="diagnostics evidence"):
+        generate_report((manifest,), tmp_path / "report")

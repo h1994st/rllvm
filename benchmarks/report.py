@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from benchmarks.records import RecordError, read_json, read_records
+from benchmarks.workflow_contract import (
+    DIAGNOSTIC_PHASES,
+    required_sample_gates,
+)
 
 
 class ReportError(ValueError):
@@ -204,6 +208,7 @@ def _load_run(path: Path, token: int) -> _SavedRun:
     seen: set[str] = set()
     for sample in samples:
         _validate_sample(sample, samples_path)
+        _validate_required_gates(sample, fixture, manifest, samples_path)
         identity = sample["id"]
         assert isinstance(identity, str)
         if identity in seen:
@@ -321,6 +326,49 @@ def _computed_sample_valid(sample: dict[str, Any]) -> bool:
     )
 
 
+def _validate_required_gates(
+    sample: dict[str, Any],
+    fixture: dict[str, Any],
+    manifest: dict[str, Any],
+    path: Path,
+) -> None:
+    targets = fixture.get("targets")
+    if not isinstance(targets, list):
+        raise ReportError(f"workflow run has malformed target set: {path}")
+    target_ids = []
+    for target in targets:
+        if not isinstance(target, dict) or not isinstance(
+            target.get("id"), str
+        ):
+            raise ReportError(f"workflow run has malformed target: {path}")
+        target_ids.append(target["id"])
+    if len(target_ids) != len(set(target_ids)):
+        raise ReportError(f"workflow run has duplicate target ids: {path}")
+    options = _mapping(manifest.get("options"), "options", path)
+    repeats = options.get("extraction_repeats")
+    if type(repeats) is not int or repeats < 1:
+        raise ReportError(
+            f"workflow run has invalid extraction repeats: {path}"
+        )
+
+    required = required_sample_gates(
+        sample["arm"], sample["state"], target_ids, repeats
+    )
+    missing = required - sample["gates"].keys()
+    declared = set(sample["missing_gates"])
+    if missing != declared:
+        undeclared = sorted(missing - declared)
+        if undeclared:
+            raise ReportError(
+                f"sample {sample['id']} is missing required gate "
+                f"{undeclared[0]} without declaring it: {path}"
+            )
+        raise ReportError(
+            f"sample {sample['id']} declares present required gates missing: "
+            f"{', '.join(sorted(declared - missing))}: {path}"
+        )
+
+
 def _validate_evidence(
     samples: tuple[dict[str, Any], ...],
     streams: dict[str, tuple[dict[str, Any], ...]],
@@ -393,17 +441,57 @@ def _validate_evidence(
                     f"inconsistent validation evidence for "
                     f"{sample['id']}/{gate}: {path}"
                 )
-    diagnostic_repetitions = {
-        record.get("repetition") for record in streams["diagnostics"]
-    }
-    for sample in samples:
+    diagnostics: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for record in streams["diagnostics"]:
+        repetition = record.get("repetition")
+        phase = record.get("phase")
+        valid = record.get("valid")
+        failures = record.get("failures")
         if (
-            sample["gates"].get("diagnostics", {}).get("valid") is True
-            and sample["repetition"] not in diagnostic_repetitions
+            type(repetition) is not int
+            or not isinstance(phase, str)
+            or not isinstance(valid, bool)
+            or not isinstance(failures, list)
+        ):
+            raise ReportError(f"malformed diagnostics evidence: {path}")
+        if valid != (not failures):
+            raise ReportError(
+                f"inconsistent diagnostics evidence for repetition "
+                f"{repetition}/{phase}: {path}"
+            )
+        diagnostics[repetition].append(record)
+
+    diagnostic_gates: dict[int, set[bool]] = defaultdict(set)
+    for sample in samples:
+        gate = sample["gates"].get("diagnostics")
+        if gate is not None:
+            diagnostic_gates[sample["repetition"]].add(gate["valid"])
+    for repetition, values in diagnostic_gates.items():
+        if len(values) != 1:
+            raise ReportError(
+                f"inconsistent sample diagnostics evidence for repetition "
+                f"{repetition}: {path}"
+            )
+        if values != {True}:
+            continue
+        records = diagnostics.get(repetition, [])
+        phases = [record["phase"] for record in records]
+        if len(phases) != len(DIAGNOSTIC_PHASES) or set(phases) != set(
+            DIAGNOSTIC_PHASES
         ):
             raise ReportError(
-                "missing diagnostics evidence for repetition "
-                f"{sample['repetition']}: {path}"
+                f"incomplete diagnostics evidence for repetition {repetition}: "
+                f"expected {sorted(DIAGNOSTIC_PHASES)}, found {sorted(phases)}"
+            )
+        if not all(
+            record["valid"]
+            and isinstance(record.get("summary"), dict)
+            and record["summary"].get("schema_version") == 1
+            and record["summary"].get("failures") == []
+            for record in records
+        ):
+            raise ReportError(
+                f"failed diagnostics evidence for repetition {repetition}: {path}"
             )
 
 
