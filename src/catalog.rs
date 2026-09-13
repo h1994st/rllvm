@@ -12,6 +12,16 @@ use sha2::{Digest, Sha256};
 
 use crate::error::Error;
 
+mod inventory;
+pub use inventory::{inspect_bitcode, inventory};
+
+/// Location of a bitcode member stored inside an archive.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ArchiveMember {
+    pub index: usize,
+    pub name: String,
+}
+
 /// Current on-disk catalog version. Readers reject unsupported versions.
 pub const SCHEMA_VERSION: u32 = 1;
 const CATALOG_KIND: &str = "rllvm-module-catalog";
@@ -95,6 +105,8 @@ pub struct ModuleRecord {
     /// Absolute, or relative to the directory containing this catalog.
     pub path: Option<PathBuf>,
     pub recorded_path: Option<PathBuf>,
+    #[serde(default)]
+    pub archive_member: Option<ArchiveMember>,
     pub content_sha256: Option<String>,
     pub sources: Vec<SourceAssociation>,
     pub target_triple: Option<String>,
