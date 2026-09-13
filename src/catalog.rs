@@ -49,6 +49,9 @@ pub struct CatalogScope {
     pub total_entries: usize,
     pub selected_entries: usize,
     pub selection: ModuleSelection,
+    /// Explicit analysis overrides, retained even if every entry failed.
+    #[serde(default)]
+    pub analysis_arguments: Vec<String>,
     pub whole_program_complete: Option<bool>,
     pub limitations: Vec<String>,
 }
@@ -155,6 +158,7 @@ impl ModuleCatalog {
                 total_entries: modules.len(),
                 selected_entries: modules.len(),
                 selection: ModuleSelection::default(),
+                analysis_arguments: Vec::new(),
                 whole_program_complete: None,
                 limitations: vec![
                     "Module availability does not establish whole-program completeness.".into(),
