@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/h1994st/rllvm/compare/v0.4.8...v0.5.0) (2026-09-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* generate selected bitcode from compilation databases ([#177](https://github.com/h1994st/rllvm/issues/177))
+
+### Features
+
+* catalog and selectively extract bitcode modules ([#176](https://github.com/h1994st/rllvm/issues/176)) ([7871741](https://github.com/h1994st/rllvm/commit/787174105d652ec3e4c737e7f6293a7b824565ab))
+* generate selected bitcode from compilation databases ([#177](https://github.com/h1994st/rllvm/issues/177)) ([e301c3b](https://github.com/h1994st/rllvm/commit/e301c3ba676b53f807ad5c7d37018141192653cd))
+
 ## [0.4.8](https://github.com/h1994st/rllvm/compare/v0.4.7...v0.4.8) (2026-09-12)
 
 
