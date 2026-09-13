@@ -11,14 +11,12 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::ExitStatus,
+    process::{Command, ExitStatus, Output},
 };
 
 use tempfile::NamedTempFile;
 
 use crate::{constants::RESPONSE_FILE_ARGUMENT_THRESHOLD, error::Error};
-
-use super::execute_command_for_status;
 
 // Bound recursive and exponentially repeated input before allocating its
 // expanded argument list. These limits apply to classification, not argv.
@@ -29,8 +27,13 @@ const MAX_RESPONSE_ARGUMENTS: usize = 1_000_000;
 /// Expand Clang's GNU host response syntax for classification only. The real
 /// compiler must still receive the original argv. Nested filenames, like all
 /// other relative arguments, resolve from the process working directory.
-pub(crate) fn expand_response_files(args: &[String]) -> Result<Vec<String>, Error> {
+/// Expand responses relative to a compilation entry without changing global cwd.
+pub(crate) fn expand_response_files_in(
+    args: &[String],
+    directory: &Path,
+) -> Result<Vec<String>, Error> {
     let mut expansion = ResponseExpansion {
+        directory: directory.to_path_buf(),
         active: Vec::new(),
         bytes_left: MAX_RESPONSE_BYTES,
         arguments_left: MAX_RESPONSE_ARGUMENTS,
@@ -43,6 +46,7 @@ pub(crate) fn expand_response_files(args: &[String]) -> Result<Vec<String>, Erro
 }
 
 struct ResponseExpansion {
+    directory: PathBuf,
     active: Vec<PathBuf>,
     bytes_left: u64,
     arguments_left: usize,
@@ -64,7 +68,7 @@ impl ResponseExpansion {
         if self.active.len() >= MAX_RESPONSE_DEPTH {
             return Err(invalid("expansion exceeds depth limit".into()));
         }
-        let path = match Path::new(filename).canonicalize() {
+        let path = match self.directory.join(filename).canonicalize() {
             Ok(path) => path,
             // Clang leaves missing @names literal. They may be valid option
             // values such as Mach-O's @rpath install names; the compiler
@@ -165,12 +169,40 @@ where
     P: AsRef<Path>,
     S: AsRef<OsStr>,
 {
+    with_llvm_command(program_filepath, args, |command| command.status())
+}
+
+/// Capture compiler diagnostics while honoring an explicit compilation directory.
+pub(crate) fn execute_llvm_tool_in_for_output<P, S>(
+    program_filepath: P,
+    args: &[S],
+    directory: &Path,
+) -> Result<Output, Error>
+where
+    P: AsRef<Path>,
+    S: AsRef<OsStr>,
+{
+    with_llvm_command(program_filepath, args, |command| {
+        command.current_dir(directory).output()
+    })
+}
+
+fn with_llvm_command<P, S, T>(
+    program_filepath: P,
+    args: &[S],
+    run: impl FnOnce(&mut Command) -> std::io::Result<T>,
+) -> Result<T, Error>
+where
+    P: AsRef<Path>,
+    S: AsRef<OsStr>,
+{
+    let mut command = Command::new(program_filepath.as_ref());
     // A few large defines can exceed ARG_MAX even below the count limit.
     let argument_bytes = args.iter().fold(0usize, |total, arg| {
         total.saturating_add(arg.as_ref().as_encoded_bytes().len() + 1)
     });
     if !needs_response_file(args.len()) && argument_bytes <= 32 * 1024 {
-        return execute_command_for_status(program_filepath, args);
+        return run(command.args(args)).map_err(Error::Io);
     }
 
     let mut response_files = Vec::new();
@@ -207,12 +239,23 @@ where
     }
 
     // Every temporary stays alive until the child has finished reading it.
-    execute_command_for_status(program_filepath, &invocation_args)
+    run(command.args(&invocation_args)).map_err(Error::Io)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_files_resolve_from_explicit_entry_directory() {
+        let scratch = tempfile::tempdir().unwrap();
+        let nested = scratch.path().join("nested");
+        fs::create_dir(&nested).unwrap();
+        fs::write(scratch.path().join("inner.rsp"), "-DVALUE=17").unwrap();
+        fs::write(nested.join("outer.rsp"), "@inner.rsp -c 'file name.c'").unwrap();
+        let args = expand_response_files_in(&["@nested/outer.rsp".into()], scratch.path()).unwrap();
+        assert_eq!(args, ["-DVALUE=17", "-c", "file name.c"]);
+    }
 
     #[test]
     fn escaping_leaves_an_ordinary_path_alone() {

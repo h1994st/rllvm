@@ -563,30 +563,16 @@ pub trait CompilerWrapper {
         }
 
         let mut args = vec![compiler_filepath.to_string_lossy().into_owned()];
-        // Not `compile_args()` verbatim: the user's command already wrote the
-        // dependency file, and this compile would overwrite it with one that
-        // names the `.bc`.
-        args.extend(without_dependency_flags(self.args().compile_args()));
-        // Add bitcode generation flags
-        if let Some(bitcode_generation_flags) = try_rllvm_config()?.bitcode_generation_flags() {
-            args.extend(bitcode_generation_flags.iter().cloned());
-        }
-        // Ours, not the user's: their `-M*` flags were stripped above, and
-        // this file is written inside the cache directory.
-        if let Some(depfile) = depfile {
-            args.extend_from_slice(&[
-                "-MD".to_string(),
-                "-MF".to_string(),
-                depfile.to_string_lossy().into_owned(),
-            ]);
-        }
-        args.extend_from_slice(&[
-            "-emit-llvm".to_string(),
-            "-c".to_string(),
-            "-o".to_string(),
-            bitcode_filepath.to_string_lossy().into_owned(),
-            src_filepath.to_string_lossy().into_owned(),
-        ]);
+        args.extend(crate::materialize::bitcode_arguments(
+            self.args().compile_args(),
+            try_rllvm_config()?
+                .bitcode_generation_flags()
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            src_filepath,
+            bitcode_filepath,
+            depfile,
+        )?);
 
         let mode = CompileMode::BitcodeGeneration;
 

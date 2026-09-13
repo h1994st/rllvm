@@ -458,9 +458,21 @@ impl CompilerArgsInfo {
     where
         S: AsRef<str>,
     {
+        self.parse_args_in(args, &env::current_dir()?)
+    }
+
+    /// Classify an imported command relative to its entry directory.
+    pub(crate) fn parse_args_in<S>(
+        &mut self,
+        args: &[S],
+        directory: &Path,
+    ) -> Result<&'_ mut Self, Error>
+    where
+        S: AsRef<str>,
+    {
         let args: Vec<String> = args.iter().map(|x| x.as_ref().to_string()).collect();
         self.input_args = args;
-        let args = expand_response_files(&self.input_args)?;
+        let args = expand_response_files_in(&self.input_args, directory)?;
         self.expanded_args = args.clone();
 
         let mut i = 0;
@@ -497,7 +509,7 @@ impl CompilerArgsInfo {
                     // Consume more parameters
                     offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
                 } else {
-                    let handler = if is_object_file(arg)? {
+                    let handler = if is_object_file(directory.join(arg))? {
                         CompilerArgsInfo::object_file
                     } else {
                         // Failed to recognize the compiler flag

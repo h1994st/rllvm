@@ -69,6 +69,10 @@ path = "src/bin/rllvm_rustc.rs"
 name = "rllvm-info"
 path = "src/bin/rllvm_info.rs"
 
+[[bin]]
+name = "rllvm-compdb"
+path = "src/bin/rllvm_compdb.rs"
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 

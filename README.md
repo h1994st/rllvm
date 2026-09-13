@@ -94,6 +94,48 @@ rllvm-info -f hello.bc    # also list functions and their counts
 Inspect the extracted `.bc` for a whole-program view. Given an object or binary,
 `rllvm-info` inspects only its first recorded module, when that file is available.
 
+### Importing a compilation database
+
+Analyze selected C/C++ compilations from an existing `compile_commands.json`
+without changing the normal build:
+
+```bash
+rllvm-compdb list build/ > compilations.json
+rllvm-compdb generate build/ --source src/example.c --output-dir analysis/example
+rllvm-compdb generate build/compile_commands.json \
+  --entry ENTRY_ID --extra-arg=-O0 --output-dir analysis/debug --jobs 4
+```
+
+`list` prints JSON with entry IDs, configuration IDs, and unsupported-command
+diagnostics without compiling or requiring source files to exist. `generate`
+selects all entries by default. Repeat `--source` or `--entry` to select several
+values; combining the two filters selects their intersection. Source selectors
+resolve from the current directory. Unmatched selectors and empty selections
+are errors. Duplicate database entries remain distinct, including repeated
+compilations of the same source with different flags or outputs.
+
+Generation uses each entry's recorded Clang/Clang++ executable and working
+directory. Structured `arguments` take precedence over `command`; command text
+is decoded without a shell, and response files resolve from the entry directory.
+Only explicit `--extra-arg` analysis overrides apply; wrapper configuration flags
+do not. Generated sources and headers must already exist. The default is one
+compiler worker; `--jobs` sets the concurrency bound.
+
+The output directory must be new. It contains separate modules, per-entry
+diagnostics, and an atomic `catalog.json` with relative module paths, content
+hashes, compiler and target metadata, recorded commands, and effective analysis
+settings. Successful modules remain available when another entry fails, and
+generation then exits nonzero. Original object and dependency outputs are
+preserved. Launchers, shell operations, unsupported drivers, non-compilation
+modes, multiple sources in one entry, universal builds, and options with
+uncontrolled side outputs (including save-temps, module caches, profiling,
+optimization records, and opaque frontend forwarding) are reported as unsupported.
+
+The catalog describes selected compilations of the **current source tree**.
+It does not establish executable membership, dependency completeness, or a
+historical source/environment snapshot. Modules are not automatically merged;
+use wrapper capture when participation in the real link matters.
+
 ### Wrapper flags
 
 Wrapper options are long-only and prefixed `--rllvm-`, so they cannot collide
