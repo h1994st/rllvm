@@ -544,7 +544,8 @@ fn validate_driver(compiler: &str) -> Result<(), Error> {
     Ok(())
 }
 
-// Lexical resolution keeps list identities independent of source existence.
+// Missing/generated sources need no canonicalization. A parent following an
+// existing symlink must follow the filesystem, as the real compiler does.
 fn resolve(path: &Path, directory: &Path) -> PathBuf {
     let joined = directory.join(path);
     let mut result = PathBuf::new();
@@ -552,6 +553,9 @@ fn resolve(path: &Path, directory: &Path) -> PathBuf {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
+                if let Ok(resolved) = fs::canonicalize(&result) {
+                    result = resolved;
+                }
                 result.pop();
             }
             _ => result.push(component.as_os_str()),

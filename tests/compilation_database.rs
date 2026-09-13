@@ -465,3 +465,47 @@ fn compiler_metadata_is_resolved_once_per_distinct_driver() {
     );
     assert_eq!(fs::read_to_string(log).unwrap(), "version\n");
 }
+
+#[test]
+fn parent_components_after_symlinks_preserve_recorded_directory_semantics() {
+    let scratch = tempfile::tempdir().unwrap();
+    fs::create_dir_all(scratch.path().join("actual/nested")).unwrap();
+    std::os::unix::fs::symlink(
+        scratch.path().join("actual/nested"),
+        scratch.path().join("link"),
+    )
+    .unwrap();
+    fs::write(
+        scratch.path().join("source.c"),
+        "int value(void) { return 19; }\n",
+    )
+    .unwrap();
+    fs::write(
+        scratch.path().join("actual/source.c"),
+        "int value(void) { return 7; }\n",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":"link/..", "file":"source.c", "arguments":[llvm_bin("clang"), "-c", "source.c"]}]),
+    );
+    assert_success(
+        &rllvm(&scratch)
+            .args(["generate", ".", "--output-dir", "analysis"])
+            .output()
+            .unwrap(),
+    );
+    let catalog: Value =
+        serde_json::from_slice(&fs::read(scratch.path().join("analysis/catalog.json")).unwrap())
+            .unwrap();
+    let ir = disassemble(
+        &scratch
+            .path()
+            .join("analysis")
+            .join(catalog["modules"][0]["path"].as_str().unwrap()),
+    );
+    assert!(
+        ir.contains("ret i32 7"),
+        "wrong source compiled through symlink/.."
+    );
+}
