@@ -115,7 +115,9 @@ are errors. Duplicate database entries remain distinct, including repeated
 compilations of the same source with different flags or outputs.
 
 Generation uses each entry's recorded Clang/Clang++ executable and working
-directory. Structured `arguments` take precedence over `command`; command text
+directory. Driver names `clang`, `clang++`, and version-suffixed variants are
+supported. Relative entry directories resolve from the database file's directory.
+Structured `arguments` take precedence over `command`; command text
 is decoded without a shell, and response files resolve from the entry directory.
 Only explicit `--extra-arg` analysis overrides apply; wrapper configuration flags
 do not. Generated sources and headers must already exist. The default is one
