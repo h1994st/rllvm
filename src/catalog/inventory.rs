@@ -1,7 +1,7 @@
 //! Read existing module evidence without compiling or merging.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet, btree_map::Entry},
     fs,
     io::Write,
     path::{Path, PathBuf},
@@ -54,6 +54,7 @@ pub fn inspect_bitcode(path: &Path, llvm_dis: &Path, id: impl Into<String>) -> M
     }
     let result = (|| -> Result<(), Error> {
         let hash = hash_file(path)?;
+        module.content_sha256 = Some(hash.clone());
         let output = Command::new(llvm_dis)
             .arg(path)
             .args(["-o", "-"])
@@ -154,19 +155,84 @@ fn parse_metadata(ir: &str, module: &mut ModuleRecord) {
     }
 }
 
-/// Read raw bitcode bytes from a recorded archive location.
-pub(crate) fn archive_module_bytes(path: &Path, member: &ArchiveMember) -> Result<Vec<u8>, Error> {
-    let data = fs::read(path)?;
-    let archive = object::read::archive::ArchiveFile::parse(&*data)?;
-    let actual = archive.members().nth(member.index).ok_or_else(|| {
-        Error::MissingFile(format!("archive member {} is missing", member.name))
-    })??;
-    if String::from_utf8_lossy(actual.name()) != member.name {
-        return Err(Error::InvalidArguments(
-            "archive member identity changed".into(),
-        ));
+struct MemberRange {
+    name: String,
+    offset: u64,
+    size: u64,
+}
+struct ArchiveData {
+    bytes: Vec<u8>,
+    members: Vec<Result<MemberRange, String>>,
+}
+
+impl ArchiveData {
+    fn read(path: &Path) -> Result<Self, Error> {
+        if !fs::metadata(path)?.is_file() {
+            return Err(Error::InvalidArguments(
+                "archive must be a regular file".into(),
+            ));
+        }
+        let bytes = fs::read(path)?;
+        let archive = object::read::archive::ArchiveFile::parse(&*bytes)?;
+        if archive.is_thin() {
+            return Err(Error::UnsupportedBinaryFormat(
+                "thin archives are not supported; create a regular archive".into(),
+            ));
+        }
+        let mut members = Vec::new();
+        for member in archive.members() {
+            match member {
+                Ok(member) => {
+                    let (offset, size) = member.file_range();
+                    members.push(Ok(MemberRange {
+                        name: String::from_utf8_lossy(member.name()).into_owned(),
+                        offset,
+                        size,
+                    }));
+                }
+                Err(error) => {
+                    members.push(Err(error.to_string()));
+                    break;
+                }
+            }
+        }
+        Ok(Self { bytes, members })
     }
-    Ok(actual.data(&*data)?.to_vec())
+}
+
+/// Reuse one archive buffer and one member index per inventory/copy operation.
+#[derive(Default)]
+pub(crate) struct ArchiveCache {
+    archives: BTreeMap<PathBuf, ArchiveData>,
+}
+
+impl ArchiveCache {
+    pub(crate) fn module(&mut self, path: &Path, member: &ArchiveMember) -> Result<&[u8], Error> {
+        let archive = match self.archives.entry(path.to_path_buf()) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(ArchiveData::read(path)?),
+        };
+        let actual = archive
+            .members
+            .get(member.index)
+            .ok_or_else(|| {
+                Error::MissingFile(format!("archive member {} is missing", member.name))
+            })?
+            .as_ref()
+            .map_err(|error| Error::InvalidArguments(error.clone()))?;
+        if actual.name != member.name {
+            return Err(Error::InvalidArguments(
+                "archive member identity changed".into(),
+            ));
+        }
+        let range = usize::try_from(actual.offset)
+            .ok()
+            .zip(usize::try_from(actual.size).ok())
+            .and_then(|(start, size)| start.checked_add(size).map(|end| start..end));
+        range
+            .and_then(|range| archive.bytes.get(range))
+            .ok_or_else(|| Error::InvalidArguments("archive member data is out of bounds".into()))
+    }
 }
 
 fn inspect_archive_member(
@@ -174,11 +240,11 @@ fn inspect_archive_member(
     member: &ArchiveMember,
     tool: &Path,
     id: &str,
+    bytes: Result<&[u8], Error>,
 ) -> ModuleRecord {
     let result = (|| -> Result<ModuleRecord, Error> {
-        let bytes = archive_module_bytes(path, member)?;
         let mut temporary = tempfile::NamedTempFile::new()?;
-        temporary.write_all(&bytes)?;
+        temporary.write_all(bytes?)?;
         Ok(inspect_bitcode(temporary.path(), tool, id))
     })();
     let mut module = result.unwrap_or_else(|error| {
@@ -212,6 +278,7 @@ pub fn inventory(
     if data.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{') {
         let mut catalog = read_catalog(&input)?;
         let root = input.parent().expect("canonical file has a parent");
+        let mut archives = ArchiveCache::default();
         for module in &mut catalog.modules {
             if let Some(path) = &module.diagnostic_path
                 && path.is_relative()
@@ -234,22 +301,29 @@ pub fn inventory(
                 continue;
             }
             let observed = if let Some(member) = &module.archive_member {
-                inspect_archive_member(&path, member, &tool, &module.id)
+                inspect_archive_member(
+                    &path,
+                    member,
+                    &tool,
+                    &module.id,
+                    archives.module(&path, member),
+                )
             } else {
                 inspect_bitcode(&path, &tool, &module.id)
             };
+            if module
+                .content_sha256
+                .as_ref()
+                .zip(observed.content_sha256.as_ref())
+                .is_some_and(|(expected, actual)| !expected.eq_ignore_ascii_case(actual))
+            {
+                module.status = ModuleStatus::Failed;
+                module
+                    .diagnostics
+                    .push("module content hash mismatch".into());
+                continue;
+            }
             if observed.status == ModuleStatus::Available {
-                if module
-                    .content_sha256
-                    .as_ref()
-                    .is_some_and(|hash| Some(hash) != observed.content_sha256.as_ref())
-                {
-                    module.status = ModuleStatus::Failed;
-                    module
-                        .diagnostics
-                        .push("module content hash mismatch".into());
-                    continue;
-                }
                 module.status = ModuleStatus::Available;
                 module.content_sha256 = observed.content_sha256;
                 module.target_triple = observed.target_triple;
@@ -287,13 +361,52 @@ pub fn inventory(
             boundaries.push("input object contains no recorded module references".into());
         }
     } else if let Ok(archive) = object::read::archive::ArchiveFile::parse(&*data) {
+        if archive.is_thin() {
+            return Err(Error::UnsupportedBinaryFormat(
+                "thin archives are not supported; create a regular archive".into(),
+            ));
+        }
         for (index, member) in archive.members().enumerate() {
-            let member = member?;
+            let member = match member {
+                Ok(member) => member,
+                Err(error) => {
+                    let mut failed = ModuleRecord::new(identity(&[
+                        "unreadable_archive_entry",
+                        origin.sha256.as_deref().unwrap_or(""),
+                        &index.to_string(),
+                    ]));
+                    failed.status = ModuleStatus::Failed;
+                    failed
+                        .diagnostics
+                        .push(format!("archive traversal failed: {error}"));
+                    failed.unavailable_metadata.push("archive_member".into());
+                    boundaries.push(format!(
+                        "archive traversal stopped at entry {index}: {error}"
+                    ));
+                    modules.push(failed);
+                    break;
+                }
+            };
             let name = String::from_utf8_lossy(member.name()).into_owned();
             let bytes = match member.data(&*data) {
                 Ok(bytes) => bytes,
                 Err(error) => {
                     boundaries.push(format!("unreadable archive member {name}: {error}"));
+                    let mut failed = ModuleRecord::new(identity(&[
+                        "unreadable_archive_member",
+                        origin.sha256.as_deref().unwrap_or(""),
+                        &index.to_string(),
+                        &name,
+                    ]));
+                    failed.status = ModuleStatus::Failed;
+                    failed.path = Some(input.clone());
+                    failed.archive_member = Some(ArchiveMember {
+                        index,
+                        name: name.clone(),
+                    });
+                    failed.diagnostics.push(error.to_string());
+                    failed.unavailable_metadata.push("module_kind".into());
+                    modules.push(failed);
                     continue;
                 }
             };
@@ -308,7 +421,13 @@ pub fn inventory(
                     &index.to_string(),
                     &name,
                 ]);
-                modules.push(inspect_archive_member(&input, &reference, &tool, &id));
+                modules.push(inspect_archive_member(
+                    &input,
+                    &reference,
+                    &tool,
+                    &id,
+                    Ok(bytes),
+                ));
             } else if let Ok(object) = object::File::parse(bytes) {
                 let paths = extract_bitcode_filepaths_from_parsed_object(&object)?;
                 if paths.is_empty() {
@@ -366,6 +485,134 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' 'source_filename = \"src/main.c\"' 'target triple = \"x86_64-test\"' 'target datalayout = \"e-p:64:64\"'\nexit {exit}\n")).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
         path
+    }
+
+    fn archive_bytes() -> Vec<u8> {
+        let mut bytes = b"!<arch>\n".to_vec();
+        for (name, data) in [
+            ("first.bc/", b"BC\xc0\xdefirst".as_slice()),
+            ("second.bc/", b"BC\xc0\xdesecond".as_slice()),
+        ] {
+            bytes.extend(
+                format!(
+                    "{name:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                    0,
+                    0,
+                    0,
+                    "100644",
+                    data.len()
+                )
+                .bytes(),
+            );
+            bytes.extend_from_slice(data);
+            if data.len() % 2 != 0 {
+                bytes.push(b'\n');
+            }
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_corrupt_archive_tail_retains_earlier_module_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("partial.bca");
+        let mut data = archive_bytes();
+        data.extend_from_slice(b"broken member header");
+        fs::write(&path, data).unwrap();
+        let catalog = inventory(&path, root.path(), Some(&reader(root.path(), 0))).unwrap();
+        assert_eq!(
+            catalog
+                .modules
+                .iter()
+                .filter(|m| m.status == ModuleStatus::Available)
+                .count(),
+            2
+        );
+        assert!(
+            catalog
+                .modules
+                .iter()
+                .any(|m| m.status == ModuleStatus::Failed)
+        );
+        assert!(
+            catalog
+                .scope
+                .limitations
+                .iter()
+                .any(|s| s.contains("archive"))
+        );
+    }
+
+    #[test]
+    fn thin_archives_are_explicitly_unsupported() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("thin.a");
+        fs::write(&path, b"!<thin>\n").unwrap();
+        let error = inventory(&path, root.path(), Some(&reader(root.path(), 0))).unwrap_err();
+        assert!(error.to_string().contains("thin"));
+    }
+
+    #[test]
+    fn archive_members_share_one_snapshot_within_an_operation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("modules.bca");
+        fs::write(&path, archive_bytes()).unwrap();
+        let mut cache = ArchiveCache::default();
+        assert_eq!(
+            cache
+                .module(
+                    &path,
+                    &ArchiveMember {
+                        index: 0,
+                        name: "first.bc".into()
+                    }
+                )
+                .unwrap(),
+            b"BC\xc0\xdefirst"
+        );
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            cache
+                .module(
+                    &path,
+                    &ArchiveMember {
+                        index: 1,
+                        name: "second.bc".into()
+                    }
+                )
+                .unwrap(),
+            b"BC\xc0\xdesecond"
+        );
+    }
+
+    #[test]
+    fn identifiable_unreadable_members_remain_failed_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("partial.bca");
+        let mut data = archive_bytes();
+        data.extend(
+            format!(
+                "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                "missing.bc/", 0, 0, 0, "100644", 10000
+            )
+            .bytes(),
+        );
+        fs::write(&path, data).unwrap();
+        let catalog = inventory(&path, root.path(), Some(&reader(root.path(), 0))).unwrap();
+        assert_eq!(
+            catalog
+                .modules
+                .iter()
+                .filter(|m| m.status == ModuleStatus::Available)
+                .count(),
+            2
+        );
+        assert!(catalog.modules.iter().any(|m| {
+            m.status == ModuleStatus::Failed
+                && m.archive_member
+                    .as_ref()
+                    .is_some_and(|member| member.name == "missing.bc")
+        }));
     }
 
     #[test]

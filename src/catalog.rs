@@ -14,6 +14,8 @@ use crate::error::Error;
 
 mod inventory;
 pub use inventory::{inspect_bitcode, inventory};
+mod selection;
+pub use selection::{copy_modules, select_modules};
 
 /// Location of a bitcode member stored inside an archive.
 #[derive(Clone, Debug, Serialize, Deserialize)]

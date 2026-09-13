@@ -194,8 +194,8 @@ entry block can be implicit.
 ## Current limitations
 
 - Universal builds are unsupported.
-- Binary inspection uses only the first recorded module, when available;
-  whole-program inspection uses the extracted `.bc`.
+- Human-readable binary inspection uses the first recorded module; `--json`
+  inventories all recorded modules. Whole-program inspection uses extracted `.bc`.
 - Link mode performs repeated compilations (#51). Changing this is a separate
   behavior/performance task.
 
@@ -205,7 +205,7 @@ entry block can be implicit.
   exiting or panicking. Logging uses `tracing`.
 - `constants.rs` is internal. Public items in `utils/` are public API; use
   `pub(crate)` for internal helpers.
-- The `docs/` directory is intentionally excluded.
+- The `docs/` directory is intentionally excluded except `docs/CATALOG.md`.
 - Published documentation, issues, and PRs use repository-relative paths or generic
   placeholders. Limit committed benchmark evidence to compact summaries and
   provenance; keep raw logs and build artifacts outside Git.

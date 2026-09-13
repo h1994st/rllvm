@@ -73,6 +73,37 @@ fn print_info(info: &BitcodeInfo, show_functions: bool) {
 fn main() -> Result<(), Error> {
     let args = InfoArgs::parse();
 
+    if args.json {
+        let root = args
+            .bitcode_root
+            .as_deref()
+            .unwrap_or(std::path::Path::new("."));
+        let catalog = rllvm::catalog::inventory(&args.input, root, None)?;
+        let selected = rllvm::catalog::select_modules(
+            &catalog,
+            &args.selection.selection(),
+            &std::env::current_dir()?,
+        )?;
+        let json = serde_json::to_string_pretty(&selected)
+            .map_err(|error| Error::InvalidArguments(error.to_string()))?;
+        println!("{json}");
+        if selected
+            .modules
+            .iter()
+            .any(|module| module.status != rllvm::catalog::ModuleStatus::Available)
+        {
+            return Err(Error::MissingFile(
+                "some selected modules are unavailable; see the JSON catalog".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if !args.selection.is_empty() {
+        return Err(Error::InvalidArguments(
+            "module/source/configuration selection requires --json".into(),
+        ));
+    }
+
     let input = &args.input;
     let input_path = input
         .canonicalize()

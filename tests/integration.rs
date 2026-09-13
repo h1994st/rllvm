@@ -4306,6 +4306,10 @@ fn completions_cover_every_extraction_option() {
         "--bitcode-root",
         "--output",
         "--save-manifest",
+        "--output-dir",
+        "--module",
+        "--source",
+        "--configuration",
     ] {
         assert!(
             script.contains(expected),
