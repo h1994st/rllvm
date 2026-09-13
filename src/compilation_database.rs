@@ -1,5 +1,7 @@
 //! Current-tree compilation database import and selective bitcode generation.
 
+mod sdk;
+
 use crate::{
     arg_parser::CompilerArgsInfo,
     catalog::{
@@ -142,6 +144,7 @@ impl CompilationDatabase {
                 });
             prepared.push((module, compiler));
         }
+        let sdk = sdk::MacosSdk::default();
         let modules = bounded_map(&prepared, options.jobs, |_, (original, compiler)| {
             generate_entry(
                 original.clone(),
@@ -149,6 +152,7 @@ impl CompilationDatabase {
                 options,
                 &output,
                 &environment,
+                &sdk,
             )
         })?;
         let mut catalog = self.catalog(modules);
@@ -325,6 +329,7 @@ fn generate_entry(
     options: &GenerateOptions,
     output: &Path,
     environment: &BTreeMap<String, String>,
+    sdk: &sdk::MacosSdk,
 ) -> ModuleRecord {
     let diagnostic = PathBuf::from("diagnostics").join(format!("{}.txt", module.id));
     module.diagnostic_path = Some(diagnostic.clone());
@@ -340,6 +345,7 @@ fn generate_entry(
         options,
         output,
         environment,
+        sdk,
         &mut diagnostics,
     );
     if let Err(error) = result {
@@ -365,6 +371,7 @@ fn materialize_entry(
     options: &GenerateOptions,
     output: &Path,
     environment: &BTreeMap<String, String>,
+    sdk: &sdk::MacosSdk,
     diagnostics: &mut Vec<u8>,
 ) -> Result<(), Error> {
     if module.status == ModuleStatus::Unsupported {
@@ -388,11 +395,28 @@ fn materialize_entry(
     let compile_args =
         imported_compile_arguments(&parsed, &options.extra_arguments, &compilation.directory)
             .inspect_err(|_| module.status = ModuleStatus::Unsupported)?;
+    let mut environment = environment.clone();
+    let mut sdk_error = None;
+    if cfg!(target_os = "macos") {
+        match sdk.infer(
+            &compile_args,
+            &compiler.identity.version,
+            &environment,
+            || sdk::discover(&environment),
+        ) {
+            Ok(Some(path)) => {
+                environment.insert("SDKROOT".into(), path);
+            }
+            Ok(None) => {}
+            Err(error) => sdk_error = Some(error),
+        }
+    }
+    compilation.environment = environment.clone();
     let identity_options = serde_json::to_string(&(
         &options.extra_arguments,
         &compile_args,
         ANALYSIS_DRIVER_ARGUMENTS,
-        environment,
+        &environment,
         &compiler.identity,
     ))
     .map_err(|error| invalid(error.to_string()))?;
@@ -431,11 +455,16 @@ fn materialize_entry(
         &compiler.identity.path,
         &arguments,
         &compilation.directory,
-        environment,
+        &environment,
     )?;
     diagnostics.extend_from_slice(&result.stderr);
     diagnostics.extend_from_slice(&result.stdout);
     if !result.status.success() {
+        if let Some(error) = sdk_error {
+            module.diagnostics.push(format!(
+                "macOS SDK discovery failed: {error}; set SDKROOT to an SDK directory or pass an explicit -isysroot with --extra-arg"
+            ));
+        }
         return Err(Error::ExecutionFailure(format!(
             "compiler exited with {}",
             result.status

@@ -259,6 +259,9 @@ pub enum CompdbCommand {
         input: PathBuf,
     },
     /// Generate separate bitcode modules and catalog.json in a new directory
+    #[command(
+        after_help = "On macOS, the SDK is inferred for macOS targets when unspecified. Override it with SDKROOT or explicit --extra-arg=-isysroot and --extra-arg=<SDK_PATH> arguments."
+    )]
     Generate {
         /// Database JSON file or directory containing compile_commands.json
         input: PathBuf,
