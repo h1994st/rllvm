@@ -121,6 +121,21 @@ Only explicit `--extra-arg` analysis overrides apply; wrapper configuration flag
 do not. Generated sources and headers must already exist. The default is one
 compiler worker; `--jobs` sets the concurrency bound.
 
+Imported compiler processes receive a constructed environment containing only
+these variables when set:
+
+- Tool lookup: `PATH`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LIBRARY_PATH`.
+- Include search: `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`.
+- Apple SDK selection: `SDKROOT`, `DEVELOPER_DIR`, `MACOSX_DEPLOYMENT_TARGET`,
+  `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
+  `VISIONOS_DEPLOYMENT_TARGET`.
+- Reproducible timestamps: `SOURCE_DATE_EPOCH`.
+
+The catalog records that supplied analysis environment. Ambient driver logging,
+dependency-output, and argument-injection variables are excluded. Implicit Clang
+configuration files are disabled with `--no-default-config`, recorded in the
+effective command; put required analysis flags in the database or `--extra-arg`.
+
 The output directory must be new. It contains separate modules, per-entry
 diagnostics, and an atomic `catalog.json` with relative module paths, content
 hashes, compiler and target metadata, recorded commands, and effective analysis
@@ -128,7 +143,7 @@ settings. Successful modules remain available when another entry fails, and
 generation then exits nonzero. Original object and dependency outputs are
 preserved. Launchers, shell operations, unsupported drivers, non-compilation
 modes, multiple sources in one entry, universal builds, and options with
-uncontrolled side outputs (including save-temps, module caches, profiling,
+uncontrolled side outputs (including save-temps, compiler statistics, module caches, profiling,
 optimization records, and opaque frontend forwarding) are reported as unsupported.
 
 The catalog describes selected compilations of the **current source tree**.

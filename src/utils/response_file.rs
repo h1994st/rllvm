@@ -7,6 +7,7 @@
 //! bitcode files there are.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     fs::{self, File},
     io::{Read, Write},
@@ -177,13 +178,18 @@ pub(crate) fn execute_llvm_tool_in_for_output<P, S>(
     program_filepath: P,
     args: &[S],
     directory: &Path,
+    environment: &BTreeMap<String, String>,
 ) -> Result<Output, Error>
 where
     P: AsRef<Path>,
     S: AsRef<OsStr>,
 {
     with_llvm_command(program_filepath, args, |command| {
-        command.current_dir(directory).output()
+        command
+            .current_dir(directory)
+            .env_clear()
+            .envs(environment)
+            .output()
     })
 }
 

@@ -15,6 +15,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+const ANALYSIS_DRIVER_ARGUMENTS: &[&str] = &["--no-default-config", "-fno-crash-diagnostics"];
+
 /// Imported entries retain database occurrences, including unsupported commands.
 pub struct CompilationDatabase {
     path: PathBuf,
@@ -126,14 +128,14 @@ impl CompilationDatabase {
                 .map(|compilation| {
                     let path = which::which_in(
                         &compilation.recorded_arguments[0],
-                        std::env::var_os("PATH"),
+                        environment.get("PATH"),
                         &compilation.directory,
                     )
                     .map_err(|error| format!("cannot resolve recorded compiler: {error}"))?;
                     compilers
                         .entry(path.clone())
                         .or_insert_with(|| {
-                            compiler_context(&path, &compilation.directory)
+                            compiler_context(&path, &compilation.directory, &environment)
                                 .map_err(|error| error.to_string())
                         })
                         .clone()
@@ -175,7 +177,7 @@ impl CompilationDatabase {
         catalog.scope.limitations.extend([
             "The database describes compilations, not executable membership or dependency completeness.".into(),
             "Sources and generated headers come from the current tree; historical inputs and original build environment are unknown.".into(),
-            "Only selected compilation environment variables are recorded; the analysis environment is not a complete snapshot.".into(),
+            "Imported compilers receive only the recorded analysis environment; implicit driver configurations are disabled with --no-default-config.".into(),
         ]);
         catalog
     }
@@ -236,8 +238,17 @@ struct CompilerContext {
     llvm_dis: PathBuf,
 }
 
-fn compiler_context(path: &Path, directory: &Path) -> Result<CompilerContext, Error> {
-    let output = crate::utils::execute_llvm_tool_in_for_output(path, &["--version"], directory)?;
+fn compiler_context(
+    path: &Path,
+    directory: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<CompilerContext, Error> {
+    let output = crate::utils::execute_llvm_tool_in_for_output(
+        path,
+        &["--version", "--no-default-config"],
+        directory,
+        environment,
+    )?;
     if !output.status.success() {
         return Err(Error::ExecutionFailure(format!(
             "compiler version query failed: {}",
@@ -255,8 +266,12 @@ fn compiler_context(path: &Path, directory: &Path) -> Result<CompilerContext, Er
         parent.join("llvm-dis")
     } else {
         let config = crate::utils::find_llvm_config()?;
-        let output =
-            crate::utils::execute_llvm_tool_in_for_output(config, &["--bindir"], directory)?;
+        let output = crate::utils::execute_llvm_tool_in_for_output(
+            config,
+            &["--bindir"],
+            directory,
+            environment,
+        )?;
         if !output.status.success() {
             return Err(Error::ExecutionFailure(
                 "llvm-config --bindir failed".into(),
@@ -283,6 +298,7 @@ fn analysis_environment() -> BTreeMap<String, String> {
         "CPLUS_INCLUDE_PATH",
         "OBJC_INCLUDE_PATH",
         "SDKROOT",
+        "DEVELOPER_DIR",
         "MACOSX_DEPLOYMENT_TARGET",
         "IPHONEOS_DEPLOYMENT_TARGET",
         "TVOS_DEPLOYMENT_TARGET",
@@ -315,6 +331,7 @@ fn generate_entry(
     if let Some(compilation) = &mut module.compilation {
         compilation.extra_arguments = options.extra_arguments.clone();
         compilation.environment = environment.clone();
+        compilation.environment_complete = true;
     }
     let mut diagnostics = Vec::new();
     let result = materialize_entry(
@@ -364,28 +381,17 @@ fn materialize_entry(
         .ok_or_else(|| invalid("compilation record unavailable"))?;
     compilation.extra_arguments = options.extra_arguments.clone();
     compilation.environment = environment.clone();
-    for name in [
-        "DEPENDENCIES_OUTPUT",
-        "SUNPRO_DEPENDENCIES",
-        "CCC_OVERRIDE_OPTIONS",
-        "CCC_ADD_ARGS",
-        "CLANG_CONFIG_FILE_SYSTEM_DIR",
-        "CLANG_CONFIG_FILE_USER_DIR",
-    ] {
-        if std::env::var_os(name).is_some() {
-            module.status = ModuleStatus::Unsupported;
-            return Err(invalid(format!(
-                "environment variable {name} may introduce unowned outputs or hidden driver arguments"
-            )));
-        }
-    }
     let mut arguments = compilation.recorded_arguments[1..].to_vec();
     arguments.extend(options.extra_arguments.iter().cloned());
     let parsed = classify_arguments(&arguments, &compilation.directory)
         .inspect_err(|_| module.status = ModuleStatus::Unsupported)?;
+    let compile_args =
+        imported_compile_arguments(&parsed, &options.extra_arguments, &compilation.directory)
+            .inspect_err(|_| module.status = ModuleStatus::Unsupported)?;
     let identity_options = serde_json::to_string(&(
         &options.extra_arguments,
-        parsed.compile_args(),
+        &compile_args,
+        ANALYSIS_DRIVER_ARGUMENTS,
         environment,
         &compiler.identity,
     ))
@@ -406,14 +412,17 @@ fn materialize_entry(
     source.content_sha256 = hash_file(&source.path).ok();
     let temporary = tempfile::NamedTempFile::new_in(output)?;
     let mut arguments = crate::materialize::bitcode_arguments(
-        parsed.compile_args(),
+        &compile_args,
         &[],
         Path::new(&parsed.input_files()[0]),
         temporary.path(),
         None,
     )?;
-    // Driver crash reports are auxiliary artifacts, not analysis settings.
-    arguments.insert(0, "-fno-crash-diagnostics".into());
+    // Hidden configuration and driver crash reports may create unowned outputs.
+    arguments.splice(
+        0..0,
+        ANALYSIS_DRIVER_ARGUMENTS.iter().map(|arg| (*arg).into()),
+    );
     compilation.effective_arguments =
         std::iter::once(compiler.identity.path.to_string_lossy().into_owned())
             .chain(arguments.iter().cloned())
@@ -422,6 +431,7 @@ fn materialize_entry(
         &compiler.identity.path,
         &arguments,
         &compilation.directory,
+        environment,
     )?;
     diagnostics.extend_from_slice(&result.stderr);
     diagnostics.extend_from_slice(&result.stdout);
@@ -629,8 +639,7 @@ fn classify_arguments(args: &[String], directory: &Path) -> Result<CompilerArgsI
             "expected a single-source compile-only Clang command (-c)",
         ));
     }
-    if parsed.is_assembly()
-        || parsed.is_assemble_only()
+    if parsed.is_assemble_only()
         || parsed.is_preprocess_only()
         || parsed.is_dependency_only()
         || parsed.is_print_only()
@@ -648,18 +657,37 @@ fn classify_arguments(args: &[String], directory: &Path) -> Result<CompilerArgsI
     if crate::arg_parser::universal_build_architectures(parsed.compile_args()).len() > 1 {
         return Err(invalid("universal builds are unsupported"));
     }
-    // An assembly or header language can also be selected with -x.
-    for pair in parsed.compile_args().windows(2) {
-        if pair[0] == "-x"
-            && !matches!(
-                pair[1].as_str(),
-                "c" | "c++" | "objective-c" | "objective-c++" | "none"
-            )
-        {
-            return Err(invalid(format!("unsupported input language: {}", pair[1])));
-        }
-    }
+    validate_language(parsed.input_language(0), parsed.is_assembly())?;
     Ok(parsed)
+}
+
+fn validate_language(language: Option<&str>, assembly_extension: bool) -> Result<(), Error> {
+    match language {
+        Some("c" | "c++" | "objective-c" | "objective-c++") => Ok(()),
+        None | Some("none") if !assembly_extension => Ok(()),
+        _ => Err(invalid(format!(
+            "unsupported input language: {}",
+            language.unwrap_or("assembly")
+        ))),
+    }
+}
+
+fn imported_compile_arguments(
+    parsed: &CompilerArgsInfo,
+    extra_args: &[String],
+    directory: &Path,
+) -> Result<Vec<String>, Error> {
+    let mut extra = CompilerArgsInfo::default();
+    extra.parse_args_in(extra_args, directory)?;
+    // Recorded -x applies at the source's original position. Explicit analysis
+    // overrides apply to this selected translation unit, including an extra -x.
+    let language = extra.final_language().or_else(|| parsed.input_language(0));
+    validate_language(language, parsed.is_assembly())?;
+    let mut arguments = parsed.without_language_arguments();
+    if let Some(language) = language {
+        arguments.extend(["-x".into(), language.into()]);
+    }
+    Ok(arguments)
 }
 
 fn check_owned_outputs(args: &[String]) -> Result<(), Error> {
@@ -668,6 +696,8 @@ fn check_owned_outputs(args: &[String]) -> Result<(), Error> {
     // arguments. Native -o and -M* flags are stripped by the shared parser.
     const UNSUPPORTED: &[&str] = &[
         "-save-temps",
+        "-save-stats",
+        "--save-stats",
         "--save-temps",
         "-gsplit-dwarf",
         "-fprofile-generate",

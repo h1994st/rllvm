@@ -509,3 +509,230 @@ fn parent_components_after_symlinks_preserve_recorded_directory_semantics() {
         "wrong source compiled through symlink/.."
     );
 }
+
+#[test]
+fn imported_save_stats_options_cannot_overwrite_build_statistics() {
+    for flag in [
+        "-save-stats",
+        "-save-stats=cwd",
+        "-save-stats=obj",
+        "--save-stats",
+        "--save-stats=cwd",
+        "--save-stats=obj",
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        fs::write(
+            scratch.path().join("source.c"),
+            "int value(void) { return 1; }\n",
+        )
+        .unwrap();
+        fs::write(scratch.path().join("source.stats"), "original statistics").unwrap();
+        write_database(
+            &scratch,
+            json!([
+                {"directory":".","file":"source.c","arguments":[llvm_bin("clang"),"-c","source.c",flag]},
+                {"directory":".","file":"source.c","arguments":[llvm_bin("clang"),"-c","source.c"]}
+            ]),
+        );
+        let output = rllvm(&scratch)
+            .args(["generate", ".", "--output-dir", "analysis"])
+            .arg(format!("--extra-arg={flag}"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "accepted {flag}");
+        assert_eq!(
+            fs::read_to_string(scratch.path().join("source.stats")).unwrap(),
+            "original statistics"
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(scratch.path().join("analysis/catalog.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            catalog["modules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|module| module["status"] == "unsupported")
+        );
+    }
+}
+
+#[test]
+fn imported_language_matches_the_language_active_at_the_source() {
+    let scratch = tempfile::tempdir().unwrap();
+    fs::write(scratch.path().join("source.c"), "#ifdef __cplusplus\nextern \"C\" int language(void) { return 1; }\n#else\nint language(void) { return 2; }\n#endif\n").unwrap();
+    fs::write(
+        scratch.path().join("command.rsp"),
+        "-x c++ -c source.c -x none",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([
+            {"directory":".","file":"source.c","arguments":[llvm_bin("clang"),"-x","c++","-c","source.c","-x","none"]},
+            {"directory":".","file":"source.c","arguments":[llvm_bin("clang"),"@command.rsp"]},
+            {"directory":".","file":"source.c","arguments":[llvm_bin("clang"),"-xc++","-c","source.c","-xnone"]}
+        ]),
+    );
+    let native = Command::new(llvm_bin("clang"))
+        .current_dir(scratch.path())
+        .args([
+            "-x",
+            "c++",
+            "-c",
+            "source.c",
+            "-x",
+            "none",
+            "-emit-llvm",
+            "-o",
+            "expected.bc",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&native);
+    assert!(disassemble(&scratch.path().join("expected.bc")).contains("ret i32 1"));
+    assert_success(
+        &rllvm(&scratch)
+            .args(["generate", ".", "--output-dir", "analysis"])
+            .output()
+            .unwrap(),
+    );
+    let catalog: Value =
+        serde_json::from_slice(&fs::read(scratch.path().join("analysis/catalog.json")).unwrap())
+            .unwrap();
+    for module in catalog["modules"].as_array().unwrap() {
+        let ir = disassemble(
+            &scratch
+                .path()
+                .join("analysis")
+                .join(module["path"].as_str().unwrap()),
+        );
+        assert!(
+            ir.contains("ret i32 1"),
+            "import changed positional language"
+        );
+    }
+    fs::write(scratch.path().join("analysis.rsp"), "-x c").unwrap();
+    assert_success(
+        &rllvm(&scratch)
+            .args([
+                "generate",
+                ".",
+                "--extra-arg=@analysis.rsp",
+                "--output-dir",
+                "override",
+            ])
+            .output()
+            .unwrap(),
+    );
+    let catalog: Value =
+        serde_json::from_slice(&fs::read(scratch.path().join("override/catalog.json")).unwrap())
+            .unwrap();
+    for module in catalog["modules"].as_array().unwrap() {
+        let ir = disassemble(
+            &scratch
+                .path()
+                .join("override")
+                .join(module["path"].as_str().unwrap()),
+        );
+        assert!(
+            ir.contains("ret i32 2"),
+            "explicit analysis language override was ignored"
+        );
+    }
+}
+
+#[test]
+fn imported_compilers_receive_only_the_recorded_analysis_environment() {
+    let scratch = tempfile::tempdir().unwrap();
+    fs::create_dir(scratch.path().join("include")).unwrap();
+    fs::write(scratch.path().join("include/value.h"), "#define VALUE 13\n").unwrap();
+    fs::write(scratch.path().join("source.c"), "#include <value.h>\n#ifdef AMBIENT_OVERRIDE\n#error ambient override reached compiler\n#endif\nint value(void) { return VALUE; }\n").unwrap();
+    fs::write(scratch.path().join("build.log"), "original build log").unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".","file":"source.c","arguments":[llvm_bin("clang"),"-c","source.c"]}]),
+    );
+    for (output_dir, override_value) in [("print", None), ("override", Some("+-DAMBIENT_OVERRIDE"))]
+    {
+        let mut command = rllvm(&scratch);
+        command
+            .env("CPATH", scratch.path().join("include"))
+            .env("CC_PRINT_OPTIONS", "1")
+            .env("CC_PRINT_OPTIONS_FILE", scratch.path().join("build.log"))
+            .env("RLLVM_COMPDB_PRIVATE_SENTINEL", "must not reach compiler")
+            .args(["generate", ".", "--output-dir", output_dir]);
+        if let Some(value) = override_value {
+            command.env("CCC_OVERRIDE_OPTIONS", value);
+        }
+        let output = command.output().unwrap();
+        assert_success(&output);
+        assert_eq!(
+            fs::read_to_string(scratch.path().join("build.log")).unwrap(),
+            "original build log"
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(scratch.path().join(output_dir).join("catalog.json")).unwrap(),
+        )
+        .unwrap();
+        let compilation = &catalog["modules"][0]["compilation"];
+        assert_eq!(compilation["environment_complete"], true);
+        assert_eq!(
+            compilation["environment"]["CPATH"],
+            scratch.path().join("include").to_str().unwrap()
+        );
+        for name in [
+            "CC_PRINT_OPTIONS",
+            "CC_PRINT_OPTIONS_FILE",
+            "CCC_OVERRIDE_OPTIONS",
+            "RLLVM_COMPDB_PRIVATE_SENTINEL",
+        ] {
+            assert!(compilation["environment"][name].is_null());
+        }
+        let ir = disassemble(
+            &scratch
+                .path()
+                .join(output_dir)
+                .join(catalog["modules"][0]["path"].as_str().unwrap()),
+        );
+        assert!(ir.contains("ret i32 13"));
+    }
+}
+
+#[test]
+fn imported_driver_default_configs_cannot_add_hidden_outputs_or_flags() {
+    let scratch = tempfile::tempdir().unwrap();
+    let driver = scratch.path().join("clang");
+    std::os::unix::fs::symlink(llvm_bin("clang"), &driver).unwrap();
+    fs::write(
+        scratch.path().join("clang.cfg"),
+        "-save-stats\n-DHIDDEN_CONFIG\n",
+    )
+    .unwrap();
+    fs::write(scratch.path().join("source.stats"), "original statistics").unwrap();
+    fs::write(scratch.path().join("source.c"), "#ifdef HIDDEN_CONFIG\n#error default config reached compiler\n#endif\nint value(void) { return 3; }\n").unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".","file":"source.c","arguments":[driver,"-no-canonical-prefixes","-c","source.c"]}]),
+    );
+    assert_success(
+        &rllvm(&scratch)
+            .args(["generate", ".", "--output-dir", "analysis"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(
+        fs::read_to_string(scratch.path().join("source.stats")).unwrap(),
+        "original statistics"
+    );
+    let catalog: Value =
+        serde_json::from_slice(&fs::read(scratch.path().join("analysis/catalog.json")).unwrap())
+            .unwrap();
+    assert!(
+        catalog["modules"][0]["compilation"]["effective_arguments"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--no-default-config"))
+    );
+}
