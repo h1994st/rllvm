@@ -1,6 +1,5 @@
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -17,7 +16,10 @@ pub fn main() -> Result<(), Error> {
 
     if args.output_dir.is_some()
         || !args.selection.is_empty()
-        || is_catalog_or_bitcode(&args.input)?
+        || matches!(
+            InputKind::from_path(&args.input)?,
+            InputKind::Bitcode | InputKind::JsonObject
+        )
     {
         return extract_catalog(&args);
     }
@@ -205,23 +207,6 @@ pub fn main() -> Result<(), Error> {
     tracing::info!("Output file: {:?}", output_filepath);
 
     Ok(())
-}
-
-fn is_catalog_or_bitcode(input: &Path) -> Result<bool, Error> {
-    let file = fs::File::open(input)?;
-    let mut prefix = [0u8; 4];
-    let count = std::io::BufReader::new(&file).read(&mut prefix)?;
-    if count == 4 && (prefix == *b"BC\xc0\xde" || prefix == [0xde, 0xc0, 0x17, 0x0b]) {
-        return Ok(true);
-    }
-    let first = std::io::BufReader::new(fs::File::open(input)?)
-        .bytes()
-        .find_map(|byte| match byte {
-            Ok(b) if b.is_ascii_whitespace() => None,
-            other => Some(other),
-        })
-        .transpose()?;
-    Ok(first == Some(b'{'))
 }
 
 fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {

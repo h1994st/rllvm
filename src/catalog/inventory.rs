@@ -13,12 +13,10 @@ use super::{
     hash_bytes, hash_file, identity, read_catalog,
 };
 use crate::{
-    bitcode_info::find_llvm_dis, error::Error, utils::extract_bitcode_filepaths_from_parsed_object,
+    bitcode_info::find_llvm_dis,
+    error::Error,
+    utils::{InputKind, extract_bitcode_filepaths_from_parsed_object},
 };
-
-fn is_bitcode(data: &[u8]) -> bool {
-    data.starts_with(b"BC\xc0\xde") || data.starts_with(&[0xde, 0xc0, 0x17, 0x0b])
-}
 
 /// Inspect one module with an explicitly selected reader. Failures stay in the record.
 pub fn inspect_bitcode(path: &Path, llvm_dis: &Path, id: impl Into<String>) -> ModuleRecord {
@@ -275,7 +273,8 @@ pub fn inventory(
         Some(path) => path.to_path_buf(),
         None => find_llvm_dis()?,
     };
-    if data.iter().copied().find(|b| !b.is_ascii_whitespace()) == Some(b'{') {
+    let kind = InputKind::from_reader(data.as_slice())?;
+    if kind == InputKind::JsonObject {
         let mut catalog = read_catalog(&input)?;
         let root = input.parent().expect("canonical file has a parent");
         let mut archives = ArchiveCache::default();
@@ -349,7 +348,7 @@ pub fn inventory(
     let mut modules = Vec::new();
     let mut references = BTreeSet::new();
     let mut boundaries = Vec::new();
-    if is_bitcode(&data) {
+    if kind == InputKind::Bitcode {
         modules.push(inspect_bitcode(
             &input,
             &tool,
@@ -410,7 +409,7 @@ pub fn inventory(
                     continue;
                 }
             };
-            if is_bitcode(bytes) {
+            if InputKind::from_reader(bytes)? == InputKind::Bitcode {
                 let reference = ArchiveMember {
                     index,
                     name: name.clone(),
