@@ -138,6 +138,16 @@ dependency-output, and argument-injection variables are excluded. Implicit Clang
 configuration files are disabled with `--no-default-config`, recorded in the
 effective command; put required analysis flags in the database or `--extra-arg`.
 
+Homebrew Clang on macOS may obtain its SDK path from a default configuration.
+Provide that SDK explicitly when importing such a database:
+
+```bash
+SDKROOT="$(xcrun --show-sdk-path)" rllvm-compdb generate build/ \
+  --output-dir analysis/modules
+```
+
+The supplied `SDKROOT` is recorded in the analysis environment.
+
 The output directory must be new. It contains separate modules, per-entry
 diagnostics, and an atomic `catalog.json` with relative module paths, content
 hashes, compiler and target metadata, recorded commands, and effective analysis

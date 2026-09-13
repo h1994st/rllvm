@@ -55,6 +55,53 @@ fn disassemble(path: &Path) -> String {
 }
 
 #[test]
+fn system_headers_use_the_explicit_sdk_environment() {
+    let scratch = tempfile::tempdir().unwrap();
+    fs::write(
+        scratch.path().join("system.c"),
+        "#include <stdlib.h>\nint system_headers(void){return EXIT_SUCCESS;}\n",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".","file":"system.c","arguments":[llvm_bin("clang"),"-c","system.c"]}]),
+    );
+    let sdk = if cfg!(target_os = "macos") {
+        let output = Command::new("xcrun")
+            .arg("--show-sdk-path")
+            .output()
+            .unwrap();
+        assert_success(&output);
+        Some(String::from_utf8(output.stdout).unwrap().trim().to_owned())
+    } else {
+        None
+    };
+    let mut command = rllvm(&scratch);
+    if let Some(sdk) = &sdk {
+        command.env("SDKROOT", sdk);
+    }
+    let output = command
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let catalog: Value =
+        serde_json::from_slice(&fs::read(scratch.path().join("analysis/catalog.json")).unwrap())
+            .unwrap();
+    let module = &catalog["modules"][0];
+    if let Some(sdk) = sdk {
+        assert_eq!(module["compilation"]["environment"]["SDKROOT"], sdk);
+    }
+    let ir = disassemble(
+        &scratch
+            .path()
+            .join("analysis")
+            .join(module["path"].as_str().unwrap()),
+    );
+    assert!(ir.contains("@system_headers") && ir.contains("ret i32 0"));
+}
+
+#[test]
 fn selected_current_source_generates_ir_and_preserves_native_outputs() {
     let scratch = tempfile::tempdir().unwrap();
     fs::create_dir(scratch.path().join("build")).unwrap();
