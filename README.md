@@ -205,6 +205,44 @@ Objects combined by `bpftool gen object`, or by `libbpf`'s linker directly,
 keep every contributing path, so extraction from a linked object covers the
 whole program. That linker requires BTF, so compile with `-g`.
 
+### Module catalogs and selection
+
+Inventory the recorded modules without merging them:
+
+```bash
+rllvm-info app --json > catalog.json
+rllvm-info app --json --source src/example.c
+```
+
+JSON inventory accepts bitcode, objects, executables, regular native or bitcode
+archives, and existing catalogs. It reads module metadata with `llvm-dis` and
+computes content hashes. Missing or unreadable entries remain in the JSON, and
+the command exits nonzero if any selected entry is unavailable. Thin archives
+are explicitly unsupported.
+
+Copy a selection into a new directory, preserving separate modules and their
+identities, then merge later if needed:
+
+```bash
+rllvm-get-bc app --module MODULE_ID --output-dir analysis/selected
+rllvm-get-bc analysis/selected/catalog.json -o selected.bc
+```
+
+Replace `MODULE_ID` with an ID from inventory. `--module`, `--source`, and
+`--configuration` are repeatable; alternatives within each option are combined,
+and different options intersect. Unmatched selectors fail. Configuration
+selection requires recorded configuration metadata; legacy object sections
+contain only bitcode paths, so that metadata is unknown.
+
+The copied catalog uses relative module paths and can move with its directory.
+Catalog inputs validate module content hashes. Existing `-o`, `-b`, and
+`--merge-strategy` outputs remain available. Use `--bitcode-root` to resolve
+relative paths recorded in native artifacts.
+
+A catalog describes known module evidence and the selected scope. It does not
+establish a complete program or a historical source snapshot. See
+[catalog reference](docs/CATALOG.md) for the versioned format and provenance boundaries.
+
 ### Bitcode storage and relocation
 
 C/C++ bitcode files are hidden files beside the requested output by default.

@@ -4,6 +4,10 @@
 //! so an item is only reachable from outside the crate if it is re-exported
 //! with `pub` below; everything else is `pub(crate)` and can change freely.
 
+/// Content classification for bitcode and potential JSON inputs
+mod input_kind;
+pub use input_kind::InputKind;
+
 /// Command execution utility functions
 mod command_utils;
 pub(crate) use command_utils::{execute_command_for_status, execute_command_for_stdout_string};
@@ -14,9 +18,7 @@ pub use file_utils::{
     embed_bitcode_filepath_to_object_file, extract_bitcode_filepaths_from_object_file,
     extract_bitcode_filepaths_from_parsed_object, extract_bitcode_filepaths_from_parsed_objects,
 };
-pub(crate) use file_utils::{
-    has_fat_lto_bitcode, is_bitcode_file, is_object_file, recorded_bitcode_filepath,
-};
+pub(crate) use file_utils::{has_fat_lto_bitcode, is_object_file, recorded_bitcode_filepath};
 
 /// LLVM-related utility functions
 mod llvm_utils;

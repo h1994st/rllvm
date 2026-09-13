@@ -100,3 +100,8 @@ tests/data/cargo_fixture/target/
 # Generated from README.md by site/build.py; never committed, so the
 # published page cannot drift from the repository's front page.
 site/index.md
+
+# Track the maintained catalog reference within the otherwise excluded docs.
+!/docs/
+/docs/*
+!/docs/CATALOG.md

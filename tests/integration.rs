@@ -3923,8 +3923,7 @@ fn bpf_objects_record_bitcode_for_the_bpf_target() {
 
 /// `-ffat-lto-objects` produces a real ELF object with the bitcode inside, so
 /// the wrapper's content-based dispatch sends it down the ordinary
-/// `llvm-objcopy` path rather than the marker path. Only `is_bitcode_file`'s
-/// own unit test covered that decision; nothing asserted that such a build
+/// `llvm-objcopy` path rather than the marker path. Verify that such a build
 /// stays extractable end to end.
 ///
 /// Linux only: clang rejects `-ffat-lto-objects` on Darwin.
@@ -4306,6 +4305,10 @@ fn completions_cover_every_extraction_option() {
         "--bitcode-root",
         "--output",
         "--save-manifest",
+        "--output-dir",
+        "--module",
+        "--source",
+        "--configuration",
     ] {
         assert!(
             script.contains(expected),

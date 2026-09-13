@@ -18,8 +18,8 @@ use crate::{
     error::Error,
     lto::{LtoFlavour, LtoMode, save_temps_flag, user_requested_save_temps},
     utils::{
-        embed_bitcode_filepath_to_object_file, execute_command_for_status, execute_llvm_tool,
-        extract_bitcode_filepaths_from_object_file, has_fat_lto_bitcode, is_bitcode_file,
+        InputKind, embed_bitcode_filepath_to_object_file, execute_command_for_status,
+        execute_llvm_tool, extract_bitcode_filepaths_from_object_file, has_fat_lto_bitcode,
         recorded_bitcode_filepath,
     },
 };
@@ -425,7 +425,7 @@ pub trait CompilerWrapper {
             // header to patch. Dispatch on content rather than on the flag:
             // `-ffat-lto-objects` produces a real object despite `-flto`, and
             // takes the ordinary path with no extra code.
-            if is_bitcode_file(&object_filepath)? {
+            if InputKind::from_path(&object_filepath)? == InputKind::Bitcode {
                 lto_marker::inject_marker(
                     &object_filepath,
                     &src_bitcode_filepath,

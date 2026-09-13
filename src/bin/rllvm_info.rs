@@ -6,33 +6,14 @@ use rllvm::{
     bitcode_info::{BitcodeInfo, analyze_bitcode},
     cli::InfoArgs,
     error::Error,
-    utils::extract_bitcode_filepaths_from_object_file,
+    utils::{InputKind, extract_bitcode_filepaths_from_parsed_object},
 };
-
-/// Detect whether a file is an LLVM bitcode file by checking its magic bytes.
-fn is_bitcode_file(path: &PathBuf) -> Result<bool, Error> {
-    let data = fs::read(path)?;
-    if data.len() < 4 {
-        return Ok(false);
-    }
-    let head = [data[0], data[1], data[2], data[3]];
-
-    // Raw bitcode begins with 'BC' 0xC0 0xDE.
-    let raw = head == [0x42, 0x43, 0xC0, 0xDE];
-
-    // On Darwin, clang emits the bitcode *wrapper* format instead, whose header
-    // magic is 0x0B17C0DE. Checking only for 'BC' rejected every bitcode file
-    // produced on macOS, which is the default output there.
-    let wrapped = u32::from_le_bytes(head) == 0x0B17_C0DE;
-
-    Ok(raw || wrapped)
-}
 
 /// Try to parse as an object file to check for embedded bitcode.
 fn try_extract_bitcode_from_object(path: &PathBuf) -> Result<Option<PathBuf>, Error> {
     let data = fs::read(path)?;
-    if object::File::parse(&*data).is_ok() {
-        let bc_paths = extract_bitcode_filepaths_from_object_file(path)?;
+    if let Ok(object) = object::File::parse(&*data) {
+        let bc_paths = extract_bitcode_filepaths_from_parsed_object(&object)?;
         if let Some(first) = bc_paths.into_iter().next()
             && first.exists()
         {
@@ -73,13 +54,44 @@ fn print_info(info: &BitcodeInfo, show_functions: bool) {
 fn main() -> Result<(), Error> {
     let args = InfoArgs::parse();
 
+    if args.json {
+        let root = args
+            .bitcode_root
+            .as_deref()
+            .unwrap_or(std::path::Path::new("."));
+        let catalog = rllvm::catalog::inventory(&args.input, root, None)?;
+        let selected = rllvm::catalog::select_modules(
+            &catalog,
+            &args.selection.selection(),
+            &std::env::current_dir()?,
+        )?;
+        let json = serde_json::to_string_pretty(&selected)
+            .map_err(|error| Error::InvalidArguments(error.to_string()))?;
+        println!("{json}");
+        if selected
+            .modules
+            .iter()
+            .any(|module| module.status != rllvm::catalog::ModuleStatus::Available)
+        {
+            return Err(Error::MissingFile(
+                "some selected modules are unavailable; see the JSON catalog".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if !args.selection.is_empty() {
+        return Err(Error::InvalidArguments(
+            "module/source/configuration selection requires --json".into(),
+        ));
+    }
+
     let input = &args.input;
     let input_path = input
         .canonicalize()
         .map_err(|e| Error::MissingFile(format!("Cannot resolve input path {:?}: {}", input, e)))?;
 
     // Determine the bitcode file to analyze
-    let bc_path = if is_bitcode_file(&input_path)? {
+    let bc_path = if InputKind::from_path(&input_path)? == InputKind::Bitcode {
         input_path
     } else {
         // Try extracting from an object file

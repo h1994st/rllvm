@@ -123,6 +123,13 @@ pub struct ExtractionArgs {
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
 
+    /// Copy selected modules and a portable catalog into a new directory; do not merge
+    #[arg(long, conflicts_with_all = ["output", "merge_strategy", "build_bitcode_archive", "save_manifest"])]
+    pub output_dir: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub selection: CatalogSelectionArgs,
+
     /// Build bitcode archive (only used for archive files, e.g., *.a).
     /// Equivalent to --merge-strategy=archive. Deprecated in favor of --merge-strategy.
     #[arg(short = 'b', long)]
@@ -191,6 +198,45 @@ pub struct InfoArgs {
     /// List all function names
     #[arg(short = 'f', long)]
     pub functions: bool,
+
+    /// Inventory all recorded modules as a versioned JSON catalog, without merging
+    #[arg(long, conflicts_with = "functions")]
+    pub json: bool,
+
+    /// Resolve relative embedded module paths against this directory (JSON inventory)
+    #[arg(long, requires = "json")]
+    pub bitcode_root: Option<PathBuf>,
+
+    #[command(flatten)]
+    pub selection: CatalogSelectionArgs,
+}
+
+/// Selection shared by inventory and extraction; values match known metadata.
+#[derive(clap::Args, Debug, Default)]
+pub struct CatalogSelectionArgs {
+    /// Select a known module ID (repeatable)
+    #[arg(long = "module", value_name = "ID")]
+    pub modules: Vec<String>,
+    /// Select a known source path (repeatable)
+    #[arg(long = "source", value_name = "PATH")]
+    pub sources: Vec<PathBuf>,
+    /// Select a known configuration ID (repeatable)
+    #[arg(long = "configuration", value_name = "ID")]
+    pub configurations: Vec<String>,
+}
+
+impl CatalogSelectionArgs {
+    pub fn is_empty(&self) -> bool {
+        self.modules.is_empty() && self.sources.is_empty() && self.configurations.is_empty()
+    }
+
+    pub fn selection(&self) -> crate::catalog::ModuleSelection {
+        crate::catalog::ModuleSelection {
+            module_ids: self.modules.clone(),
+            sources: self.sources.clone(),
+            configuration_ids: self.configurations.clone(),
+        }
+    }
 }
 
 /// The wrapper options `rllvm-rustc` answers.

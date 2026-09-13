@@ -1,4 +1,7 @@
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use clap::Parser;
 use object::Object;
@@ -10,6 +13,16 @@ use tracing_subscriber::FmtSubscriber;
 
 pub fn main() -> Result<(), Error> {
     let args = ExtractionArgs::parse();
+
+    if args.output_dir.is_some()
+        || !args.selection.is_empty()
+        || matches!(
+            InputKind::from_path(&args.input)?,
+            InputKind::Bitcode | InputKind::JsonObject
+        )
+    {
+        return extract_catalog(&args);
+    }
 
     // Set log level
     // The verbose flag will override the configured log level
@@ -193,5 +206,116 @@ pub fn main() -> Result<(), Error> {
     }
     tracing::info!("Output file: {:?}", output_filepath);
 
+    Ok(())
+}
+
+fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
+    use rllvm::catalog::{copy_modules, inventory, select_modules};
+    let root = args.bitcode_root.as_deref().unwrap_or(Path::new("."));
+    let catalog = inventory(&args.input, root, None)?;
+    let selected = select_modules(
+        &catalog,
+        &args.selection.selection(),
+        &std::env::current_dir()?,
+    )?;
+    if let Some(directory) = &args.output_dir {
+        copy_modules(&selected, directory)?;
+        return Ok(());
+    }
+    let strategy = args
+        .merge_strategy
+        .unwrap_or(if args.build_bitcode_archive {
+            MergeStrategy::Archive
+        } else {
+            MergeStrategy::Full
+        });
+    if strategy != MergeStrategy::Archive {
+        let targets: std::collections::BTreeSet<_> = selected
+            .modules
+            .iter()
+            .filter_map(|m| m.target_triple.as_deref())
+            .collect();
+        let layouts: std::collections::BTreeSet<_> = selected
+            .modules
+            .iter()
+            .filter_map(|m| m.data_layout.as_deref())
+            .collect();
+        if targets.len() > 1 || layouts.len() > 1 {
+            return Err(Error::InvalidArguments("selected modules have incompatible targets/data layouts; select a compatible subset or use archive output".into()));
+        }
+    }
+    if args.save_manifest && selected.modules.iter().any(|m| m.archive_member.is_some()) {
+        return Err(Error::InvalidArguments("a path manifest cannot represent embedded archive members; use --output-dir for a portable catalog".into()));
+    }
+    let stem = args
+        .input
+        .file_stem()
+        .ok_or_else(|| Error::InvalidArguments("input has no filename".into()))?
+        .to_string_lossy();
+    let output = args.output.clone().unwrap_or_else(|| {
+        PathBuf::from(format!(
+            "{stem}.{}",
+            if strategy == MergeStrategy::Archive {
+                "bca"
+            } else {
+                "bc"
+            }
+        ))
+    });
+    let input = args.input.canonicalize()?;
+    let manifest = if args.save_manifest {
+        let filename = output
+            .file_name()
+            .ok_or_else(|| Error::InvalidArguments("output has no filename".into()))?
+            .to_string_lossy();
+        Some(
+            input
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{filename}.manifest")),
+        )
+    } else {
+        None
+    };
+    for destination in std::iter::once(&output).chain(manifest.iter()) {
+        if let Ok(existing) = destination.canonicalize()
+            && (existing == input
+                || selected
+                    .modules
+                    .iter()
+                    .filter_map(|m| m.path.as_ref())
+                    .any(|path| path.canonicalize().ok().as_ref() == Some(&existing)))
+        {
+            return Err(Error::InvalidArguments(
+                "output or manifest would overwrite an input artifact; choose another -o path"
+                    .into(),
+            ));
+        }
+    }
+    let scratch = tempfile::tempdir()?;
+    let directory = scratch.path().join("modules");
+    let copied = copy_modules(&selected, &directory)?;
+    let paths: Vec<PathBuf> = copied
+        .modules
+        .iter()
+        .map(|m| directory.join(m.path.as_ref().expect("copied module has a path")))
+        .collect();
+    if rllvm::merge::merge_bitcode_files(strategy, &paths, output.clone())?
+        .is_some_and(|code| code != 0)
+    {
+        return Err(Error::ExecutionFailure(
+            "selected module merge failed".into(),
+        ));
+    }
+    if let Some(manifest) = manifest {
+        let contents = selected
+            .modules
+            .iter()
+            .filter_map(|m| m.path.as_ref())
+            .map(|p| p.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(manifest, contents)?;
+    }
     Ok(())
 }
