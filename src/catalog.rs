@@ -51,6 +51,9 @@ pub struct CatalogScope {
     pub total_entries: usize,
     pub selected_entries: usize,
     pub selection: ModuleSelection,
+    /// Earlier filters when an already selected catalog is narrowed again.
+    #[serde(default)]
+    pub selection_history: Vec<ModuleSelection>,
     /// Explicit analysis overrides, retained even if every entry failed.
     #[serde(default)]
     pub analysis_arguments: Vec<String>,
@@ -160,6 +163,7 @@ impl ModuleCatalog {
                 total_entries: modules.len(),
                 selected_entries: modules.len(),
                 selection: ModuleSelection::default(),
+                selection_history: Vec::new(),
                 analysis_arguments: Vec::new(),
                 whole_program_complete: None,
                 limitations: vec![

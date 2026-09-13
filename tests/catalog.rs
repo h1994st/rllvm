@@ -287,3 +287,93 @@ fn bitcode_archive_inventory_and_copy_preserve_member_modules() {
         );
     }
 }
+
+#[test]
+fn selected_partial_merge_preserves_original_directory_groups() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let a = f.module("first", "first.c", "int first(void){return 1;}");
+    let b = f.module("second", "second.c", "int second(void){return 2;}");
+    let other = f.root.path().join("other");
+    fs::create_dir(&other).unwrap();
+    let moved = other.join("second.bc");
+    fs::rename(b, &moved).unwrap();
+    let input = f.object(&[a, moved]);
+    let catalog = Fixture::catalog(
+        &f.command("info")
+            .arg(&input)
+            .arg("--json")
+            .output()
+            .unwrap(),
+    );
+    let quote = |p: PathBuf| format!("'{}'", p.display().to_string().replace('\'', "'\"'\"'"));
+    let log = f.root.path().join("link.log");
+    let shim = f.root.path().join("linker");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf 'link\\n' >> {}\nexec {} \"$@\"\n",
+            quote(log.clone()),
+            quote(f.tools.join("llvm-link"))
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    let config = fs::read_to_string(&f.config).unwrap().replace(
+        &f.tools.join("llvm-link").display().to_string(),
+        &shim.display().to_string(),
+    );
+    fs::write(&f.config, config).unwrap();
+    let output = f.root.path().join("partial.bc");
+    let result = f
+        .command("get")
+        .arg(&input)
+        .args([
+            "--module",
+            &catalog.modules[0].id,
+            "--module",
+            &catalog.modules[1].id,
+            "--merge-strategy",
+            "partial",
+            "-o",
+        ])
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(fs::read_to_string(log).unwrap().lines().count(), 3);
+    let ir = f.ir(&output);
+    assert!(ir.contains("@first") && ir.contains("@second"));
+}
+
+#[test]
+fn manifest_destination_cannot_overwrite_the_input_catalog() {
+    let f = Fixture::new();
+    let module = f.module("first", "first.c", "int first(void){return 1;}");
+    let catalog = Fixture::catalog(
+        &f.command("info")
+            .arg(&module)
+            .arg("--json")
+            .output()
+            .unwrap(),
+    );
+    let input = f.root.path().join("result.bc.manifest");
+    write_catalog(&input, &catalog).unwrap();
+    let before = fs::read(&input).unwrap();
+    let output = f.root.path().join("result.bc");
+    let result = f
+        .command("get")
+        .arg(&input)
+        .arg("-m")
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert_eq!(fs::read(&input).unwrap(), before);
+    assert!(!output.exists());
+}

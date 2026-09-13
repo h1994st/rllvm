@@ -18,6 +18,7 @@ entry counts, and available entries without a path and content hash.
 | `scope.kind` | Recorded module inventory or selected analysis compilations. |
 | `scope.total_entries`, `scope.selected_entries` | Known entries before and after selection. |
 | `scope.selection` | Requested module IDs, source paths, and configuration IDs. |
+| `scope.selection_history` | Earlier filters preserved when a selected catalog is narrowed again. |
 | `scope.analysis_arguments` | Explicit analysis overrides, including runs where all entries fail. |
 | `scope.whole_program_complete` | `null` when program completeness is not established, as with these producers. |
 | `scope.limitations` | Unrecorded inputs, unreadable archive boundaries, and unavailable provenance. |
@@ -69,7 +70,9 @@ recorded directory can only be matched by its recorded spelling.
 
 Catalog-relative module and diagnostic paths resolve from the catalog's
 directory, independently of the current working directory. Copied outputs use
-relative paths and preserve IDs, hashes, and recorded provenance. Original
+relative paths and preserve IDs, hashes, recorded provenance, and input-directory
+groups for partial merging. Reusing a catalog without new selectors retains its
+selection; further selections retain the earlier filters as history. Original
 source/compiler/origin paths remain provenance; they are not rewritten to imply
 the source tree or toolchain moved with the modules.
 

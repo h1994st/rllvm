@@ -277,17 +277,35 @@ fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
             }
         ))
     });
-    if let Ok(existing) = output.canonicalize()
-        && (existing == args.input.canonicalize()?
-            || selected
-                .modules
-                .iter()
-                .filter_map(|m| m.path.as_ref())
-                .any(|path| path.canonicalize().ok().as_ref() == Some(&existing)))
-    {
-        return Err(Error::InvalidArguments(
-            "output would overwrite an input artifact; choose another -o path".into(),
-        ));
+    let input = args.input.canonicalize()?;
+    let manifest = if args.save_manifest {
+        let filename = output
+            .file_name()
+            .ok_or_else(|| Error::InvalidArguments("output has no filename".into()))?
+            .to_string_lossy();
+        Some(
+            input
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(format!("{filename}.manifest")),
+        )
+    } else {
+        None
+    };
+    for destination in std::iter::once(&output).chain(manifest.iter()) {
+        if let Ok(existing) = destination.canonicalize()
+            && (existing == input
+                || selected
+                    .modules
+                    .iter()
+                    .filter_map(|m| m.path.as_ref())
+                    .any(|path| path.canonicalize().ok().as_ref() == Some(&existing)))
+        {
+            return Err(Error::InvalidArguments(
+                "output or manifest would overwrite an input artifact; choose another -o path"
+                    .into(),
+            ));
+        }
     }
     let scratch = tempfile::tempdir()?;
     let directory = scratch.path().join("modules");
@@ -304,16 +322,7 @@ fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
             "selected module merge failed".into(),
         ));
     }
-    if args.save_manifest {
-        let input = args.input.canonicalize()?;
-        let filename = output
-            .file_name()
-            .ok_or_else(|| Error::InvalidArguments("output has no filename".into()))?
-            .to_string_lossy();
-        let manifest = input
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join(format!("{filename}.manifest"));
+    if let Some(manifest) = manifest {
         let contents = selected
             .modules
             .iter()

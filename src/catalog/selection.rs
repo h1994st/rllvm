@@ -1,6 +1,6 @@
 //! Selection by known metadata and publication of portable, unmerged modules.
 
-use std::{fs, io::Write, path::Path};
+use std::{collections::BTreeMap, fs, io::Write, path::Path};
 
 use super::{
     ModuleCatalog, ModuleRecord, ModuleSelection, ModuleStatus, hash_bytes, hash_file,
@@ -93,7 +93,18 @@ pub fn select_modules(
             "selectors have an empty intersection".into(),
         ));
     }
-    selected.scope.selection = selection.clone();
+    let has_filters = |s: &ModuleSelection| {
+        !s.module_ids.is_empty() || !s.sources.is_empty() || !s.configuration_ids.is_empty()
+    };
+    if has_filters(selection) {
+        if has_filters(&catalog.scope.selection) {
+            selected
+                .scope
+                .selection_history
+                .push(catalog.scope.selection.clone());
+        }
+        selected.scope.selection = selection.clone();
+    }
     selected.scope.selected_entries = selected.modules.len();
     selected.scope.whole_program_complete = None;
     Ok(selected)
@@ -166,8 +177,22 @@ pub fn copy_modules(catalog: &ModuleCatalog, output_dir: &Path) -> Result<Module
     fs::create_dir(output_dir)?;
     let mut copied = catalog.clone();
     let mut archives = super::inventory::ArchiveCache::default();
+    let mut groups = BTreeMap::new();
     for (index, module) in copied.modules.iter_mut().enumerate() {
-        let filename = format!("{index:06}-{}.bc", &hash_bytes(module.id.as_bytes())[..16]);
+        let parent = module
+            .path
+            .as_deref()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new("."))
+            .to_path_buf();
+        let next_group = groups.len();
+        let group = groups.entry(parent).or_insert(next_group);
+        let group_dir = output_dir.join(format!("{group:06}"));
+        fs::create_dir_all(&group_dir)?;
+        let filename = format!(
+            "{group:06}/{index:06}-{}.bc",
+            &hash_bytes(module.id.as_bytes())[..16]
+        );
         copy_module(module, &output_dir.join(&filename), &mut archives)?;
         module.path = Some(filename.into());
         module.archive_member = None;
@@ -291,6 +316,32 @@ mod tests {
         let selected = select_modules(&catalog, &selection, root.path()).unwrap();
         assert_eq!(selected.modules.len(), 1);
         assert_eq!(selected.modules[0].id, "debug");
+    }
+
+    #[test]
+    fn reusing_a_catalog_preserves_its_recorded_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let catalog = fixture(root.path());
+        let selection = ModuleSelection {
+            sources: vec!["src/source.c".into()],
+            ..Default::default()
+        };
+        let selected = select_modules(&catalog, &selection, root.path()).unwrap();
+        let reused = select_modules(&selected, &ModuleSelection::default(), root.path()).unwrap();
+        assert_eq!(reused.scope.selection.sources, selection.sources);
+        let narrowed = select_modules(
+            &selected,
+            &ModuleSelection {
+                module_ids: vec!["debug".into()],
+                ..Default::default()
+            },
+            root.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            narrowed.scope.selection_history[0].sources,
+            selection.sources
+        );
     }
 
     #[test]
