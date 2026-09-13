@@ -111,7 +111,6 @@ pub struct CompilerArgsInfo {
     input_files: Vec<String>,
     input_languages: Vec<Option<String>>,
     current_language: Option<String>,
-    language_argument_indices: Vec<usize>,
     object_files: Vec<String>,
     output_filename: String,
     compile_args: Vec<String>,
@@ -352,7 +351,6 @@ impl CompilerArgsInfo {
             .filter(|language| !language.is_empty())
         {
             self.current_language = Some(language.to_string());
-            self.language_argument_indices.push(self.compile_args.len());
         }
         self.compile_args.push(flag.as_ref().to_string());
         self
@@ -397,8 +395,6 @@ impl CompilerArgsInfo {
     {
         if flag.as_ref() == "-x" {
             self.current_language = Some(args[0].as_ref().to_string());
-            self.language_argument_indices
-                .extend([self.compile_args.len(), self.compile_args.len() + 1]);
         }
         self.compile_args.push(flag.as_ref().to_string());
         self.compile_args.push(args[0].as_ref().to_string());
@@ -566,16 +562,6 @@ impl CompilerArgsInfo {
 
     pub(crate) fn final_language(&self) -> Option<&str> {
         self.current_language.as_deref()
-    }
-
-    /// Omit only recognized language flags, retaining values owned by other flags.
-    pub(crate) fn without_language_arguments(&self) -> Vec<String> {
-        self.compile_args
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !self.language_argument_indices.contains(index))
-            .map(|(_, arg)| arg.clone())
-            .collect()
     }
 
     /// Returns the list of object files.

@@ -683,9 +683,12 @@ fn imported_compile_arguments(
     // overrides apply to this selected translation unit, including an extra -x.
     let language = extra.final_language().or_else(|| parsed.input_language(0));
     validate_language(language, parsed.is_assembly())?;
-    let mut arguments = parsed.without_language_arguments();
-    if let Some(language) = language {
-        arguments.extend(["-x".into(), language.into()]);
+    // Keep every original option so Clang still rejects invalid inactive -x
+    // values. Restore positional semantics for the source appended by the
+    // shared builder, including the driver's default language when needed.
+    let mut arguments = parsed.compile_args().clone();
+    if parsed.final_language().is_some() {
+        arguments.extend(["-x".into(), language.unwrap_or("none").into()]);
     }
     Ok(arguments)
 }

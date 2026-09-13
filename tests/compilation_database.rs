@@ -736,3 +736,105 @@ fn imported_driver_default_configs_cannot_add_hidden_outputs_or_flags() {
             .contains(&json!("--no-default-config"))
     );
 }
+
+#[test]
+fn imported_inactive_invalid_languages_keep_native_compiler_failures() {
+    for arguments in [
+        vec!["-c", "source.c", "-x", "bogus"],
+        vec!["-x", "bogus", "-x", "c", "-c", "source.c"],
+        vec!["-c", "source.c", "-xbogus"],
+    ] {
+        let scratch = tempfile::tempdir().unwrap();
+        fs::write(
+            scratch.path().join("source.c"),
+            "int value(void) { return 1; }\n",
+        )
+        .unwrap();
+        let native = Command::new(llvm_bin("clang"))
+            .current_dir(scratch.path())
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert!(!native.status.success());
+        assert!(String::from_utf8_lossy(&native.stderr).contains("language not recognized"));
+        let argv: Vec<_> = std::iter::once(llvm_bin("clang").display().to_string())
+            .chain(arguments.into_iter().map(String::from))
+            .collect();
+        write_database(
+            &scratch,
+            json!([{"directory":".","file":"source.c","arguments":argv}]),
+        );
+        let output = rllvm(&scratch)
+            .args(["generate", ".", "--output-dir", "analysis"])
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "import erased an invalid language option"
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(scratch.path().join("analysis/catalog.json")).unwrap(),
+        )
+        .unwrap();
+        assert_ne!(catalog["modules"][0]["status"], "available");
+        let diagnostic = fs::read_to_string(
+            scratch
+                .path()
+                .join("analysis")
+                .join(catalog["modules"][0]["diagnostic_path"].as_str().unwrap()),
+        )
+        .unwrap();
+        assert!(diagnostic.contains("language not recognized"));
+    }
+}
+
+#[test]
+fn imported_language_restoration_preserves_inactive_valid_options_and_operands() {
+    for include_directory in ["-x", "-xbogus"] {
+        let scratch = tempfile::tempdir().unwrap();
+        fs::create_dir(scratch.path().join(include_directory)).unwrap();
+        fs::write(
+            scratch.path().join(include_directory).join("value.h"),
+            "#define VALUE 11\n",
+        )
+        .unwrap();
+        fs::write(
+            scratch.path().join("source.c"),
+            "#include <value.h>\nint value(void) { return VALUE; }\n",
+        )
+        .unwrap();
+        let arguments = ["-I", include_directory, "-c", "source.c", "-x", "assembler"];
+        let native = Command::new(llvm_bin("clang"))
+            .current_dir(scratch.path())
+            .args(arguments)
+            .args(["-emit-llvm", "-o", "expected.bc"])
+            .output()
+            .unwrap();
+        assert_success(&native);
+        assert!(disassemble(&scratch.path().join("expected.bc")).contains("ret i32 11"));
+        let argv: Vec<_> = std::iter::once(llvm_bin("clang").display().to_string())
+            .chain(arguments.into_iter().map(String::from))
+            .collect();
+        write_database(
+            &scratch,
+            json!([{"directory":".","file":"source.c","arguments":argv}]),
+        );
+        assert_success(
+            &rllvm(&scratch)
+                .args(["generate", ".", "--output-dir", "analysis"])
+                .output()
+                .unwrap(),
+        );
+        let catalog: Value = serde_json::from_slice(
+            &fs::read(scratch.path().join("analysis/catalog.json")).unwrap(),
+        )
+        .unwrap();
+        let ir = disassemble(
+            &scratch
+                .path()
+                .join("analysis")
+                .join(catalog["modules"][0]["path"].as_str().unwrap()),
+        );
+        assert!(ir.contains("ret i32 11"));
+    }
+}
