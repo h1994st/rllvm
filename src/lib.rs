@@ -27,6 +27,10 @@ pub mod cli;
 
 pub mod arg_parser;
 
+mod materialize;
+
+pub mod compilation_database;
+
 /// Incremental bitcode cache for skipping recompilation of unchanged files.
 pub mod cache;
 

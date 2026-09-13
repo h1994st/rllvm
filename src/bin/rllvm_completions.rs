@@ -3,7 +3,8 @@ use std::io;
 use clap::{Command, CommandFactory, Parser};
 use clap_complete::generate;
 use rllvm::cli::{
-    BinName, ClangWrapperArgs, CompletionArgs, ExtractionArgs, InfoArgs, InitArgs, RustcWrapperArgs,
+    BinName, ClangWrapperArgs, CompdbArgs, CompletionArgs, ExtractionArgs, InfoArgs, InitArgs,
+    RustcWrapperArgs,
 };
 
 /// The clap `Command` a binary parses with.
@@ -24,6 +25,7 @@ fn command_for(bin: BinName) -> Command {
         BinName::GetBc => ExtractionArgs::command(),
         BinName::Init => InitArgs::command(),
         BinName::Info => InfoArgs::command(),
+        BinName::Compdb => CompdbArgs::command(),
         BinName::Rustc => RustcWrapperArgs::command(),
         BinName::Completions => CompletionArgs::command(),
     }

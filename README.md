@@ -94,6 +94,75 @@ rllvm-info -f hello.bc    # also list functions and their counts
 Inspect the extracted `.bc` for a whole-program view. Given an object or binary,
 `rllvm-info` inspects only its first recorded module, when that file is available.
 
+### Importing a compilation database
+
+Analyze selected C/C++ compilations from an existing `compile_commands.json`
+without changing the normal build:
+
+```bash
+rllvm-compdb list build/ > compilations.json
+rllvm-compdb generate build/ --source src/example.c --output-dir analysis/example
+rllvm-compdb generate build/compile_commands.json \
+  --entry ENTRY_ID --extra-arg=-O0 --output-dir analysis/debug --jobs 4
+```
+
+`list` prints JSON with entry IDs, configuration IDs, and unsupported-command
+diagnostics without compiling or requiring source files to exist. `generate`
+selects all entries by default. Repeat `--source` or `--entry` to select several
+values; combining the two filters selects their intersection. Source selectors
+resolve from the current directory. Unmatched selectors and empty selections
+are errors. Duplicate database entries remain distinct, including repeated
+compilations of the same source with different flags or outputs.
+
+Generation uses each entry's recorded Clang/Clang++ executable and working
+directory. Driver names `clang`, `clang++`, and version-suffixed variants are
+supported. Relative entry directories resolve from the database file's directory.
+Structured `arguments` take precedence over `command`; command text
+is decoded without a shell, and response files resolve from the entry directory.
+Only explicit `--extra-arg` analysis overrides apply; wrapper configuration flags
+do not. Generated sources and headers must already exist. The default is one
+compiler worker; `--jobs` sets the concurrency bound.
+
+Imported compiler processes receive a constructed environment containing only
+these variables when set:
+
+- Tool lookup: `PATH`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LIBRARY_PATH`.
+- Include search: `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`.
+- Apple SDK selection: `SDKROOT`, `DEVELOPER_DIR`, `MACOSX_DEPLOYMENT_TARGET`,
+  `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
+  `VISIONOS_DEPLOYMENT_TARGET`.
+- Reproducible timestamps: `SOURCE_DATE_EPOCH`.
+
+The catalog records that supplied analysis environment. Ambient driver logging,
+dependency-output, and argument-injection variables are excluded. Implicit Clang
+configuration files are disabled with `--no-default-config`, recorded in the
+effective command; put required analysis flags in the database or `--extra-arg`.
+
+Homebrew Clang on macOS may obtain its SDK path from a default configuration.
+Provide that SDK explicitly when importing such a database:
+
+```bash
+SDKROOT="$(xcrun --show-sdk-path)" rllvm-compdb generate build/ \
+  --output-dir analysis/modules
+```
+
+The supplied `SDKROOT` is recorded in the analysis environment.
+
+The output directory must be new. It contains separate modules, per-entry
+diagnostics, and an atomic `catalog.json` with relative module paths, content
+hashes, compiler and target metadata, recorded commands, and effective analysis
+settings. Successful modules remain available when another entry fails, and
+generation then exits nonzero. Original object and dependency outputs are
+preserved. Launchers, shell operations, unsupported drivers, non-compilation
+modes, multiple sources in one entry, universal builds, and options with
+uncontrolled side outputs (including save-temps, compiler statistics, module caches, profiling,
+optimization records, and opaque frontend forwarding) are reported as unsupported.
+
+The catalog describes selected compilations of the **current source tree**.
+It does not establish executable membership, dependency completeness, or a
+historical source/environment snapshot. Modules are not automatically merged;
+use wrapper capture when participation in the real link matters.
+
 ### Wrapper flags
 
 Wrapper options are long-only and prefixed `--rllvm-`, so they cannot collide

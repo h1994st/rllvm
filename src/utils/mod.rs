@@ -28,7 +28,9 @@ pub use llvm_utils::{
 
 /// GNU response-file classification and LLVM tool transport
 mod response_file;
-pub(crate) use response_file::{execute_llvm_tool, expand_response_files};
+pub(crate) use response_file::{
+    execute_llvm_tool, execute_llvm_tool_in_for_output, expand_response_files_in,
+};
 
 /// Filepath-related utility functions
 mod path_utils;

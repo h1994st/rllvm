@@ -6,6 +6,8 @@
 builds. `rllvm-get-bc` extracts it; `rllvm-info` inspects a module. Helpers:
 `rllvm-init` and `rllvm-completions`.
 
+`rllvm-compdb` generates selected bitcode modules from `compile_commands.json`.
+
 `rules_rllvm` is a separate Bazel-only project that does not use these binaries.
 Do not change anything here to serve it.
 

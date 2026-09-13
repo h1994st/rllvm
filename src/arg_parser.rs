@@ -109,6 +109,8 @@ pub struct CompilerArgsInfo {
     input_args: Vec<String>,
     expanded_args: Vec<String>,
     input_files: Vec<String>,
+    input_languages: Vec<Option<String>>,
+    current_language: Option<String>,
     object_files: Vec<String>,
     output_filename: String,
     compile_args: Vec<String>,
@@ -190,6 +192,7 @@ impl CompilerArgsInfo {
         S: AsRef<str>,
     {
         self.input_files.push(flag.as_ref().to_string());
+        self.input_languages.push(self.current_language.clone());
 
         // Assembly files
         static RE: OnceLock<Regex> = OnceLock::new();
@@ -342,6 +345,13 @@ impl CompilerArgsInfo {
     where
         S: AsRef<str>,
     {
+        if let Some(language) = flag
+            .as_ref()
+            .strip_prefix("-x")
+            .filter(|language| !language.is_empty())
+        {
+            self.current_language = Some(language.to_string());
+        }
         self.compile_args.push(flag.as_ref().to_string());
         self
     }
@@ -383,6 +393,9 @@ impl CompilerArgsInfo {
     where
         S: AsRef<str>,
     {
+        if flag.as_ref() == "-x" {
+            self.current_language = Some(args[0].as_ref().to_string());
+        }
         self.compile_args.push(flag.as_ref().to_string());
         self.compile_args.push(args[0].as_ref().to_string());
         self
@@ -458,9 +471,21 @@ impl CompilerArgsInfo {
     where
         S: AsRef<str>,
     {
+        self.parse_args_in(args, &env::current_dir()?)
+    }
+
+    /// Classify an imported command relative to its entry directory.
+    pub(crate) fn parse_args_in<S>(
+        &mut self,
+        args: &[S],
+        directory: &Path,
+    ) -> Result<&'_ mut Self, Error>
+    where
+        S: AsRef<str>,
+    {
         let args: Vec<String> = args.iter().map(|x| x.as_ref().to_string()).collect();
         self.input_args = args;
-        let args = expand_response_files(&self.input_args)?;
+        let args = expand_response_files_in(&self.input_args, directory)?;
         self.expanded_args = args.clone();
 
         let mut i = 0;
@@ -497,7 +522,7 @@ impl CompilerArgsInfo {
                     // Consume more parameters
                     offset += self.consume_params(i, arg.to_string(), arg_info, &args)?;
                 } else {
-                    let handler = if is_object_file(arg)? {
+                    let handler = if is_object_file(directory.join(arg))? {
                         CompilerArgsInfo::object_file
                     } else {
                         // Failed to recognize the compiler flag
@@ -528,6 +553,15 @@ impl CompilerArgsInfo {
     /// Returns the list of input source files.
     pub fn input_files(&self) -> &Vec<String> {
         self.input_files.as_ref()
+    }
+
+    /// The positional language active when this source appeared in expanded argv.
+    pub(crate) fn input_language(&self, index: usize) -> Option<&str> {
+        self.input_languages.get(index).and_then(Option::as_deref)
+    }
+
+    pub(crate) fn final_language(&self) -> Option<&str> {
+        self.current_language.as_deref()
     }
 
     /// Returns the list of object files.

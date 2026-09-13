@@ -239,6 +239,47 @@ impl CatalogSelectionArgs {
     }
 }
 
+/// Import current-tree compilations from compile_commands.json.
+#[derive(Parser, Debug)]
+#[command(
+    name = "rllvm-compdb",
+    version,
+    about = "List or generate selected current-tree Clang compilations"
+)]
+pub struct CompdbArgs {
+    #[command(subcommand)]
+    pub command: CompdbCommand,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum CompdbCommand {
+    /// Print compilation entries, identities and unsupported-command diagnostics as JSON
+    List {
+        /// Database JSON file or directory containing compile_commands.json
+        input: PathBuf,
+    },
+    /// Generate separate bitcode modules and catalog.json in a new directory
+    Generate {
+        /// Database JSON file or directory containing compile_commands.json
+        input: PathBuf,
+        /// New output directory; an existing path is rejected
+        #[arg(long)]
+        output_dir: PathBuf,
+        /// Exact source path resolved from the current directory (repeatable)
+        #[arg(long)]
+        source: Vec<PathBuf>,
+        /// Entry ID from list output (repeatable; intersects source selection)
+        #[arg(long)]
+        entry: Vec<String>,
+        /// Explicit analysis argument, e.g. --extra-arg=-O0 (repeatable)
+        #[arg(long, allow_hyphen_values = true)]
+        extra_arg: Vec<String>,
+        /// Maximum simultaneous compiler processes
+        #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..))]
+        jobs: u32,
+    },
+}
+
 /// The wrapper options `rllvm-rustc` answers.
 ///
 /// Cargo owns a `RUSTC_WRAPPER`'s command line, so the compiler-selection and
@@ -274,6 +315,7 @@ pub enum BinName {
     GetBc,
     Init,
     Info,
+    Compdb,
     Rustc,
     Completions,
 }
