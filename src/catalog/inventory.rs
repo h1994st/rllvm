@@ -476,13 +476,17 @@ mod tests {
     use super::*;
     use crate::catalog::{ModuleStatus, hash_file, write_catalog};
     #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::symlink;
     use std::{fs, path::Path};
 
     fn reader(root: &Path, exit: i32) -> std::path::PathBuf {
         let path = root.join(format!("llvm-dis-{exit}"));
-        fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' 'source_filename = \"src/main.c\"' 'target triple = \"x86_64-test\"' 'target datalayout = \"e-p:64:64\"'\nexit {exit}\n")).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        // A freshly written executable can fail with ETXTBSY on Linux when
+        // another test's child inherits its writable descriptor during spawn.
+        // The checked-in fixture is never opened for writing by the tests.
+        let fixture =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/catalog/testdata/llvm-dis.sh");
+        symlink(fixture, &path).unwrap();
         path
     }
 
@@ -639,7 +643,14 @@ mod tests {
         let module = inspect_bitcode(&path, &reader(dir.path(), 7), "module");
         assert_eq!(module.status, ModuleStatus::Failed);
         assert!(module.target_triple.is_none());
-        assert!(!module.diagnostics.is_empty());
+        assert!(
+            module
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("llvm-dis exited") && message.contains('7')),
+            "{:?}",
+            module.diagnostics
+        );
     }
 
     #[test]
@@ -660,14 +671,16 @@ mod tests {
         let input = dir.path().join("input.o");
         fs::write(&input, object.write().unwrap()).unwrap();
         let catalog = inventory(&input, dir.path(), Some(&reader(dir.path(), 0))).unwrap();
-        assert_eq!(catalog.modules.len(), 2);
+        assert_eq!(catalog.modules.len(), 2, "{:#?}", catalog.modules);
         assert_eq!(
             catalog
                 .modules
                 .iter()
                 .filter(|m| m.status == ModuleStatus::Available)
                 .count(),
-            1
+            1,
+            "{:#?}",
+            catalog.modules
         );
         assert_eq!(
             catalog
