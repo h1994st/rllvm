@@ -174,6 +174,12 @@ pub fn copy_modules(catalog: &ModuleCatalog, output_dir: &Path) -> Result<Module
             module.diagnostics.join("; ")
         )));
     }
+    if let Some(parent) = output_dir
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
     fs::create_dir(output_dir)?;
     let mut copied = catalog.clone();
     let mut archives = super::inventory::ArchiveCache::default();
@@ -355,7 +361,7 @@ mod tests {
             ..Default::default()
         };
         let selected = select_modules(&catalog, &selection, root.path()).unwrap();
-        let output = root.path().join("selected");
+        let output = root.path().join("analysis/selected");
         let copied = copy_modules(&selected, &output).unwrap();
         assert_eq!(copied.modules[0].id, "debug");
         assert!(copied.modules[0].path.as_ref().unwrap().is_relative());
