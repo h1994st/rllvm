@@ -55,6 +55,157 @@ fn disassemble(path: &Path) -> String {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn system_headers_infer_the_macos_sdk_without_environment_setup() {
+    let scratch = tempfile::tempdir().unwrap();
+    fs::write(
+        scratch.path().join("system.c"),
+        "#include <unistd.h>\nint system_headers(void){return STDOUT_FILENO;}\n",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".","file":"system.c","arguments":[llvm_bin("clang"),"-c","system.c"]}]),
+    );
+    let output = rllvm(&scratch)
+        .env_remove("SDKROOT")
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let catalog: Value =
+        serde_json::from_slice(&fs::read(scratch.path().join("analysis/catalog.json")).unwrap())
+            .unwrap();
+    let module = &catalog["modules"][0];
+    let sdk = module["compilation"]["environment"]["SDKROOT"]
+        .as_str()
+        .unwrap();
+    assert!(Path::new(sdk).is_absolute() && Path::new(sdk).is_dir());
+    assert!(
+        !module["compilation"]["recorded_arguments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|argument| argument.as_str() == Some(sdk))
+    );
+    let ir = disassemble(
+        &scratch
+            .path()
+            .join("analysis")
+            .join(module["path"].as_str().unwrap()),
+    );
+    assert!(ir.contains("@system_headers") && ir.contains("ret i32 1"));
+}
+
+#[test]
+fn explicit_sysroots_and_analysis_overrides_select_the_requested_headers() {
+    let scratch = tempfile::tempdir().unwrap();
+    let recorded_sdk = scratch.path().join("recorded-sdk");
+    let override_sdk = scratch.path().join("override-sdk");
+    for (sdk, value) in [(&recorded_sdk, 11), (&override_sdk, 17)] {
+        fs::create_dir_all(sdk.join("usr/include")).unwrap();
+        fs::write(
+            sdk.join("usr/include/sdk_value.h"),
+            format!("#define SDK_VALUE {value}\n"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        scratch.path().join("system.c"),
+        "#include <sdk_value.h>\nint sdk_value(void){return SDK_VALUE;}\n",
+    )
+    .unwrap();
+    // Response files must participate in SDK selection just like direct argv.
+    fs::write(
+        scratch.path().join("sdk.rsp"),
+        format!("--sysroot=\"{}\"", recorded_sdk.display()),
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".","file":"system.c","arguments":[llvm_bin("clang"),"@sdk.rsp","-c","system.c"]}]),
+    );
+    let mut analysis_ids = Vec::new();
+    for (name, value) in [("recorded", 11), ("override", 17)] {
+        let mut command = rllvm(&scratch);
+        command
+            .env_remove("SDKROOT")
+            .args(["generate", ".", "--output-dir", name]);
+        if name == "override" {
+            command.arg(format!("--extra-arg=--sysroot={}", override_sdk.display()));
+        }
+        assert_success(&command.output().unwrap());
+        let output = scratch.path().join(name);
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(output.join("catalog.json")).unwrap()).unwrap();
+        let module = &catalog["modules"][0];
+        assert!(module["compilation"]["environment"]["SDKROOT"].is_null());
+        analysis_ids.push(module["compilation"]["analysis_id"].clone());
+        let ir = disassemble(&output.join(module["path"].as_str().unwrap()));
+        assert!(ir.contains(&format!("ret i32 {value}")));
+    }
+    assert_ne!(analysis_ids[0], analysis_ids[1]);
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn sdk_discovery_failure_keeps_usable_entries_and_explains_the_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let scratch = tempfile::tempdir().unwrap();
+    fs::create_dir(scratch.path().join("bin")).unwrap();
+    let xcrun = scratch.path().join("bin/xcrun");
+    fs::write(
+        &xcrun,
+        "#!/bin/sh\nprintf 'called\\n' >> xcrun-calls\nprintf 'SDK unavailable\\n' >&2\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&xcrun, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        scratch.path().join("system.c"),
+        "#include <unistd.h>\nint sdk_value(void){return STDOUT_FILENO;}\n",
+    )
+    .unwrap();
+    fs::write(
+        scratch.path().join("simple.c"),
+        "int simple(void){return 7;}\n",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([
+            {"directory":".","file":"system.c","arguments":[llvm_bin("clang"),"-c","system.c"]},
+            {"directory":".","file":"simple.c","arguments":[llvm_bin("clang"),"-c","simple.c"]}
+        ]),
+    );
+    let path = std::env::join_paths(
+        std::iter::once(scratch.path().join("bin"))
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let output = rllvm(&scratch)
+        .env_remove("SDKROOT")
+        .env("PATH", path)
+        .args(["generate", ".", "--output-dir", "analysis", "--jobs", "2"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("set SDKROOT"));
+    assert_eq!(
+        fs::read_to_string(scratch.path().join("xcrun-calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    let catalog: Value =
+        serde_json::from_slice(&fs::read(scratch.path().join("analysis/catalog.json")).unwrap())
+            .unwrap();
+    assert_eq!(catalog["modules"][0]["status"], "failed");
+    assert_eq!(catalog["modules"][1]["status"], "available");
+}
+
+#[test]
 fn system_headers_use_the_explicit_sdk_environment() {
     let scratch = tempfile::tempdir().unwrap();
     fs::write(

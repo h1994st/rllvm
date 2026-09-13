@@ -60,6 +60,43 @@ are identical. Consumers should use IDs for selection and hashes for integrity;
 they should not derive IDs from filenames or assume a content hash identifies a
 compilation configuration. Analysis overrides have their own analysis identity.
 
+## Compilation database provenance
+
+The importer records original commands separately from effective analysis
+arguments. Duplicate database occurrences remain distinct. Source hashes describe
+current files; they do not identify a historical source/dependency closure or
+establish which modules participated in an executable.
+
+Imported compilers receive only the following environment variables when set:
+
+- Tool lookup: `PATH`, `COMPILER_PATH`, `GCC_EXEC_PREFIX`, `LIBRARY_PATH`.
+- Include search: `CPATH`, `C_INCLUDE_PATH`, `CPLUS_INCLUDE_PATH`, `OBJC_INCLUDE_PATH`.
+- Apple SDK selection: `SDKROOT`, `DEVELOPER_DIR`, `MACOSX_DEPLOYMENT_TARGET`,
+  `IPHONEOS_DEPLOYMENT_TARGET`, `TVOS_DEPLOYMENT_TARGET`, `WATCHOS_DEPLOYMENT_TARGET`,
+  `VISIONOS_DEPLOYMENT_TARGET`.
+- Reproducible timestamps: `SOURCE_DATE_EPOCH`.
+
+On macOS, a macOS-target entry without an explicit sysroot or `SDKROOT` can
+receive an inferred `SDKROOT` from `xcrun --sdk macosx --show-sdk-path`.
+Discovery honors `DEVELOPER_DIR` and runs at most once per generation invocation.
+The chosen SDK path is recorded in `compilation.environment` and contributes to
+`analysis_id`; original commands remain unchanged. Explicit SDK settings and
+non-macOS targets bypass inference. If discovery fails, compilation is still
+attempted; a failed compilation includes a diagnostic explaining the override.
+
+`environment_complete` describes the constructed analysis environment, not the
+original build environment. Ambient driver logging, dependency-output, and
+argument-injection variables are excluded. Implicit Clang configuration files
+are disabled with `--no-default-config`; put required flags in the database or
+pass them with `--extra-arg`.
+
+Supported inputs are direct Clang/Clang++ single-source compilations. Launchers,
+shell operations, other drivers, non-compilation modes, multiple sources in one
+entry, universal builds, and uncontrolled side outputs are unsupported. The
+latter include save-temps, compiler statistics, module caches, profiling,
+optimization records, and opaque frontend forwarding. Generated sources and
+headers must already exist. Native object and dependency outputs are preserved.
+
 ## Selection and relocation
 
 Selections combine alternatives within an option and intersect different
