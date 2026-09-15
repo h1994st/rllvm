@@ -13,6 +13,11 @@ use sha2::{Digest, Sha256};
 use crate::error::Error;
 
 mod inventory;
+// Only `query::load` consumes this re-export, and that module is itself
+// gated behind the `query` feature: without the cfg here, a default-feature
+// build has no consumer, and `cargo clippy --all-targets -- -D warnings`
+// (the CI gate, run without `--all-features`) fails on the unused import.
+#[cfg(feature = "query")]
 pub(crate) use inventory::ArchiveCache;
 pub use inventory::{inspect_bitcode, inventory};
 mod selection;
