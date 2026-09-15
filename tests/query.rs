@@ -445,9 +445,81 @@ fn a_parse_failure_carries_the_reason_llvm_gave() {
     let message = rllvm::query::extract::extract(&loaded, &Default::default())
         .unwrap_err()
         .to_string();
+    // The severity-tagged report LLVM produced, not the fixed template around
+    // it. Its wording belongs to LLVM and is not pinned here; that it arrived
+    // at all is.
+    let reported = message
+        .split_once('(')
+        .and_then(|(_, rest)| rest.rsplit_once(')'))
+        .map(|(inside, _)| inside)
+        .unwrap_or_default();
     assert!(
-        message.contains('('),
+        reported.starts_with("error: ") && reported.len() > "error: ".len(),
         "LLVM's own report must reach the error: {message}"
+    );
+}
+
+#[test]
+fn an_inlined_frame_carries_its_own_file_not_the_leaf_s() {
+    let scratch = tempfile::tempdir().unwrap();
+    // `add` is inlined into `main`, so the call to `outer` sits in `main`
+    // with a leaf location in the header and a frame above it in `t.c`. Each
+    // frame resolves through its own scope; copying the leaf's file upward
+    // would report the header twice.
+    std::fs::write(
+        scratch.path().join("helper.h"),
+        "int outer(int);\n\
+         \n\
+         static inline __attribute__((always_inline)) int add(int a,int b){ return outer(a+b); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        scratch.path().join("t.c"),
+        "#include \"helper.h\"\n\
+         int main(void){ return add(2,3); }\n",
+    )
+    .unwrap();
+    let facts = compile_and_extract(&scratch, &["-g", "-O1"]);
+
+    let call = facts
+        .call_sites
+        .iter()
+        .find(|c| matches!(&c.target, CallTarget::Direct { callee } if callee.symbol == "outer"))
+        .expect("call to outer");
+    let leaf = call
+        .location
+        .as_ref()
+        .expect("an inlined call has a location");
+    assert_eq!(leaf.file.file_name().unwrap(), "helper.h");
+    assert_eq!(leaf.line, 3);
+
+    let frame = leaf
+        .inlined_at
+        .first()
+        .unwrap_or_else(|| panic!("inlining chain is empty for {leaf:?}"));
+    assert_eq!(
+        frame.file.file_name().unwrap(),
+        "t.c",
+        "the frame above the leaf is in the caller's file: {frame:?}"
+    );
+    assert_eq!(frame.line, 2);
+}
+
+#[test]
+fn a_signature_records_parameter_and_return_types() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(&scratch, "int add(int a,int b){return a+b;}\n");
+    let add = facts
+        .functions
+        .iter()
+        .find(|f| f.id.symbol == "add")
+        .unwrap();
+    // The function's value type. Under opaque pointers the type *of* the
+    // value is `ptr`, which records no signature at all.
+    assert!(
+        add.signature.starts_with("i32 (") && add.signature.contains("i32, i32"),
+        "{}",
+        add.signature
     );
 }
 
@@ -460,8 +532,14 @@ fn extract_source_with_flags(
     source: &str,
     flags: &[&str],
 ) -> rllvm::query::ModuleFacts {
+    std::fs::write(scratch.path().join("t.c"), source).unwrap();
+    compile_and_extract(scratch, flags)
+}
+
+/// Compiles the `t.c` already written into `scratch`, so a fixture can put a
+/// header beside it first.
+fn compile_and_extract(scratch: &tempfile::TempDir, flags: &[&str]) -> rllvm::query::ModuleFacts {
     let path = scratch.path().join("t.c");
-    std::fs::write(&path, source).unwrap();
     let module = scratch.path().join("t.bc");
     let status = std::process::Command::new(llvm_bin("clang"))
         .args(flags)
