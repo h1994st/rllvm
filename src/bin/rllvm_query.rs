@@ -17,8 +17,10 @@ use rllvm::{
 };
 use tracing_subscriber::FmtSubscriber;
 
-/// Converts a parsed subcommand into the `query::Query` it names. Kept out of
-/// `cli.rs` because `Query` does not exist without the `query` feature.
+/// Converts a parsed subcommand into the `query::Query` it names, or `None`
+/// for `Mcp`, which names a mode (serve over MCP stdio) rather than one of
+/// the nine queries. Kept out of `cli.rs` because `Query` does not exist
+/// without the `query` feature.
 ///
 /// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
 /// arm here fails to compile. That alone does not catch the opposite drift --
@@ -27,8 +29,8 @@ use tracing_subscriber::FmtSubscriber;
 /// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
 /// fails to compile there instead, until this file is updated to drive it
 /// from the command line.
-fn to_query(command: QueryCommand, heuristics: bool) -> Query {
-    match command {
+fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
+    Some(match command {
         QueryCommand::Defs { name } => Query::Defs { name },
         QueryCommand::At { file, line } => Query::At { file, line },
         QueryCommand::Callers { name } => Query::Callers { name },
@@ -44,7 +46,8 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Query {
         },
         QueryCommand::Externals => Query::Externals,
         QueryCommand::IndirectTargets { at } => Query::IndirectTargets { at, heuristics },
-    }
+        QueryCommand::Mcp => return None,
+    })
 }
 
 /// Loads the catalog, extracts every module it names, binds cross-module
@@ -143,7 +146,15 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         .init();
 
     let session = build_session(&catalog)?;
-    let query = to_query(command, args.heuristics);
+
+    // `Mcp` names a mode, not a query: `to_query` returns `None` for it, and
+    // the session already loaded above is handed to `serve` so the first
+    // `tools/call` pays no analysis cost.
+    let Some(query) = to_query(command, args.heuristics) else {
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        return query::mcp::serve(&session, stdin.lock(), stdout.lock());
+    };
     let result = run(&session, &query);
 
     let json = serde_json::to_string_pretty(&result)
@@ -202,6 +213,13 @@ mod tests {
         }
     }
 
+    /// `to_query` maps `QueryCommand::Mcp` to `None`, since it selects a
+    /// mode rather than naming a query.
+    #[test]
+    fn the_mcp_command_has_no_query() {
+        assert!(to_query(QueryCommand::Mcp, false).is_none());
+    }
+
     /// Not just a compile-time fence: proves `to_query` and `cli_command_for`
     /// actually agree on every field, for every variant, not merely that
     /// both happen to be exhaustive.
@@ -237,7 +255,8 @@ mod tests {
         ];
         for query in queries {
             let command = cli_command_for(&query);
-            let round_tripped = to_query(command, heuristics);
+            let round_tripped =
+                to_query(command, heuristics).expect("every QueryCommand but Mcp names a query");
             assert_eq!(
                 format!("{round_tripped:?}"),
                 format!("{query:?}"),

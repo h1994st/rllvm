@@ -377,12 +377,14 @@ pub enum ClosureDirection {
     Out,
 }
 
-/// One of the nine source-level queries `rllvm-query` answers.
+/// The nine source-level queries `rllvm-query` answers, plus `Mcp` to serve
+/// them over MCP stdio instead of running one and exiting.
 ///
-/// Mirrors `query::Query` field-for-field, for the same reason
-/// [`ClosureDirection`] mirrors `query::Direction`: this type must build
-/// without the `query` feature. The binary converts a parsed variant into a
-/// `query::Query` before running it.
+/// The nine query variants mirror `query::Query` field-for-field, for the
+/// same reason [`ClosureDirection`] mirrors `query::Direction`: this type
+/// must build without the `query` feature. The binary converts a parsed
+/// variant into a `query::Query` before running it; `Mcp` has no
+/// `query::Query` counterpart; it selects `query::mcp::serve` instead.
 ///
 /// This mirror can drift: `to_query` in `rllvm_query.rs` is exhaustive over
 /// this type, so a variant added here without an arm there fails to compile,
@@ -443,6 +445,8 @@ pub enum QueryCommand {
         /// `file:line` location, e.g. `t.c:4`
         at: String,
     },
+    /// Serve the nine queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
+    Mcp,
 }
 
 #[cfg(test)]

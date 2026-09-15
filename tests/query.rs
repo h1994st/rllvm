@@ -1,6 +1,7 @@
 use std::{
+    io::Write as _,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use rllvm::catalog::read_catalog;
@@ -866,3 +867,217 @@ fn record_with_compiler_version(version: &str) -> rllvm::catalog::ModuleRecord {
         ..Default::default()
     }
 }
+
+// --- MCP stdio server -------------------------------------------------
+//
+// Nested in its own module so `cargo test --features query --test query mcp`
+// selects exactly this group by path.
+//
+// Every modern message shape below is copied from the official schema
+// examples at `schema/2026-07-28/examples/` in
+// `modelcontextprotocol/modelcontextprotocol` (`ListToolsRequest`,
+// `DiscoverRequest`, `CallToolRequest`, `ListToolsResultResponse`,
+// `DiscoverResultResponse`), not written from memory: `_meta` lives inside
+// `params`, the key is `io.modelcontextprotocol/protocolVersion` in
+// camelCase, and `io.modelcontextprotocol/clientCapabilities` is required on
+// every modern request.
+mod mcp {
+    use super::*;
+
+    const MODERN: &str = "2026-07-28";
+    const LEGACY: &str = "2025-06-18";
+
+    /// The `_meta` block every modern request must carry.
+    fn modern_meta() -> serde_json::Value {
+        serde_json::json!({
+            "io.modelcontextprotocol/protocolVersion": MODERN,
+            "io.modelcontextprotocol/clientInfo": { "name": "rllvm-test", "version": "1.0.0" },
+            "io.modelcontextprotocol/clientCapabilities": {}
+        })
+    }
+
+    fn modern_request(id: &str, method: &str, mut params: serde_json::Value) -> String {
+        params["_meta"] = modern_meta();
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+            .to_string()
+    }
+
+    /// An empty catalog: no modules to load or extract, just enough for
+    /// `build_session` to produce a `Session` the server can answer over. The
+    /// MCP tests below only need a session to exist, not any particular
+    /// program in it.
+    fn empty_catalog(scratch: &tempfile::TempDir) -> PathBuf {
+        let catalog = rllvm::catalog::ModuleCatalog::new(
+            rllvm::catalog::CatalogOrigin {
+                kind: "test".into(),
+                input: PathBuf::from("test"),
+                sha256: None,
+            },
+            "test",
+            vec![],
+        );
+        let catalog_path = scratch.path().join("catalog.json");
+        rllvm::catalog::write_catalog(&catalog_path, &catalog).unwrap();
+        catalog_path
+    }
+
+    /// Spawns `rllvm-query --catalog <empty> mcp`, writes one request line to
+    /// its stdin, closes stdin so the server sees EOF and exits, and returns
+    /// everything the process wrote to stdout, raw.
+    fn mcp_raw(request: &str) -> String {
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = empty_catalog(&scratch);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
+            .arg("--catalog")
+            .arg(&catalog)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        // The transport is one JSON-RPC frame per line. A fixture may format
+        // its JSON across multiple source lines for readability (e.g. the
+        // legacy `initialize` request); JSON's grammar treats a newline
+        // between tokens as insignificant whitespace, so collapsing it to a
+        // space here changes nothing the server parses.
+        let single_line: String = request
+            .chars()
+            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+            .collect();
+
+        let mut stdin = child.stdin.take().unwrap();
+        writeln!(stdin, "{single_line}").unwrap();
+        drop(stdin);
+
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "rllvm-query mcp exited with an error: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Sends one request and parses the server's one response line as JSON.
+    fn mcp_exchange(request: &str) -> serde_json::Value {
+        let raw = mcp_raw(request);
+        let line = raw
+            .lines()
+            .find(|line| !line.is_empty())
+            .unwrap_or_else(|| panic!("no response line in: {raw:?}"));
+        serde_json::from_str(line).unwrap()
+    }
+
+    #[test]
+    fn a_modern_request_is_served_without_a_handshake() {
+        let response = mcp_exchange(&modern_request(
+            "list-tools",
+            "tools/list",
+            serde_json::json!({}),
+        ));
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert!(response["result"]["tools"].as_array().unwrap().len() >= 9);
+    }
+
+    #[test]
+    fn server_discover_returns_supported_versions() {
+        let response = mcp_exchange(&modern_request(
+            "discover",
+            "server/discover",
+            serde_json::json!({}),
+        ));
+        let result = &response["result"];
+        assert_eq!(result["resultType"], "complete");
+        let versions = result["supportedVersions"].as_array().unwrap();
+        assert!(versions.iter().any(|v| v == MODERN));
+        assert!(
+            versions.iter().any(|v| v == LEGACY),
+            "a dual-era server supports both"
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+        assert!(
+            result["ttlMs"].is_number(),
+            "DiscoverResult extends CacheableResult"
+        );
+    }
+
+    #[test]
+    fn a_modern_tool_call_returns_a_call_tool_result() {
+        let response = mcp_exchange(&modern_request(
+            "call",
+            "tools/call",
+            serde_json::json!({ "name": "externals", "arguments": {} }),
+        ));
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["isError"], false);
+        assert!(response["result"]["content"].as_array().is_some());
+    }
+
+    #[test]
+    fn a_request_without_client_capabilities_is_rejected() {
+        // `clientCapabilities` is required; accepting its absence would make the
+        // server pass tests a conforming client would fail against.
+        let response = mcp_exchange(
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": MODERN } }
+            })
+            .to_string(),
+        );
+        assert_eq!(response["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn an_unsupported_version_returns_minus_32022_with_the_supported_list() {
+        let response = mcp_exchange(
+            &serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "1900-01-01",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }}
+            })
+            .to_string(),
+        );
+        assert_eq!(response["error"]["code"], -32022);
+        let supported = response["error"]["data"]["supported"].as_array().unwrap();
+        assert!(supported.iter().any(|v| v == MODERN));
+    }
+
+    #[test]
+    fn a_legacy_initialize_selects_legacy_semantics() {
+        let response = mcp_exchange(&format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize",
+             "params":{{"protocolVersion":"{LEGACY}","capabilities":{{}},
+             "clientInfo":{{"name":"t","version":"1"}}}}}}"#
+        ));
+        assert_eq!(response["result"]["protocolVersion"], LEGACY);
+        assert!(response["result"]["capabilities"]["tools"].is_object());
+        assert!(
+            response["result"]["resultType"].is_null(),
+            "legacy results must not carry modern fields"
+        );
+    }
+
+    #[test]
+    fn malformed_json_returns_minus_32700() {
+        let response = mcp_exchange("{not json");
+        assert_eq!(response["error"]["code"], -32700);
+    }
+
+    #[test]
+    fn stdout_carries_only_protocol_frames() {
+        let raw = mcp_raw(&modern_request(
+            "list-tools",
+            "tools/list",
+            serde_json::json!({}),
+        ));
+        for line in raw.lines().filter(|l| !l.is_empty()) {
+            serde_json::from_str::<serde_json::Value>(line)
+                .unwrap_or_else(|_| panic!("non-protocol output on stdout: {line}"));
+        }
+    }
+} // mod mcp
