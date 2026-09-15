@@ -1,0 +1,442 @@
+//! Indexes over extracted facts, and the graph walks that answer
+//! reachability.
+//!
+//! Every walk here distinguishes exactly three kinds of call-site evidence:
+//! a `CallTarget::Direct` edge, a `CallTarget::Indirect` edge CVP bounded to
+//! a known set of targets (traversed, one edge per bound member), and a
+//! `CallTarget::Indirect` edge with no bound (uncertainty, never traversed).
+//! The heuristic address-taken inventory recorded in `ProgramFacts::uses` is
+//! not an edge source at all and is never consulted here.
+
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
+};
+
+use super::{
+    bind::{BindingStatus, SymbolBinding},
+    facts::{CallSiteFact, CallSiteId, CallTarget, FunctionId, ProgramFacts},
+};
+
+/// Direction of a transitive closure walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Functions that reach the named function.
+    In,
+    /// Functions the named function reaches.
+    Out,
+}
+
+/// One step on a path `Session::reach` returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathStep {
+    /// A direct call.
+    Call(CallSiteId),
+    /// An indirect call CVP bounded to a known set of targets. The path
+    /// holds only if the call actually takes `chosen`; `bound` carries every
+    /// alternative so a reader is not handed one target as though it were
+    /// certain.
+    BoundedIndirect {
+        site: CallSiteId,
+        chosen: FunctionId,
+        bound: Vec<FunctionId>,
+    },
+    /// A declaration resolved to its one visible definition.
+    Binding(SymbolBinding),
+}
+
+/// The result of a `Session::reach` query.
+#[derive(Debug)]
+pub struct ReachResult {
+    pub path: Option<Vec<PathStep>>,
+    /// Ambiguous bindings the search reached but could not resolve, recorded
+    /// rather than guessed through.
+    pub frontier: Vec<SymbolBinding>,
+}
+
+/// Indexes over one program's captured facts, joined with resolved symbol
+/// bindings. `reach` and `closure` walk only resolved edges: direct calls,
+/// and indirect calls CVP bounded to a bound.
+pub struct Session {
+    facts: ProgramFacts,
+    bindings: Vec<SymbolBinding>,
+    by_name: HashMap<String, Vec<FunctionId>>,
+    function_index: HashMap<FunctionId, usize>,
+    /// Call sites owned by a function, i.e. the calls it makes.
+    callees_by_function: HashMap<FunctionId, Vec<usize>>,
+    /// Call sites that resolve to a function, directly or as a member of an
+    /// LLVM-bounded indirect call's bound, i.e. the calls made to it.
+    callers_by_function: HashMap<FunctionId, Vec<usize>>,
+    /// Bindings keyed by symbol, for resolving a declaration forward to its
+    /// candidates.
+    bindings_by_symbol: HashMap<String, Vec<usize>>,
+    /// `Unique` bindings keyed by their one candidate, for reverse (`In`)
+    /// closure walks back through the declaration that resolved to it.
+    bindings_by_candidate: HashMap<FunctionId, Vec<usize>>,
+    /// Functions mapped to a source file and line. Not yet consumed within
+    /// this module; the source-line `at` query builds on it.
+    #[allow(dead_code)]
+    by_file_line: HashMap<(PathBuf, u32), Vec<FunctionId>>,
+}
+
+impl Session {
+    pub fn new(facts: ProgramFacts, bindings: Vec<SymbolBinding>) -> Session {
+        let mut by_name: HashMap<String, Vec<FunctionId>> = HashMap::new();
+        let mut function_index: HashMap<FunctionId, usize> = HashMap::new();
+        let mut by_file_line: HashMap<(PathBuf, u32), Vec<FunctionId>> = HashMap::new();
+        for (idx, function) in facts.functions.iter().enumerate() {
+            by_name
+                .entry(function.id.symbol.clone())
+                .or_default()
+                .push(function.id.clone());
+            function_index.insert(function.id.clone(), idx);
+            for (file, line) in &function.mapped_lines {
+                by_file_line
+                    .entry((file.clone(), *line))
+                    .or_default()
+                    .push(function.id.clone());
+            }
+        }
+
+        let mut callees_by_function: HashMap<FunctionId, Vec<usize>> = HashMap::new();
+        let mut callers_by_function: HashMap<FunctionId, Vec<usize>> = HashMap::new();
+        for (idx, site) in facts.call_sites.iter().enumerate() {
+            callees_by_function
+                .entry(site.id.function.clone())
+                .or_default()
+                .push(idx);
+            match &site.target {
+                CallTarget::Direct { callee } => {
+                    callers_by_function
+                        .entry(callee.clone())
+                        .or_default()
+                        .push(idx);
+                }
+                CallTarget::Indirect {
+                    llvm_target_bound: Some(bound),
+                    ..
+                } => {
+                    for callee in bound {
+                        callers_by_function
+                            .entry(callee.clone())
+                            .or_default()
+                            .push(idx);
+                    }
+                }
+                CallTarget::Indirect {
+                    llvm_target_bound: None,
+                    ..
+                }
+                | CallTarget::Intrinsic { .. }
+                | CallTarget::InlineAsm => {}
+            }
+        }
+
+        let mut bindings_by_symbol: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut bindings_by_candidate: HashMap<FunctionId, Vec<usize>> = HashMap::new();
+        for (idx, binding) in bindings.iter().enumerate() {
+            bindings_by_symbol
+                .entry(binding.symbol.clone())
+                .or_default()
+                .push(idx);
+            if binding.status == BindingStatus::Unique
+                && let Some(candidate) = binding.candidates.first()
+            {
+                bindings_by_candidate
+                    .entry(candidate.function.clone())
+                    .or_default()
+                    .push(idx);
+            }
+        }
+
+        Session {
+            facts,
+            bindings,
+            by_name,
+            function_index,
+            callees_by_function,
+            callers_by_function,
+            bindings_by_symbol,
+            bindings_by_candidate,
+            by_file_line,
+        }
+    }
+
+    /// Call sites that resolve to the named function: a direct call, or an
+    /// indirect call CVP bounded to a set that includes it.
+    pub fn callers(&self, name: &str) -> Vec<CallSiteFact> {
+        self.ids_by_name(name)
+            .iter()
+            .flat_map(|id| self.callers_by_function.get(id).into_iter().flatten())
+            .map(|&idx| self.facts.call_sites[idx].clone())
+            .collect()
+    }
+
+    /// Call sites the named function makes, resolved or not.
+    pub fn callees(&self, name: &str) -> Vec<CallSiteFact> {
+        self.ids_by_name(name)
+            .iter()
+            .flat_map(|id| self.callees_by_function.get(id).into_iter().flatten())
+            .map(|&idx| self.facts.call_sites[idx].clone())
+            .collect()
+    }
+
+    /// Breadth-first search over resolved edges: `CallTarget::Direct`,
+    /// `CallTarget::Indirect` bounded by CVP, and `Unique` symbol bindings
+    /// resolving a declaration. An `Ambiguous` binding halts that branch and
+    /// is recorded in `frontier` rather than guessed through. A visited set
+    /// guarantees termination on a cycle.
+    pub fn reach(&self, from: &str, to: &str) -> ReachResult {
+        // A mere declaration is not a reached function: only a definition
+        // among the functions named `to` counts as the destination.
+        let targets: HashSet<FunctionId> = self
+            .ids_by_name(to)
+            .into_iter()
+            .filter(|id| self.is_definition(id))
+            .collect();
+
+        let mut visited: HashSet<FunctionId> = HashSet::new();
+        let mut queue: VecDeque<(FunctionId, Vec<PathStep>)> = VecDeque::new();
+        let mut frontier: Vec<SymbolBinding> = Vec::new();
+
+        for start in self.ids_by_name(from) {
+            if visited.insert(start.clone()) {
+                queue.push_back((start, Vec::new()));
+            }
+        }
+
+        while let Some((current, path)) = queue.pop_front() {
+            if targets.contains(&current) {
+                return ReachResult {
+                    path: Some(path),
+                    frontier,
+                };
+            }
+
+            let (edges, ambiguous) = self.successors(&current);
+            if let Some(binding) = ambiguous {
+                frontier.push(binding);
+            }
+            for (next, step) in edges {
+                if visited.insert(next.clone()) {
+                    let mut next_path = path.clone();
+                    next_path.push(step);
+                    queue.push_back((next, next_path));
+                }
+            }
+        }
+
+        ReachResult {
+            path: None,
+            frontier,
+        }
+    }
+
+    /// The same walk as `reach`, run to exhaustion in one direction and
+    /// collecting every function reached (never including the start set
+    /// itself).
+    pub fn closure(&self, name: &str, direction: Direction) -> Vec<FunctionId> {
+        let mut visited: HashSet<FunctionId> = HashSet::new();
+        let mut queue: VecDeque<FunctionId> = VecDeque::new();
+        for start in self.ids_by_name(name) {
+            if visited.insert(start.clone()) {
+                queue.push_back(start);
+            }
+        }
+
+        let mut reached = Vec::new();
+        while let Some(current) = queue.pop_front() {
+            let neighbors = match direction {
+                Direction::Out => self.successors(&current).0,
+                Direction::In => self.predecessors(&current),
+            };
+            for (next, _step) in neighbors {
+                if visited.insert(next.clone()) {
+                    reached.push(next.clone());
+                    queue.push_back(next);
+                }
+            }
+        }
+        reached
+    }
+
+    fn ids_by_name(&self, name: &str) -> Vec<FunctionId> {
+        self.by_name.get(name).cloned().unwrap_or_default()
+    }
+
+    fn is_definition(&self, id: &FunctionId) -> bool {
+        self.function_index
+            .get(id)
+            .map(|&idx| self.facts.functions[idx].is_definition)
+            .unwrap_or(false)
+    }
+
+    fn binding_for_declaration(&self, id: &FunctionId) -> Option<&SymbolBinding> {
+        self.bindings_by_symbol
+            .get(&id.symbol)?
+            .iter()
+            .map(|&idx| &self.bindings[idx])
+            .find(|binding| {
+                binding
+                    .declared_in
+                    .iter()
+                    .any(|module| module == &id.module_id)
+            })
+    }
+
+    /// Forward edges out of `id`: a definition's resolved call sites, or a
+    /// declaration's `Unique` binding. Also returns the binding at `id` when
+    /// it is `Ambiguous`, so callers can record it in a `frontier` without
+    /// treating it as an edge.
+    fn successors(&self, id: &FunctionId) -> (Vec<(FunctionId, PathStep)>, Option<SymbolBinding>) {
+        if !self.is_definition(id) {
+            return match self.binding_for_declaration(id).cloned() {
+                Some(binding) => match binding.status {
+                    BindingStatus::Unique => {
+                        let candidate = binding.candidates[0].function.clone();
+                        (vec![(candidate, PathStep::Binding(binding))], None)
+                    }
+                    BindingStatus::Ambiguous => (Vec::new(), Some(binding)),
+                    BindingStatus::Unbound => (Vec::new(), None),
+                },
+                None => (Vec::new(), None),
+            };
+        }
+
+        let mut edges = Vec::new();
+        for &site_idx in self.callees_by_function.get(id).into_iter().flatten() {
+            let site = &self.facts.call_sites[site_idx];
+            match &site.target {
+                CallTarget::Direct { callee } => {
+                    edges.push((callee.clone(), PathStep::Call(site.id.clone())));
+                }
+                CallTarget::Indirect {
+                    llvm_target_bound: Some(bound),
+                    ..
+                } => {
+                    for chosen in bound {
+                        edges.push((
+                            chosen.clone(),
+                            PathStep::BoundedIndirect {
+                                site: site.id.clone(),
+                                chosen: chosen.clone(),
+                                bound: bound.clone(),
+                            },
+                        ));
+                    }
+                }
+                CallTarget::Indirect {
+                    llvm_target_bound: None,
+                    ..
+                }
+                | CallTarget::Intrinsic { .. }
+                | CallTarget::InlineAsm => {}
+            }
+        }
+        (edges, None)
+    }
+
+    /// Reverse edges into `id`: call sites resolving to it, and any `Unique`
+    /// binding for which it is the one candidate, walked back to the
+    /// declaration(s) that resolve to it.
+    fn predecessors(&self, id: &FunctionId) -> Vec<(FunctionId, PathStep)> {
+        let mut edges = Vec::new();
+        for &site_idx in self.callers_by_function.get(id).into_iter().flatten() {
+            let site = &self.facts.call_sites[site_idx];
+            let step = match &site.target {
+                CallTarget::Direct { .. } => PathStep::Call(site.id.clone()),
+                CallTarget::Indirect {
+                    llvm_target_bound: Some(bound),
+                    ..
+                } => PathStep::BoundedIndirect {
+                    site: site.id.clone(),
+                    chosen: id.clone(),
+                    bound: bound.clone(),
+                },
+                _ => continue,
+            };
+            edges.push((site.id.function.clone(), step));
+        }
+
+        for &binding_idx in self.bindings_by_candidate.get(id).into_iter().flatten() {
+            let binding = &self.bindings[binding_idx];
+            for module in &binding.declared_in {
+                let declaration = FunctionId {
+                    module_id: module.clone(),
+                    symbol: binding.symbol.clone(),
+                };
+                edges.push((declaration, PathStep::Binding(binding.clone())));
+            }
+        }
+        edges
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::testing::*;
+
+    #[test]
+    fn reach_follows_a_chain_of_direct_calls() {
+        let session = session_from(&[("a", "b"), ("b", "c")]);
+        let result = session.reach("a", "c");
+        assert!(result.path.is_some());
+    }
+
+    #[test]
+    fn reach_stops_at_an_ambiguous_binding_and_reports_candidates() {
+        let session = session_with_ambiguous_binding();
+        let result = session.reach("caller", "target");
+        assert!(
+            result.path.is_none(),
+            "must not invent a path through an ambiguous link"
+        );
+        assert_eq!(result.frontier.len(), 1);
+        assert_eq!(result.frontier[0].candidates.len(), 2);
+    }
+
+    #[test]
+    fn reach_uses_an_llvm_bounded_indirect_edge() {
+        // The only route from `a` to `target` runs through an indirect call
+        // CVP bounded to {target}. Without bounded edges this returns None.
+        let session = session_with_bounded_indirect();
+        let result = session.reach("a", "target");
+        let path = result
+            .path
+            .expect("a bounded indirect edge is a resolved edge");
+        assert!(matches!(
+            path.iter().find(|step| matches!(step, PathStep::BoundedIndirect { .. })),
+            Some(PathStep::BoundedIndirect { bound, chosen, .. })
+                if chosen.symbol == "target" && bound.len() == 1
+        ));
+    }
+
+    #[test]
+    fn reach_ignores_an_unbounded_indirect_edge() {
+        let session = session_with_indirect_gap();
+        assert!(session.reach("a", "c").path.is_none());
+    }
+
+    #[test]
+    fn reach_never_traverses_the_heuristic_inventory() {
+        // `add`'s address is taken, so it is in the inventory, but nothing
+        // bounds the call. The inventory must not become an edge.
+        let session = session_with_address_taken_function();
+        assert!(session.reach("caller", "add").path.is_none());
+    }
+
+    #[test]
+    fn reach_terminates_on_a_cycle() {
+        let session = session_from(&[("a", "b"), ("b", "a")]);
+        let result = session.reach("a", "absent");
+        assert!(result.path.is_none());
+    }
+
+    #[test]
+    fn closure_runs_in_both_directions() {
+        let session = session_from(&[("a", "b"), ("b", "c")]);
+        assert_eq!(session.closure("a", Direction::Out).len(), 2);
+        assert_eq!(session.closure("c", Direction::In).len(), 2);
+    }
+}

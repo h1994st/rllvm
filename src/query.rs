@@ -10,3 +10,9 @@ pub mod load;
 
 pub mod bind;
 pub use bind::{BindingCandidate, BindingStatus, SymbolBinding};
+
+pub mod index;
+pub use index::{Direction, PathStep, ReachResult, Session};
+
+#[cfg(test)]
+pub(crate) mod testing;
