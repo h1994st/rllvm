@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/h1994st/rllvm/compare/v0.5.0...v0.5.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* infer macOS SDKs for compilation database imports ([#179](https://github.com/h1994st/rllvm/issues/179)) ([f6574b2](https://github.com/h1994st/rllvm/commit/f6574b2c3acbd115a0b88f971b72c04a2c4a7fed))
+
 ## [0.5.0](https://github.com/h1994st/rllvm/compare/v0.4.8...v0.5.0) (2026-09-13)
 
 
