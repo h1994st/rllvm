@@ -116,6 +116,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
+        id: setup-llvm
         if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
@@ -128,6 +129,15 @@ jobs:
       - name: Run tests
         if: needs.changes.outputs.code == 'true'
         run: cargo test --all --verbose
+
+      # The `query` feature is gated behind `required-features` so the default
+      # jobs above never build or run it; run it explicitly here, on both
+      # platforms in this job's matrix.
+      - name: Run query tests
+        if: needs.changes.outputs.code == 'true'
+        run: cargo test --features query --test query
+        env:
+          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 
       - name: Install uv
         if: needs.changes.outputs.code == 'true'

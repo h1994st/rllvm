@@ -11,6 +11,14 @@ inputs:
     description: LLVM major version to install
     required: true
 
+outputs:
+  prefix:
+    description: >
+      Filesystem prefix of the installed LLVM toolchain, for consumers such as
+      llvm-sys's LLVM_SYS_<version>_PREFIX that cannot rely on llvm-config
+      being on PATH (e.g. Homebrew's keg-only install).
+    value: ${{ steps.resolve-prefix.outputs.prefix }}
+
 runs:
   using: composite
   steps:
@@ -51,3 +59,8 @@ runs:
           "${{ inputs.version }}".*) ;;
           *) echo "expected LLVM ${{ inputs.version }}, got $(llvm-config --version)" >&2; exit 1 ;;
         esac
+
+    - name: Resolve the toolchain prefix
+      id: resolve-prefix
+      shell: bash
+      run: echo "prefix=$(llvm-config --prefix)" >> "$GITHUB_OUTPUT"

@@ -341,6 +341,19 @@ pub struct CompletionArgs {
     pub bin: BinName,
 }
 
+/// Arguments for `rllvm-query`.
+///
+/// No subcommands exist yet; later work adds an optional
+/// `#[command(subcommand)]` field here, which must not disturb
+/// `--llvm-version` invoked on its own.
+#[derive(Debug, Parser)]
+#[command(name = "rllvm-query", about = "Query captured bitcode at source level")]
+pub struct QueryArgs {
+    /// Print the LLVM version this binary links and exit
+    #[arg(long = "llvm-version")]
+    pub llvm_version: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
