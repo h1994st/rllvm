@@ -523,6 +523,134 @@ fn a_signature_records_parameter_and_return_types() {
     );
 }
 
+/// From the spec's verified constraint 2. Each row is a CVP eligibility rule.
+#[test]
+fn cvp_bounds_an_internal_global_at_o0() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "static int add(int a,int b){return a+b;}\n\
+         static int sub(int a,int b){return a-b;}\n\
+         static int (*fp)(int,int) = add;\n\
+         int pick(int x){ if(x) fp = sub; return fp(2,3); }\n",
+    );
+    let bound = indirect_bound(&facts);
+    let mut names: Vec<_> = bound
+        .expect("internal global is eligible")
+        .iter()
+        .map(|f| f.symbol.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["add", "sub"]);
+}
+
+#[test]
+fn cvp_does_not_bound_an_external_global() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "static int add(int a,int b){return a+b;}\n\
+         static int sub(int a,int b){return a-b;}\n\
+         int (*fp)(int,int) = add;\n\
+         int pick(int x){ if(x) fp = sub; return fp(2,3); }\n",
+    );
+    assert!(
+        indirect_bound(&facts).is_none(),
+        "external linkage is ineligible"
+    );
+}
+
+#[test]
+fn cvp_does_not_bound_a_stack_slot_at_o0() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "static int add(int a,int b){return a+b;}\n\
+         static int sub(int a,int b){return a-b;}\n\
+         __attribute__((noinline)) static int apply(int(*f)(int,int),int x){ return f(x,3); }\n\
+         int run(int x){ return apply(add,x) + apply(sub,x); }\n",
+    );
+    assert!(
+        indirect_bound(&facts).is_none(),
+        "-O0 routes the argument through a stack slot"
+    );
+}
+
+#[test]
+fn cvp_bounds_the_same_argument_at_o1() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(
+        &scratch,
+        "static int add(int a,int b){return a+b;}\n\
+         static int sub(int a,int b){return a-b;}\n\
+         __attribute__((noinline)) static int apply(int(*f)(int,int),int x){ return f(x,3); }\n\
+         int run(int x){ return apply(add,x) + apply(sub,x); }\n",
+        &["-g", "-O1"],
+    );
+    assert_eq!(indirect_bound(&facts).map(|b| b.len()), Some(2));
+}
+
+#[test]
+fn cvp_drops_candidate_sets_above_four() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut source = String::new();
+    for index in 1..=5 {
+        source.push_str(&format!(
+            "static int f{index}(int a,int b){{return a+{index}*b;}}\n"
+        ));
+    }
+    source.push_str("static int (*fp)(int,int) = f1;\n");
+    source.push_str("int pick(int x){ switch(x){");
+    for index in 1..=5 {
+        source.push_str(&format!(" case {index}: fp = f{index}; break;"));
+    }
+    source.push_str(" } return fp(2,3); }\n");
+
+    let facts = extract_source(&scratch, &source);
+    assert!(
+        indirect_bound(&facts).is_none(),
+        "five candidates exceed CVP's default limit of four"
+    );
+}
+
+#[test]
+fn cvp_does_not_propagate_across_modules() {
+    // The callback is registered in one translation unit and invoked in
+    // another. CVP runs per module, so the invoking module cannot see the
+    // assignment and the site stays unresolved. Expressed at the extraction
+    // layer: Session and bindings do not exist yet, and would not change the
+    // answer if they did.
+    let scratch = tempfile::tempdir().unwrap();
+
+    let registering = extract_source(
+        &scratch,
+        "int handle(int a,int b){return a+b;}\n\
+         extern void install(int(*)(int,int));\n\
+         void setup(void){ install(handle); }\n",
+    );
+    assert!(registering.uses.iter().any(|u| u.used.symbol == "handle"));
+
+    let invoking = extract_source(
+        &scratch,
+        "static int (*slot)(int,int);\n\
+         void install(int(*f)(int,int)){ slot = f; }\n\
+         int fire(void){ return slot(1,2); }\n",
+    );
+    assert!(
+        indirect_bound(&invoking).is_none(),
+        "the only assignment lives in another module, so no bound is possible"
+    );
+}
+
+fn indirect_bound(facts: &rllvm::query::ModuleFacts) -> Option<Vec<rllvm::query::FunctionId>> {
+    facts.call_sites.iter().find_map(|site| match &site.target {
+        CallTarget::Indirect {
+            llvm_target_bound, ..
+        } => llvm_target_bound.clone(),
+        _ => None,
+    })
+}
+
 fn extract_source(scratch: &tempfile::TempDir, source: &str) -> rllvm::query::ModuleFacts {
     extract_source_with_flags(scratch, source, &["-g", "-O0"])
 }

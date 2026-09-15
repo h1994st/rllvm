@@ -17,7 +17,11 @@ use llvm_sys::{
         LLVMDILocationGetInlinedAt, LLVMDILocationGetLine, LLVMDILocationGetScope,
         LLVMDIScopeGetFile, LLVMInstructionGetDebugLoc,
     },
+    error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage},
     prelude::*,
+    transforms::pass_builder::{
+        LLVMCreatePassBuilderOptions, LLVMDisposePassBuilderOptions, LLVMRunPasses,
+    },
 };
 
 use crate::{
@@ -164,6 +168,38 @@ unsafe fn owned_message(pointer: *mut c_char) -> String {
         .into_owned();
     // SAFETY: ownership was transferred to this call, so it is freed once.
     unsafe { LLVMDisposeMessage(pointer) };
+    text
+}
+
+/// Copies an LLVM error's message and consumes the error.
+///
+/// Not a reuse of [`owned_message`]: `LLVMGetErrorMessage` documents its own
+/// deallocator, `LLVMDisposeErrorMessage`, and LLVM implements the two
+/// message families with different allocators (`new[]`/`delete[]` for
+/// errors, `strdup`/`free` for the `Print*ToString` family `owned_message`
+/// serves). Freeing one family's message with the other's deallocator is
+/// undefined behaviour, not just a documentation mismatch.
+///
+/// # Safety
+/// `error` must be null or a live, not-yet-consumed `LLVMErrorRef`.
+unsafe fn owned_error_message(error: LLVMErrorRef) -> String {
+    if error.is_null() {
+        return String::new();
+    }
+    // SAFETY: the caller guarantees a live, unconsumed error. This call
+    // consumes it and returns a message now owned by this function.
+    let message = unsafe { LLVMGetErrorMessage(error) };
+    if message.is_null() {
+        return String::new();
+    }
+    // SAFETY: `message` is non-null, and `LLVMGetErrorMessage` guarantees a
+    // NUL-terminated string.
+    let text = unsafe { CStr::from_ptr(message) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: ownership passed to this call from `LLVMGetErrorMessage`, and
+    // this is the deallocator its documentation pairs it with.
+    unsafe { LLVMDisposeErrorMessage(message) };
     text
 }
 
@@ -342,13 +378,56 @@ fn linkage_of(linkage: LLVMLinkage) -> Linkage {
     }
 }
 
+/// Reads CVP's `!callees` metadata off an indirect call, if CVP attached
+/// any.
+///
+/// `!callees` is an upper bound: it states that a defined execution of the
+/// call cannot target a function outside the set. It is neither a claim
+/// that these targets are reachable nor that the call executes at all.
+///
+/// # Safety
+/// `instruction` must be a live call or invoke instruction in the context
+/// that `callees_kind` was interned in.
+unsafe fn indirect_target_bound(
+    instruction: LLVMValueRef,
+    callees_kind: u32,
+    module_id: &str,
+) -> Option<Vec<FunctionId>> {
+    // SAFETY: the caller guarantees a live instruction and a kind ID from
+    // its own context; a call this metadata kind was never attached to
+    // simply answers null.
+    let node = unsafe { LLVMGetMetadata(instruction, callees_kind) };
+    if node.is_null() {
+        return None;
+    }
+    // SAFETY: `node` is the live MDNode value CVP attached to `instruction`.
+    let count = unsafe { LLVMGetNumOperands(node) } as usize;
+    let mut operands = vec![std::ptr::null_mut(); count];
+    // SAFETY: `node` is that same live MDNode, and `operands` holds exactly
+    // the `count` slots `LLVMGetNumOperands` just reported for it.
+    unsafe { LLVMGetMDNodeOperands(node, operands.as_mut_ptr()) };
+    Some(
+        operands
+            .into_iter()
+            .filter(|operand| !operand.is_null())
+            .map(|operand| FunctionId {
+                module_id: module_id.to_string(),
+                // SAFETY: `operand` is a live, non-null operand of that node.
+                symbol: unsafe { value_name(operand) },
+            })
+            .collect(),
+    )
+}
+
 /// Classifies a call or invoke by what it actually calls in this module.
 /// A name is never rebound: a direct call records the callee as referenced
 /// here.
 ///
 /// # Safety
-/// `instruction` must be a live call or invoke instruction.
-unsafe fn call_target(instruction: LLVMValueRef, module_id: &str) -> CallTarget {
+/// `instruction` must be a live call or invoke instruction, and
+/// `callees_kind` must be the "callees" metadata kind ID interned in the
+/// context that owns it.
+unsafe fn call_target(instruction: LLVMValueRef, module_id: &str, callees_kind: u32) -> CallTarget {
     // SAFETY: the caller guarantees a call or invoke, which this accessor
     // requires.
     let called = unsafe { LLVMGetCalledValue(instruction) };
@@ -381,9 +460,10 @@ unsafe fn call_target(instruction: LLVMValueRef, module_id: &str) -> CallTarget 
                 instruction,
             )))
         },
-        // `!callees` is read in a later step; an unbounded site stays `None`
-        // rather than claiming a bound nothing established.
-        llvm_target_bound: None,
+        // SAFETY: the caller guarantees a live call or invoke and a matching
+        // kind ID. A site CVP could not bound stays `None` rather than
+        // claiming a bound nothing established.
+        llvm_target_bound: unsafe { indirect_target_bound(instruction, callees_kind, module_id) },
     }
 }
 
@@ -544,6 +624,36 @@ unsafe fn extract_inner(
     }
     let parsed = ParsedModule(parsed);
 
+    let mut pass_diagnostics = Vec::new();
+    // CVP only attaches metadata; it rewrites no instructions, and the
+    // bitcode on disk is never touched. Propagation is per module: a
+    // callback assigned in another translation unit stays unresolved.
+    // SAFETY: `parsed.0` is the module just parsed, live in `context.0`.
+    // The target machine is null because `called-value-propagation` is a
+    // module pass that needs none, which `LLVMRunPasses` accepts. `options`
+    // is created and disposed within this block, never used afterward.
+    unsafe {
+        let options = LLVMCreatePassBuilderOptions();
+        let error = LLVMRunPasses(
+            parsed.0,
+            c"called-value-propagation".as_ptr(),
+            std::ptr::null_mut(),
+            options,
+        );
+        LLVMDisposePassBuilderOptions(options);
+        if !error.is_null() {
+            // Not fatal -- bounds are opportunistic -- but it changes what
+            // the answers can contain, so it belongs in the report rather
+            // than in a debug log.
+            let message = owned_error_message(error);
+            pass_diagnostics.push(format!("called-value-propagation did not run: {message}"));
+        }
+    }
+
+    // SAFETY: `context.0` is live; "callees" is 7 bytes, the metadata kind
+    // CVP attaches its upper bound under.
+    let callees_kind = unsafe { LLVMGetMDKindIDInContext(context.0, c"callees".as_ptr(), 7) };
+
     let mut functions = Vec::new();
     let mut call_sites = Vec::new();
     let mut uses = Vec::new();
@@ -589,7 +699,7 @@ unsafe fn extract_inner(
                         },
                         location,
                         // SAFETY: reached only for a call or invoke.
-                        target: unsafe { call_target(instruction, &module.id) },
+                        target: unsafe { call_target(instruction, &module.id, callees_kind) },
                     });
                 }
 
@@ -629,7 +739,8 @@ unsafe fn extract_inner(
     drop(parsed);
     drop(buffer);
     drop(context);
-    let diagnostics = sink.take();
+    let mut diagnostics = pass_diagnostics;
+    diagnostics.extend(sink.take());
 
     Ok(ModuleFacts {
         functions,
