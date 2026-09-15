@@ -4,6 +4,7 @@ use std::{
 };
 
 use rllvm::catalog::read_catalog;
+use rllvm::query::CallTarget;
 use rllvm::query::load::{for_each_module, load_catalog};
 
 #[test]
@@ -304,4 +305,191 @@ fn archive_catalog(scratch: &tempfile::TempDir) -> PathBuf {
     let path = scratch.path().join("archive-catalog.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
     path
+}
+
+#[test]
+fn direct_calls_carry_caller_callee_and_line() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "int add(int a,int b){return a+b;}\n\
+         int main(void){ return add(2,3); }\n",
+    );
+    let call = facts
+        .call_sites
+        .iter()
+        .find(|c| matches!(&c.target, CallTarget::Direct { callee } if callee.symbol == "add"))
+        .expect("direct call to add");
+    assert_eq!(call.id.function.symbol, "main");
+    assert_eq!(call.location.as_ref().unwrap().line, 2);
+}
+
+#[test]
+fn two_calls_on_one_line_are_two_call_sites() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "int add(int a,int b){return a+b;}\n\
+         int sub(int a,int b){return a-b;}\n\
+         int main(void){ return add(1,2) + sub(3,4); }\n",
+    );
+    let line_three: Vec<_> = facts
+        .call_sites
+        .iter()
+        .filter(|c| c.location.as_ref().is_some_and(|l| l.line == 3))
+        .collect();
+    assert_eq!(line_three.len(), 2);
+    assert_ne!(line_three[0].id, line_three[1].id);
+}
+
+#[test]
+fn a_function_whose_address_is_taken_records_a_use_not_a_call() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "static int add(int a,int b){return a+b;}\n\
+         int (*pick(void))(int,int){ return add; }\n",
+    );
+    assert!(
+        facts.call_sites.iter().all(|c| !matches!(&c.target,
+            CallTarget::Direct { callee } if callee.symbol == "add")),
+        "taking an address is not a call"
+    );
+    assert!(facts.uses.iter().any(|u| u.used.symbol == "add"));
+}
+
+#[test]
+fn a_function_without_debug_info_has_no_location() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(
+        &scratch,
+        "int add(int a,int b){return a+b;}\n",
+        &["-O0"], // no -g
+    );
+    let add = facts
+        .functions
+        .iter()
+        .find(|f| f.id.symbol == "add")
+        .unwrap();
+    assert!(add.location.is_none());
+}
+
+#[test]
+fn a_module_from_a_newer_llvm_names_both_versions() {
+    // A bitcode wrapper claiming a future producer version. Parsing fails;
+    // the message is what this test pins.
+    let loaded = rllvm::query::load::LoadedModule {
+        id: "future".into(),
+        bytes: b"BC\xc0\xde\xff\xff\xff\xff".to_vec(),
+        record: record_with_compiler_version("clang 99.0.0"),
+    };
+    let error = rllvm::query::extract::extract(&loaded, &Default::default()).unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("99.0.0"),
+        "must name the producer: {message}"
+    );
+    assert!(
+        message.contains(&rllvm::query::llvm_version()),
+        "must name the reader: {message}"
+    );
+}
+
+#[test]
+fn an_ordinary_call_is_not_recorded_as_a_use() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "int add(int a,int b){return a+b;}\n\
+         int main(void){ return add(2,3); }\n",
+    );
+    // Callee position is already a call site. Recording it again would make
+    // every called function look address-taken to the heuristics that read
+    // `uses`.
+    assert!(
+        facts.uses.iter().all(|u| u.used.symbol != "add"),
+        "{:?}",
+        facts.uses
+    );
+}
+
+#[test]
+fn mapped_lines_cover_every_line_a_function_has_instructions_on() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "int add(int a,int b){\n\
+         \x20 int c = a + b;\n\
+         \x20 return c;\n\
+         }\n",
+    );
+    let add = facts
+        .functions
+        .iter()
+        .find(|f| f.id.symbol == "add")
+        .unwrap();
+    let lines: Vec<u32> = add.mapped_lines.iter().map(|(_, line)| *line).collect();
+    assert!(lines.contains(&2) && lines.contains(&3), "{lines:?}");
+}
+
+#[test]
+fn a_parse_failure_carries_the_reason_llvm_gave() {
+    // Without a diagnostic handler installed, LLVM's own report goes to
+    // stderr instead of reaching the caller, and on the versions that call
+    // `exit(1)` for an error it takes the process with it.
+    let loaded = rllvm::query::load::LoadedModule {
+        id: "broken".into(),
+        bytes: b"BC\xc0\xde\xff\xff\xff\xff".to_vec(),
+        record: Default::default(),
+    };
+    let message = rllvm::query::extract::extract(&loaded, &Default::default())
+        .unwrap_err()
+        .to_string();
+    assert!(
+        message.contains('('),
+        "LLVM's own report must reach the error: {message}"
+    );
+}
+
+fn extract_source(scratch: &tempfile::TempDir, source: &str) -> rllvm::query::ModuleFacts {
+    extract_source_with_flags(scratch, source, &["-g", "-O0"])
+}
+
+fn extract_source_with_flags(
+    scratch: &tempfile::TempDir,
+    source: &str,
+    flags: &[&str],
+) -> rllvm::query::ModuleFacts {
+    let path = scratch.path().join("t.c");
+    std::fs::write(&path, source).unwrap();
+    let module = scratch.path().join("t.bc");
+    let status = std::process::Command::new(llvm_bin("clang"))
+        .args(flags)
+        .args(["-emit-llvm", "-c"])
+        .arg(&path)
+        .arg("-o")
+        .arg(&module)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let loaded = rllvm::query::load::LoadedModule {
+        id: "t".into(),
+        bytes: std::fs::read(&module).unwrap(),
+        record: Default::default(),
+    };
+    rllvm::query::extract::extract(&loaded, &Default::default()).unwrap()
+}
+
+/// Stands in for a catalog whose capture recorded a compiler this LLVM is
+/// older than.
+fn record_with_compiler_version(version: &str) -> rllvm::catalog::ModuleRecord {
+    rllvm::catalog::ModuleRecord {
+        compiler: Some(rllvm::catalog::CompilerIdentity {
+            path: PathBuf::from("clang"),
+            realpath: None,
+            version: version.to_string(),
+            sha256: None,
+        }),
+        ..Default::default()
+    }
 }
