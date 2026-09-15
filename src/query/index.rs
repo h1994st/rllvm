@@ -10,12 +10,12 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use super::{
     bind::{BindingStatus, SymbolBinding},
-    facts::{CallSiteFact, CallSiteId, CallTarget, FunctionId, ProgramFacts},
+    facts::{CallSiteFact, CallSiteId, CallTarget, FunctionId, ProgramFacts, UseFact},
 };
 
 /// Direction of a transitive closure walk.
@@ -73,8 +73,9 @@ pub struct Session {
     /// `Unique` bindings keyed by their one candidate, for reverse (`In`)
     /// closure walks back through the declaration that resolved to it.
     bindings_by_candidate: HashMap<FunctionId, Vec<usize>>,
-    /// Functions mapped to a source file and line. Not yet consumed within
-    /// this module; the source-line `at` query builds on it.
+    /// Functions mapped to a source file and line. Read by `functions_at`.
+    /// Unread by any non-test caller until the `at` query (a later task)
+    /// wires it up; exercised directly by this module's own tests.
     #[allow(dead_code)]
     by_file_line: HashMap<(PathBuf, u32), Vec<FunctionId>>,
 }
@@ -179,6 +180,26 @@ impl Session {
             .flat_map(|id| self.callees_by_function.get(id).into_iter().flatten())
             .map(|&idx| self.facts.call_sites[idx].clone())
             .collect()
+    }
+
+    /// Functions whose recorded source mapping includes `file:line`. Not
+    /// public API: internal plumbing for the `at` query, called by
+    /// `query::run` starting with the task that adds it.
+    #[allow(dead_code)]
+    pub(crate) fn functions_at(&self, file: &Path, line: u32) -> &[FunctionId] {
+        self.by_file_line
+            .get(&(file.to_path_buf(), line))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The heuristic address-taken inventory, verbatim. Never consulted by
+    /// `reach`/`closure`; exposed only so an opt-in `indirect-targets`
+    /// answer can report it. Not public API: internal plumbing, called by
+    /// `query::run` starting with the task that adds it.
+    #[allow(dead_code)]
+    pub(crate) fn uses(&self) -> &[UseFact] {
+        &self.facts.uses
     }
 
     /// Breadth-first search over resolved edges: `CallTarget::Direct`,
@@ -292,10 +313,16 @@ impl Session {
         if !self.is_definition(id) {
             return match self.binding_for_declaration(id).cloned() {
                 Some(binding) => match binding.status {
-                    BindingStatus::Unique => {
-                        let candidate = binding.candidates[0].function.clone();
-                        (vec![(candidate, PathStep::Binding(binding))], None)
-                    }
+                    BindingStatus::Unique => match binding.candidates.first() {
+                        Some(candidate) => {
+                            let function = candidate.function.clone();
+                            (vec![(function, PathStep::Binding(binding))], None)
+                        }
+                        // `SymbolBinding` is public and `Session::new` does
+                        // not validate it: a caller-built `Unique` binding
+                        // with no candidate has nothing to resolve to.
+                        None => (Vec::new(), None),
+                    },
                     BindingStatus::Ambiguous => (Vec::new(), Some(binding)),
                     BindingStatus::Unbound => (Vec::new(), None),
                 },
@@ -375,7 +402,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::testing::*;
+    use crate::query::{facts::Linkage, testing::*};
 
     #[test]
     fn reach_follows_a_chain_of_direct_calls() {
@@ -397,9 +424,29 @@ mod tests {
     }
 
     #[test]
+    fn reach_does_not_panic_on_a_unique_binding_built_with_no_candidates() {
+        // `SymbolBinding` is public and `Session::new` does not validate it
+        // against `bind()`'s invariant that `Unique` implies one candidate.
+        let caller = function("c", "caller", true, Linkage::External);
+        let declaration = function("c", "target", false, Linkage::External);
+        let call = direct_call(&caller, &declaration, 0);
+        let binding = SymbolBinding {
+            symbol: "target".into(),
+            declared_in: vec!["c".into()],
+            candidates: Vec::new(),
+            status: BindingStatus::Unique,
+        };
+        let session = Session::new(facts(vec![caller, declaration], vec![call]), vec![binding]);
+        assert!(session.reach("caller", "target").path.is_none());
+    }
+
+    #[test]
     fn reach_uses_an_llvm_bounded_indirect_edge() {
         // The only route from `a` to `target` runs through an indirect call
-        // CVP bounded to {target}. Without bounded edges this returns None.
+        // CVP bounded to {target, other}. Without bounded edges this
+        // returns None. The bound has two members so an implementation that
+        // collapsed it to just the taken target (`bound: vec![chosen]`)
+        // fails this too, not only one that drops the edge outright.
         let session = session_with_bounded_indirect();
         let result = session.reach("a", "target");
         let path = result
@@ -408,7 +455,10 @@ mod tests {
         assert!(matches!(
             path.iter().find(|step| matches!(step, PathStep::BoundedIndirect { .. })),
             Some(PathStep::BoundedIndirect { bound, chosen, .. })
-                if chosen.symbol == "target" && bound.len() == 1
+                if chosen.symbol == "target"
+                    && bound.len() == 2
+                    && bound.contains(chosen)
+                    && bound.iter().any(|f| f.symbol == "other")
         ));
     }
 
@@ -438,5 +488,25 @@ mod tests {
         let session = session_from(&[("a", "b"), ("b", "c")]);
         assert_eq!(session.closure("a", Direction::Out).len(), 2);
         assert_eq!(session.closure("c", Direction::In).len(), 2);
+    }
+
+    #[test]
+    fn functions_at_finds_only_the_mapped_line() {
+        let mut only = function("m", "only", true, Linkage::Internal);
+        only.mapped_lines = [(PathBuf::from("t.c"), 2)].into_iter().collect();
+        let session = Session::new(facts(vec![only], Vec::new()), Vec::new());
+
+        let found = session.functions_at(Path::new("t.c"), 2);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].symbol, "only");
+        assert!(session.functions_at(Path::new("t.c"), 99).is_empty());
+    }
+
+    #[test]
+    fn uses_reports_the_heuristic_inventory_verbatim() {
+        let session = session_with_address_taken_function();
+        let uses = session.uses();
+        assert_eq!(uses.len(), 1);
+        assert_eq!(uses[0].used.symbol, "add");
     }
 }

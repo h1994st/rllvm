@@ -99,10 +99,14 @@ pub(crate) fn session_from(edges: &[(&str, &str)]) -> Session {
     Session::new(facts(functions, call_sites), Vec::new())
 }
 
-/// `a` reaches `target` only through an indirect site CVP bounded to it.
+/// `a` reaches `target` only through an indirect site CVP bounded to
+/// `{target, other}`. A second bound member matters: it lets a test tell a
+/// correct bounded-indirect edge apart from one that collapsed the bound to
+/// just the target taken.
 pub(crate) fn session_with_bounded_indirect() -> Session {
     let a = function("m", "a", true, Linkage::Internal);
     let target = function("m", "target", true, Linkage::Internal);
+    let other = function("m", "other", true, Linkage::Internal);
     let site = CallSiteFact {
         id: CallSiteId {
             function: a.id.clone(),
@@ -112,10 +116,10 @@ pub(crate) fn session_with_bounded_indirect() -> Session {
         location: None,
         target: CallTarget::Indirect {
             signature: "i32 (i32, i32)".into(),
-            llvm_target_bound: Some(vec![target.id.clone()]),
+            llvm_target_bound: Some(vec![target.id.clone(), other.id.clone()]),
         },
     };
-    Session::new(facts(vec![a, target], vec![site]), Vec::new())
+    Session::new(facts(vec![a, target, other], vec![site]), Vec::new())
 }
 
 /// `caller` calls a symbol two modules define under different configurations.
