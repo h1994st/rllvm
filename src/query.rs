@@ -7,3 +7,6 @@ pub mod facts;
 pub use facts::*;
 
 pub mod load;
+
+pub mod bind;
+pub use bind::{BindingCandidate, BindingStatus, SymbolBinding};
