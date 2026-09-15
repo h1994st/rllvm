@@ -24,7 +24,7 @@ version = "0.5.0"
 # Links LLVM via llvm-sys for source-level queries over captured bitcode.
 # Kept as the crate's only feature: mutually exclusive LLVM features would
 # break `cargo llvm-cov --all-features` in CI.
-query = ["dep:llvm-sys"]
+query = ["dep:llvm-sys", "llvm-sys/force-static"]
 
 [dependencies]
 clap = {version = "~4.5.48", features = ["derive"]}

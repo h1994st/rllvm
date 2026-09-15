@@ -20,6 +20,42 @@ fn query_binary_reports_its_llvm_major() {
 }
 
 #[test]
+fn the_binary_does_not_link_an_llvm_shared_library() {
+    let binary = env!("CARGO_BIN_EXE_rllvm-query");
+    let tool = if cfg!(target_os = "macos") {
+        "otool"
+    } else {
+        "ldd"
+    };
+    let args: &[&str] = if cfg!(target_os = "macos") {
+        &["-L"]
+    } else {
+        &[]
+    };
+    let output = std::process::Command::new(tool)
+        .args(args)
+        .arg(binary)
+        .output()
+        .unwrap();
+    // Without this the test passes when the inspection command itself fails:
+    // an empty stdout trivially contains no "libLLVM".
+    assert!(
+        output.status.success(),
+        "{tool} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !text.trim().is_empty(),
+        "{tool} produced no output to inspect"
+    );
+    assert!(
+        !text.contains("libLLVM"),
+        "LLVM must be linked statically; found a dynamic reference:\n{text}"
+    );
+}
+
+#[test]
 fn the_cli_prints_callers_as_json() {
     let scratch = tempfile::tempdir().unwrap();
     let catalog = two_module_catalog(&scratch); // main calls add
@@ -990,6 +1026,63 @@ mod mcp {
         let scratch = tempfile::tempdir().unwrap();
         let catalog = empty_catalog(&scratch);
         mcp_exchange_in(&scratch, &catalog, request)
+    }
+
+    /// Calls one tool against `catalog` over `tools/call` and returns the
+    /// decoded envelope (`results`/`analysis`/`uncertainty`) the query
+    /// produced, not the `CallToolResult` wrapper around it: `tool_call_outcome`
+    /// (`mcp.rs`) serializes `run`'s result to a JSON string and carries it in
+    /// `content[0].text`, so this unwraps that one layer for callers that want
+    /// to compare it against the CLI's own JSON on stdout.
+    fn mcp_tool_call(
+        catalog: &Path,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> serde_json::Value {
+        let scratch = tempfile::tempdir().unwrap();
+        let response = mcp_exchange_in(
+            &scratch,
+            catalog,
+            &modern_request(
+                "call",
+                "tools/call",
+                serde_json::json!({ "name": name, "arguments": arguments }),
+            ),
+        );
+        assert_eq!(
+            response["result"]["isError"], false,
+            "tool `{name}` call failed: {response:?}"
+        );
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn the_cli_and_mcp_return_the_same_answer() {
+        // Structural, not a bug hunt: the CLI and `tools/call` both resolve
+        // to `run`/`Session` (`mcp.rs`'s `tool_call_outcome` calls the same
+        // `run` the CLI's own dispatch calls), so this documents that
+        // invariant rather than searching for a place the two diverge.
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = super::two_module_catalog(&scratch); // main calls add
+
+        let cli: serde_json::Value = serde_json::from_slice(
+            &Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+                .env("RLLVM_CONFIG", super::scratch_rllvm_config(&scratch))
+                .arg("--catalog")
+                .arg(&catalog)
+                .args(["callers", "add"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+
+        let mcp = mcp_tool_call(&catalog, "callers", serde_json::json!({ "name": "add" }));
+
+        assert_eq!(cli["results"], mcp["results"]);
+        assert_eq!(cli["analysis"], mcp["analysis"]);
+        assert_eq!(cli["uncertainty"], mcp["uncertainty"]);
     }
 
     #[test]
