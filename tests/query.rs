@@ -23,6 +23,7 @@ fn the_cli_prints_callers_as_json() {
     let scratch = tempfile::tempdir().unwrap();
     let catalog = two_module_catalog(&scratch); // main calls add
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
         .arg("--catalog")
         .arg(&catalog)
         .args(["callers", "add"])
@@ -39,6 +40,29 @@ fn llvm_bin(name: &str) -> PathBuf {
     let output = Command::new(config).arg("--bindir").output().unwrap();
     assert!(output.status.success());
     Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)
+}
+
+/// Points `RLLVM_CONFIG` at a scratch file, matching `tests/integration.rs`'s
+/// isolation convention: `rllvm-query` now reads the configured log level
+/// (`rllvm_query.rs`, so a module that fails to extract is actually reported
+/// on stderr), and without this the CLI test would depend on whatever the
+/// developer happens to have at `~/.rllvm/config.toml`.
+fn scratch_rllvm_config(scratch: &tempfile::TempDir) -> PathBuf {
+    let contents = format!(
+        "llvm_config_filepath = '{}'\n\
+         clang_filepath = '{}'\n\
+         clangxx_filepath = '{}'\n\
+         llvm_ar_filepath = '{}'\n\
+         llvm_link_filepath = '{}'\n",
+        rllvm::utils::find_llvm_config().unwrap().display(),
+        llvm_bin("clang").display(),
+        llvm_bin("clang++").display(),
+        llvm_bin("llvm-ar").display(),
+        llvm_bin("llvm-link").display(),
+    );
+    let config_path = scratch.path().join("rllvm-config.toml");
+    std::fs::write(&config_path, contents).unwrap();
+    config_path
 }
 
 #[test]

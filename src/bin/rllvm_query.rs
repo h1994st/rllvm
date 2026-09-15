@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::Path, process::ExitCode};
 use clap::Parser;
 use rllvm::{
     cli::{ClosureDirection, QueryArgs, QueryCommand},
+    config::try_rllvm_config,
     error::Error,
     query::{
         self, Query,
@@ -14,9 +15,18 @@ use rllvm::{
         run,
     },
 };
+use tracing_subscriber::FmtSubscriber;
 
 /// Converts a parsed subcommand into the `query::Query` it names. Kept out of
 /// `cli.rs` because `Query` does not exist without the `query` feature.
+///
+/// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
+/// arm here fails to compile. That alone does not catch the opposite drift --
+/// a new `query::Query` variant added without a matching `QueryCommand` --
+/// which compiles cleanly on its own. `cli_command_for` in this file's tests
+/// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
+/// fails to compile there instead, until this file is updated to drive it
+/// from the command line.
 fn to_query(command: QueryCommand, heuristics: bool) -> Query {
     match command {
         QueryCommand::Defs { name } => Query::Defs { name },
@@ -120,6 +130,18 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         Error::InvalidArguments("--catalog is required to run a query".to_string())
     })?;
 
+    // Matches the wrapper binaries' own convention (`rllvm_cc.rs`,
+    // `rllvm_get_bc.rs`, `rllvm_rustc.rs`): the configured log level, on
+    // stderr, so `tracing::warn!` above (a module that failed to extract)
+    // actually reaches a reader instead of being silently dropped by the
+    // default no-op subscriber. Deferred until here, after both early
+    // returns above, so `--llvm-version` alone never touches the
+    // configuration file.
+    FmtSubscriber::builder()
+        .with_max_level(try_rllvm_config()?.log_level())
+        .with_writer(std::io::stderr)
+        .init();
+
     let session = build_session(&catalog)?;
     let query = to_query(command, args.heuristics);
     let result = run(&session, &query);
@@ -140,6 +162,87 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reverse of `to_query`'s exhaustiveness: every `query::Query`
+    /// variant must appear here, with no wildcard arm. A `Query` variant
+    /// added without a matching arm fails to compile, so a new query cannot
+    /// ship without a `QueryCommand` (and a `to_query` arm) to drive it from
+    /// the command line -- closing the drift gap `to_query` alone leaves
+    /// open, since it is only ever exhaustive over `QueryCommand`.
+    fn cli_command_for(query: &Query) -> QueryCommand {
+        match query {
+            Query::Defs { name } => QueryCommand::Defs { name: name.clone() },
+            Query::At { file, line } => QueryCommand::At {
+                file: file.clone(),
+                line: *line,
+            },
+            Query::Callers { name } => QueryCommand::Callers { name: name.clone() },
+            Query::Callees { name } => QueryCommand::Callees { name: name.clone() },
+            Query::Uses { name } => QueryCommand::Uses { name: name.clone() },
+            Query::Reach { from, to } => QueryCommand::Reach {
+                from: from.clone(),
+                to: to.clone(),
+            },
+            Query::Closure { name, direction } => QueryCommand::Closure {
+                name: name.clone(),
+                direction: match direction {
+                    Direction::In => ClosureDirection::In,
+                    Direction::Out => ClosureDirection::Out,
+                },
+            },
+            Query::Externals => QueryCommand::Externals,
+            Query::IndirectTargets { at, .. } => QueryCommand::IndirectTargets { at: at.clone() },
+        }
+    }
+
+    /// Not just a compile-time fence: proves `to_query` and `cli_command_for`
+    /// actually agree on every field, for every variant, not merely that
+    /// both happen to be exhaustive.
+    #[test]
+    fn every_query_variant_round_trips_through_the_cli_command_mapping() {
+        let heuristics = true;
+        let queries = [
+            Query::Defs { name: "f".into() },
+            Query::At {
+                file: "t.c".into(),
+                line: 1,
+            },
+            Query::Callers { name: "f".into() },
+            Query::Callees { name: "f".into() },
+            Query::Uses { name: "f".into() },
+            Query::Reach {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            Query::Closure {
+                name: "f".into(),
+                direction: Direction::In,
+            },
+            Query::Closure {
+                name: "f".into(),
+                direction: Direction::Out,
+            },
+            Query::Externals,
+            Query::IndirectTargets {
+                at: "t.c:4".into(),
+                heuristics,
+            },
+        ];
+        for query in queries {
+            let command = cli_command_for(&query);
+            let round_tripped = to_query(command, heuristics);
+            assert_eq!(
+                format!("{round_tripped:?}"),
+                format!("{query:?}"),
+                "CLI round-trip must preserve every field"
+            );
         }
     }
 }

@@ -383,6 +383,13 @@ pub enum ClosureDirection {
 /// [`ClosureDirection`] mirrors `query::Direction`: this type must build
 /// without the `query` feature. The binary converts a parsed variant into a
 /// `query::Query` before running it.
+///
+/// This mirror can drift: `to_query` in `rllvm_query.rs` is exhaustive over
+/// this type, so a variant added here without an arm there fails to compile,
+/// but a variant added to `query::Query` with no matching variant here
+/// compiles cleanly on its own. `rllvm_query.rs`'s tests close that gap with
+/// a reverse match, exhaustive over `query::Query`, so that drift also fails
+/// to compile.
 #[derive(clap::Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 pub enum QueryCommand {
