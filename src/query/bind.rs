@@ -128,9 +128,25 @@ mod tests {
             declaration("b", "parse"),
         ];
         let bindings = bind(&functions, &Default::default());
+        assert_eq!(bindings.len(), 1, "should have exactly one binding");
         let binding = &bindings[0];
         assert_eq!(binding.status, BindingStatus::Unique);
         assert_eq!(binding.candidates.len(), 1);
+        // Verify the candidate's function identity
+        assert_eq!(
+            binding.candidates[0].function,
+            FunctionId {
+                module_id: "a".to_string(),
+                symbol: "parse".to_string(),
+            },
+            "candidate must be the definition from module a"
+        );
+        // Verify declared_in identifies the declaring module
+        assert_eq!(
+            binding.declared_in,
+            vec!["b"],
+            "declaration must be from module b"
+        );
     }
 
     #[test]
@@ -144,8 +160,32 @@ mod tests {
         configurations.insert("a".to_string(), Some("debug".to_string()));
         configurations.insert("b".to_string(), Some("release".to_string()));
         let bindings = bind(&functions, &configurations);
-        assert_eq!(bindings[0].status, BindingStatus::Ambiguous);
-        assert_eq!(bindings[0].candidates.len(), 2);
+        assert_eq!(bindings.len(), 1, "should have exactly one binding");
+        let binding = &bindings[0];
+        assert_eq!(binding.status, BindingStatus::Ambiguous);
+        assert_eq!(binding.candidates.len(), 2, "should have both candidates");
+        // Verify the pairing: module a must have config "debug"
+        let candidate_a = binding
+            .candidates
+            .iter()
+            .find(|c| c.function.module_id == "a")
+            .expect("candidate from module a must exist");
+        assert_eq!(
+            candidate_a.configuration_id,
+            Some("debug".to_string()),
+            "module a must be paired with config debug"
+        );
+        // Verify the pairing: module b must have config "release"
+        let candidate_b = binding
+            .candidates
+            .iter()
+            .find(|c| c.function.module_id == "b")
+            .expect("candidate from module b must exist");
+        assert_eq!(
+            candidate_b.configuration_id,
+            Some("release".to_string()),
+            "module b must be paired with config release"
+        );
     }
 
     #[test]
@@ -155,10 +195,41 @@ mod tests {
             declaration("b", "helper"),
         ];
         let bindings = bind(&functions, &Default::default());
+        assert_eq!(bindings.len(), 1, "should have exactly one binding");
+        let binding = &bindings[0];
         assert_eq!(
-            bindings[0].status,
+            binding.status,
             BindingStatus::Unbound,
             "a static definition cannot satisfy another module's declaration"
+        );
+        assert_eq!(
+            binding.candidates.len(),
+            0,
+            "internal linkage definition must not appear as a candidate"
+        );
+    }
+
+    #[test]
+    fn defined_symbol_with_no_declarations_produces_no_binding() {
+        let functions = vec![
+            definition("a", "helper", Linkage::External),
+            declaration("b", "other"),
+        ];
+        let bindings = bind(&functions, &Default::default());
+        // Only "other" should have a binding, not "helper"
+        assert_eq!(
+            bindings.len(),
+            1,
+            "should have exactly one binding (for 'other')"
+        );
+        assert_eq!(
+            bindings[0].symbol, "other",
+            "binding must be for the declared symbol"
+        );
+        // Verify no binding exists for the unreferenced definition
+        assert!(
+            bindings.iter().all(|b| b.symbol != "helper"),
+            "unreferenced definition must produce no binding"
         );
     }
 }
