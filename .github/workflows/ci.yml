@@ -23,7 +23,7 @@ env:
   CARGO_TERM_COLOR: always
   # Pinned so both runners test the same toolchain. Unpinned, Linux got
   # Ubuntu's default and macOS got Homebrew's latest -- four majors apart.
-  LLVM_VERSION: "22"
+  LLVM_VERSION: "23"
 
 jobs:
   changes:

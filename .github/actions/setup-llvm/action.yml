@@ -3,7 +3,7 @@ description: >
   Installs a pinned LLVM/Clang toolchain from official channels and puts it
   first on PATH. Pinning matters: rllvm shells out to llvm-config, llvm-link,
   llvm-ar, llvm-objcopy and llvm-dis, and an unpinned install gave Ubuntu's
-  default (18) on Linux and Homebrew's latest (22) on macOS, so the two runners
+  default on Linux and Homebrew's latest on macOS, so the two runners
   tested different toolchains.
 
 inputs:

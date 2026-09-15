@@ -11,7 +11,7 @@ linked `.wasm`.
   separate formula, and its version must match your LLVM:
 
   ```bash
-  brew install llvm@22 lld@22
+  brew install llvm lld
   ```
 
   A mismatched pair fails at link time with a dyld symbol error, not a message
