@@ -6,10 +6,13 @@
 //! modern (`MODERN`): served statelessly, checked against `MODERN`, and
 //! rejected with `-32022` (naming what is supported) when it does not
 //! match. An `initialize` request carries no such `_meta` block and selects
-//! legacy (`LEGACY`) instead, echoing it back when the client asked for it.
-//! Both version strings are fixed literals: accepting and echoing whatever a
-//! client sends would claim conformance this server has never been checked
-//! against.
+//! legacy (`LEGACY`) instead. Per the 2025-06-18 lifecycle spec, an
+//! unsupported requested version there gets a *counter-offer* -- a
+//! successful `InitializeResult` naming `LEGACY` -- not a protocol error: a
+//! legacy client has no fall-forward mechanism, so an error would be a dead
+//! end the counter-offer exists to avoid. Both version strings are fixed
+//! literals: accepting and echoing whatever a client sends would claim
+//! conformance this server has never been checked against.
 //!
 //! No connection state is kept for this beyond the request in hand. A
 //! legacy client never sends the modern `_meta` block on any message, so
@@ -22,6 +25,13 @@
 //! follow for their own stdout: every diagnostic belongs on stderr, and
 //! `serve` itself never writes anything but one JSON-RPC response line per
 //! request that expects one.
+//!
+//! Tool names (`tool_for`, `query_from_call`) are `snake_case`, matching
+//! `Query`'s own serde `kind` tag, so a result envelope's `"kind":
+//! "indirect_targets"` feeds straight back into `tools/call`'s `name`. CLI
+//! subcommands (`cli::QueryCommand`) are `kebab-case` instead, clap's
+//! convention. The two spellings diverge only in these literals; nothing
+//! ties them together.
 
 use std::io::{BufRead, Write};
 
@@ -112,7 +122,7 @@ fn handle_line(session: &Session, line: &str) -> Option<Value> {
     let method = request.get("method").and_then(Value::as_str).unwrap_or("");
     let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
 
-    let era = match classify_era(method, &params) {
+    let era = match classify_era(&params) {
         Ok(era) => era,
         Err((code, message, data)) => return Some(error_response(id, code, &message, data)),
     };
@@ -129,11 +139,17 @@ fn handle_line(session: &Session, line: &str) -> Option<Value> {
     Some(match outcome {
         Outcome::Error(code, message, data) => error_response(id, code, &message, data),
         Outcome::Result(mut result, cacheable) => {
-            if era == Era::Modern {
-                result["resultType"] = json!("complete");
+            // `Value`'s `IndexMut` panics on a non-object `Value`; no
+            // handler returns one today, but library code here must not
+            // panic if that ever changes, so this goes through
+            // `as_object_mut` instead of indexed assignment.
+            if era == Era::Modern
+                && let Some(map) = result.as_object_mut()
+            {
+                map.insert("resultType".into(), json!("complete"));
                 if cacheable {
-                    result["ttlMs"] = json!(60_000);
-                    result["cacheScope"] = json!("session");
+                    map.insert("ttlMs".into(), json!(60_000));
+                    map.insert("cacheScope".into(), json!("session"));
                 }
             }
             success_response(id, result)
@@ -142,12 +158,21 @@ fn handle_line(session: &Session, line: &str) -> Option<Value> {
 }
 
 /// Classifies a request into its era, and validates the version-selection
-/// fields that belong to that classification: a modern request's required
-/// `clientCapabilities` and its protocol version, or a legacy `initialize`'s
-/// requested version. Returns the JSON-RPC error to send when either check
-/// fails, since a legacy client with no fall-forward mechanism may see
-/// nothing else that explains why the handshake did not succeed.
-fn classify_era(method: &str, params: &Value) -> Result<Era, (i64, String, Option<Value>)> {
+/// fields a modern request requires: `clientCapabilities` alongside the
+/// modern `_meta` block, and a `protocolVersion` that matches `MODERN`.
+/// Returns the JSON-RPC error to send when either check fails.
+///
+/// A legacy `initialize`'s requested version is not validated here: the
+/// 2025-06-18 lifecycle spec requires a counter-offer, not an error, when
+/// the requested version is unsupported ("If the server supports the
+/// requested protocol version, it MUST respond with the same version.
+/// Otherwise, the server MUST respond with another protocol version it
+/// supports."). `legacy_initialize_result` always names `LEGACY`, which
+/// satisfies both branches of that sentence at once, so `initialize` always
+/// selects `Era::Legacy` regardless of what was requested -- a legacy
+/// client has no fall-forward mechanism, so an error here would be exactly
+/// the dead end the counter-offer exists to avoid.
+fn classify_era(params: &Value) -> Result<Era, (i64, String, Option<Value>)> {
     let meta = params.get("_meta");
     let modern_version = meta
         .and_then(|meta| meta.get(META_PROTOCOL_VERSION))
@@ -168,14 +193,6 @@ fn classify_era(method: &str, params: &Value) -> Result<Era, (i64, String, Optio
             return Err(unsupported_version(version));
         }
         return Ok(Era::Modern);
-    }
-
-    if method == "initialize" {
-        let requested = params.get("protocolVersion").and_then(Value::as_str);
-        return match requested {
-            Some(LEGACY) => Ok(Era::Legacy),
-            other => Err(unsupported_version(other.unwrap_or("<none>"))),
-        };
     }
 
     Ok(Era::Legacy)

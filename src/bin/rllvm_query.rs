@@ -166,7 +166,12 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
 fn main() -> ExitCode {
     let args = QueryArgs::parse();
     if args.llvm_version {
+        // Documented as "print ... and exit": must return here rather than
+        // falling into `run_query`, or `--llvm-version --catalog c mcp`
+        // would print a bare version line onto stdout ahead of the
+        // JSON-RPC frames, corrupting the protocol stream.
         println!("{}", query::llvm_version());
+        return ExitCode::SUCCESS;
     }
     match run_query(args) {
         Ok(()) => ExitCode::SUCCESS,

@@ -921,16 +921,17 @@ mod mcp {
         catalog_path
     }
 
-    /// Spawns `rllvm-query --catalog <empty> mcp`, writes one request line to
-    /// its stdin, closes stdin so the server sees EOF and exits, and returns
-    /// everything the process wrote to stdout, raw.
-    fn mcp_raw(request: &str) -> String {
-        let scratch = tempfile::tempdir().unwrap();
-        let catalog = empty_catalog(&scratch);
+    /// Spawns `rllvm-query --catalog <catalog> mcp` against an existing
+    /// scratch/catalog pair, writes one request line to its stdin, closes
+    /// stdin so the server sees EOF and exits, and returns everything the
+    /// process wrote to stdout, raw. Shared by `mcp_raw` (a fresh, unused
+    /// catalog per call) and tests that need several calls to see the same
+    /// session.
+    fn mcp_raw_in(scratch: &tempfile::TempDir, catalog: &Path, request: &str) -> String {
         let mut child = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-            .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch))
             .arg("--catalog")
-            .arg(&catalog)
+            .arg(catalog)
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -961,14 +962,34 @@ mod mcp {
         String::from_utf8(output.stdout).unwrap()
     }
 
-    /// Sends one request and parses the server's one response line as JSON.
-    fn mcp_exchange(request: &str) -> serde_json::Value {
-        let raw = mcp_raw(request);
+    /// Sends one request against an existing scratch/catalog pair and parses
+    /// the server's one response line as JSON.
+    fn mcp_exchange_in(
+        scratch: &tempfile::TempDir,
+        catalog: &Path,
+        request: &str,
+    ) -> serde_json::Value {
+        let raw = mcp_raw_in(scratch, catalog, request);
         let line = raw
             .lines()
             .find(|line| !line.is_empty())
             .unwrap_or_else(|| panic!("no response line in: {raw:?}"));
         serde_json::from_str(line).unwrap()
+    }
+
+    /// `mcp_raw_in` against a fresh, unused empty catalog: for tests that
+    /// only need one exchange and don't care what session answered it.
+    fn mcp_raw(request: &str) -> String {
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = empty_catalog(&scratch);
+        mcp_raw_in(&scratch, &catalog, request)
+    }
+
+    /// `mcp_exchange_in` against a fresh, unused empty catalog.
+    fn mcp_exchange(request: &str) -> serde_json::Value {
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = empty_catalog(&scratch);
+        mcp_exchange_in(&scratch, &catalog, request)
     }
 
     #[test]
@@ -1017,6 +1038,67 @@ mod mcp {
     }
 
     #[test]
+    fn every_listed_tool_resolves_through_a_call() {
+        // `tool_for`'s "name" literals (what `tools/list` reports) and
+        // `query_from_call`'s match arms (what `tools/call` actually
+        // recognizes) are two independent lists in `mcp.rs`: nothing forces
+        // them to agree. Renaming one and not the other compiles cleanly and
+        // makes that tool permanently uncallable -- every invocation would
+        // return `isError: true, unknown tool`. This drives every name
+        // `tools/list` reports through `tools/call` with a valid argument
+        // object, which also exercises the argument plumbing for the eight
+        // tools the other `tools/call` test (`externals`, no arguments)
+        // does not.
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = empty_catalog(&scratch);
+
+        let list = mcp_exchange_in(
+            &scratch,
+            &catalog,
+            &modern_request("list-tools", "tools/list", serde_json::json!({})),
+        );
+        let tools = list["result"]["tools"].as_array().unwrap();
+        assert!(tools.len() >= 9);
+
+        let sample_arguments: std::collections::HashMap<&str, serde_json::Value> = [
+            ("defs", serde_json::json!({ "name": "f" })),
+            ("at", serde_json::json!({ "file": "t.c", "line": 1 })),
+            ("callers", serde_json::json!({ "name": "f" })),
+            ("callees", serde_json::json!({ "name": "f" })),
+            ("uses", serde_json::json!({ "name": "f" })),
+            ("reach", serde_json::json!({ "from": "a", "to": "b" })),
+            (
+                "closure",
+                serde_json::json!({ "name": "f", "direction": "in" }),
+            ),
+            ("externals", serde_json::json!({})),
+            ("indirect_targets", serde_json::json!({ "at": "t.c:4" })),
+        ]
+        .into_iter()
+        .collect();
+
+        for tool in tools {
+            let name = tool["name"].as_str().unwrap();
+            let arguments = sample_arguments
+                .get(name)
+                .unwrap_or_else(|| panic!("no sample arguments for listed tool `{name}`"));
+            let response = mcp_exchange_in(
+                &scratch,
+                &catalog,
+                &modern_request(
+                    "call",
+                    "tools/call",
+                    serde_json::json!({ "name": name, "arguments": arguments }),
+                ),
+            );
+            assert_eq!(
+                response["result"]["isError"], false,
+                "tool `{name}` did not resolve through query_from_call: {response:?}"
+            );
+        }
+    }
+
+    #[test]
     fn a_request_without_client_capabilities_is_rejected() {
         // `clientCapabilities` is required; accepting its absence would make the
         // server pass tests a conforming client would fail against.
@@ -1060,6 +1142,27 @@ mod mcp {
             response["result"]["resultType"].is_null(),
             "legacy results must not carry modern fields"
         );
+    }
+
+    #[test]
+    fn a_legacy_initialize_with_an_older_version_gets_a_counter_offer() {
+        // The 2025-06-18 lifecycle spec: "If the server supports the
+        // requested protocol version, it MUST respond with the same
+        // version. Otherwise, the server MUST respond with another protocol
+        // version it supports." That is a successful `InitializeResult`
+        // naming `LEGACY`, not a protocol error -- a legacy client has no
+        // fall-forward mechanism, so an error would be exactly the dead end
+        // the counter-offer exists to avoid.
+        let response = mcp_exchange(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize",
+             "params":{"protocolVersion":"2024-11-05","capabilities":{},
+             "clientInfo":{"name":"t","version":"1"}}}"#,
+        );
+        assert!(
+            response["error"].is_null(),
+            "an unsupported requested version must counter-offer, not error: {response:?}"
+        );
+        assert_eq!(response["result"]["protocolVersion"], LEGACY);
     }
 
     #[test]
