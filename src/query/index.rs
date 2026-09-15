@@ -13,13 +13,21 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
+
+use crate::catalog::{CatalogOrigin, CatalogScope};
+
 use super::{
     bind::{BindingStatus, SymbolBinding},
-    facts::{CallSiteFact, CallSiteId, CallTarget, FunctionId, ProgramFacts, UseFact},
+    facts::{
+        CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, ModuleReport, ProgramFacts,
+        UseFact,
+    },
 };
 
 /// Direction of a transitive closure walk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// Functions that reach the named function.
     In,
@@ -28,7 +36,8 @@ pub enum Direction {
 }
 
 /// One step on a path `Session::reach` returns.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PathStep {
     /// A direct call.
     Call(CallSiteId),
@@ -74,9 +83,6 @@ pub struct Session {
     /// closure walks back through the declaration that resolved to it.
     bindings_by_candidate: HashMap<FunctionId, Vec<usize>>,
     /// Functions mapped to a source file and line. Read by `functions_at`.
-    /// Unread by any non-test caller until the `at` query (a later task)
-    /// wires it up; exercised directly by this module's own tests.
-    #[allow(dead_code)]
     by_file_line: HashMap<(PathBuf, u32), Vec<FunctionId>>,
 }
 
@@ -184,8 +190,7 @@ impl Session {
 
     /// Functions whose recorded source mapping includes `file:line`. Not
     /// public API: internal plumbing for the `at` query, called by
-    /// `query::run` starting with the task that adds it.
-    #[allow(dead_code)]
+    /// `query::run`.
     pub(crate) fn functions_at(&self, file: &Path, line: u32) -> &[FunctionId] {
         self.by_file_line
             .get(&(file.to_path_buf(), line))
@@ -196,10 +201,84 @@ impl Session {
     /// The heuristic address-taken inventory, verbatim. Never consulted by
     /// `reach`/`closure`; exposed only so an opt-in `indirect-targets`
     /// answer can report it. Not public API: internal plumbing, called by
-    /// `query::run` starting with the task that adds it.
-    #[allow(dead_code)]
+    /// `query::run`.
     pub(crate) fn uses(&self) -> &[UseFact] {
         &self.facts.uses
+    }
+
+    /// Every function in the selected scope. Not public API: internal
+    /// plumbing for envelope-level counts such as functions without a
+    /// recorded location.
+    pub(crate) fn functions(&self) -> &[FunctionFact] {
+        &self.facts.functions
+    }
+
+    /// One function's fact, by identity. Not public API: internal plumbing
+    /// for shaping an answer around a function already named by an edge.
+    pub(crate) fn function(&self, id: &FunctionId) -> Option<&FunctionFact> {
+        self.function_index
+            .get(id)
+            .map(|&idx| &self.facts.functions[idx])
+    }
+
+    /// Definitions of `name`. Declarations are excluded: a `defs` answer
+    /// reports where the symbol is defined, not every place it is merely
+    /// declared. Not public API: internal plumbing for `query::run`.
+    pub(crate) fn definitions(&self, name: &str) -> Vec<&FunctionFact> {
+        self.ids_by_name(name)
+            .into_iter()
+            .filter_map(|id| self.function(&id))
+            .filter(|function| function.is_definition)
+            .collect()
+    }
+
+    /// Every call site in the selected scope, resolved or not. Not public
+    /// API: internal plumbing for the envelope's uncertainty counts, which
+    /// must see every indirect site regardless of which function query ran.
+    pub(crate) fn call_sites(&self) -> &[CallSiteFact] {
+        &self.facts.call_sites
+    }
+
+    /// Call sites recorded at exactly `file:line`, in any function. Not
+    /// public API: internal plumbing for `at` and `indirect-targets`, which
+    /// both key off a source location rather than a symbol name.
+    pub(crate) fn call_sites_at(&self, file: &Path, line: u32) -> Vec<&CallSiteFact> {
+        self.facts
+            .call_sites
+            .iter()
+            .filter(|site| {
+                site.location
+                    .as_ref()
+                    .is_some_and(|location| location.file == *file && location.line == line)
+            })
+            .collect()
+    }
+
+    /// Per-module analysis reports, quoted from the catalog load and
+    /// extraction. Not public API: internal plumbing for the envelope's
+    /// `analysis` block, which must count every recorded status.
+    pub(crate) fn modules(&self) -> &[ModuleReport] {
+        &self.facts.modules
+    }
+
+    /// The catalog's selection, quoted verbatim. Not public API: internal
+    /// plumbing for the envelope's `scope` block, which must never
+    /// recompute what the catalog already selected.
+    pub(crate) fn scope(&self) -> &CatalogScope {
+        &self.facts.scope
+    }
+
+    /// The catalog's origin, quoted verbatim. Not public API: internal
+    /// plumbing for the envelope's `provenance` block.
+    pub(crate) fn origin(&self) -> &CatalogOrigin {
+        &self.facts.origin
+    }
+
+    /// Every resolved cross-module binding, `Unbound` included. Not public
+    /// API: internal plumbing for `externals` and for the envelope's
+    /// program-wide ambiguity count.
+    pub(crate) fn bindings(&self) -> &[SymbolBinding] {
+        &self.bindings
     }
 
     /// Breadth-first search over resolved edges: `CallTarget::Direct`,

@@ -11,8 +11,9 @@ use crate::{
     query::{
         bind::{BindingCandidate, BindingStatus, SymbolBinding},
         facts::{
-            CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Linkage, ProgramFacts,
-            SourceLocation, SourceStatus, UseFact, UseKind,
+            CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Linkage,
+            ModuleAnalysis, ModuleReport, ProgramFacts, SourceLocation, SourceStatus, UseFact,
+            UseKind,
         },
         index::Session,
     },
@@ -204,4 +205,48 @@ pub(crate) fn session_with_address_taken_function() -> Session {
         kind: UseKind::StoredToMemory,
     }];
     Session::new(base, Vec::new())
+}
+
+/// `scope.selected_entries == 2`, but only one module was read: `a` parsed,
+/// `b` failed. Pins that `scope` is quoted from the catalog and never
+/// recomputed from what `analysis` actually managed to read.
+pub(crate) fn facts_with_one_failed_module() -> ProgramFacts {
+    let mut base = facts(vec![], vec![]);
+    base.scope.total_entries = 2;
+    base.scope.selected_entries = 2;
+    base.modules = vec![
+        ModuleReport {
+            id: "a".into(),
+            status: ModuleAnalysis::Analyzed,
+            ir_stage: None,
+            debug_info: Some(true),
+            compiler: None,
+            configuration_id: None,
+            content_sha256: None,
+            target_triple: None,
+            diagnostic: None,
+        },
+        ModuleReport {
+            id: "b".into(),
+            status: ModuleAnalysis::Failed,
+            ir_stage: None,
+            debug_info: None,
+            compiler: None,
+            configuration_id: None,
+            content_sha256: None,
+            target_triple: None,
+            diagnostic: Some("truncated".into()),
+        },
+    ];
+    base
+}
+
+/// A function whose only mapped line is the given `(file, line)` pairs.
+pub(crate) fn session_from_source_lines(lines: &[(&str, u32)]) -> Session {
+    let mut only = function("m", "only", true, Linkage::Internal);
+    only.mapped_lines = lines
+        .iter()
+        .map(|(file, line)| (PathBuf::from(file), *line))
+        .collect();
+    Session::new(facts(vec![only], Vec::new()), Vec::new())
 }
