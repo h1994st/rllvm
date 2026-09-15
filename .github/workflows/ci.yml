@@ -132,10 +132,12 @@ jobs:
 
       # The `query` feature is gated behind `required-features` so the default
       # jobs above never build or run it; run it explicitly here, on both
-      # platforms in this job's matrix.
+      # platforms in this job's matrix. `--lib` as well as `--test query`:
+      # most of the query design's commitments are pinned by unit tests in
+      # `src/query/*`, and `--test query` alone runs none of them.
       - name: Run query tests
         if: needs.changes.outputs.code == 'true'
-        run: cargo test --features query --test query
+        run: cargo test --features query --lib --test query
         env:
           LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 
@@ -214,14 +216,27 @@ jobs:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
+        id: setup-llvm
         if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
           version: ${{ env.LLVM_VERSION }}
 
+      # Default features, unchanged: this is the gate that caught an unused
+      # re-export the `--features query` build could not see, because the
+      # feature makes that import used.
       - name: Run clippy
         if: needs.changes.outputs.code == 'true'
         run: cargo clippy --all-targets -- -D warnings
+
+      # And again with the feature on: without this, `src/query/**` and
+      # `src/bin/rllvm_query.rs` -- every `unsafe` block in the crate among
+      # them -- are cfg'd out of the lint gate entirely.
+      - name: Run clippy (query feature)
+        if: needs.changes.outputs.code == 'true'
+        run: cargo clippy --all-targets --features query -- -D warnings
+        env:
+          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 
   audit:
     name: Security Audit
