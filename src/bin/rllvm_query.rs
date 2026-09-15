@@ -1,19 +1,11 @@
-use std::{collections::HashMap, path::Path, process::ExitCode};
+use std::process::ExitCode;
 
 use clap::Parser;
 use rllvm::{
     cli::{ClosureDirection, QueryArgs, QueryCommand},
     config::try_rllvm_config,
     error::Error,
-    query::{
-        self, Query,
-        bind::bind,
-        extract::extract,
-        facts::{CallSiteFact, FunctionFact, ModuleAnalysis, ProgramFacts, UseFact},
-        index::{Direction, Session},
-        load::{for_each_module, load_catalog},
-        run,
-    },
+    query::{self, Query, index::Direction, open, run},
 };
 use tracing_subscriber::FmtSubscriber;
 
@@ -50,81 +42,6 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
     })
 }
 
-/// Loads the catalog, extracts every module it names, binds cross-module
-/// symbols, and returns a session ready to answer queries.
-///
-/// Assembly order matters, and enforces two spec rules. First, only
-/// extraction may promote a module's report from `Verified` (set by
-/// `load_catalog`) to `Analyzed`; a module that fails to extract is marked
-/// `Failed` with the diagnostic instead, and the run continues -- the other
-/// modules still answer. Second, `for_each_module` hands over one module's
-/// bytes at a time by design, and the `Loaded` value (with the archive cache
-/// `for_each_module` uses internally, already gone once it returns) is
-/// dropped below before the session is built, so no bitcode buffer stays
-/// resident once queries start answering.
-fn build_session(catalog: &Path) -> Result<Session, Error> {
-    let loaded = load_catalog(catalog)?;
-
-    // Every module the loader intends to read, regardless of whether
-    // extraction later succeeds: `bind` only consults a module's
-    // configuration when it also sees a `FunctionFact` from that module, so
-    // an entry for a module that fails extraction is simply unused.
-    let configurations: HashMap<String, Option<String>> = loaded
-        .pending
-        .iter()
-        .map(|module| (module.id.clone(), module.record.configuration_id.clone()))
-        .collect();
-
-    let mut functions: Vec<FunctionFact> = Vec::new();
-    let mut call_sites: Vec<CallSiteFact> = Vec::new();
-    let mut uses: Vec<UseFact> = Vec::new();
-    let mut reports = loaded.reports.clone();
-
-    for_each_module(&loaded, |module| {
-        match extract(&module, &loaded.source_status) {
-            Ok(facts) => {
-                if let Some(report) = reports.iter_mut().find(|report| report.id == module.id) {
-                    report.status = ModuleAnalysis::Analyzed;
-                    if !facts.diagnostics.is_empty() {
-                        let joined = facts.diagnostics.join("; ");
-                        report.diagnostic = Some(match report.diagnostic.take() {
-                            Some(existing) => format!("{existing}; {joined}"),
-                            None => joined,
-                        });
-                    }
-                }
-                functions.extend(facts.functions);
-                call_sites.extend(facts.call_sites);
-                uses.extend(facts.uses);
-            }
-            Err(error) => {
-                tracing::warn!(module = %module.id, %error, "module failed to extract");
-                if let Some(report) = reports.iter_mut().find(|report| report.id == module.id) {
-                    report.status = ModuleAnalysis::Failed;
-                    report.diagnostic = Some(error.to_string());
-                }
-            }
-        }
-        // A module that fails to extract must not abort the run.
-        Ok(())
-    })?;
-
-    let bindings = bind(&functions, &configurations);
-    let facts = ProgramFacts {
-        functions,
-        call_sites,
-        uses,
-        scope: loaded.scope.clone(),
-        origin: loaded.origin.clone(),
-        modules: reports,
-    };
-    // The loop above already dropped its own archive cache on return; this
-    // drops `Loaded` itself before the session below starts serving.
-    drop(loaded);
-
-    Ok(Session::new(facts, bindings))
-}
-
 fn run_query(args: QueryArgs) -> Result<(), Error> {
     let Some(command) = args.command else {
         return Ok(());
@@ -145,7 +62,7 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         .with_writer(std::io::stderr)
         .init();
 
-    let session = build_session(&catalog)?;
+    let session = open(&catalog)?;
 
     // `Mcp` names a mode, not a query: `to_query` returns `None` for it, and
     // the session already loaded above is handed to `serve` so the first
@@ -155,7 +72,7 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         let stdout = std::io::stdout();
         return query::mcp::serve(&session, stdin.lock(), stdout.lock());
     };
-    let result = run(&session, &query);
+    let result = run(&session, &query)?;
 
     let json = serde_json::to_string_pretty(&result)
         .map_err(|error| Error::InvalidArguments(error.to_string()))?;

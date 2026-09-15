@@ -357,7 +357,11 @@ pub struct QueryArgs {
     pub catalog: Option<PathBuf>,
 
     /// Include the heuristic address-taken inventory in `indirect-targets` answers
-    #[arg(long)]
+    ///
+    /// Global so it may trail its subcommand -- `indirect-targets t.c:8
+    /// --heuristics` -- which is how the README writes it and the only
+    /// placement that reads naturally for a flag that modifies one query.
+    #[arg(long, global = true)]
     pub heuristics: bool,
 
     #[command(subcommand)]

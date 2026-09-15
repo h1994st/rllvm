@@ -59,7 +59,8 @@ pub enum PathStep {
 pub struct ReachResult {
     pub path: Option<Vec<PathStep>>,
     /// Ambiguous bindings the search reached but could not resolve, recorded
-    /// rather than guessed through.
+    /// rather than guessed through. One entry per symbol, however many
+    /// declarations of it the walk passed through.
     pub frontier: Vec<SymbolBinding>,
 }
 
@@ -314,7 +315,13 @@ impl Session {
             }
 
             let (edges, ambiguous) = self.successors(&current);
-            if let Some(binding) = ambiguous {
+            // One entry per symbol. A symbol declared in several modules is
+            // reached once per declaration, and the binding is the same
+            // record each time; pushing it repeatedly would report one
+            // ambiguous symbol as several.
+            if let Some(binding) = ambiguous
+                && !frontier.iter().any(|seen| seen.symbol == binding.symbol)
+            {
                 frontier.push(binding);
             }
             for (next, step) in edges {
@@ -488,6 +495,29 @@ mod tests {
         let session = session_from(&[("a", "b"), ("b", "c")]);
         let result = session.reach("a", "c");
         assert!(result.path.is_some());
+    }
+
+    /// Two modules declare one ambiguous symbol, so the walk reaches the
+    /// same binding twice. It is one ambiguous symbol, and the frontier must
+    /// say so once: pushing per declaration reports one problem as several,
+    /// and every count downstream inherits the inflation.
+    #[test]
+    fn one_ambiguous_symbol_reached_twice_is_reported_once() {
+        let session = session_with_ambiguous_bindings();
+        let result = session.reach("caller", "target");
+        assert!(result.path.is_none());
+        assert_eq!(
+            result.frontier.len(),
+            1,
+            "one symbol, however many declarations reached it: {:?}",
+            result.frontier
+        );
+        assert_eq!(result.frontier[0].symbol, "target");
+        assert_eq!(
+            result.frontier[0].declared_in.len(),
+            2,
+            "the one entry still names both declaring modules"
+        );
     }
 
     #[test]

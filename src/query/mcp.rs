@@ -101,9 +101,9 @@ pub fn serve(
     }
 }
 
-/// Handle one request line. Returns `None` for a notification (no `id`),
-/// which the JSON-RPC 2.0 contract never answers -- `notifications/initialized`
-/// is handled this way, with no method-specific case needed.
+/// Handle one request line. Returns `None` only for a notification: a
+/// request object carrying a `method` and no `id`. Everything else is
+/// answered, including a value that is not a request object at all.
 fn handle_line(session: &Session, line: &str) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(request) => request,
@@ -117,10 +117,32 @@ fn handle_line(session: &Session, line: &str) -> Option<Value> {
         }
     };
 
-    request.get("id")?;
-    let id = request.get("id").cloned().unwrap_or(Value::Null);
-    let method = request.get("method").and_then(Value::as_str).unwrap_or("");
-    let params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+    // A valid-JSON value that is not an object, and an object with no
+    // string `method`, are both Invalid Request (-32600), not an unknown
+    // method and not silence. JSON-RPC 2.0 requires `id: null` when the id
+    // cannot be determined, which is what a non-object has.
+    let Some(object) = request.as_object() else {
+        return Some(error_response(
+            Value::Null,
+            -32600,
+            "Invalid Request: expected a JSON-RPC 2.0 request object",
+            None,
+        ));
+    };
+    let id = object.get("id").cloned().unwrap_or(Value::Null);
+    let Some(method) = object.get("method").and_then(Value::as_str) else {
+        return Some(error_response(
+            id,
+            -32600,
+            "Invalid Request: `method` must be a string",
+            None,
+        ));
+    };
+    // A request with a method and no `id` is a notification, which the
+    // JSON-RPC 2.0 contract never answers -- `notifications/initialized` is
+    // handled this way, with no method-specific case needed.
+    object.get("id")?;
+    let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
 
     let era = match classify_era(&params) {
         Ok(era) => era,
@@ -225,55 +247,58 @@ fn tools_list_result() -> Value {
     json!({ "tools": sample_queries().iter().map(tool_for).collect::<Vec<_>>() })
 }
 
-/// One instance per `Query` variant, so `tools/list` reports all nine. The
-/// field values are placeholders that only select a match arm below; they
-/// never reach a session. The actual drift guard is `tool_for`'s own match,
-/// which the compiler requires to cover every `Query` variant regardless of
-/// how many samples are listed here -- a `Query` variant added without a
-/// matching arm in `tool_for` fails to compile whether or not it is ever
-/// instantiated. This is the third listing of the nine queries, after
-/// `query::Query` and `cli::QueryCommand`, and pushing entries into a `Vec`
-/// here instead would drift the same way the CLI's list once could.
-fn sample_queries() -> [Query; 9] {
-    [
-        Query::Defs {
-            name: String::new(),
-        },
-        Query::At {
-            file: String::new(),
-            line: 0,
-        },
-        Query::Callers {
-            name: String::new(),
-        },
-        Query::Callees {
-            name: String::new(),
-        },
-        Query::Uses {
-            name: String::new(),
-        },
-        Query::Reach {
-            from: String::new(),
-            to: String::new(),
-        },
-        Query::Closure {
-            name: String::new(),
-            direction: Direction::In,
-        },
-        Query::Externals,
-        Query::IndirectTargets {
-            at: String::new(),
-            heuristics: false,
-        },
-    ]
+/// Declares the tool surface once: for each `Query` variant, the pattern
+/// that matches it, a sample instance, and the tool name.
+///
+/// This is what keeps the surface from going stale. The generated
+/// `tool_name_of` is a match over `Query` with no wildcard arm, so a variant
+/// missing from the list below fails to compile -- and because
+/// `sample_queries` is generated from the same list, being declared here is
+/// what puts a tool into `tools/list` at all. A hand-written `[Query; 9]`
+/// could not do that: its length has no relationship to the variant count,
+/// so a tenth query would compile, go unlisted, and be permanently
+/// uncallable over MCP while working fine on the command line.
+///
+/// The sample field values are placeholders that only select a match arm in
+/// `tool_for`; they never reach a session.
+macro_rules! query_tool_surface {
+    ($($pattern:pat => $sample:expr, $name:literal;)+) => {
+        /// One instance per `Query` variant, so `tools/list` reports them all.
+        fn sample_queries() -> Vec<Query> {
+            vec![$($sample),+]
+        }
+
+        /// The MCP tool name for one `Query` variant. Exhaustive over
+        /// `Query` with no wildcard arm.
+        fn tool_name_of(query: &Query) -> &'static str {
+            match query {
+                $($pattern => $name,)+
+            }
+        }
+    };
+}
+
+query_tool_surface! {
+    Query::Defs { .. } => Query::Defs { name: String::new() }, "defs";
+    Query::At { .. } => Query::At { file: String::new(), line: 0 }, "at";
+    Query::Callers { .. } => Query::Callers { name: String::new() }, "callers";
+    Query::Callees { .. } => Query::Callees { name: String::new() }, "callees";
+    Query::Uses { .. } => Query::Uses { name: String::new() }, "uses";
+    Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new() }, "reach";
+    Query::Closure { .. } => Query::Closure { name: String::new(), direction: Direction::In }, "closure";
+    Query::Externals => Query::Externals, "externals";
+    Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
 }
 
 /// The MCP tool definition for one `Query` variant: name, description, and
-/// JSON input schema. Exhaustive over `Query` with no wildcard arm.
+/// JSON input schema. Exhaustive over `Query` with no wildcard arm, and the
+/// name is taken from `tool_name_of` so the listing and the name a client
+/// calls back cannot be spelled differently.
 fn tool_for(query: &Query) -> Value {
+    let name = tool_name_of(query);
     match query {
         Query::Defs { .. } => json!({
-            "name": "defs",
+            "name": name,
             "description": "Every definition of the symbol, with module and configuration.",
             "inputSchema": {
                 "type": "object",
@@ -284,7 +309,7 @@ fn tool_for(query: &Query) -> Value {
             }
         }),
         Query::At { .. } => json!({
-            "name": "at",
+            "name": name,
             "description": "Functions with at least one instruction mapped to file:line, and the call sites recorded there.",
             "inputSchema": {
                 "type": "object",
@@ -296,7 +321,7 @@ fn tool_for(query: &Query) -> Value {
             }
         }),
         Query::Callers { .. } => json!({
-            "name": "callers",
+            "name": name,
             "description": "Functions containing a call to the target, each with its call sites.",
             "inputSchema": {
                 "type": "object",
@@ -307,7 +332,7 @@ fn tool_for(query: &Query) -> Value {
             }
         }),
         Query::Callees { .. } => json!({
-            "name": "callees",
+            "name": name,
             "description": "Outgoing call sites of the target, classified. Includes unresolved indirect sites.",
             "inputSchema": {
                 "type": "object",
@@ -318,7 +343,7 @@ fn tool_for(query: &Query) -> Value {
             }
         }),
         Query::Uses { .. } => json!({
-            "name": "uses",
+            "name": name,
             "description": "Non-call uses: how and where the function's address is taken.",
             "inputSchema": {
                 "type": "object",
@@ -329,7 +354,7 @@ fn tool_for(query: &Query) -> Value {
             }
         }),
         Query::Reach { .. } => json!({
-            "name": "reach",
+            "name": name,
             "description": "One supporting path from `from` to `to`, or its explicit absence.",
             "inputSchema": {
                 "type": "object",
@@ -341,7 +366,7 @@ fn tool_for(query: &Query) -> Value {
             }
         }),
         Query::Closure { .. } => json!({
-            "name": "closure",
+            "name": name,
             "description": "The set that can reach the target (in) or that it can reach (out).",
             "inputSchema": {
                 "type": "object",
@@ -357,12 +382,12 @@ fn tool_for(query: &Query) -> Value {
             }
         }),
         Query::Externals => json!({
-            "name": "externals",
+            "name": name,
             "description": "Unbound symbols: the captured program's boundary.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         Query::IndirectTargets { .. } => json!({
-            "name": "indirect_targets",
+            "name": name,
             "description": "`!callees` at a call site, when CVP produced it; otherwise unresolved.",
             "inputSchema": {
                 "type": "object",
@@ -381,9 +406,10 @@ fn tool_for(query: &Query) -> Value {
 }
 
 /// Runs a `tools/call`. `name`/`arguments` are validated by `query_from_call`;
-/// a name or arguments that do not resolve to a query become a
-/// `CallToolResult` with `isError: true` rather than a protocol error, so
-/// the client can display what was wrong with the call it made.
+/// a name or arguments that do not resolve to a query, and a query the
+/// session cannot interpret, both become a `CallToolResult` with
+/// `isError: true` rather than a protocol error, so the client can display
+/// what was wrong with the call it made.
 fn tool_call_outcome(session: &Session, params: &Value) -> Outcome {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Outcome::Error(
@@ -402,7 +428,14 @@ fn tool_call_outcome(session: &Session, params: &Value) -> Outcome {
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
 
-    let result = run(session, &query);
+    // A query the session could not interpret -- an `indirect_targets`
+    // location that does not parse -- is a tool error the client can
+    // display, not a protocol error, and never an empty `results` list that
+    // would read as a valid answer.
+    let result = match run(session, &query) {
+        Ok(result) => result,
+        Err(error) => return Outcome::Result(call_tool_result(true, &error.to_string()), false),
+    };
     let payload = serde_json::to_value(&result)
         .unwrap_or_else(|error| json!({ "serialization_error": error.to_string() }));
     Outcome::Result(call_tool_result(false, &payload.to_string()), false)
@@ -490,4 +523,134 @@ fn error_response(id: Value, code: i64, message: &str, data: Option<Value>) -> V
 
 fn success_response(id: Value, result: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "result": result })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::query::testing::session_from;
+
+    /// Sample arguments for one tool, keyed by the same `Query` variant the
+    /// tool was listed from. Exhaustive over `Query` with no wildcard arm,
+    /// like `tool_name_of` itself, so a new variant fails to compile here
+    /// too.
+    fn sample_arguments(query: &Query) -> Value {
+        match query {
+            Query::Defs { .. } => json!({ "name": "a" }),
+            Query::At { .. } => json!({ "file": "t.c", "line": 1 }),
+            Query::Callers { .. } => json!({ "name": "a" }),
+            Query::Callees { .. } => json!({ "name": "a" }),
+            Query::Uses { .. } => json!({ "name": "a" }),
+            Query::Reach { .. } => json!({ "from": "a", "to": "b" }),
+            Query::Closure { .. } => json!({ "name": "a", "direction": "in" }),
+            Query::Externals => json!({}),
+            Query::IndirectTargets { .. } => json!({ "at": "t.c:4" }),
+        }
+    }
+
+    fn listed_tool_names() -> Vec<String> {
+        tools_list_result()["tools"]
+            .as_array()
+            .expect("tools/list must report an array")
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// The guard the fixed-length `[Query; 9]` could not give: every variant
+    /// declared in `query_tool_surface!` -- and the macro's `tool_name_of`
+    /// match makes that every variant, or the crate does not compile --
+    /// reaches `tools/list` under its own name and comes back through
+    /// `query_from_call` as the same variant.
+    #[test]
+    fn every_query_variant_is_listed_and_resolves_through_a_call() {
+        let listed = listed_tool_names();
+        for query in sample_queries() {
+            let name = tool_name_of(&query);
+            assert!(
+                listed.iter().any(|listed| listed == name),
+                "tools/list does not report `{name}`: {listed:?}"
+            );
+            let resolved = query_from_call(name, &sample_arguments(&query))
+                .unwrap_or_else(|error| panic!("`{name}` did not resolve: {error}"));
+            assert_eq!(
+                tool_name_of(&resolved),
+                name,
+                "`{name}` resolved to a different query variant"
+            );
+        }
+        assert_eq!(
+            listed.len(),
+            sample_queries().len(),
+            "every listed tool must come from exactly one sampled variant"
+        );
+    }
+
+    /// A tool name is one spelling on both sides: listed once, and the same
+    /// literal `query_from_call` matches.
+    #[test]
+    fn no_two_tools_share_a_name() {
+        let mut listed = listed_tool_names();
+        listed.sort();
+        let count = listed.len();
+        listed.dedup();
+        assert_eq!(listed.len(), count, "duplicate tool name in tools/list");
+    }
+
+    /// `indirect_targets` with a location missing its `:line` is a tool
+    /// error the client can see, not an empty `results` list that would be
+    /// byte-identical to a valid line with no indirect calls.
+    #[test]
+    fn an_unparseable_location_is_a_tool_error_not_an_empty_answer() {
+        let session = session_from(&[("a", "b")]);
+        let call = json!({ "name": "indirect_targets", "arguments": { "at": "parser.c" } });
+        let Outcome::Result(result, _) = tool_call_outcome(&session, &call) else {
+            panic!("a query error must be a CallToolResult, not a protocol error");
+        };
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("parser.c"),
+            "the error must name the location it could not parse: {text}"
+        );
+    }
+
+    #[test]
+    fn a_valid_location_still_answers() {
+        let session = session_from(&[("a", "b")]);
+        let call = json!({ "name": "indirect_targets", "arguments": { "at": "parser.c:8" } });
+        let Outcome::Result(result, _) = tool_call_outcome(&session, &call) else {
+            panic!("a valid call must produce a result");
+        };
+        assert_eq!(result["isError"], false);
+    }
+
+    #[test]
+    fn a_json_value_that_is_not_a_request_object_is_invalid_request() {
+        let session = session_from(&[("a", "b")]);
+        let response = handle_line(&session, "42").expect("a non-object must still be answered");
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["id"], Value::Null);
+    }
+
+    #[test]
+    fn a_request_without_a_method_is_invalid_request() {
+        let session = session_from(&[("a", "b")]);
+        let response = handle_line(&session, r#"{"jsonrpc":"2.0","id":1}"#)
+            .expect("a request with an id must be answered");
+        assert_eq!(response["error"]["code"], -32600);
+        assert_eq!(response["id"], 1);
+    }
+
+    #[test]
+    fn a_notification_is_still_never_answered() {
+        let session = session_from(&[("a", "b")]);
+        assert!(
+            handle_line(
+                &session,
+                r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+            )
+            .is_none()
+        );
+    }
 }

@@ -432,6 +432,218 @@ fn two_module_catalog(scratch: &tempfile::TempDir) -> PathBuf {
 }
 
 #[test]
+fn a_module_that_vanishes_after_loading_is_reported_not_fatal() {
+    // A concurrent build deletes or rewrites one `.bc` between
+    // `load_catalog` and the read that actually wants its bytes. The
+    // contract is the one `load_catalog` already follows: record the module
+    // and carry on. Propagating the read error instead fails the whole run,
+    // so the query answers nothing at all rather than answering with that
+    // one module unaccounted for.
+    let scratch = tempfile::tempdir().unwrap();
+    let (catalog_path, first_module) = two_plain_module_catalog(&scratch);
+
+    let loaded = load_catalog(&catalog_path).unwrap();
+    assert_eq!(loaded.pending.len(), 2, "both modules verify at load time");
+    let vanished = loaded
+        .pending
+        .iter()
+        .find(|module| module.path.file_name() == first_module.file_name())
+        .expect("the catalog must name the module about to vanish")
+        .id
+        .clone();
+
+    std::fs::remove_file(&first_module).unwrap();
+
+    let mut visited: Vec<String> = Vec::new();
+    let unreadable = for_each_module(&loaded, |module| {
+        visited.push(module.id.clone());
+        Ok(())
+    })
+    .expect("one unreadable module must not abort the walk");
+
+    assert_eq!(
+        visited.len(),
+        1,
+        "the surviving module must still be handed over: {visited:?}"
+    );
+    assert!(!visited.contains(&vanished));
+    assert_eq!(unreadable.len(), 1);
+    assert_eq!(unreadable[0].0, vanished);
+}
+
+#[test]
+fn a_compdb_catalog_carries_source_status_into_an_answer() {
+    // `inventory()` records `content_sha256: None` for every source
+    // association, so a `rllvm-get-bc` catalog can only ever answer
+    // `unknown`. `rllvm-compdb generate` hashes the source it compiles, and
+    // this is the end-to-end proof that the hash survives the catalog, the
+    // `(module, path)` key `build_location` looks up, and the envelope --
+    // any of which silently degrades to `unknown` if the key shape drifts.
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("mod.c");
+    std::fs::write(
+        &source,
+        "int helper(int x){return x+1;}\nint main(void){return helper(1);}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        scratch.path().join("compile_commands.json"),
+        serde_json::to_vec_pretty(&serde_json::json!([{
+            "directory": scratch.path(),
+            "file": source,
+            "arguments": [llvm_bin("clang"), "-g", "-O0", "-c", source],
+        }]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let generate = Command::new(env!("CARGO_BIN_EXE_rllvm-compdb"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
+        .current_dir(scratch.path())
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert!(
+        generate.status.success(),
+        "rllvm-compdb generate failed: {}",
+        String::from_utf8_lossy(&generate.stderr)
+    );
+    let catalog = scratch.path().join("analysis/catalog.json");
+
+    let current = query_json(&scratch, &catalog, &["defs", "helper"]);
+    assert_eq!(
+        current["results"][0]["location"]["source_status"], "current",
+        "a compdb capture records a source hash, so the status is decided, \
+         not `unknown`: {current}"
+    );
+    assert_eq!(current["uncertainty"]["locations_from_modified_sources"], 0);
+
+    // Edit the source after capture: the same location must now say so.
+    std::fs::write(
+        &source,
+        "int helper(int x){return x+2;}\nint main(void){return helper(1);}\n",
+    )
+    .unwrap();
+    let modified = query_json(&scratch, &catalog, &["defs", "helper"]);
+    assert_eq!(
+        modified["results"][0]["location"]["source_status"], "modified",
+        "{modified}"
+    );
+    assert!(
+        modified["uncertainty"]["locations_from_modified_sources"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "the envelope must count the stale locations it just reported"
+    );
+}
+
+#[test]
+fn a_location_without_a_line_is_an_error_not_an_empty_answer() {
+    // `indirect-targets parser.c` with the `:8` missing must not exit 0 with
+    // `results: []`, which is byte-identical to a valid line that has no
+    // indirect calls.
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["indirect-targets", "main.c"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a location that does not parse must not answer: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(output.stdout.is_empty(), "no answer may reach stdout");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("main.c"),
+        "the diagnostic must name the location: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn the_heuristics_flag_may_follow_its_subcommand() {
+    // The README writes `indirect-targets parser.c:8 --heuristics`; without
+    // `global = true` clap rejects that placement outright.
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let value = query_json(
+        &scratch,
+        &catalog,
+        &["indirect-targets", "main.c:2", "--heuristics"],
+    );
+    assert_eq!(
+        value["query"]["heuristics"], true,
+        "the trailing flag must reach the query: {value}"
+    );
+}
+
+/// Runs `rllvm-query --catalog <catalog> <args...>` and parses its stdout.
+fn query_json(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch))
+        .arg("--catalog")
+        .arg(catalog)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "rllvm-query {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+/// Two modules as plain `.bc` files rather than archive members, so one of
+/// them can be removed from under a load that already verified it. Returns
+/// the catalog and the path of the first module.
+fn two_plain_module_catalog(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+    let mut modules = Vec::new();
+    let mut origin = None;
+    let mut first = None;
+    for (name, source) in [
+        ("add.c", "int add(int a,int b){return a+b;}\n"),
+        (
+            "main.c",
+            "int add(int a,int b);\nint main(void){ return add(2,3); }\n",
+        ),
+    ] {
+        let source_path = scratch.path().join(name);
+        std::fs::write(&source_path, source).unwrap();
+        let object = scratch.path().join(name.replace(".c", ".bc"));
+        assert!(
+            Command::new(llvm_bin("clang"))
+                .args(["-g", "-O0", "-emit-llvm", "-c"])
+                .arg(&source_path)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let catalog =
+            rllvm::catalog::inventory(&object, scratch.path(), Some(&llvm_bin("llvm-dis")))
+                .unwrap();
+        origin.get_or_insert(catalog.origin.clone());
+        first.get_or_insert(object);
+        modules.extend(catalog.modules);
+    }
+    let catalog = rllvm::catalog::ModuleCatalog::new(
+        origin.expect("at least one module"),
+        "recorded_modules",
+        modules,
+    );
+    let path = scratch.path().join("plain-catalog.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+    (path, first.expect("at least one module"))
+}
+
+#[test]
 fn direct_calls_carry_caller_callee_and_line() {
     let scratch = tempfile::tempdir().unwrap();
     let facts = extract_source(

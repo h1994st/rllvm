@@ -250,3 +250,85 @@ pub(crate) fn session_from_source_lines(lines: &[(&str, u32)]) -> Session {
         .collect();
     Session::new(facts(vec![only], Vec::new()), Vec::new())
 }
+
+/// Two ambiguous symbols, and one of them reachable through two different
+/// declarations: `c1` and `c2` each define `caller` and declare `target`,
+/// while `a` and `b` each define `target`. A second binding, `unused`, is
+/// ambiguous too but sits on no path out of `caller`.
+///
+/// Distinguishes three counts that are easy to conflate: the bindings one
+/// walk reached (one), the declarations it reached them through (two), and
+/// every ambiguous binding in scope (two).
+pub(crate) fn session_with_ambiguous_bindings() -> Session {
+    let mut functions = Vec::new();
+    let mut call_sites = Vec::new();
+    for (index, module) in ["c1", "c2"].into_iter().enumerate() {
+        let caller = function(module, "caller", true, Linkage::External);
+        let declaration = function(module, "target", false, Linkage::External);
+        call_sites.push(direct_call(&caller, &declaration, index as u32));
+        functions.push(caller);
+        functions.push(declaration);
+    }
+    let first = function("a", "target", true, Linkage::External);
+    let second = function("b", "target", true, Linkage::External);
+    functions.push(first.clone());
+    functions.push(second.clone());
+
+    let target = SymbolBinding {
+        symbol: "target".into(),
+        declared_in: vec!["c1".into(), "c2".into()],
+        candidates: vec![
+            BindingCandidate {
+                function: first.id,
+                configuration_id: Some("debug".into()),
+            },
+            BindingCandidate {
+                function: second.id,
+                configuration_id: Some("release".into()),
+            },
+        ],
+        status: BindingStatus::Ambiguous,
+    };
+    let unused = SymbolBinding {
+        symbol: "unused".into(),
+        declared_in: vec!["z".into()],
+        candidates: vec![
+            BindingCandidate {
+                function: FunctionId {
+                    module_id: "a".into(),
+                    symbol: "unused".into(),
+                },
+                configuration_id: None,
+            },
+            BindingCandidate {
+                function: FunctionId {
+                    module_id: "b".into(),
+                    symbol: "unused".into(),
+                },
+                configuration_id: None,
+            },
+        ],
+        status: BindingStatus::Ambiguous,
+    };
+    Session::new(facts(functions, call_sites), vec![target, unused])
+}
+
+/// One module the loader verified and extraction never saw, so
+/// `analysis.verified` is the only non-zero count.
+pub(crate) fn facts_with_one_verified_module() -> ProgramFacts {
+    let mut base = facts(vec![], vec![]);
+    base.scope.total_entries = 1;
+    base.scope.selected_entries = 1;
+    base.modules = vec![ModuleReport {
+        id: "v".into(),
+        status: ModuleAnalysis::Verified,
+        ir_stage: None,
+        debug_info: None,
+        compiler: None,
+        configuration_id: None,
+        content_sha256: None,
+        target_triple: None,
+        diagnostic: None,
+    }];
+    base
+}

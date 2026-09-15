@@ -195,15 +195,30 @@ pub fn load_catalog(path: &Path) -> Result<Loaded, Error> {
 /// Reads and hands over one module at a time, so only one bitcode buffer is
 /// resident. The archive cache is dropped when the loop ends, before any
 /// session begins serving requests.
+///
+/// A module that verified at load time but cannot be read now -- deleted or
+/// rewritten by a concurrent build in between -- is returned in the
+/// unreadable list and skipped, not propagated. `load_catalog` already
+/// records an unreadable module and carries on with the rest, and one
+/// module vanishing must not cost the answer every other module. Only an
+/// error raised by `visit` itself aborts the walk.
 pub fn for_each_module(
     loaded: &Loaded,
     mut visit: impl FnMut(LoadedModule) -> Result<(), Error>,
-) -> Result<(), Error> {
+) -> Result<Vec<(String, Error)>, Error> {
     let mut archives = ArchiveCache::default();
+    let mut unreadable = Vec::new();
     for pending in &loaded.pending {
         let bytes = match &pending.member {
-            Some(member) => archives.module(&pending.path, member)?.to_vec(),
-            None => std::fs::read(&pending.path)?,
+            Some(member) => archives.module(&pending.path, member).map(<[u8]>::to_vec),
+            None => std::fs::read(&pending.path).map_err(Error::from),
+        };
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                unreadable.push((pending.id.clone(), error));
+                continue;
+            }
         };
         visit(LoadedModule {
             id: pending.id.clone(),
@@ -211,5 +226,5 @@ pub fn for_each_module(
             record: pending.record.clone(),
         })?;
     }
-    Ok(())
+    Ok(unreadable)
 }
