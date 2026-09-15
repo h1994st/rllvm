@@ -18,6 +18,22 @@ fn query_binary_reports_its_llvm_major() {
     assert!(text.starts_with("23."), "unexpected LLVM version: {text}");
 }
 
+#[test]
+fn the_cli_prints_callers_as_json() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch); // main calls add
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["callers", "add"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["results"][0]["function"]["symbol"], "main");
+}
+
 fn llvm_bin(name: &str) -> PathBuf {
     let config = rllvm::utils::find_llvm_config().unwrap();
     let output = Command::new(config).arg("--bindir").output().unwrap();
@@ -303,6 +319,53 @@ fn archive_catalog(scratch: &tempfile::TempDir) -> PathBuf {
     let catalog =
         rllvm::catalog::inventory(&archive, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
     let path = scratch.path().join("archive-catalog.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+    path
+}
+
+/// Builds a real two-module catalog: one module defines `add`, the other
+/// defines `main`, which calls it. Combined with `llvm-ar rs` into one
+/// archive and inventoried, following `archive_catalog`, so the catalog
+/// carries genuine content hashes and `archive_member` indices, and exercises
+/// the archive path the loader already supports.
+fn two_module_catalog(scratch: &tempfile::TempDir) -> PathBuf {
+    let sources = [
+        ("add.c", "int add(int a,int b){return a+b;}\n"),
+        (
+            "main.c",
+            "int add(int a,int b);\nint main(void){ return add(2,3); }\n",
+        ),
+    ];
+    let mut objects = Vec::new();
+    for (name, source) in sources {
+        let source_path = scratch.path().join(name);
+        std::fs::write(&source_path, source).unwrap();
+        let object = scratch.path().join(name.replace(".c", ".bc"));
+        assert!(
+            std::process::Command::new(llvm_bin("clang"))
+                .args(["-g", "-O0", "-emit-llvm", "-c"])
+                .arg(&source_path)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap()
+                .success()
+        );
+        objects.push(object);
+    }
+    let archive = scratch.path().join("two.a");
+    assert!(
+        std::process::Command::new(llvm_bin("llvm-ar"))
+            .arg("rs")
+            .arg(&archive)
+            .args(&objects)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let catalog =
+        rllvm::catalog::inventory(&archive, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+    let path = scratch.path().join("two-module-catalog.json");
     std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
     path
 }
