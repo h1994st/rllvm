@@ -288,6 +288,10 @@ cargo install rllvm --features query
 LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install rllvm --features query
 ```
 
+On Ubuntu/Debian, also install `libpolly-N-dev` alongside `llvm-N-dev` and
+`libclang-N-dev`: `llvm-sys` links statically, and `llvm-config --libs` lists
+Polly even though rllvm does not use it.
+
 `--catalog` takes JSON from `rllvm-get-bc --output-dir` or `rllvm-compdb
 generate` (see Module catalogs and selection above):
 
