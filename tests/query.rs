@@ -159,6 +159,32 @@ fn an_archive_member_loads_through_the_existing_cache() {
     assert_eq!(loaded_count, 2);
 }
 
+#[test]
+fn a_deleted_archive_reports_its_members_missing_not_failed() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog_path = archive_catalog(&scratch);
+
+    // The archive itself is gone, not just corrupted: `ArchiveData::read`
+    // opens it via `fs::metadata`/`fs::read`, which fail with `NotFound`,
+    // and that must surface as Missing rather than Failed.
+    std::fs::remove_file(scratch.path().join("lib.a")).unwrap();
+
+    let loaded = load_catalog(&catalog_path).unwrap();
+    assert!(
+        loaded.pending.is_empty(),
+        "no module can load from a deleted archive"
+    );
+    assert_eq!(loaded.reports.len(), 2);
+    assert!(
+        loaded
+            .reports
+            .iter()
+            .all(|report| report.status == rllvm::query::ModuleAnalysis::Missing),
+        "{:?}",
+        loaded.reports
+    );
+}
+
 /// Builds a real one-module catalog by compiling a source with the configured
 /// clang and running the inventory, so the recorded hashes are genuine.
 ///

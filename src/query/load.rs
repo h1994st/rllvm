@@ -82,15 +82,17 @@ pub fn load_catalog(path: &Path) -> Result<Loaded, Error> {
 
         // Each recorded status keeps its own meaning, and its recorded
         // diagnostics travel with it. Collapsing all of them to Missing
-        // discards the reason the capture already knew.
-        if record.status != ModuleStatus::Available {
-            let status = match record.status {
-                ModuleStatus::Missing => ModuleAnalysis::Missing,
-                ModuleStatus::Failed => ModuleAnalysis::Failed,
-                ModuleStatus::Unsupported => ModuleAnalysis::Unsupported,
-                ModuleStatus::Planned => ModuleAnalysis::NotBuilt,
-                ModuleStatus::Available => unreachable!(),
-            };
+        // discards the reason the capture already knew. `Available` maps to
+        // `None`: it is analysed below rather than reported from its
+        // catalog status alone, so there is no arm left to panic on.
+        let unavailable = match record.status {
+            ModuleStatus::Missing => Some(ModuleAnalysis::Missing),
+            ModuleStatus::Failed => Some(ModuleAnalysis::Failed),
+            ModuleStatus::Unsupported => Some(ModuleAnalysis::Unsupported),
+            ModuleStatus::Planned => Some(ModuleAnalysis::NotBuilt),
+            ModuleStatus::Available => None,
+        };
+        if let Some(status) = unavailable {
             let recorded = (!record.diagnostics.is_empty()).then(|| record.diagnostics.join("; "));
             reports.push(report_base(status, recorded));
             continue;
@@ -108,6 +110,17 @@ pub fn load_catalog(path: &Path) -> Result<Loaded, Error> {
         let bytes = match &record.archive_member {
             Some(member) => match archives.module(&path, member).map(<[u8]>::to_vec) {
                 Ok(bytes) => bytes,
+                // `ArchiveData::read` opens the archive itself via `fs::metadata`/
+                // `fs::read`, and `Error::Io` preserves the wrapped `io::Error`'s
+                // kind: an absent archive surfaces the same `NotFound` an absent
+                // plain module file would, so it gets the same Missing treatment.
+                Err(Error::Io(io_error)) if io_error.kind() == std::io::ErrorKind::NotFound => {
+                    reports.push(report_base(
+                        ModuleAnalysis::Missing,
+                        Some(io_error.to_string()),
+                    ));
+                    continue;
+                }
                 Err(error) => {
                     reports.push(report_base(ModuleAnalysis::Failed, Some(error.to_string())));
                     continue;
