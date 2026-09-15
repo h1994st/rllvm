@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::error::Error;
 
 mod inventory;
+pub(crate) use inventory::ArchiveCache;
 pub use inventory::{inspect_bitcode, inventory};
 mod selection;
 pub use selection::{copy_modules, select_modules};
