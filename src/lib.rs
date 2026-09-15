@@ -63,3 +63,7 @@ pub mod utils;
 
 /// Internal constants for argument patterns, section names, and LLVM version ranges.
 pub(crate) mod constants;
+
+/// Source-level queries over captured bitcode, linking LLVM directly.
+#[cfg(feature = "query")]
+pub mod query;

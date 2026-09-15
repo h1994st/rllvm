@@ -276,6 +276,106 @@ users to `skip`. A `save-temps` link producing no merged module is an error.
 Universal (multiple `-arch`) builds and combined universal binaries are unsupported;
 build and extract one architecture at a time.
 
+## Querying captured bitcode
+
+Build with the optional `query` feature to ask nine source-level questions
+about captured bitcode, from the command line or over MCP. It links LLVM via
+`llvm-sys`, statically:
+
+```bash
+cargo install rllvm --features query
+# When llvm-config is not on PATH, point at an LLVM 23 install:
+LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install rllvm --features query
+```
+
+On Ubuntu/Debian, also install `libpolly-N-dev` alongside `llvm-N-dev` and
+`libclang-N-dev`: `llvm-sys` links statically, and `llvm-config --libs` lists
+Polly even though rllvm does not use it.
+
+`--catalog` takes JSON from `rllvm-get-bc --output-dir` or `rllvm-compdb
+generate` (see Module catalogs and selection above):
+
+```bash
+rllvm-query --catalog catalog.json defs parse_frame            # every definition of the symbol
+rllvm-query --catalog catalog.json at parser.c 4               # functions/call sites mapped to a source line
+rllvm-query --catalog catalog.json callers parse_frame         # functions that call it
+rllvm-query --catalog catalog.json callees main                # its outgoing call sites
+rllvm-query --catalog catalog.json uses parse_frame            # non-call uses (address taken)
+rllvm-query --catalog catalog.json reach main parse_frame       # one path from `main` to `parse_frame`
+rllvm-query --catalog catalog.json closure parse_frame in       # functions that reach it (`out`: functions it reaches)
+rllvm-query --catalog catalog.json externals                   # symbols the captured program leaves unbound
+rllvm-query --catalog catalog.json indirect-targets parser.c:8 # the `!callees` bound at an indirect call site
+```
+
+Add `--heuristics` to include a heuristic address-taken inventory alongside
+`indirect-targets`. Every answer is one JSON envelope: `results`, the catalog
+`scope` it was computed over, an `analysis` of which modules actually parsed,
+and an `uncertainty` block naming indirect call sites, functions without debug
+locations, and ambiguous symbol bindings the answer could not see through.
+
+Answers report whether the source behind a location has changed since capture
+only when the catalog recorded a source hash. `rllvm-compdb generate` records
+one; `rllvm-get-bc` and the other inventory paths do not, so their locations
+report `source_status: "unknown"` rather than `current` or `modified`.
+
+CLI subcommands are kebab-case (`indirect-targets`); MCP tool names are
+snake_case (`indirect_targets`), matching `Query`'s own serde tag. The two
+spellings coincide for every other query, which is one word either way.
+
+### MCP server
+
+```bash
+rllvm-query --catalog catalog.json mcp
+```
+
+Serves the same nine queries as JSON-RPC 2.0 tools, newline-delimited over
+stdio, and answers both the modern and legacy MCP protocol revisions. Point a
+client at it:
+
+```json
+{
+  "mcpServers": {
+    "rllvm": {
+      "command": "rllvm-query",
+      "args": ["--catalog", "/path/to/catalog.json", "mcp"]
+    }
+  }
+}
+```
+
+### Limitations
+
+- An edge is a call present in the captured IR: `callers`, `callees`, `reach`,
+  and `closure` see only calls the compiler emitted, not every call a running
+  program could make.
+- An empty `reach` is not unreachability. It says there is no path over
+  resolved edges within the selected scope; `uncertainty` names the indirect
+  sites and ambiguous bindings that could carry a path the walk cannot see.
+- Cross-module resolution is by symbol name, which the catalog does not
+  record. A unique binding is traversed and reported as the assumption it is;
+  an ambiguous one stops the walk and is listed in `uncertainty.frontier`.
+- Every definition a linker could pick is a binding candidate, and C++ emits
+  many: a template instantiation, an inline member function or a defaulted
+  constructor is emitted into every translation unit that uses it, so one such
+  symbol is `ambiguous` with one candidate per module and `reach` stops there
+  listing what are really copies of one function. The conservative direction --
+  it halts a walk rather than inventing a path -- but it makes `reach` and
+  `closure` less useful on C++ than on C until the extractor records LLVM's
+  full linkage taxonomy.
+- Locations are the source positions recorded at capture. If the file changed
+  afterwards they no longer point where they did; `source_status` says so when
+  the catalog recorded a source hash, and `unknown` when it did not.
+- `!callees` at an indirect call site (`indirect-targets`) is an upper bound on
+  the call's possible targets, not a reachable set. LLVM produces it only for
+  patterns constant-value propagation (CVP) can bound, within one module; most
+  indirect calls answer unresolved.
+- The `--heuristics` address-taken inventory is opt-in and contributes no
+  graph edges.
+- One LLVM major per build: `rllvm-query` cannot read bitcode produced by a
+  newer LLVM than the one it links.
+- `-g -O0` is the supported analysis compilation: debug info locates results,
+  and it is the configuration these queries are tested against.
+
 ## Configuration
 
 The TOML file lives at `$RLLVM_CONFIG` or `~/.rllvm/config.toml`.
