@@ -6,20 +6,20 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::facts::{FunctionFact, FunctionId, Linkage};
 
 /// A symbol definition visible to other modules, from which cross-module
 /// bindings may be formed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BindingCandidate {
     pub function: FunctionId,
     pub configuration_id: Option<String>,
 }
 
 /// The result of resolving a symbol across all modules.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingStatus {
     /// No definition visible to other modules.
@@ -31,7 +31,7 @@ pub enum BindingStatus {
 }
 
 /// A declared symbol and the definitions that might satisfy it.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SymbolBinding {
     pub symbol: String,
     pub declared_in: Vec<String>,

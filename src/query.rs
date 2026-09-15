@@ -141,7 +141,12 @@ pub enum QueryResults {
     Callers(Vec<CallerEntry>),
     Callees(Vec<CallSiteFact>),
     Uses(Vec<UseFact>),
-    Reach(Vec<PathStep>),
+    /// `None` when no path over resolved edges exists. `Some` carries the
+    /// path's steps, which may legitimately be empty: `reach(x, x)` finds
+    /// `x` immediately and returns `Some(vec![])`, a found answer, not an
+    /// absent one. Collapsing the two into one `Vec` would make a trivial
+    /// found path read as unreachable.
+    Reach(Option<Vec<PathStep>>),
     Closure(Vec<FunctionId>),
     Externals(Vec<SymbolBinding>),
     IndirectTargets(Vec<IndirectTargetsResult>),
@@ -155,7 +160,10 @@ impl QueryResults {
             QueryResults::Callers(items) => items.is_empty(),
             QueryResults::Callees(items) => items.is_empty(),
             QueryResults::Uses(items) => items.is_empty(),
-            QueryResults::Reach(items) => items.is_empty(),
+            // `None` (no path) is the only "nothing to report" case;
+            // `Some(_)` is a found answer even when its step list is
+            // itself empty (a trivial `reach(x, x)`).
+            QueryResults::Reach(path) => path.is_none(),
             QueryResults::Closure(items) => items.is_empty(),
             QueryResults::Externals(items) => items.is_empty(),
             QueryResults::IndirectTargets(items) => items.is_empty(),
@@ -232,7 +240,7 @@ pub fn run(session: &Session, query: &Query) -> QueryResult {
         Query::Reach { from, to } => {
             let reach = session.reach(from, to);
             reach_frontier = Some(reach.frontier);
-            QueryResults::Reach(reach.path.unwrap_or_default())
+            QueryResults::Reach(reach.path)
         }
         Query::Closure { name, direction } => {
             QueryResults::Closure(session.closure(name, *direction))
@@ -517,6 +525,10 @@ mod tests {
         assert_eq!(result.scope.selected_entries, 2);
         assert_eq!(result.analysis.analyzed, 1);
         assert_eq!(result.analysis.failed, 1);
+        // Per-module detail, not just a count: rule 2 requires `ir_stage`
+        // and `debug_info` to survive per module rather than collapsing
+        // into one aggregate flag.
+        assert_eq!(result.analysis.modules[0].debug_info, Some(true));
     }
 
     #[test]
@@ -531,6 +543,36 @@ mod tests {
         );
         assert!(result.results.is_empty());
         assert_eq!(result.uncertainty.indirect_call_sites, 1);
+    }
+
+    #[test]
+    fn a_trivial_reach_is_a_found_path_not_an_absent_one() {
+        // `session.reach("a", "a")` finds `a` immediately and returns
+        // `Some(vec![])`: a found path with zero steps. Collapsing that
+        // into the same empty `Vec` a missing path produces would make a
+        // trivial found path read as unreachable.
+        let session = session_from(&[("a", "b")]);
+
+        let trivial = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "a".into(),
+            },
+        );
+        assert!(
+            !trivial.results.is_empty(),
+            "a==a must be a found path, not an absent one"
+        );
+
+        let missing = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "absent".into(),
+            },
+        );
+        assert!(missing.results.is_empty());
     }
 
     #[test]
@@ -575,15 +617,40 @@ mod tests {
 
     #[test]
     fn at_returns_nothing_for_a_line_with_no_instructions() {
-        let session = session_from_source_lines(&[("t.c", 2)]);
+        // Lines 2 and 10 are mapped, but 5 is not: a range-containment
+        // implementation (`min..max`) would wrongly return the function for
+        // line 5, since it falls inside `2..10`. Only a mapping
+        // implementation answers empty here, which is `at`'s actual
+        // contract: at least one instruction mapped to that exact line.
+        let session = session_from_source_lines(&[("t.c", 2), ("t.c", 10)]);
         let result = run(
             &session,
             &Query::At {
                 file: "t.c".into(),
-                line: 99,
+                line: 5,
             },
         );
         assert!(result.results.is_empty());
+    }
+
+    #[test]
+    fn callees_of_b_keeps_the_unresolved_indirect_site() {
+        // A future refactor could add a `CallTarget::Indirect { .. } => {}`
+        // arm to `callees_by_function` by symmetry with the match just
+        // below it for `callers_by_function` (`index.rs`), which would
+        // drop every unresolved indirect site from every `callees` answer
+        // without failing any existing test. This pins that it must not.
+        let session = session_with_indirect_gap();
+        let result = run(&session, &Query::Callees { name: "b".into() });
+        let QueryResults::Callees(sites) = &result.results else {
+            panic!("Query::Callees must produce QueryResults::Callees");
+        };
+        let indirect = sites
+            .iter()
+            .find(|site| matches!(&site.target, CallTarget::Indirect { .. }))
+            .expect("the unresolved indirect call site must not be dropped");
+        assert_eq!(indirect.id.instruction_index, 1);
+        assert_eq!(indirect.location, None);
     }
 
     /// A synthetic one-module catalog whose module bytes are not real

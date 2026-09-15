@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::catalog::{CatalogOrigin, CatalogScope};
 
@@ -26,7 +26,7 @@ use super::{
 };
 
 /// Direction of a transitive closure walk.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Direction {
     /// Functions that reach the named function.
@@ -36,7 +36,7 @@ pub enum Direction {
 }
 
 /// One step on a path `Session::reach` returns.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PathStep {
     /// A direct call.
