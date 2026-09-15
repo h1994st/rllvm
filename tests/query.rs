@@ -554,10 +554,7 @@ fn cvp_does_not_bound_an_external_global() {
          int (*fp)(int,int) = add;\n\
          int pick(int x){ if(x) fp = sub; return fp(2,3); }\n",
     );
-    assert!(
-        indirect_bound(&facts).is_none(),
-        "external linkage is ineligible"
-    );
+    assert_unresolved_indirect_site(&facts, "external linkage is ineligible");
 }
 
 #[test]
@@ -570,10 +567,7 @@ fn cvp_does_not_bound_a_stack_slot_at_o0() {
          __attribute__((noinline)) static int apply(int(*f)(int,int),int x){ return f(x,3); }\n\
          int run(int x){ return apply(add,x) + apply(sub,x); }\n",
     );
-    assert!(
-        indirect_bound(&facts).is_none(),
-        "-O0 routes the argument through a stack slot"
-    );
+    assert_unresolved_indirect_site(&facts, "-O0 routes the argument through a stack slot");
 }
 
 #[test]
@@ -590,27 +584,63 @@ fn cvp_bounds_the_same_argument_at_o1() {
     assert_eq!(indirect_bound(&facts).map(|b| b.len()), Some(2));
 }
 
+/// From the spec's verified-constraints table: a struct field, the fourth
+/// eligibility row alongside the internal global, the external global, and
+/// the `noinline` argument above.
+#[test]
+fn cvp_does_not_bound_a_struct_field_at_o0() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(
+        &scratch,
+        "static int add(int a,int b){return a+b;}\n\
+         static int sub(int a,int b){return a-b;}\n\
+         struct ops { int (*op)(int,int); };\n\
+         int run(int x){ struct ops o; o.op = x ? add : sub; return o.op(1,2); }\n",
+    );
+    assert_unresolved_indirect_site(
+        &facts,
+        "-O0 leaves the field in an alloca CVP cannot follow",
+    );
+}
+
+#[test]
+fn cvp_bounds_the_same_struct_field_at_o1() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(
+        &scratch,
+        "static int add(int a,int b){return a+b;}\n\
+         static int sub(int a,int b){return a-b;}\n\
+         struct ops { int (*op)(int,int); };\n\
+         int run(int x){ struct ops o; o.op = x ? add : sub; return o.op(1,2); }\n",
+        &["-g", "-O1"],
+    );
+    let mut names: Vec<_> = indirect_bound(&facts)
+        .expect("SROA promotes the field to SSA at -O1")
+        .iter()
+        .map(|f| f.symbol.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["add", "sub"]);
+}
+
+#[test]
+fn cvp_bounds_a_four_candidate_set() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source(&scratch, &switch_dispatch_source(4));
+    let mut names: Vec<_> = indirect_bound(&facts)
+        .expect("four candidates is within CVP's default limit")
+        .iter()
+        .map(|f| f.symbol.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, vec!["f1", "f2", "f3", "f4"]);
+}
+
 #[test]
 fn cvp_drops_candidate_sets_above_four() {
     let scratch = tempfile::tempdir().unwrap();
-    let mut source = String::new();
-    for index in 1..=5 {
-        source.push_str(&format!(
-            "static int f{index}(int a,int b){{return a+{index}*b;}}\n"
-        ));
-    }
-    source.push_str("static int (*fp)(int,int) = f1;\n");
-    source.push_str("int pick(int x){ switch(x){");
-    for index in 1..=5 {
-        source.push_str(&format!(" case {index}: fp = f{index}; break;"));
-    }
-    source.push_str(" } return fp(2,3); }\n");
-
-    let facts = extract_source(&scratch, &source);
-    assert!(
-        indirect_bound(&facts).is_none(),
-        "five candidates exceed CVP's default limit of four"
-    );
+    let facts = extract_source(&scratch, &switch_dispatch_source(5));
+    assert_unresolved_indirect_site(&facts, "five candidates exceed CVP's default limit of four");
 }
 
 #[test]
@@ -636,19 +666,69 @@ fn cvp_does_not_propagate_across_modules() {
          void install(int(*f)(int,int)){ slot = f; }\n\
          int fire(void){ return slot(1,2); }\n",
     );
-    assert!(
-        indirect_bound(&invoking).is_none(),
-        "the only assignment lives in another module, so no bound is possible"
+    assert_unresolved_indirect_site(
+        &invoking,
+        "the only assignment lives in another module, so no bound is possible",
     );
 }
 
+/// A `switch` dispatching one of `candidates` internal functions through one
+/// internal global, called once at the end. Shared by the tests pinning
+/// CVP's default candidate-set limit from both sides.
+fn switch_dispatch_source(candidates: usize) -> String {
+    let mut source = String::new();
+    for index in 1..=candidates {
+        source.push_str(&format!(
+            "static int f{index}(int a,int b){{return a+{index}*b;}}\n"
+        ));
+    }
+    source.push_str("static int (*fp)(int,int) = f1;\n");
+    source.push_str("int pick(int x){ switch(x){");
+    for index in 1..=candidates {
+        source.push_str(&format!(" case {index}: fp = f{index}; break;"));
+    }
+    source.push_str(" } return fp(2,3); }\n");
+    source
+}
+
+/// The `CallTarget::Indirect` a fixture is expected to have exactly one of.
+/// Panics if none is found, so a fixture that stops producing an indirect
+/// call site fails loudly instead of letting every `None`-expecting
+/// assertion downstream pass vacuously.
+fn indirect_target(facts: &rllvm::query::ModuleFacts) -> &CallTarget {
+    facts
+        .call_sites
+        .iter()
+        .map(|site| &site.target)
+        .find(|target| matches!(target, CallTarget::Indirect { .. }))
+        .expect("fixture must contain an indirect call site")
+}
+
 fn indirect_bound(facts: &rllvm::query::ModuleFacts) -> Option<Vec<rllvm::query::FunctionId>> {
-    facts.call_sites.iter().find_map(|site| match &site.target {
+    match indirect_target(facts) {
         CallTarget::Indirect {
             llvm_target_bound, ..
         } => llvm_target_bound.clone(),
-        _ => None,
-    })
+        _ => unreachable!("indirect_target only ever returns an Indirect target"),
+    }
+}
+
+/// Asserts the fixture's one indirect call site exists and carries no
+/// `llvm_target_bound`. Stronger than asserting `indirect_bound(facts).is_none()`
+/// alone: that alone would pass just as well if the fixture recorded no
+/// indirect call site at all.
+fn assert_unresolved_indirect_site(facts: &rllvm::query::ModuleFacts, message: &str) {
+    let target = indirect_target(facts);
+    assert!(
+        matches!(
+            target,
+            CallTarget::Indirect {
+                llvm_target_bound: None,
+                ..
+            }
+        ),
+        "{message}: {target:?}"
+    );
 }
 
 fn extract_source(scratch: &tempfile::TempDir, source: &str) -> rllvm::query::ModuleFacts {
