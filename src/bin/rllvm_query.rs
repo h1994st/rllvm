@@ -46,44 +46,51 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     let Some(command) = args.command else {
         return Ok(());
     };
-    let catalog = args.catalog.ok_or_else(|| {
-        Error::InvalidArguments("--catalog is required to run a query".to_string())
-    })?;
 
     // Matches the wrapper binaries' own convention (`rllvm_cc.rs`,
     // `rllvm_get_bc.rs`, `rllvm_rustc.rs`): the configured log level, on
     // stderr, so `tracing::warn!` above (a module that failed to extract)
     // actually reaches a reader instead of being silently dropped by the
-    // default no-op subscriber. Deferred until here, after both early
-    // returns above, so `--llvm-version` alone never touches the
-    // configuration file.
+    // default no-op subscriber. Deferred until here, after the early return
+    // above, so `--llvm-version` alone never touches the configuration file.
     FmtSubscriber::builder()
         .with_max_level(try_rllvm_config()?.log_level())
         .with_writer(std::io::stderr)
         .init();
 
-    // `Mcp` names a mode, not a query: `to_query` returns `None` for it, and
-    // the session loaded below is handed to `serve` so the first `tools/call`
-    // pays no analysis cost. Building the query first also lets a mistyped
-    // location fail before `open` reads and extracts the whole catalog.
-    let query = to_query(command, args.heuristics);
-    if let Some(query) = &query {
-        query.validate()?;
-    }
-
-    let session = open(&catalog)?;
-
-    let Some(query) = query else {
-        let stdin = std::io::stdin();
-        let stdout = std::io::stdout();
-        return query::mcp::serve(&session, stdin.lock(), stdout.lock());
+    // `Mcp` names a mode, not a query: `to_query` returns `None` for it.
+    let Some(query) = to_query(command, args.heuristics) else {
+        return serve_mcp(args.catalog.as_deref());
     };
-    let result = run(&session, &query)?;
+
+    // Before `open`, so a mistyped location costs a diagnostic rather than a
+    // full read and extraction of the catalog.
+    query.validate()?;
+    let catalog = args.catalog.ok_or_else(|| {
+        Error::InvalidArguments("--catalog is required to run a query".to_string())
+    })?;
+    let result = run(&open(&catalog)?, &query)?;
 
     let json = serde_json::to_string_pretty(&result)
         .map_err(|error| Error::InvalidArguments(error.to_string()))?;
     println!("{json}");
     Ok(())
+}
+
+/// Serves MCP over stdio. `--catalog` is optional here and only preloads:
+/// the point of the server is that a client chooses what to analyse, through
+/// `load_catalog` and `inventory`, and keeps several catalogs loaded at once.
+/// A preload failure is still fatal -- a client that asked for a catalog on
+/// the command line should hear that it could not be read, not discover it
+/// one query later.
+fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
+    let mut registry = query::mcp::Registry::new();
+    if let Some(catalog) = catalog {
+        registry.load(catalog)?;
+    }
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    query::mcp::serve(&mut registry, stdin.lock(), stdout.lock())
 }
 
 fn main() -> ExitCode {

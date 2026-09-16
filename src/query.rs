@@ -28,7 +28,7 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    catalog::{CatalogOrigin, CatalogScope},
+    catalog::{CatalogOrigin, CatalogScope, ModuleCatalog},
     error::Error,
 };
 
@@ -263,8 +263,18 @@ pub struct QueryResult {
 /// before the session is built, so no bitcode buffer stays resident once
 /// queries start answering.
 pub fn open(catalog: &Path) -> Result<Session, Error> {
-    let loaded = load::load_catalog(catalog)?;
+    session_from_loaded(load::load_catalog(catalog)?)
+}
 
+/// [`open`] for a catalog already in memory, resolving its relative module
+/// paths against `catalog_dir`. The MCP `inventory` tool builds a catalog
+/// from an artifact and queries it without ever writing it to disk.
+pub fn open_catalog(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<Session, Error> {
+    session_from_loaded(load::load_catalog_value(catalog, catalog_dir)?)
+}
+
+/// Extraction and binding, shared by both entry points above.
+fn session_from_loaded(loaded: load::Loaded) -> Result<Session, Error> {
     // Every module the loader intends to read, regardless of whether
     // extraction later succeeds: `bind` only consults a module's
     // configuration when it also sees a `FunctionFact` from that module, so

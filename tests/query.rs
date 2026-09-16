@@ -1117,17 +1117,23 @@ mod mcp {
         catalog_path
     }
 
-    /// Spawns `rllvm-query --catalog <catalog> mcp` against an existing
-    /// scratch/catalog pair, writes one request line to its stdin, closes
-    /// stdin so the server sees EOF and exits, and returns everything the
-    /// process wrote to stdout, raw. Shared by `mcp_raw` (a fresh, unused
-    /// catalog per call) and tests that need several calls to see the same
-    /// session.
-    fn mcp_raw_in(scratch: &tempfile::TempDir, catalog: &Path, request: &str) -> String {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch))
-            .arg("--catalog")
-            .arg(catalog)
+    /// Spawns `rllvm-query [--catalog <catalog>] mcp`, writes each request on
+    /// its own line, closes stdin so the server sees EOF and exits, and
+    /// returns everything the process wrote to stdout, raw.
+    ///
+    /// Several requests share one process, which is the only way to exercise
+    /// a session that loads a catalog and then queries what it loaded.
+    fn mcp_raw_session(
+        scratch: &tempfile::TempDir,
+        catalog: Option<&Path>,
+        requests: &[&str],
+    ) -> String {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rllvm-query"));
+        command.env("RLLVM_CONFIG", scratch_rllvm_config(scratch));
+        if let Some(catalog) = catalog {
+            command.arg("--catalog").arg(catalog);
+        }
+        let mut child = command
             .arg("mcp")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1135,18 +1141,19 @@ mod mcp {
             .spawn()
             .unwrap();
 
-        // The transport is one JSON-RPC frame per line. A fixture may format
-        // its JSON across multiple source lines for readability (e.g. the
-        // legacy `initialize` request); JSON's grammar treats a newline
-        // between tokens as insignificant whitespace, so collapsing it to a
-        // space here changes nothing the server parses.
-        let single_line: String = request
-            .chars()
-            .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
-            .collect();
-
         let mut stdin = child.stdin.take().unwrap();
-        writeln!(stdin, "{single_line}").unwrap();
+        for request in requests {
+            // The transport is one JSON-RPC frame per line. A fixture may
+            // format its JSON across multiple source lines for readability
+            // (e.g. the legacy `initialize` request); JSON's grammar treats a
+            // newline between tokens as insignificant whitespace, so
+            // collapsing it to a space here changes nothing the server parses.
+            let single_line: String = request
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect();
+            writeln!(stdin, "{single_line}").unwrap();
+        }
         drop(stdin);
 
         let output = child.wait_with_output().unwrap();
@@ -1156,6 +1163,33 @@ mod mcp {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Every response line of one multi-request session, parsed.
+    fn mcp_session(
+        scratch: &tempfile::TempDir,
+        catalog: Option<&Path>,
+        requests: &[&str],
+    ) -> Vec<serde_json::Value> {
+        let raw = mcp_raw_session(scratch, catalog, requests);
+        raw.lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    /// One request against a preloaded catalog.
+    fn mcp_raw_in(scratch: &tempfile::TempDir, catalog: &Path, request: &str) -> String {
+        mcp_raw_session(scratch, Some(catalog), &[request])
+    }
+
+    /// The text payload of a `CallToolResult`, decoded as the JSON the tool
+    /// answered with.
+    fn tool_payload(response: &serde_json::Value) -> serde_json::Value {
+        let text = response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no tool payload in {response:?}"));
+        serde_json::from_str(text).unwrap()
     }
 
     /// Sends one request against an existing scratch/catalog pair and parses
@@ -1294,6 +1328,182 @@ mod mcp {
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["isError"], false);
         assert!(response["result"]["content"].as_array().is_some());
+    }
+
+    #[test]
+    fn a_server_started_with_no_catalog_loads_one_and_answers_from_it() {
+        // The point of the registry: the client chooses what to analyse.
+        // Started bare, the server has nothing to answer from; after
+        // `load_catalog` it answers about that program, in the same process.
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = super::two_module_catalog(&scratch); // main calls add
+
+        let responses = mcp_session(
+            &scratch,
+            None,
+            &[
+                &modern_request(
+                    "before",
+                    "tools/call",
+                    serde_json::json!({ "name": "callers", "arguments": { "name": "add" } }),
+                ),
+                &modern_request(
+                    "load",
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "load_catalog",
+                        "arguments": { "path": catalog.to_str().unwrap() }
+                    }),
+                ),
+                &modern_request(
+                    "after",
+                    "tools/call",
+                    serde_json::json!({ "name": "callers", "arguments": { "name": "add" } }),
+                ),
+            ],
+        );
+        assert_eq!(responses.len(), 3);
+
+        assert_eq!(
+            responses[0]["result"]["isError"], true,
+            "a query before any load must not answer: {:?}",
+            responses[0]
+        );
+
+        // The load reports what actually parsed, before anything is asked.
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let loaded = tool_payload(&responses[1]);
+        assert_eq!(loaded["analysis"]["analyzed"], 2);
+        assert_eq!(loaded["scope"]["selected_entries"], 2);
+
+        assert_eq!(responses[2]["result"]["isError"], false);
+        let answer = tool_payload(&responses[2]);
+        assert_eq!(answer["results"][0]["function"]["symbol"], "main");
+    }
+
+    #[test]
+    fn inventory_loads_an_artifact_with_no_catalog_on_disk() {
+        // No catalog JSON exists anywhere: the client hands the server a
+        // captured artifact and queries what comes back. Nothing is written.
+        let scratch = tempfile::tempdir().unwrap();
+        let module = super::compile_bitcode(
+            &scratch,
+            "add.c",
+            "int add(int a,int b){return a+b;}\nint main(void){ return add(2,3); }\n",
+        );
+        let responses = mcp_session(
+            &scratch,
+            None,
+            &[
+                &modern_request(
+                    "inventory",
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "inventory",
+                        "arguments": { "artifact": module.to_str().unwrap() }
+                    }),
+                ),
+                &modern_request(
+                    "query",
+                    "tools/call",
+                    serde_json::json!({ "name": "callers", "arguments": { "name": "add" } }),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            responses[0]["result"]["isError"], false,
+            "inventory failed: {:?}",
+            responses[0]
+        );
+        assert_eq!(tool_payload(&responses[0])["analysis"]["analyzed"], 1);
+
+        assert_eq!(responses[1]["result"]["isError"], false);
+        assert_eq!(
+            tool_payload(&responses[1])["results"][0]["function"]["symbol"],
+            "main"
+        );
+
+        // No catalog JSON was published anywhere: the whole point is that a
+        // client can query an artifact without first naming a file to write.
+        let published: Vec<PathBuf> = std::fs::read_dir(scratch.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect();
+        assert!(
+            published.is_empty(),
+            "inventory must not write a catalog to disk: {published:?}"
+        );
+    }
+
+    #[test]
+    fn two_catalogs_stay_loaded_and_are_told_apart() {
+        let scratch = tempfile::tempdir().unwrap();
+        let first = super::two_module_catalog(&scratch); // defines add and main
+        let second = super::archive_catalog(&scratch); // defines one and two
+
+        let responses = mcp_session(
+            &scratch,
+            None,
+            &[
+                &modern_request(
+                    "load-1",
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "load_catalog",
+                        "arguments": { "path": first.to_str().unwrap() }
+                    }),
+                ),
+                &modern_request(
+                    "load-2",
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "load_catalog",
+                        "arguments": { "path": second.to_str().unwrap() }
+                    }),
+                ),
+                &modern_request(
+                    "ambiguous",
+                    "tools/call",
+                    serde_json::json!({ "name": "defs", "arguments": { "name": "add" } }),
+                ),
+                &modern_request(
+                    "named",
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "defs",
+                        "arguments": { "name": "add", "catalog": first.canonicalize().unwrap().to_str().unwrap() }
+                    }),
+                ),
+                &modern_request(
+                    "list",
+                    "tools/call",
+                    serde_json::json!({ "name": "list_catalogs", "arguments": {} }),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            responses[2]["result"]["isError"], true,
+            "two loaded catalogs must not be silently picked between"
+        );
+        assert_eq!(responses[3]["result"]["isError"], false);
+        assert_eq!(
+            tool_payload(&responses[3])["results"][0]["function"]["symbol"],
+            "add"
+        );
+        assert_eq!(
+            tool_payload(&responses[4])["catalogs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "both catalogs stay loaded across calls"
+        );
     }
 
     #[test]

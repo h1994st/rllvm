@@ -1,5 +1,14 @@
 //! MCP stdio server: the nine source-level queries as JSON-RPC 2.0 tools,
-//! newline-delimited over stdin/stdout.
+//! newline-delimited over stdin/stdout, plus four that decide which catalogs
+//! they run against.
+//!
+//! The catalog is chosen by the client, not by the command line. A server
+//! pinned to one catalog at startup could not switch programs, compare two
+//! builds, or work in a repository where no catalog exists yet -- all of
+//! which an interactive session does. [`Registry`] holds what has been
+//! loaded for the life of the process, so a catalog's analysis is paid once
+//! and every query after it answers from memory. `--catalog` survives as a
+//! preload for a client that always analyses the same program.
 //!
 //! Dual-era, exactly as the specification permits. A request whose
 //! `params._meta["io.modelcontextprotocol/protocolVersion"]` is present is
@@ -26,20 +35,24 @@
 //! `serve` itself never writes anything but one JSON-RPC response line per
 //! request that expects one.
 //!
-//! Tool names (`tool_for`, `query_from_call`) are `snake_case`, matching
+//! Tool names (`query_tool`, `query_from_call`) are `snake_case`, matching
 //! `Query`'s own serde `kind` tag, so a result envelope's `"kind":
 //! "indirect_targets"` feeds straight back into `tools/call`'s `name`. CLI
 //! subcommands (`cli::QueryCommand`) are `kebab-case` instead, clap's
 //! convention. The two spellings diverge only in these literals; nothing
 //! ties them together.
 
-use std::io::{BufRead, Write};
+use std::{
+    collections::BTreeMap,
+    io::{BufRead, Write},
+    path::{Path, PathBuf},
+};
 
 use serde_json::{Value, json};
 
 use crate::error::Error;
 
-use super::{Direction, Query, Session, run};
+use super::{Direction, Query, Session, analysis_of, open, open_catalog, run};
 
 /// The modern protocol revision this server has been checked against.
 const MODERN: &str = "2026-07-28";
@@ -48,6 +61,154 @@ const LEGACY: &str = "2025-06-18";
 
 const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+/// The catalogs one MCP session has loaded, keyed by the canonical path they
+/// came from: the catalog JSON for `load_catalog`, the artifact itself for
+/// `inventory`. Loading the same path twice replaces its entry, which is
+/// what an agent wants after a rebuild.
+///
+/// Held by the caller across the whole `serve` loop, so the analysis a
+/// catalog costs is paid once however many queries follow -- and so an agent
+/// can point the server at a second program without restarting it.
+#[derive(Default)]
+pub struct Registry {
+    sessions: BTreeMap<PathBuf, Session>,
+}
+
+impl Registry {
+    pub fn new() -> Registry {
+        Registry::default()
+    }
+
+    /// Reads the catalog JSON at `path` and makes it queryable. Returns the
+    /// same summary the `load_catalog` tool answers with: what the catalog
+    /// claims, and what actually parsed.
+    pub fn load(&mut self, path: &Path) -> Result<Value, Error> {
+        let key = path.canonicalize()?;
+        let session = open(&key)?;
+        Ok(self.insert(key, session))
+    }
+
+    /// Inventories a captured binary, archive or `.bc` and loads the catalog
+    /// that produces. The catalog is never written to disk: an agent asking
+    /// about an artifact wants an answer, not a file it has to name.
+    fn inventory(&mut self, artifact: &Path, bitcode_root: &Path) -> Result<Value, Error> {
+        let key = artifact.canonicalize()?;
+        let catalog = crate::catalog::inventory(&key, bitcode_root, None)?;
+        let directory = key.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let session = open_catalog(catalog, &directory)?;
+        Ok(self.insert(key, session))
+    }
+
+    /// A registry holding sessions under names of the test's choosing, since
+    /// the fixtures here are built in memory and never came from a path.
+    #[cfg(test)]
+    pub(crate) fn with_sessions(sessions: Vec<(&str, Session)>) -> Registry {
+        Registry {
+            sessions: sessions
+                .into_iter()
+                .map(|(key, session)| (PathBuf::from(key), session))
+                .collect(),
+        }
+    }
+
+    fn insert(&mut self, key: PathBuf, session: Session) -> Value {
+        let summary = catalog_summary(&key, &session);
+        self.sessions.insert(key, session);
+        summary
+    }
+
+    fn unload(&mut self, requested: &str) -> Result<Value, String> {
+        match self.key_for(requested) {
+            Some(key) => {
+                self.sessions.remove(&key);
+                Ok(json!({ "unloaded": key.display().to_string(), "loaded": self.loaded() }))
+            }
+            None => Err(self.not_loaded(requested)),
+        }
+    }
+
+    fn list(&self) -> Value {
+        json!({
+            "catalogs": self
+                .sessions
+                .iter()
+                .map(|(key, session)| catalog_summary(key, session))
+                .collect::<Vec<_>>()
+        })
+    }
+
+    /// The session a call names, or the only one loaded.
+    ///
+    /// `catalog` is optional exactly while one catalog is loaded, which keeps
+    /// the common single-program session free of ceremony. With none loaded
+    /// or several, the message names what to do rather than guessing: picking
+    /// one of several would answer confidently about the wrong program.
+    fn session(&self, requested: Option<&str>) -> Result<&Session, String> {
+        if let Some(requested) = requested {
+            return match self
+                .key_for(requested)
+                .and_then(|key| self.sessions.get(&key))
+            {
+                Some(session) => Ok(session),
+                None => Err(self.not_loaded(requested)),
+            };
+        }
+        let mut loaded = self.sessions.values();
+        match (loaded.next(), loaded.next()) {
+            (Some(only), None) => Ok(only),
+            (None, _) => Err(
+                "no catalog is loaded: call `load_catalog` with a catalog JSON, or `inventory` \
+                 with a captured binary, archive or .bc file"
+                    .to_string(),
+            ),
+            _ => Err(format!(
+                "several catalogs are loaded; name one in `catalog`: {}",
+                self.loaded().join(", ")
+            )),
+        }
+    }
+
+    /// Accepts the key as reported and, failing that, whatever the path
+    /// canonicalizes to now: an agent that passes the path it typed rather
+    /// than the one it was handed back should still be understood.
+    fn key_for(&self, requested: &str) -> Option<PathBuf> {
+        let as_given = PathBuf::from(requested);
+        if self.sessions.contains_key(&as_given) {
+            return Some(as_given);
+        }
+        let canonical = as_given.canonicalize().ok()?;
+        self.sessions.contains_key(&canonical).then_some(canonical)
+    }
+
+    fn loaded(&self) -> Vec<String> {
+        self.sessions
+            .keys()
+            .map(|key| key.display().to_string())
+            .collect()
+    }
+
+    fn not_loaded(&self, requested: &str) -> String {
+        format!(
+            "no catalog loaded as `{requested}`; loaded: {}",
+            match self.loaded() {
+                names if names.is_empty() => "none".to_string(),
+                names => names.join(", "),
+            }
+        )
+    }
+}
+
+/// What a load or a listing reports about one catalog: the scope it claims
+/// and what actually parsed. The same two blocks every query answer carries,
+/// so an agent sees the analysis before it asks its first question.
+fn catalog_summary(key: &Path, session: &Session) -> Value {
+    json!({
+        "catalog": key.display().to_string(),
+        "scope": session.scope(),
+        "analysis": analysis_of(session.modules()),
+    })
+}
 
 /// Which era a request was classified into, and therefore which result
 /// fields its response may carry.
@@ -75,11 +236,13 @@ enum Outcome {
 
 /// Serve JSON-RPC 2.0 requests, one per line, until `input` reaches EOF.
 ///
-/// `session` is loaded once by the caller before this is entered, so the
-/// first `tools/call` pays no analysis cost and every call after it answers
-/// from memory.
+/// `registry` may start empty: a client loads catalogs through the
+/// `load_catalog` and `inventory` tools and keeps them for the life of the
+/// process, so each catalog's analysis is paid once however many queries
+/// follow. A caller that already knows the catalog can preload it, and then
+/// the first `tools/call` pays nothing at all.
 pub fn serve(
-    session: &Session,
+    registry: &mut Registry,
     mut input: impl BufRead,
     mut output: impl Write,
 ) -> Result<(), Error> {
@@ -94,7 +257,7 @@ pub fn serve(
         if trimmed.is_empty() {
             continue;
         }
-        if let Some(response) = handle_line(session, trimmed) {
+        if let Some(response) = handle_line(registry, trimmed) {
             writeln!(output, "{response}")?;
             output.flush()?;
         }
@@ -104,7 +267,7 @@ pub fn serve(
 /// Handle one request line. Returns `None` only for a notification: a
 /// request object carrying a `method` and no `id`. Everything else is
 /// answered, including a value that is not a request object at all.
-fn handle_line(session: &Session, line: &str) -> Option<Value> {
+fn handle_line(registry: &mut Registry, line: &str) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(request) => request,
         Err(error) => {
@@ -154,7 +317,7 @@ fn handle_line(session: &Session, line: &str) -> Option<Value> {
         ("ping", _) => Outcome::Result(json!({}), false),
         ("server/discover", _) => Outcome::Result(discover_result(), true),
         ("tools/list", _) => Outcome::Result(tools_list_result(), true),
-        ("tools/call", _) => tool_call_outcome(session, &params),
+        ("tools/call", _) => tool_call_outcome(registry, &params),
         _ => Outcome::Error(-32601, format!("unknown method: {method}"), None),
     };
 
@@ -244,7 +407,136 @@ fn discover_result() -> Value {
 }
 
 fn tools_list_result() -> Value {
-    json!({ "tools": sample_queries().iter().map(tool_for).collect::<Vec<_>>() })
+    let tools: Vec<Value> = Management::all()
+        .into_iter()
+        .map(Management::tool)
+        .chain(sample_queries().iter().map(tool_for))
+        .collect();
+    json!({ "tools": tools })
+}
+
+/// Declares the catalog-management surface once, under the same rule
+/// `query_tool_surface!` follows: `all`, `name`, `tool` and `from_name` are
+/// generated from one list, so a tool cannot be listed under a name
+/// `tools/call` does not recognize, nor recognized under one `tools/list`
+/// never reports.
+macro_rules! management_tool_surface {
+    ($($variant:ident => $name:literal, $description:literal, $schema:expr;)+) => {
+        /// A tool that decides which catalogs are loaded, as opposed to the
+        /// nine that ask a question of one.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Management { $($variant),+ }
+
+        impl Management {
+            fn all() -> Vec<Management> {
+                vec![$(Management::$variant),+]
+            }
+
+            fn name(self) -> &'static str {
+                match self { $(Management::$variant => $name,)+ }
+            }
+
+            fn from_name(name: &str) -> Option<Management> {
+                match name {
+                    $($name => Some(Management::$variant),)+
+                    _ => None,
+                }
+            }
+
+            fn tool(self) -> Value {
+                // Through `name`, as `query_tool` goes through `tool_name_of`:
+                // the listing and the name the dispatcher matches are one
+                // string, not two literals that happen to agree today.
+                let name = self.name();
+                match self {
+                    $(Management::$variant => json!({
+                        "name": name,
+                        "description": $description,
+                        "inputSchema": $schema,
+                    }),)+
+                }
+            }
+        }
+    };
+}
+
+management_tool_surface! {
+    Load => "load_catalog",
+        "Load a catalog written by `rllvm-get-bc --output-dir` or `rllvm-compdb generate`, and keep it queryable for the rest of this session. Answers with what the catalog claims and what actually parsed.",
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Path to the catalog JSON" }
+            },
+            "required": ["path"]
+        });
+    Inventory => "inventory",
+        "Inventory a binary, archive or .bc file rllvm captured bitcode for, and load the catalog it yields. Nothing is written to disk. Use this when no catalog JSON exists yet.",
+        json!({
+            "type": "object",
+            "properties": {
+                "artifact": {
+                    "type": "string",
+                    "description": "Binary, archive or .bc file with recorded bitcode paths"
+                },
+                "bitcode_root": {
+                    "type": "string",
+                    "description": "Directory that relative recorded module paths resolve against (default: the working directory)"
+                }
+            },
+            "required": ["artifact"]
+        });
+    List => "list_catalogs",
+        "Every catalog loaded right now, each with what the catalog claims and what actually parsed.",
+        json!({ "type": "object", "properties": {} });
+    Unload => "unload_catalog",
+        "Drop a loaded catalog and release the facts extracted from it.",
+        json!({
+            "type": "object",
+            "properties": {
+                "catalog": {
+                    "type": "string",
+                    "description": "Catalog to drop, named as `load_catalog` reported it"
+                }
+            },
+            "required": ["catalog"]
+        });
+}
+
+/// Runs one catalog-management call. Every failure here is a message the
+/// client can act on -- a path that does not exist, a catalog that was never
+/// loaded -- so all of them come back as tool errors, never protocol errors.
+fn management_outcome(
+    registry: &mut Registry,
+    tool: Management,
+    arguments: &Value,
+) -> Result<Value, String> {
+    match tool {
+        Management::Load => registry
+            .load(Path::new(&string_argument(arguments, "path")?))
+            .map_err(|error| error.to_string()),
+        Management::Inventory => {
+            let artifact = string_argument(arguments, "artifact")?;
+            let root = arguments
+                .get("bitcode_root")
+                .and_then(Value::as_str)
+                .unwrap_or(".");
+            registry
+                .inventory(Path::new(&artifact), Path::new(root))
+                .map_err(|error| error.to_string())
+        }
+        Management::List => Ok(registry.list()),
+        Management::Unload => registry.unload(&string_argument(arguments, "catalog")?),
+    }
+}
+
+/// One string argument, or the message a client sees when it is missing.
+fn string_argument(arguments: &Value, key: &str) -> Result<String, String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("missing or non-string argument `{key}`"))
 }
 
 /// Declares the tool surface once: for each `Query` variant, the pattern
@@ -310,11 +602,34 @@ fn symbol_tool(name: &str, description: &str) -> Value {
     })
 }
 
+/// Which loaded catalog a query runs against. Added to all nine schemas at
+/// one point below rather than written into each: nine copies of an optional
+/// argument drift, and a client reads the drift as a real difference.
+fn catalog_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "Loaded catalog to query, named as `load_catalog` reported it. Optional while exactly one catalog is loaded."
+    })
+}
+
 /// The MCP tool definition for one `Query` variant: name, description, and
-/// JSON input schema. Exhaustive over `Query` with no wildcard arm, and the
-/// name is taken from `tool_name_of` so the listing and the name a client
-/// calls back cannot be spelled differently.
+/// JSON input schema, plus the shared optional `catalog` argument.
 fn tool_for(query: &Query) -> Value {
+    let mut tool = query_tool(query);
+    if let Some(properties) = tool
+        .get_mut("inputSchema")
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    {
+        properties.insert("catalog".into(), catalog_property());
+    }
+    tool
+}
+
+/// The query half of a tool definition. Exhaustive over `Query` with no
+/// wildcard arm, and the name is taken from `tool_name_of` so the listing
+/// and the name a client calls back cannot be spelled differently.
+fn query_tool(query: &Query) -> Value {
     let name = tool_name_of(query);
     match query {
         Query::Defs { .. } => symbol_tool(
@@ -397,12 +712,14 @@ fn tool_for(query: &Query) -> Value {
     }
 }
 
-/// Runs a `tools/call`. `name`/`arguments` are validated by `query_from_call`;
-/// a name or arguments that do not resolve to a query, and a query the
-/// session cannot interpret, both become a `CallToolResult` with
-/// `isError: true` rather than a protocol error, so the client can display
-/// what was wrong with the call it made.
-fn tool_call_outcome(session: &Session, params: &Value) -> Outcome {
+/// Runs a `tools/call`, management tool or query.
+///
+/// Everything a client can get wrong -- an unknown tool, missing arguments,
+/// a catalog that will not load, a query naming no loaded catalog, a
+/// location that does not parse -- comes back as a `CallToolResult` with
+/// `isError: true` rather than a protocol error, so the client can read what
+/// was wrong with the call it made and try again.
+fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Outcome::Error(
             -32602,
@@ -415,8 +732,19 @@ fn tool_call_outcome(session: &Session, params: &Value) -> Outcome {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
+    if let Some(tool) = Management::from_name(name) {
+        return match management_outcome(registry, tool, &arguments) {
+            Ok(payload) => Outcome::Result(call_tool_result(false, &payload.to_string()), false),
+            Err(message) => Outcome::Result(call_tool_result(true, &message), false),
+        };
+    }
+
     let query = match query_from_call(name, &arguments) {
         Ok(query) => query,
+        Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
+    };
+    let session = match registry.session(arguments.get("catalog").and_then(Value::as_str)) {
+        Ok(session) => session,
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
 
@@ -446,13 +774,7 @@ fn call_tool_result(is_error: bool, text: &str) -> Value {
 /// strings those variants chose, checked by `tools/list`'s own answer
 /// containing every name this recognizes.
 fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
-    let string_field = |key: &str| -> Result<String, String> {
-        arguments
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| format!("missing or non-string argument `{key}`"))
-    };
+    let string_field = |key: &str| string_argument(arguments, key);
 
     match name {
         "defs" => Ok(Query::Defs {
@@ -522,6 +844,10 @@ mod tests {
     use super::*;
     use crate::query::testing::session_from;
 
+    fn one_catalog() -> Registry {
+        Registry::with_sessions(vec![("first", session_from(&[("a", "b")]))])
+    }
+
     /// Sample arguments for one tool, keyed by the same `Query` variant the
     /// tool was listed from. Exhaustive over `Query` with no wildcard arm,
     /// like `tool_name_of` itself, so a new variant fails to compile here
@@ -549,6 +875,23 @@ mod tests {
             .collect()
     }
 
+    /// Calls one tool and returns its `CallToolResult`, which is where every
+    /// client-visible failure lands.
+    fn call(registry: &mut Registry, name: &str, arguments: Value) -> Value {
+        let params = json!({ "name": name, "arguments": arguments });
+        let Outcome::Result(result, _) = tool_call_outcome(registry, &params) else {
+            panic!("`{name}` must produce a CallToolResult, not a protocol error");
+        };
+        result
+    }
+
+    fn call_text(registry: &mut Registry, name: &str, arguments: Value) -> String {
+        call(registry, name, arguments)["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
     /// The guard the fixed-length `[Query; 9]` could not give: every variant
     /// declared in `query_tool_surface!` -- and the macro's `tool_name_of`
     /// match makes that every variant, or the crate does not compile --
@@ -571,15 +914,39 @@ mod tests {
                 "`{name}` resolved to a different query variant"
             );
         }
+    }
+
+    /// The same guard for the management half, and the accounting that keeps
+    /// the two halves exhaustive between them: a listed tool that is neither
+    /// a `Management` variant nor a `Query` variant is a tool nothing can
+    /// dispatch.
+    #[test]
+    fn every_listed_tool_is_a_management_tool_or_a_query() {
+        let listed = listed_tool_names();
+        for tool in Management::all() {
+            assert!(
+                listed.iter().any(|listed| listed == tool.name()),
+                "tools/list does not report `{}`: {listed:?}",
+                tool.name()
+            );
+            assert_eq!(
+                Management::from_name(tool.name()),
+                Some(tool),
+                "`{}` resolved to a different management tool",
+                tool.name()
+            );
+        }
         assert_eq!(
             listed.len(),
-            sample_queries().len(),
-            "every listed tool must come from exactly one sampled variant"
+            Management::all().len() + sample_queries().len(),
+            "every listed tool must come from exactly one variant of one of the two surfaces"
         );
     }
 
     /// A tool name is one spelling on both sides: listed once, and the same
-    /// literal `query_from_call` matches.
+    /// literal the dispatcher matches. Covers collisions across the two
+    /// surfaces too -- a query named `inventory` would be unreachable,
+    /// because management names are matched first.
     #[test]
     fn no_two_tools_share_a_name() {
         let mut listed = listed_tool_names();
@@ -589,16 +956,167 @@ mod tests {
         assert_eq!(listed.len(), count, "duplicate tool name in tools/list");
     }
 
+    /// Every query tool takes the same optional `catalog` argument. It is
+    /// added at one point in `tool_for`, and this is what says it reached
+    /// all nine.
+    #[test]
+    fn every_query_tool_accepts_a_catalog_argument() {
+        for query in sample_queries() {
+            let tool = tool_for(&query);
+            assert!(
+                tool["inputSchema"]["properties"]["catalog"].is_object(),
+                "`{}` does not accept a catalog: {tool}",
+                tool_name_of(&query)
+            );
+            assert!(
+                !tool["inputSchema"]["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|key| key == "catalog")),
+                "`catalog` must stay optional on `{}`",
+                tool_name_of(&query)
+            );
+        }
+    }
+
+    /// With nothing loaded a query cannot be answered, and saying so is not
+    /// the same as answering `results: []` -- which is what a server that
+    /// treated "no catalog" as "no facts" would return.
+    #[test]
+    fn a_query_with_no_catalog_loaded_says_how_to_load_one() {
+        let mut registry = Registry::new();
+        let result = call(&mut registry, "externals", json!({}));
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(
+            text.contains("load_catalog") && text.contains("inventory"),
+            "the error must name the tools that fix it: {text}"
+        );
+    }
+
+    /// One loaded catalog is the default, so an agent working on a single
+    /// program never names it.
+    #[test]
+    fn one_loaded_catalog_answers_without_being_named() {
+        let mut registry = one_catalog();
+        assert_eq!(
+            call(&mut registry, "callers", json!({ "name": "b" }))["isError"],
+            false
+        );
+    }
+
+    /// With several loaded, picking one would answer confidently about the
+    /// wrong program. The error names them instead.
+    #[test]
+    fn several_loaded_catalogs_must_be_told_apart() {
+        let mut registry = Registry::with_sessions(vec![
+            ("first", session_from(&[("a", "b")])),
+            ("second", session_from(&[("c", "d")])),
+        ]);
+
+        let text = call_text(&mut registry, "callers", json!({ "name": "b" }));
+        assert!(
+            text.contains("first") && text.contains("second"),
+            "the error must name the loaded catalogs: {text}"
+        );
+
+        // Named, each answers about its own program and not the other's.
+        let first = call(
+            &mut registry,
+            "callers",
+            json!({ "name": "b", "catalog": "first" }),
+        );
+        assert_eq!(first["isError"], false);
+        let second = call_text(
+            &mut registry,
+            "defs",
+            json!({ "name": "b", "catalog": "second" }),
+        );
+        let second: Value = serde_json::from_str(&second).unwrap();
+        assert!(
+            second["results"].as_array().unwrap().is_empty(),
+            "`b` is defined in `first`, not `second`: {second}"
+        );
+    }
+
+    #[test]
+    fn a_catalog_named_but_never_loaded_is_a_tool_error() {
+        let mut registry = one_catalog();
+        let text = call_text(
+            &mut registry,
+            "externals",
+            json!({ "name": "a", "catalog": "absent" }),
+        );
+        assert!(
+            text.contains("absent") && text.contains("first"),
+            "the error must name what was asked for and what is loaded: {text}"
+        );
+    }
+
+    #[test]
+    fn unloading_frees_the_catalog_and_leaves_the_rest() {
+        let mut registry = Registry::with_sessions(vec![
+            ("first", session_from(&[("a", "b")])),
+            ("second", session_from(&[("c", "d")])),
+        ]);
+        let text = call_text(
+            &mut registry,
+            "unload_catalog",
+            json!({ "catalog": "first" }),
+        );
+        assert!(text.contains("second"), "{text}");
+
+        // One left, so it is the default again.
+        assert_eq!(
+            call(&mut registry, "externals", json!({}))["isError"],
+            false
+        );
+        let text = call_text(&mut registry, "externals", json!({ "catalog": "first" }));
+        assert!(text.contains("no catalog loaded as `first`"), "{text}");
+    }
+
+    #[test]
+    fn listing_reports_every_loaded_catalog_with_its_analysis() {
+        let mut registry = one_catalog();
+        let text = call_text(&mut registry, "list_catalogs", json!({}));
+        let listed: Value = serde_json::from_str(&text).unwrap();
+        let catalogs = listed["catalogs"].as_array().unwrap();
+        assert_eq!(catalogs.len(), 1);
+        assert_eq!(catalogs[0]["catalog"], "first");
+        assert!(
+            catalogs[0]["analysis"].is_object() && catalogs[0]["scope"].is_object(),
+            "a listing must carry the same honesty blocks a query answer does: {listed}"
+        );
+    }
+
+    #[test]
+    fn a_load_that_cannot_read_its_path_is_a_tool_error_not_a_protocol_error() {
+        let mut registry = Registry::new();
+        let result = call(
+            &mut registry,
+            "load_catalog",
+            json!({ "path": "/nonexistent/catalog.json" }),
+        );
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn a_management_call_missing_its_argument_is_a_tool_error() {
+        let mut registry = Registry::new();
+        let text = call_text(&mut registry, "load_catalog", json!({}));
+        assert!(text.contains("`path`"), "{text}");
+    }
+
     /// `indirect_targets` with a location missing its `:line` is a tool
     /// error the client can see, not an empty `results` list that would be
     /// byte-identical to a valid line with no indirect calls.
     #[test]
     fn an_unparseable_location_is_a_tool_error_not_an_empty_answer() {
-        let session = session_from(&[("a", "b")]);
-        let call = json!({ "name": "indirect_targets", "arguments": { "at": "parser.c" } });
-        let Outcome::Result(result, _) = tool_call_outcome(&session, &call) else {
-            panic!("a query error must be a CallToolResult, not a protocol error");
-        };
+        let mut registry = one_catalog();
+        let result = call(
+            &mut registry,
+            "indirect_targets",
+            json!({ "at": "parser.c" }),
+        );
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(
@@ -609,26 +1127,26 @@ mod tests {
 
     #[test]
     fn a_valid_location_still_answers() {
-        let session = session_from(&[("a", "b")]);
-        let call = json!({ "name": "indirect_targets", "arguments": { "at": "parser.c:8" } });
-        let Outcome::Result(result, _) = tool_call_outcome(&session, &call) else {
-            panic!("a valid call must produce a result");
-        };
+        let mut registry = one_catalog();
+        let result = call(
+            &mut registry,
+            "indirect_targets",
+            json!({ "at": "parser.c:8" }),
+        );
         assert_eq!(result["isError"], false);
     }
 
     #[test]
     fn a_json_value_that_is_not_a_request_object_is_invalid_request() {
-        let session = session_from(&[("a", "b")]);
-        let response = handle_line(&session, "42").expect("a non-object must still be answered");
+        let response =
+            handle_line(&mut one_catalog(), "42").expect("a non-object must still be answered");
         assert_eq!(response["error"]["code"], -32600);
         assert_eq!(response["id"], Value::Null);
     }
 
     #[test]
     fn a_request_without_a_method_is_invalid_request() {
-        let session = session_from(&[("a", "b")]);
-        let response = handle_line(&session, r#"{"jsonrpc":"2.0","id":1}"#)
+        let response = handle_line(&mut one_catalog(), r#"{"jsonrpc":"2.0","id":1}"#)
             .expect("a request with an id must be answered");
         assert_eq!(response["error"]["code"], -32600);
         assert_eq!(response["id"], 1);
@@ -636,10 +1154,9 @@ mod tests {
 
     #[test]
     fn a_notification_is_still_never_answered() {
-        let session = session_from(&[("a", "b")]);
         assert!(
             handle_line(
-                &session,
+                &mut one_catalog(),
                 r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
             )
             .is_none()

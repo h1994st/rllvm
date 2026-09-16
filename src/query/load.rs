@@ -58,9 +58,19 @@ fn resolve(catalog_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+/// Reads the catalog at `path` and loads what it names, resolving relative
+/// module paths against the directory holding it.
 pub fn load_catalog(path: &Path) -> Result<Loaded, Error> {
     let catalog: ModuleCatalog = read_catalog(path)?;
-    let catalog_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let catalog_dir = path.parent().unwrap_or(Path::new("."));
+    load_catalog_value(catalog, catalog_dir)
+}
+
+/// The same load for a catalog already in memory, so a caller that just
+/// built one -- `catalog::inventory` over an artifact -- need not write it
+/// to disk and read it back to query it.
+pub fn load_catalog_value(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<Loaded, Error> {
+    let catalog_dir = catalog_dir.to_path_buf();
 
     let mut pending = Vec::new();
     let mut reports = Vec::new();

@@ -320,7 +320,7 @@ spellings coincide for every other query, which is one word either way.
 ### MCP server
 
 ```bash
-rllvm-query --catalog catalog.json mcp
+rllvm-query mcp
 ```
 
 Serves the same nine queries as JSON-RPC 2.0 tools, newline-delimited over
@@ -332,11 +332,25 @@ client at it:
   "mcpServers": {
     "rllvm": {
       "command": "rllvm-query",
-      "args": ["--catalog", "/path/to/catalog.json", "mcp"]
+      "args": ["mcp"]
     }
   }
 }
 ```
+
+The client chooses what to analyse, and several programs can be loaded at once:
+
+- `load_catalog` — read a catalog JSON and keep it queryable
+- `inventory` — inventory a captured binary, archive or `.bc` and load the result, with no catalog JSON on disk
+- `list_catalogs`, `unload_catalog`
+
+Both loaders answer with the catalog's `scope` and the `analysis` of what
+actually parsed, so a client sees that before its first question. Each catalog
+is analysed once and answers every query after it from memory. Queries take an
+optional `catalog` argument, needed only when more than one is loaded.
+
+`--catalog` still works and preloads one, for a client that always analyses the
+same program.
 
 ## Configuration
 
