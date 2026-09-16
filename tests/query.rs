@@ -1064,6 +1064,90 @@ fn record_with_compiler_version(version: &str) -> rllvm::catalog::ModuleRecord {
     }
 }
 
+/// The template from the #184 repro: one definition, two instantiations, each
+/// emitted `linkonce_odr` under its own mangled name.
+const TWICE_CXX: &str = "template <typename T> T twice(T x) { return x + x; }\n\
+     int main() { return twice<int>(2) + (int)twice<double>(1.5); }\n";
+
+fn cxx_catalog(scratch: &tempfile::TempDir) -> PathBuf {
+    let module = compile_bitcode(scratch, "twice.cpp", TWICE_CXX);
+    let mut catalog =
+        rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+    catalog.modules[0].id = "twice".to_string();
+    let path = scratch.path().join("catalog.json");
+    write_catalog_json(&path, &catalog);
+    path
+}
+
+#[test]
+fn a_cxx_answer_carries_the_reading_of_the_symbols_it_prints() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = cxx_catalog(&scratch);
+
+    let answer = query_json(&scratch, &catalog, &["defs", "_Z5twiceIiET_S0_"]);
+    assert_eq!(
+        answer["results"][0]["function"]["symbol"], "_Z5twiceIiET_S0_",
+        "the mangled name stays the identity"
+    );
+    assert_eq!(
+        answer["symbols"]["_Z5twiceIiET_S0_"], "int twice<int>(int)",
+        "and the table carries its reading: {answer}"
+    );
+    assert_eq!(answer["resolution"][0]["matched"], "mangled");
+}
+
+#[test]
+fn a_demangled_name_is_accepted_as_input() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = cxx_catalog(&scratch);
+
+    let answer = query_json(&scratch, &catalog, &["defs", "int twice<int>(int)"]);
+    assert_eq!(answer["resolution"][0]["matched"], "demangled");
+    assert_eq!(
+        answer["results"][0]["function"]["symbol"],
+        "_Z5twiceIiET_S0_"
+    );
+    assert_eq!(
+        answer["results"].as_array().unwrap().len(),
+        1,
+        "the full reading names one instantiation, not both"
+    );
+}
+
+/// The convenience the issue asked for, and the honesty it costs: `twice`
+/// finds both instantiations, and the answer says it got there fuzzily.
+#[test]
+fn a_bare_identifier_finds_every_instantiation_and_says_it_was_fuzzy() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = cxx_catalog(&scratch);
+
+    let answer = query_json(&scratch, &catalog, &["defs", "twice"]);
+    assert_eq!(answer["resolution"][0]["matched"], "fuzzy");
+    assert_eq!(
+        answer["resolution"][0]["symbols"],
+        serde_json::json!(["_Z5twiceIdET_S0_", "_Z5twiceIiET_S0_"])
+    );
+    assert_eq!(answer["results"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        answer["symbols"]["_Z5twiceIdET_S0_"],
+        "double twice<double>(double)"
+    );
+}
+
+/// A C program's answers gain neither block's noise: `main` is its own name.
+#[test]
+fn a_c_answer_carries_no_symbol_table() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+
+    let answer = query_json(&scratch, &catalog, &["callers", "add"]);
+    assert_eq!(answer["resolution"][0]["matched"], "mangled");
+    assert!(
+        answer.get("symbols").is_none(),
+        "nothing in a C answer demangles: {answer}"
+    );
+}
+
 // --- MCP stdio server -------------------------------------------------
 //
 // Nested in its own module so `cargo test --features query --test query mcp`

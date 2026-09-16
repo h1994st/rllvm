@@ -274,6 +274,25 @@ pub(crate) fn session_with_ambiguous_bindings() -> Session {
     Session::new(facts(functions, call_sites), vec![target, unused])
 }
 
+/// A C++ module: two instantiations of `twice`, a `twice_helper` that must
+/// not be confused for one, `ns::twice` in a namespace, and a C `main`.
+///
+/// Symbols are the real mangled spellings, so `Session::new` demangles them
+/// through the same path a captured module would.
+pub(crate) fn session_with_cxx_symbols() -> Session {
+    let functions = [
+        "_Z5twiceIiET_S0_",  // int twice<int>(int)
+        "_Z5twiceIdET_S0_",  // double twice<double>(double)
+        "_Z12twice_helperv", // twice_helper()
+        "_ZN2ns5twiceEv",    // ns::twice()
+        "main",
+    ]
+    .into_iter()
+    .map(|symbol| function("m", symbol, true, Linkage::External))
+    .collect();
+    Session::new(facts(functions, Vec::new()), Vec::new())
+}
+
 /// One module the loader verified and extraction never saw, so
 /// `analysis.verified` is the only non-zero count.
 pub(crate) fn facts_with_one_verified_module() -> ProgramFacts {

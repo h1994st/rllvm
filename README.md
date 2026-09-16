@@ -313,6 +313,26 @@ Add `--heuristics` to include a heuristic address-taken inventory alongside
 and an `uncertainty` block naming indirect call sites, functions without debug
 locations, and ambiguous symbol bindings the answer could not see through.
 
+### C++ names
+
+A query naming a symbol takes any of three spellings, tried in that order:
+
+```bash
+rllvm-query --catalog catalog.json defs _Z5twiceIiET_S0_      # the mangled symbol
+rllvm-query --catalog catalog.json defs 'int twice<int>(int)' # its full demangled reading
+rllvm-query --catalog catalog.json defs twice                 # any reading containing that identifier
+```
+
+The first two name one function. The third is a search: it matches every
+function whose reading contains `twice` as a whole identifier — both
+instantiations above, and `ns::twice`, but not `twice_helper`. Every answer
+carries a `resolution` block saying which applied, so a search that gathered
+several unrelated functions never reads like an exact hit.
+
+Answers keep the mangled symbol as the identity, and add a `symbols` table
+mapping each one to its reading. A C program's answers have neither block's
+noise: its names are already readable.
+
 CLI subcommands are kebab-case (`indirect-targets`); MCP tool names are
 snake_case (`indirect_targets`), matching `Query`'s own serde tag. The two
 spellings coincide for every other query, which is one word either way.

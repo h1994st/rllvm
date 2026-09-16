@@ -4,7 +4,7 @@
 
 use std::{
     collections::{BTreeSet, HashMap},
-    ffi::{CStr, c_char, c_void},
+    ffi::{CStr, c_char, c_int, c_void},
     path::PathBuf,
 };
 
@@ -28,6 +28,73 @@ use crate::{
     error::Error,
     query::{facts::*, load::LoadedModule},
 };
+
+unsafe extern "C" {
+    /// The Itanium C++ ABI demangler, from the C++ runtime LLVM already
+    /// links. `llvm-c` exposes no demangler of its own (checked against the
+    /// LLVM 23 headers), and `llvm::itaniumDemangle` is C++ with no C entry
+    /// point, so this is the only one reachable without a new dependency.
+    ///
+    /// With a null output buffer it allocates the result with `malloc`, so
+    /// the caller frees it with `free` -- not `LLVMDisposeMessage`, which
+    /// happens to call `free` today but documents no such contract.
+    fn __cxa_demangle(
+        name: *const c_char,
+        output: *mut c_char,
+        length: *mut usize,
+        status: *mut c_int,
+    ) -> *mut c_char;
+
+    /// Paired with `__cxa_demangle` above. Declared rather than pulled in
+    /// through a `libc` dependency, matching how this module already reaches
+    /// the C API through `std::ffi` alone.
+    fn free(pointer: *mut c_void);
+}
+
+/// The C++ reading of a mangled symbol, or `None` when the name is not
+/// mangled or the demangler refuses it.
+///
+/// Identity stays with the mangled symbol; this is for display. A name that
+/// merely looks mangled produces `None` rather than a garbled guess, so an
+/// absent reading is never mistaken for a real one.
+///
+/// Rust's legacy scheme is Itanium-shaped and demangles (hash suffix and
+/// all); its `v0` scheme is not, and answers `None`.
+pub fn demangle(symbol: &str) -> Option<String> {
+    // `_Z` is the Itanium ABI's marker for a mangled name, so a C program
+    // never reaches the FFI call at all, and neither does Rust `v0`.
+    if !symbol.starts_with("_Z") {
+        return None;
+    }
+    // An interior NUL cannot be part of an LLVM symbol, but `CString`
+    // rejecting one is cheaper than reasoning about it.
+    let input = std::ffi::CString::new(symbol).ok()?;
+    let mut status: c_int = 0;
+    // SAFETY: `input` is a live NUL-terminated string for the call. A null
+    // output buffer and length ask the demangler to allocate, which it does
+    // with `malloc`; `status` is a valid out pointer.
+    let output = unsafe {
+        __cxa_demangle(
+            input.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut status,
+        )
+    };
+    if output.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, and the demangler returns a NUL-terminated string.
+    let text = unsafe { CStr::from_ptr(output) }
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: ownership of a `malloc`ed buffer passed to this call, freed
+    // once. Done before the status check below so no exit path leaks it.
+    unsafe { free(output.cast()) };
+    // A non-zero status with a non-null buffer is not documented to happen,
+    // but the buffer is not a reading of the symbol if it does.
+    (status == 0).then_some(text)
+}
 
 /// Version of the LLVM this binary links, from the C API.
 pub fn llvm_version() -> String {
@@ -748,4 +815,46 @@ unsafe fn extract_inner(
         uses,
         diagnostics,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rows that matter are the refusals: a demangler that guessed at a
+    /// name it does not understand would put a fabricated C++ signature in an
+    /// answer, which is worse than printing the mangled name.
+    #[test]
+    fn demangling_reads_cxx_names_and_refuses_everything_else() {
+        assert_eq!(
+            demangle("_Z5twiceIiET_S0_").as_deref(),
+            Some("int twice<int>(int)"),
+            "the template instantiation from the ODR repro in #184"
+        );
+        assert_eq!(demangle("_ZN3FooC1Ev").as_deref(), Some("Foo::Foo()"));
+
+        assert_eq!(demangle("main"), None, "a C name is not mangled");
+        assert_eq!(demangle(""), None);
+        assert_eq!(
+            demangle("_Znotreallymangled"),
+            None,
+            "a name that only looks mangled must not produce a guess"
+        );
+        assert_eq!(
+            demangle("_RNvC6foo3bar"),
+            None,
+            "Rust's v0 scheme is not Itanium"
+        );
+    }
+
+    /// Rust's legacy scheme is Itanium-shaped, so it reads back. Pinned
+    /// because rllvm captures Rust bitcode too, and this is what those
+    /// answers will show.
+    #[test]
+    fn a_legacy_rust_symbol_reads_back_with_its_hash() {
+        assert_eq!(
+            demangle("_ZN4core3fmt5write17h1234567890abcdefE").as_deref(),
+            Some("core::fmt::write::h1234567890abcdef")
+        );
+    }
 }

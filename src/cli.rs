@@ -401,7 +401,7 @@ pub enum ClosureDirection {
 pub enum QueryCommand {
     /// Every definition of the symbol, with module and configuration.
     Defs {
-        /// Symbol to look up
+        /// Mangled symbol, full demangled reading, or a bare identifier
         name: String,
     },
     /// Functions with at least one instruction mapped to `file:line`, and
@@ -414,17 +414,17 @@ pub enum QueryCommand {
     },
     /// Functions containing a call to the target, each with its call sites.
     Callers {
-        /// Symbol to look up
+        /// Mangled symbol, full demangled reading, or a bare identifier
         name: String,
     },
     /// Outgoing call sites of the target, classified.
     Callees {
-        /// Symbol to look up
+        /// Mangled symbol, full demangled reading, or a bare identifier
         name: String,
     },
     /// Non-call uses: how and where the function's address is taken.
     Uses {
-        /// Symbol to look up
+        /// Mangled symbol, full demangled reading, or a bare identifier
         name: String,
     },
     /// One supporting path from `from` to `to`, or its explicit absence.
@@ -436,7 +436,7 @@ pub enum QueryCommand {
     },
     /// The set that can reach the target, or that it can reach.
     Closure {
-        /// Symbol to look up
+        /// Mangled symbol, full demangled reading, or a bare identifier
         name: String,
         /// `in` for functions that reach it, `out` for functions it reaches
         #[arg(value_enum)]

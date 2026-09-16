@@ -44,7 +44,7 @@ pub mod bind;
 pub use bind::{BindingCandidate, BindingStatus, SymbolBinding};
 
 pub mod index;
-pub use index::{Direction, PathStep, ReachResult, Session};
+pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Session};
 
 pub mod mcp;
 
@@ -227,6 +227,22 @@ pub struct Uncertainty {
     pub conditional_path_steps: usize,
 }
 
+/// How one name in the query reached the symbols it named.
+///
+/// Reported per name because the tiers are not equally certain: a `fuzzy`
+/// match can gather unrelated functions that merely share an identifier, and
+/// an answer that did not say so would read exactly like an exact hit.
+#[derive(Clone, Debug, Serialize)]
+pub struct Resolution {
+    pub requested: String,
+    /// Absent when the name matched nothing in the selected scope, which is
+    /// an empty answer rather than an error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched: Option<NameMatch>,
+    /// The mangled symbols the name resolved to, sorted and deduplicated.
+    pub symbols: Vec<String>,
+}
+
 /// Where the answer's facts came from.
 #[derive(Clone, Debug, Serialize)]
 pub struct Provenance {
@@ -241,7 +257,21 @@ pub struct Provenance {
 pub struct QueryResult {
     pub schema_version: u32,
     pub query: Query,
+    /// How each name the query took resolved. Empty for a query that takes a
+    /// location or no name.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub resolution: Vec<Resolution>,
     pub results: QueryResults,
+    /// The C++ reading of every mangled symbol this answer prints, keyed by
+    /// the symbol.
+    ///
+    /// A table rather than a field beside each `symbol`: the reading is a
+    /// function of the name alone, so one entry serves however many times the
+    /// symbol occurs, and `FunctionId` keeps the plain identity it is used as
+    /// a map key for. Empty for a C program, and for any answer whose symbols
+    /// are all unmangled.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub symbols: BTreeMap<String, String>,
     /// Cloned from `ProgramFacts::scope`, never recomputed.
     pub scope: CatalogScope,
     pub analysis: Analysis,
@@ -383,10 +413,18 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
     // count is program-wide either way -- see `uncertainty_of`.
     let frontier = reach_frontier.unwrap_or_else(|| ambiguous_bindings(session));
 
+    let symbols = symbols_in(session, &results, &frontier);
+
     Ok(QueryResult {
         schema_version: 1,
         query: query.clone(),
+        resolution: query
+            .names()
+            .into_iter()
+            .map(|name| resolution_of(session, name))
+            .collect(),
         results,
+        symbols,
         scope: session.scope().clone(),
         analysis: analysis_of(session.modules()),
         uncertainty: uncertainty_of(session, frontier, conditional_path_steps),
@@ -396,6 +434,159 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
             rllvm_version: env!("CARGO_PKG_VERSION").to_string(),
         },
     })
+}
+
+fn resolution_of(session: &Session, name: &str) -> Resolution {
+    let resolved = session.resolve(name);
+    let mut symbols: Vec<String> = resolved
+        .iter()
+        .flat_map(|resolution| &resolution.ids)
+        .map(|id| id.symbol.clone())
+        .collect();
+    symbols.sort_unstable();
+    symbols.dedup();
+    Resolution {
+        requested: name.to_string(),
+        matched: resolved.map(|resolution| resolution.matched),
+        symbols,
+    }
+}
+
+/// The C++ reading of every mangled symbol the answer prints.
+///
+/// Collected from the results and from the frontier, which is where `reach`
+/// reports the bindings it refused to guess through: those name symbols too,
+/// and a reader meets them as often as the results.
+fn symbols_in(
+    session: &Session,
+    results: &QueryResults,
+    frontier: &[SymbolBinding],
+) -> BTreeMap<String, String> {
+    let mut names = BTreeSet::new();
+    results.collect_symbols(&mut names);
+    for binding in frontier {
+        collect_binding(binding, &mut names);
+    }
+    names
+        .into_iter()
+        .filter_map(|name| {
+            session
+                .demangled(&name)
+                .map(|reading| (name, reading.to_string()))
+        })
+        .collect()
+}
+
+impl QueryResults {
+    /// Every symbol this answer prints. Exhaustive over the variants with no
+    /// wildcard arm, so a new query's results cannot quietly go untabulated
+    /// and leave its mangled names unreadable.
+    fn collect_symbols(&self, into: &mut BTreeSet<String>) {
+        match self {
+            QueryResults::Defs(entries) => {
+                for entry in entries {
+                    collect_function(&entry.function, into);
+                }
+            }
+            QueryResults::At(entries) => {
+                for entry in entries {
+                    collect_function(&entry.function, into);
+                    collect_call_sites(&entry.call_sites, into);
+                }
+            }
+            QueryResults::Callers(entries) => {
+                for entry in entries {
+                    collect_function(&entry.function, into);
+                    collect_call_sites(&entry.call_sites, into);
+                }
+            }
+            QueryResults::Callees(sites) => collect_call_sites(sites, into),
+            QueryResults::Uses(uses) => {
+                for use_fact in uses {
+                    collect_function(&use_fact.used, into);
+                    if let Some(id) = &use_fact.in_function {
+                        collect_function(id, into);
+                    }
+                }
+            }
+            QueryResults::Reach(path) => {
+                for step in path.iter().flatten() {
+                    collect_step(step, into);
+                }
+            }
+            QueryResults::Closure(ids) => {
+                for id in ids {
+                    collect_function(id, into);
+                }
+            }
+            QueryResults::Externals(bindings) => {
+                for binding in bindings {
+                    collect_binding(binding, into);
+                }
+            }
+            QueryResults::IndirectTargets(entries) => {
+                for entry in entries {
+                    collect_function(&entry.site.function, into);
+                    let lists = [
+                        &entry.llvm_target_bound,
+                        &entry.address_taken_inventory,
+                        &entry.signature_compatible,
+                    ];
+                    for id in lists.into_iter().flatten().flatten() {
+                        collect_function(id, into);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_function(id: &FunctionId, into: &mut BTreeSet<String>) {
+    into.insert(id.symbol.clone());
+}
+
+fn collect_call_sites(sites: &[CallSiteFact], into: &mut BTreeSet<String>) {
+    for site in sites {
+        collect_function(&site.id.function, into);
+        match &site.target {
+            CallTarget::Direct { callee } => collect_function(callee, into),
+            CallTarget::Indirect {
+                llvm_target_bound, ..
+            } => {
+                for id in llvm_target_bound.iter().flatten() {
+                    collect_function(id, into);
+                }
+            }
+            // An intrinsic is named `llvm.*` and is never mangled; inline
+            // assembly names nothing at all.
+            CallTarget::Intrinsic { .. } | CallTarget::InlineAsm => {}
+        }
+    }
+}
+
+fn collect_step(step: &PathStep, into: &mut BTreeSet<String>) {
+    match step {
+        PathStep::Call(site) => collect_function(&site.function, into),
+        PathStep::BoundedIndirect {
+            site,
+            chosen,
+            bound,
+        } => {
+            collect_function(&site.function, into);
+            collect_function(chosen, into);
+            for id in bound {
+                collect_function(id, into);
+            }
+        }
+        PathStep::Binding(binding) => collect_binding(binding, into),
+    }
+}
+
+fn collect_binding(binding: &SymbolBinding, into: &mut BTreeSet<String>) {
+    into.insert(binding.symbol.clone());
+    for candidate in &binding.candidates {
+        collect_function(&candidate.function, into);
+    }
 }
 
 /// Marks one module's report `Failed` with the reason. Only extraction may
@@ -559,6 +750,24 @@ fn address_taken_inventory(session: &Session) -> Vec<FunctionId> {
 }
 
 impl Query {
+    /// The symbol names this query takes, in the order it takes them.
+    ///
+    /// Exhaustive over `Query` with no wildcard arm: a new query that takes a
+    /// name has to be listed here, or its answer would never say how that
+    /// name resolved -- and a fuzzy match would look like an exact one.
+    fn names(&self) -> Vec<&str> {
+        match self {
+            Query::Defs { name }
+            | Query::Callers { name }
+            | Query::Callees { name }
+            | Query::Uses { name }
+            | Query::Closure { name, .. } => vec![name],
+            Query::Reach { from, to } => vec![from, to],
+            // These take a location or nothing at all.
+            Query::At { .. } | Query::Externals | Query::IndirectTargets { .. } => Vec::new(),
+        }
+    }
+
     /// Check the arguments that can be rejected without reading any bitcode.
     ///
     /// `open` loads and extracts every selected module, which for a real
@@ -945,6 +1154,136 @@ mod tests {
             result.scope.selected_entries, 1,
             "scope still quotes the catalog"
         );
+    }
+
+    #[test]
+    fn an_answer_carries_the_reading_of_every_mangled_symbol_it_prints() {
+        let result = run(
+            &session_with_cxx_symbols(),
+            &Query::Defs {
+                name: "_Z5twiceIiET_S0_".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.symbols.get("_Z5twiceIiET_S0_").map(String::as_str),
+            Some("int twice<int>(int)")
+        );
+        assert!(
+            !result.symbols.contains_key("main"),
+            "a C name has no reading, so it gets no entry: {:?}",
+            result.symbols
+        );
+    }
+
+    /// The table indexes what the answer actually prints, not the program:
+    /// a `defs` answer for one instantiation must not hand back every
+    /// mangled name in scope.
+    #[test]
+    fn the_symbol_table_covers_the_answer_not_the_whole_scope() {
+        let result = run(
+            &session_with_cxx_symbols(),
+            &Query::Defs {
+                name: "int twice<int>(int)".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            result.symbols.keys().collect::<Vec<_>>(),
+            vec!["_Z5twiceIiET_S0_"],
+            "only the one function this answer names"
+        );
+    }
+
+    #[test]
+    fn a_c_only_answer_carries_no_symbol_table_at_all() {
+        let result = run(
+            &session_from(&[("a", "b")]),
+            &Query::Defs { name: "a".into() },
+        )
+        .unwrap();
+        assert!(result.symbols.is_empty());
+        let json = serde_json::to_value(&result).unwrap();
+        assert!(
+            json.get("symbols").is_none(),
+            "an empty table is omitted rather than printed as {{}}"
+        );
+    }
+
+    /// The point of the `resolution` block: `defs twice` gathering three
+    /// unrelated functions must not read like an exact hit on one.
+    #[test]
+    fn an_answer_says_which_tier_resolved_its_name() {
+        let session = session_with_cxx_symbols();
+
+        let exact = run(
+            &session,
+            &Query::Defs {
+                name: "_Z5twiceIiET_S0_".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(exact.resolution[0].requested, "_Z5twiceIiET_S0_");
+        assert_eq!(exact.resolution[0].matched, Some(NameMatch::Mangled));
+        assert_eq!(exact.resolution[0].symbols.len(), 1);
+
+        let fuzzy = run(
+            &session,
+            &Query::Defs {
+                name: "twice".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(fuzzy.resolution[0].matched, Some(NameMatch::Fuzzy));
+        assert_eq!(
+            fuzzy.resolution[0].symbols,
+            ["_Z5twiceIdET_S0_", "_Z5twiceIiET_S0_", "_ZN2ns5twiceEv"],
+            "the block names every symbol the fuzzy tier gathered"
+        );
+        assert!(!fuzzy.results.is_empty(), "all three still answer");
+    }
+
+    #[test]
+    fn a_name_that_matches_nothing_reports_no_tier() {
+        let result = run(
+            &session_with_cxx_symbols(),
+            &Query::Defs {
+                name: "absent".into(),
+            },
+        )
+        .unwrap();
+        assert!(result.results.is_empty());
+        assert_eq!(result.resolution[0].matched, None);
+        assert!(result.resolution[0].symbols.is_empty());
+    }
+
+    /// `reach` takes two names, so it reports two resolutions, in order.
+    /// A query that takes a location or nothing reports none.
+    #[test]
+    fn resolution_is_reported_once_per_name_the_query_takes() {
+        let session = session_from(&[("a", "b")]);
+
+        let reach = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "b".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reach
+                .resolution
+                .iter()
+                .map(|entry| entry.requested.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+
+        let externals = run(&session, &Query::Externals).unwrap();
+        assert!(externals.resolution.is_empty());
+        let json = serde_json::to_value(&externals).unwrap();
+        assert!(json.get("resolution").is_none(), "omitted when empty");
     }
 
     /// A synthetic one-module catalog whose module bytes are not real
