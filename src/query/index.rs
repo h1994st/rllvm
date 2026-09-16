@@ -9,7 +9,7 @@
 //! not an edge source at all and is never consulted here.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
 };
 
@@ -19,11 +19,68 @@ use crate::catalog::{CatalogOrigin, CatalogScope};
 
 use super::{
     bind::{BindingStatus, SymbolBinding},
+    extract::demangle,
     facts::{
         CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, ModuleReport, ProgramFacts,
         UseFact,
     },
 };
+
+/// How a queried name reached the symbols it named.
+///
+/// Reported on every answer that took a name, because the three are not
+/// equally certain: the first two identify one function each, while `Fuzzy`
+/// can gather unrelated functions that merely share an identifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NameMatch {
+    /// The name is a mangled symbol, matched exactly. A C name lands here
+    /// too: it is its own symbol.
+    Mangled,
+    /// The name is a full demangled reading, matched exactly --
+    /// `int twice<int>(int)`.
+    Demangled,
+    /// The name occurs as a whole identifier inside one or more demangled
+    /// readings -- `twice` finding `int twice<int>(int)`. A convenience for
+    /// typing, and the only tier that can answer for several unrelated
+    /// functions at once.
+    Fuzzy,
+}
+
+/// The symbols a queried name resolved to, and which tier found them.
+#[derive(Clone, Debug)]
+pub struct NameResolution {
+    pub matched: NameMatch,
+    pub ids: Vec<FunctionId>,
+}
+
+/// Whether `needle` occurs in `haystack` bounded by non-identifier
+/// characters, so `twice` is found in `int twice<int>(int)` and in
+/// `void wrap::twice()` but not in `twice_helper` or `mytwice`.
+///
+/// Deliberately not a parse of the demangled declaration: deriving a "base
+/// name" by stripping return type, template arguments and parameters means
+/// parsing C++ with string operations, which breaks on operator overloads
+/// (`operator<<`) and nested templates in ways that are silent.
+fn contains_identifier(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let boundary = |character: char| !(character.is_alphanumeric() || character == '_');
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let end = start + needle.len();
+        if haystack[..start].chars().next_back().is_none_or(boundary)
+            && haystack[end..].chars().next().is_none_or(boundary)
+        {
+            return true;
+        }
+        // Past this occurrence's first character, on a character boundary.
+        from = start + haystack[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
 
 /// Direction of a transitive closure walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -85,6 +142,14 @@ pub struct Session {
     bindings_by_candidate: HashMap<FunctionId, Vec<usize>>,
     /// Functions mapped to a source file and line. Read by `functions_at`.
     by_file_line: HashMap<(PathBuf, u32), Vec<FunctionId>>,
+    /// The C++ reading of every symbol that has one, keyed by the mangled
+    /// name. Built once here rather than per query: a name demangles the same
+    /// way every time, the fuzzy tier scans all of them, and the envelope's
+    /// `symbols` table quotes from it. Sorted, so a fuzzy answer comes back
+    /// in the same order every run.
+    demangled: BTreeMap<String, String>,
+    /// Function ids keyed by their exact demangled reading.
+    by_demangled: HashMap<String, Vec<FunctionId>>,
 }
 
 impl Session {
@@ -157,6 +222,29 @@ impl Session {
             }
         }
 
+        // One demangle per distinct symbol, not per function: the reading is
+        // a function of the name alone. `demangle` returns early on anything
+        // without the Itanium `_Z` marker, so a C program pays nothing here.
+        let distinct: BTreeSet<&str> = facts
+            .functions
+            .iter()
+            .map(|function| function.id.symbol.as_str())
+            .collect();
+        let demangled: BTreeMap<String, String> = distinct
+            .into_iter()
+            .filter_map(|symbol| demangle(symbol).map(|reading| (symbol.to_string(), reading)))
+            .collect();
+
+        let mut by_demangled: HashMap<String, Vec<FunctionId>> = HashMap::new();
+        for function in &facts.functions {
+            if let Some(reading) = demangled.get(&function.id.symbol) {
+                by_demangled
+                    .entry(reading.clone())
+                    .or_default()
+                    .push(function.id.clone());
+            }
+        }
+
         Session {
             facts,
             bindings,
@@ -167,7 +255,48 @@ impl Session {
             bindings_by_symbol,
             bindings_by_candidate,
             by_file_line,
+            demangled,
+            by_demangled,
         }
+    }
+
+    /// The symbols a queried name names, and how it got there.
+    ///
+    /// Tried in order of certainty, stopping at the first tier that answers:
+    /// the mangled symbol, then the full demangled reading, then the
+    /// identifier search. The exact tiers come first so a program that
+    /// genuinely defines a symbol spelled like someone else's identifier is
+    /// never answered fuzzily.
+    pub fn resolve(&self, name: &str) -> Option<NameResolution> {
+        if let Some(ids) = self.by_name.get(name) {
+            return Some(NameResolution {
+                matched: NameMatch::Mangled,
+                ids: ids.clone(),
+            });
+        }
+        if let Some(ids) = self.by_demangled.get(name) {
+            return Some(NameResolution {
+                matched: NameMatch::Demangled,
+                ids: ids.clone(),
+            });
+        }
+        let ids: Vec<FunctionId> = self
+            .demangled
+            .iter()
+            .filter(|(_, reading)| contains_identifier(reading, name))
+            .flat_map(|(symbol, _)| self.by_name.get(symbol).into_iter().flatten())
+            .cloned()
+            .collect();
+        (!ids.is_empty()).then_some(NameResolution {
+            matched: NameMatch::Fuzzy,
+            ids,
+        })
+    }
+
+    /// The C++ reading of one symbol, for the envelope's `symbols` table.
+    /// Not public API: internal plumbing for `query::run`.
+    pub(crate) fn demangled(&self, symbol: &str) -> Option<&str> {
+        self.demangled.get(symbol).map(String::as_str)
     }
 
     /// Call sites that resolve to the named function: a direct call, or an
@@ -368,7 +497,9 @@ impl Session {
     }
 
     fn ids_by_name(&self, name: &str) -> Vec<FunctionId> {
-        self.by_name.get(name).cloned().unwrap_or_default()
+        self.resolve(name)
+            .map(|resolution| resolution.ids)
+            .unwrap_or_default()
     }
 
     fn is_definition(&self, id: &FunctionId) -> bool {
@@ -601,6 +732,78 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].symbol, "only");
         assert!(session.functions_at(Path::new("t.c"), 99).is_empty());
+    }
+
+    #[test]
+    fn a_name_resolves_by_mangled_symbol_then_demangled_reading_then_identifier() {
+        let session = session_with_cxx_symbols();
+
+        let mangled = session
+            .resolve("_Z5twiceIiET_S0_")
+            .expect("the symbol itself");
+        assert_eq!(mangled.matched, NameMatch::Mangled);
+        assert_eq!(mangled.ids.len(), 1);
+
+        let demangled = session
+            .resolve("int twice<int>(int)")
+            .expect("the full reading");
+        assert_eq!(demangled.matched, NameMatch::Demangled);
+        assert_eq!(demangled.ids, mangled.ids, "both name one function");
+
+        // A C name is its own symbol, so it lands in the exact tier.
+        assert_eq!(
+            session.resolve("main").map(|r| r.matched),
+            Some(NameMatch::Mangled)
+        );
+
+        assert!(session.resolve("absent").is_none());
+    }
+
+    #[test]
+    fn the_fuzzy_tier_finds_every_instantiation_and_stops_at_identifier_edges() {
+        let session = session_with_cxx_symbols();
+        let fuzzy = session.resolve("twice").expect("an identifier search");
+        assert_eq!(fuzzy.matched, NameMatch::Fuzzy);
+
+        let mut found: Vec<&str> = fuzzy.ids.iter().map(|id| id.symbol.as_str()).collect();
+        found.sort_unstable();
+        assert_eq!(
+            found,
+            ["_Z5twiceIdET_S0_", "_Z5twiceIiET_S0_", "_ZN2ns5twiceEv"],
+            "both instantiations and the namespaced one, but never `twice_helper`"
+        );
+    }
+
+    /// The exact tiers run first, so a program that really defines a symbol
+    /// spelled like a common identifier is answered exactly, not fuzzily.
+    #[test]
+    fn an_exact_symbol_is_never_answered_by_the_fuzzy_tier() {
+        let mut functions: Vec<FunctionFact> = ["_Z5twiceIiET_S0_", "twice"]
+            .into_iter()
+            .map(|symbol| function("m", symbol, true, Linkage::External))
+            .collect();
+        functions.push(function("m", "other", true, Linkage::External));
+        let session = Session::new(facts(functions, Vec::new()), Vec::new());
+
+        let resolved = session.resolve("twice").expect("the C symbol `twice`");
+        assert_eq!(resolved.matched, NameMatch::Mangled);
+        assert_eq!(resolved.ids.len(), 1);
+        assert_eq!(resolved.ids[0].symbol, "twice");
+    }
+
+    #[test]
+    fn an_identifier_search_respects_both_edges() {
+        assert!(contains_identifier("int twice<int>(int)", "twice"));
+        assert!(contains_identifier("void wrap::twice()", "twice"));
+        assert!(contains_identifier("twice_helper()", "twice_helper"));
+        assert!(contains_identifier("void Foo::bar(int)", "Foo::bar"));
+
+        assert!(
+            !contains_identifier("twice_helper()", "twice"),
+            "trailing _"
+        );
+        assert!(!contains_identifier("mytwice()", "twice"), "leading letter");
+        assert!(!contains_identifier("int twice<int>(int)", ""));
     }
 
     #[test]

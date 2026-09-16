@@ -202,6 +202,13 @@ a reachable set, and CVP propagates within one module only. The heuristic
 address-taken inventory is opt-in and contributes no graph edges. MCP stdout
 carries protocol frames only.
 
+The mangled symbol is the identity: `FunctionId` is a map key, so demangled
+readings live in the envelope's `symbols` table, never beside each `symbol`.
+Names resolve mangled, then demangled, then as an identifier search, and the
+`resolution` block always says which — a fuzzy match must not read as exact.
+`demangle` refuses anything without the Itanium `_Z` marker rather than
+guessing.
+
 ## Current limitations
 
 - Universal builds are unsupported.

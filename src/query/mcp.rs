@@ -586,7 +586,10 @@ query_tool_surface! {
 /// once: four copies of one schema drift apart, and a client reads the
 /// drifted one as a real difference between the tools.
 fn symbol_property() -> Value {
-    json!({ "type": "string", "description": "Symbol to look up" })
+    json!({
+        "type": "string",
+        "description": "Symbol to look up. Accepts a mangled symbol (`_Z5twiceIiET_S0_`), a full demangled reading (`int twice<int>(int)`), or a bare identifier (`twice`), which matches every function whose reading contains it. The answer's `resolution` block says which applied."
+    })
 }
 
 /// A tool whose only argument is that symbol name.
@@ -666,8 +669,8 @@ fn query_tool(query: &Query) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "from": { "type": "string", "description": "Symbol to start from" },
-                    "to": { "type": "string", "description": "Symbol to reach" }
+                    "from": { "type": "string", "description": "Symbol to start from; same spellings as `defs` accepts" },
+                    "to": { "type": "string", "description": "Symbol to reach; same spellings as `defs` accepts" }
                 },
                 "required": ["from", "to"]
             }
