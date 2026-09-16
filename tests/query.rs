@@ -79,6 +79,46 @@ fn llvm_bin(name: &str) -> PathBuf {
     Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)
 }
 
+/// Two modules where `main` calls `add`: the smallest catalog carrying a
+/// real cross-module call. Shared by the archive and plain-file fixtures.
+const ADD_AND_MAIN: &[(&str, &str)] = &[
+    ("add.c", "int add(int a,int b){return a+b;}\n"),
+    (
+        "main.c",
+        "int add(int a,int b);\nint main(void){ return add(2,3); }\n",
+    ),
+];
+
+/// Writes `source` into the scratch directory and compiles it to bitcode
+/// beside itself, with the flags every catalog fixture here wants.
+fn compile_bitcode(scratch: &tempfile::TempDir, name: &str, source: &str) -> PathBuf {
+    let source_path = scratch.path().join(name);
+    std::fs::write(&source_path, source).unwrap();
+    compile_bitcode_file(&source_path, &["-g", "-O0"])
+}
+
+/// Compiles a source already on disk, for a fixture that puts a header
+/// beside it first or chooses its own optimization level.
+fn compile_bitcode_file(source: &Path, flags: &[&str]) -> PathBuf {
+    let module = source.with_extension("bc");
+    let status = Command::new(llvm_bin("clang"))
+        .args(flags)
+        .args(["-emit-llvm", "-c"])
+        .arg(source)
+        .arg("-o")
+        .arg(&module)
+        .status()
+        .unwrap();
+    assert!(status.success(), "clang failed on {}", source.display());
+    module
+}
+
+/// Writes a catalog straight to `path`. Not `catalog::write_catalog`, whose
+/// no-clobber publish these fixtures do not need.
+fn write_catalog_json(path: &Path, catalog: &rllvm::catalog::ModuleCatalog) {
+    std::fs::write(path, serde_json::to_vec_pretty(catalog).unwrap()).unwrap();
+}
+
 /// Points `RLLVM_CONFIG` at a scratch file, matching `tests/integration.rs`'s
 /// isolation convention: `rllvm-query` now reads the configured log level
 /// (`rllvm_query.rs`, so a module that fails to extract is actually reported
@@ -270,23 +310,12 @@ fn a_deleted_archive_reports_its_members_missing_not_failed() {
 /// lookups on it: `inventory()` derives ids from a content hash, which is not
 /// otherwise predictable from the fixture.
 fn write_catalog_with_one_module(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
-    let source = scratch.path().join("add.c");
-    std::fs::write(&source, "int add(int a,int b){return a+b;}\n").unwrap();
-    let module = scratch.path().join("add.bc");
-    let status = std::process::Command::new(llvm_bin("clang"))
-        .args(["-g", "-O0", "-emit-llvm", "-c"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&module)
-        .status()
-        .unwrap();
-    assert!(status.success());
-
+    let module = compile_bitcode(scratch, "add.c", "int add(int a,int b){return a+b;}\n");
     let mut catalog =
         rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
     catalog.modules[0].id = "add".to_string();
     let catalog_path = scratch.path().join("catalog.json");
-    std::fs::write(&catalog_path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+    write_catalog_json(&catalog_path, &catalog);
     (catalog_path, module)
 }
 
@@ -309,17 +338,8 @@ fn record_source_hash(catalog_path: &Path, source: &Path) {
 /// the source's real current hash; "stale" is stamped with a hash that does
 /// not match, standing in for a capture whose source has since changed.
 fn two_modules_one_source(scratch: &tempfile::TempDir) -> PathBuf {
+    let module = compile_bitcode(scratch, "shared.c", "int shared(void){return 0;}\n");
     let source = scratch.path().join("shared.c");
-    std::fs::write(&source, "int shared(void){return 0;}\n").unwrap();
-    let module = scratch.path().join("shared.bc");
-    let status = std::process::Command::new(llvm_bin("clang"))
-        .args(["-g", "-O0", "-emit-llvm", "-c"])
-        .arg(&source)
-        .arg("-o")
-        .arg(&module)
-        .status()
-        .unwrap();
-    assert!(status.success());
 
     let base =
         rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
@@ -342,93 +362,57 @@ fn two_modules_one_source(scratch: &tempfile::TempDir) -> PathBuf {
 
     let catalog =
         rllvm::catalog::ModuleCatalog::new(base.origin, "recorded_modules", vec![fresh, stale]);
-    let path = scratch.path().join("two-module-catalog.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+    let path = scratch.path().join("shared-catalog.json");
+    write_catalog_json(&path, &catalog);
     path
 }
 
-/// Builds a real archive of two bitcode members and inventories it, so the
-/// catalog carries genuine `archive_member` indices.
+/// Compiles every `(name, source)` into one archive named `<stem>.a` and
+/// inventories it, so the catalog carries genuine content hashes and
+/// `archive_member` indices, and exercises the archive path the loader
+/// already supports.
+fn archive_catalog_of(
+    scratch: &tempfile::TempDir,
+    stem: &str,
+    sources: &[(&str, &str)],
+) -> PathBuf {
+    let objects: Vec<PathBuf> = sources
+        .iter()
+        .map(|(name, source)| compile_bitcode(scratch, name, source))
+        .collect();
+    let archive = scratch.path().join(format!("{stem}.a"));
+    assert!(
+        Command::new(llvm_bin("llvm-ar"))
+            .arg("rs")
+            .arg(&archive)
+            .args(&objects)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let catalog =
+        rllvm::catalog::inventory(&archive, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+    let path = scratch.path().join(format!("{stem}-catalog.json"));
+    write_catalog_json(&path, &catalog);
+    path
+}
+
+/// Two unrelated modules in one archive, for the loader's archive-member
+/// handling. The archive is `lib.a`, which those tests delete by name.
 fn archive_catalog(scratch: &tempfile::TempDir) -> PathBuf {
-    let mut objects = Vec::new();
-    for name in ["one", "two"] {
-        let source = scratch.path().join(format!("{name}.c"));
-        std::fs::write(&source, format!("int {name}(void){{return 0;}}\n")).unwrap();
-        let object = scratch.path().join(format!("{name}.bc"));
-        assert!(
-            std::process::Command::new(llvm_bin("clang"))
-                .args(["-g", "-O0", "-emit-llvm", "-c"])
-                .arg(&source)
-                .arg("-o")
-                .arg(&object)
-                .status()
-                .unwrap()
-                .success()
-        );
-        objects.push(object);
-    }
-    let archive = scratch.path().join("lib.a");
-    assert!(
-        std::process::Command::new(llvm_bin("llvm-ar"))
-            .arg("rs")
-            .arg(&archive)
-            .args(&objects)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let catalog =
-        rllvm::catalog::inventory(&archive, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
-    let path = scratch.path().join("archive-catalog.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
-    path
+    archive_catalog_of(
+        scratch,
+        "lib",
+        &[
+            ("one.c", "int one(void){return 0;}\n"),
+            ("two.c", "int two(void){return 0;}\n"),
+        ],
+    )
 }
 
-/// Builds a real two-module catalog: one module defines `add`, the other
-/// defines `main`, which calls it. Combined with `llvm-ar rs` into one
-/// archive and inventoried, following `archive_catalog`, so the catalog
-/// carries genuine content hashes and `archive_member` indices, and exercises
-/// the archive path the loader already supports.
+/// `main` calls `add`, across two modules in one archive.
 fn two_module_catalog(scratch: &tempfile::TempDir) -> PathBuf {
-    let sources = [
-        ("add.c", "int add(int a,int b){return a+b;}\n"),
-        (
-            "main.c",
-            "int add(int a,int b);\nint main(void){ return add(2,3); }\n",
-        ),
-    ];
-    let mut objects = Vec::new();
-    for (name, source) in sources {
-        let source_path = scratch.path().join(name);
-        std::fs::write(&source_path, source).unwrap();
-        let object = scratch.path().join(name.replace(".c", ".bc"));
-        assert!(
-            std::process::Command::new(llvm_bin("clang"))
-                .args(["-g", "-O0", "-emit-llvm", "-c"])
-                .arg(&source_path)
-                .arg("-o")
-                .arg(&object)
-                .status()
-                .unwrap()
-                .success()
-        );
-        objects.push(object);
-    }
-    let archive = scratch.path().join("two.a");
-    assert!(
-        std::process::Command::new(llvm_bin("llvm-ar"))
-            .arg("rs")
-            .arg(&archive)
-            .args(&objects)
-            .status()
-            .unwrap()
-            .success()
-    );
-    let catalog =
-        rllvm::catalog::inventory(&archive, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
-    let path = scratch.path().join("two-module-catalog.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
-    path
+    archive_catalog_of(scratch, "two", ADD_AND_MAIN)
 }
 
 #[test]
@@ -606,26 +590,8 @@ fn two_plain_module_catalog(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     let mut modules = Vec::new();
     let mut origin = None;
     let mut first = None;
-    for (name, source) in [
-        ("add.c", "int add(int a,int b){return a+b;}\n"),
-        (
-            "main.c",
-            "int add(int a,int b);\nint main(void){ return add(2,3); }\n",
-        ),
-    ] {
-        let source_path = scratch.path().join(name);
-        std::fs::write(&source_path, source).unwrap();
-        let object = scratch.path().join(name.replace(".c", ".bc"));
-        assert!(
-            Command::new(llvm_bin("clang"))
-                .args(["-g", "-O0", "-emit-llvm", "-c"])
-                .arg(&source_path)
-                .arg("-o")
-                .arg(&object)
-                .status()
-                .unwrap()
-                .success()
-        );
+    for (name, source) in ADD_AND_MAIN {
+        let object = compile_bitcode(scratch, name, source);
         let catalog =
             rllvm::catalog::inventory(&object, scratch.path(), Some(&llvm_bin("llvm-dis")))
                 .unwrap();
@@ -639,7 +605,7 @@ fn two_plain_module_catalog(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
         modules,
     );
     let path = scratch.path().join("plain-catalog.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
+    write_catalog_json(&path, &catalog);
     (path, first.expect("at least one module"))
 }
 
@@ -859,6 +825,34 @@ fn a_signature_records_parameter_and_return_types() {
     );
 }
 
+/// A function pointer passed as an argument to a `noinline` callee. At `-O0`
+/// it lands in a stack slot CVP cannot follow; at `-O1` it stays in SSA.
+/// One source, two optimization levels: the difference under test is the
+/// flags, so the program must not differ too.
+const NOINLINE_ARGUMENT: &str = "static int add(int a,int b){return a+b;}\n\
+     static int sub(int a,int b){return a-b;}\n\
+     __attribute__((noinline)) static int apply(int(*f)(int,int),int x){ return f(x,3); }\n\
+     int run(int x){ return apply(add,x) + apply(sub,x); }\n";
+
+/// A function pointer in a local struct field. At `-O0` the field stays in an
+/// alloca; at `-O1` SROA promotes it to SSA. Again one source, two levels.
+const STRUCT_FIELD: &str = "static int add(int a,int b){return a+b;}\n\
+     static int sub(int a,int b){return a-b;}\n\
+     struct ops { int (*op)(int,int); };\n\
+     int run(int x){ struct ops o; o.op = x ? add : sub; return o.op(1,2); }\n";
+
+/// The bound's symbols, sorted, so a test pins the set rather than whatever
+/// order CVP happened to list its metadata operands in.
+fn bound_symbols(facts: &rllvm::query::ModuleFacts, expectation: &str) -> Vec<String> {
+    let mut names: Vec<String> = indirect_bound(facts)
+        .unwrap_or_else(|| panic!("{expectation}"))
+        .iter()
+        .map(|function| function.symbol.clone())
+        .collect();
+    names.sort();
+    names
+}
+
 /// From the spec's verified constraint 2. Each row is a CVP eligibility rule.
 #[test]
 fn cvp_bounds_an_internal_global_at_o0() {
@@ -870,14 +864,10 @@ fn cvp_bounds_an_internal_global_at_o0() {
          static int (*fp)(int,int) = add;\n\
          int pick(int x){ if(x) fp = sub; return fp(2,3); }\n",
     );
-    let bound = indirect_bound(&facts);
-    let mut names: Vec<_> = bound
-        .expect("internal global is eligible")
-        .iter()
-        .map(|f| f.symbol.clone())
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["add", "sub"]);
+    assert_eq!(
+        bound_symbols(&facts, "internal global is eligible"),
+        ["add", "sub"]
+    );
 }
 
 #[test]
@@ -896,28 +886,15 @@ fn cvp_does_not_bound_an_external_global() {
 #[test]
 fn cvp_does_not_bound_a_stack_slot_at_o0() {
     let scratch = tempfile::tempdir().unwrap();
-    let facts = extract_source(
-        &scratch,
-        "static int add(int a,int b){return a+b;}\n\
-         static int sub(int a,int b){return a-b;}\n\
-         __attribute__((noinline)) static int apply(int(*f)(int,int),int x){ return f(x,3); }\n\
-         int run(int x){ return apply(add,x) + apply(sub,x); }\n",
-    );
+    let facts = extract_source(&scratch, NOINLINE_ARGUMENT);
     assert_unresolved_indirect_site(&facts, "-O0 routes the argument through a stack slot");
 }
 
 #[test]
 fn cvp_bounds_the_same_argument_at_o1() {
     let scratch = tempfile::tempdir().unwrap();
-    let facts = extract_source_with_flags(
-        &scratch,
-        "static int add(int a,int b){return a+b;}\n\
-         static int sub(int a,int b){return a-b;}\n\
-         __attribute__((noinline)) static int apply(int(*f)(int,int),int x){ return f(x,3); }\n\
-         int run(int x){ return apply(add,x) + apply(sub,x); }\n",
-        &["-g", "-O1"],
-    );
-    assert_eq!(indirect_bound(&facts).map(|b| b.len()), Some(2));
+    let facts = extract_source_with_flags(&scratch, NOINLINE_ARGUMENT, &["-g", "-O1"]);
+    assert_eq!(indirect_bound(&facts).map(|bound| bound.len()), Some(2));
 }
 
 /// From the spec's verified-constraints table: a struct field, the fourth
@@ -926,13 +903,7 @@ fn cvp_bounds_the_same_argument_at_o1() {
 #[test]
 fn cvp_does_not_bound_a_struct_field_at_o0() {
     let scratch = tempfile::tempdir().unwrap();
-    let facts = extract_source(
-        &scratch,
-        "static int add(int a,int b){return a+b;}\n\
-         static int sub(int a,int b){return a-b;}\n\
-         struct ops { int (*op)(int,int); };\n\
-         int run(int x){ struct ops o; o.op = x ? add : sub; return o.op(1,2); }\n",
-    );
+    let facts = extract_source(&scratch, STRUCT_FIELD);
     assert_unresolved_indirect_site(
         &facts,
         "-O0 leaves the field in an alloca CVP cannot follow",
@@ -942,34 +913,21 @@ fn cvp_does_not_bound_a_struct_field_at_o0() {
 #[test]
 fn cvp_bounds_the_same_struct_field_at_o1() {
     let scratch = tempfile::tempdir().unwrap();
-    let facts = extract_source_with_flags(
-        &scratch,
-        "static int add(int a,int b){return a+b;}\n\
-         static int sub(int a,int b){return a-b;}\n\
-         struct ops { int (*op)(int,int); };\n\
-         int run(int x){ struct ops o; o.op = x ? add : sub; return o.op(1,2); }\n",
-        &["-g", "-O1"],
+    let facts = extract_source_with_flags(&scratch, STRUCT_FIELD, &["-g", "-O1"]);
+    assert_eq!(
+        bound_symbols(&facts, "SROA promotes the field to SSA at -O1"),
+        ["add", "sub"]
     );
-    let mut names: Vec<_> = indirect_bound(&facts)
-        .expect("SROA promotes the field to SSA at -O1")
-        .iter()
-        .map(|f| f.symbol.clone())
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["add", "sub"]);
 }
 
 #[test]
 fn cvp_bounds_a_four_candidate_set() {
     let scratch = tempfile::tempdir().unwrap();
     let facts = extract_source(&scratch, &switch_dispatch_source(4));
-    let mut names: Vec<_> = indirect_bound(&facts)
-        .expect("four candidates is within CVP's default limit")
-        .iter()
-        .map(|f| f.symbol.clone())
-        .collect();
-    names.sort();
-    assert_eq!(names, vec!["f1", "f2", "f3", "f4"]);
+    assert_eq!(
+        bound_symbols(&facts, "four candidates is within CVP's default limit"),
+        ["f1", "f2", "f3", "f4"]
+    );
 }
 
 #[test]
@@ -1083,17 +1041,7 @@ fn extract_source_with_flags(
 /// Compiles the `t.c` already written into `scratch`, so a fixture can put a
 /// header beside it first.
 fn compile_and_extract(scratch: &tempfile::TempDir, flags: &[&str]) -> rllvm::query::ModuleFacts {
-    let path = scratch.path().join("t.c");
-    let module = scratch.path().join("t.bc");
-    let status = std::process::Command::new(llvm_bin("clang"))
-        .args(flags)
-        .args(["-emit-llvm", "-c"])
-        .arg(&path)
-        .arg("-o")
-        .arg(&module)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    let module = compile_bitcode_file(&scratch.path().join("t.c"), flags);
     let loaded = rllvm::query::load::LoadedModule {
         id: "t".into(),
         bytes: std::fs::read(&module).unwrap(),
@@ -1330,6 +1278,12 @@ mod mcp {
         );
     }
 
+    /// One tool over the wire. That every one of the nine is listed under a
+    /// name `query_from_call` resolves is `mcp.rs`'s own
+    /// `every_query_variant_is_listed_and_resolves_through_a_call`, which
+    /// checks it against a match the compiler forces to stay exhaustive --
+    /// driving the same nine through a subprocess here proves nothing extra
+    /// about the transport this test already covers.
     #[test]
     fn a_modern_tool_call_returns_a_call_tool_result() {
         let response = mcp_exchange(&modern_request(
@@ -1340,67 +1294,6 @@ mod mcp {
         assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(response["result"]["isError"], false);
         assert!(response["result"]["content"].as_array().is_some());
-    }
-
-    #[test]
-    fn every_listed_tool_resolves_through_a_call() {
-        // `tool_for`'s "name" literals (what `tools/list` reports) and
-        // `query_from_call`'s match arms (what `tools/call` actually
-        // recognizes) are two independent lists in `mcp.rs`: nothing forces
-        // them to agree. Renaming one and not the other compiles cleanly and
-        // makes that tool permanently uncallable -- every invocation would
-        // return `isError: true, unknown tool`. This drives every name
-        // `tools/list` reports through `tools/call` with a valid argument
-        // object, which also exercises the argument plumbing for the eight
-        // tools the other `tools/call` test (`externals`, no arguments)
-        // does not.
-        let scratch = tempfile::tempdir().unwrap();
-        let catalog = empty_catalog(&scratch);
-
-        let list = mcp_exchange_in(
-            &scratch,
-            &catalog,
-            &modern_request("list-tools", "tools/list", serde_json::json!({})),
-        );
-        let tools = list["result"]["tools"].as_array().unwrap();
-        assert!(tools.len() >= 9);
-
-        let sample_arguments: std::collections::HashMap<&str, serde_json::Value> = [
-            ("defs", serde_json::json!({ "name": "f" })),
-            ("at", serde_json::json!({ "file": "t.c", "line": 1 })),
-            ("callers", serde_json::json!({ "name": "f" })),
-            ("callees", serde_json::json!({ "name": "f" })),
-            ("uses", serde_json::json!({ "name": "f" })),
-            ("reach", serde_json::json!({ "from": "a", "to": "b" })),
-            (
-                "closure",
-                serde_json::json!({ "name": "f", "direction": "in" }),
-            ),
-            ("externals", serde_json::json!({})),
-            ("indirect_targets", serde_json::json!({ "at": "t.c:4" })),
-        ]
-        .into_iter()
-        .collect();
-
-        for tool in tools {
-            let name = tool["name"].as_str().unwrap();
-            let arguments = sample_arguments
-                .get(name)
-                .unwrap_or_else(|| panic!("no sample arguments for listed tool `{name}`"));
-            let response = mcp_exchange_in(
-                &scratch,
-                &catalog,
-                &modern_request(
-                    "call",
-                    "tools/call",
-                    serde_json::json!({ "name": name, "arguments": arguments }),
-                ),
-            );
-            assert_eq!(
-                response["result"]["isError"], false,
-                "tool `{name}` did not resolve through query_from_call: {response:?}"
-            );
-        }
     }
 
     #[test]

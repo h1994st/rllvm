@@ -88,54 +88,24 @@ pub fn bind(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use super::*;
+    use crate::query::testing::function;
 
-    /// Helper to construct a function definition with the given module, symbol,
-    /// and linkage.
-    fn definition(module_id: &str, symbol: &str, linkage: Linkage) -> FunctionFact {
-        FunctionFact {
-            id: FunctionId {
-                module_id: module_id.to_string(),
-                symbol: symbol.to_string(),
-            },
-            is_definition: true,
-            linkage,
-            signature: "void()".to_string(),
-            location: None,
-            mapped_lines: BTreeSet::new(),
-        }
-    }
-
-    /// Helper to construct a function declaration with the given module and
-    /// symbol.
-    fn declaration(module_id: &str, symbol: &str) -> FunctionFact {
-        FunctionFact {
-            id: FunctionId {
-                module_id: module_id.to_string(),
-                symbol: symbol.to_string(),
-            },
-            is_definition: false,
-            linkage: Linkage::External,
-            signature: "void()".to_string(),
-            location: None,
-            mapped_lines: BTreeSet::new(),
-        }
+    /// A declaration of `symbol` in `module`, as the shared builder spells it.
+    fn declaration(module: &str, symbol: &str) -> FunctionFact {
+        function(module, symbol, false, Linkage::External)
     }
 
     #[test]
     fn one_external_definition_binds_uniquely() {
         let functions = vec![
-            definition("a", "parse", Linkage::External),
+            function("a", "parse", true, Linkage::External),
             declaration("b", "parse"),
         ];
         let bindings = bind(&functions, &Default::default());
         assert_eq!(bindings.len(), 1, "should have exactly one binding");
         let binding = &bindings[0];
         assert_eq!(binding.status, BindingStatus::Unique);
-        assert_eq!(binding.candidates.len(), 1);
-        // Verify the candidate's function identity
         assert_eq!(
             binding.candidates[0].function,
             FunctionId {
@@ -144,7 +114,6 @@ mod tests {
             },
             "candidate must be the definition from module a"
         );
-        // Verify declared_in identifies the declaring module
         assert_eq!(
             binding.declared_in,
             vec!["b"],
@@ -155,58 +124,50 @@ mod tests {
     #[test]
     fn two_definitions_under_different_configurations_are_ambiguous() {
         let functions = vec![
-            definition("a", "parse", Linkage::External),
-            definition("b", "parse", Linkage::External),
+            function("a", "parse", true, Linkage::External),
+            function("b", "parse", true, Linkage::External),
             declaration("c", "parse"),
         ];
-        let mut configurations = HashMap::new();
-        configurations.insert("a".to_string(), Some("debug".to_string()));
-        configurations.insert("b".to_string(), Some("release".to_string()));
+        let configurations = HashMap::from([
+            ("a".to_string(), Some("debug".to_string())),
+            ("b".to_string(), Some("release".to_string())),
+        ]);
         let bindings = bind(&functions, &configurations);
         assert_eq!(bindings.len(), 1, "should have exactly one binding");
         let binding = &bindings[0];
         assert_eq!(binding.status, BindingStatus::Ambiguous);
-        assert_eq!(binding.candidates.len(), 2, "should have both candidates");
-        // Verify the pairing: module a must have config "debug"
-        let candidate_a = binding
-            .candidates
-            .iter()
-            .find(|c| c.function.module_id == "a")
-            .expect("candidate from module a must exist");
-        assert_eq!(
-            candidate_a.configuration_id,
-            Some("debug".to_string()),
-            "module a must be paired with config debug"
-        );
-        // Verify the pairing: module b must have config "release"
-        let candidate_b = binding
-            .candidates
-            .iter()
-            .find(|c| c.function.module_id == "b")
-            .expect("candidate from module b must exist");
-        assert_eq!(
-            candidate_b.configuration_id,
-            Some("release".to_string()),
-            "module b must be paired with config release"
-        );
+
+        // Each candidate must keep its own module's configuration: swapping
+        // the two would still give two candidates and the right status.
+        for (module, configuration) in [("a", "debug"), ("b", "release")] {
+            let candidate = binding
+                .candidates
+                .iter()
+                .find(|c| c.function.module_id == module)
+                .unwrap_or_else(|| panic!("candidate from module {module} must exist"));
+            assert_eq!(
+                candidate.configuration_id,
+                Some(configuration.to_string()),
+                "module {module} must be paired with config {configuration}"
+            );
+        }
     }
 
     #[test]
     fn internal_linkage_never_binds_across_modules() {
         let functions = vec![
-            definition("a", "helper", Linkage::Internal),
+            function("a", "helper", true, Linkage::Internal),
             declaration("b", "helper"),
         ];
         let bindings = bind(&functions, &Default::default());
         assert_eq!(bindings.len(), 1, "should have exactly one binding");
-        let binding = &bindings[0];
         assert_eq!(
-            binding.status,
+            bindings[0].status,
             BindingStatus::Unbound,
             "a static definition cannot satisfy another module's declaration"
         );
         assert_eq!(
-            binding.candidates.len(),
+            bindings[0].candidates.len(),
             0,
             "internal linkage definition must not appear as a candidate"
         );
@@ -215,11 +176,10 @@ mod tests {
     #[test]
     fn defined_symbol_with_no_declarations_produces_no_binding() {
         let functions = vec![
-            definition("a", "helper", Linkage::External),
+            function("a", "helper", true, Linkage::External),
             declaration("b", "other"),
         ];
         let bindings = bind(&functions, &Default::default());
-        // Only "other" should have a binding, not "helper"
         assert_eq!(
             bindings.len(),
             1,
@@ -227,12 +187,7 @@ mod tests {
         );
         assert_eq!(
             bindings[0].symbol, "other",
-            "binding must be for the declared symbol"
-        );
-        // Verify no binding exists for the unreferenced definition
-        assert!(
-            bindings.iter().all(|b| b.symbol != "helper"),
-            "unreferenced definition must produce no binding"
+            "an unreferenced definition must produce no binding"
         );
     }
 }

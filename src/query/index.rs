@@ -498,9 +498,10 @@ mod tests {
     }
 
     /// Two modules declare one ambiguous symbol, so the walk reaches the
-    /// same binding twice. It is one ambiguous symbol, and the frontier must
-    /// say so once: pushing per declaration reports one problem as several,
-    /// and every count downstream inherits the inflation.
+    /// same binding twice. It must not invent a path through the ambiguity,
+    /// and the frontier must report one symbol once: pushing per declaration
+    /// reports one problem as several, and every count downstream inherits
+    /// the inflation.
     #[test]
     fn one_ambiguous_symbol_reached_twice_is_reported_once() {
         let session = session_with_ambiguous_bindings();
@@ -518,18 +519,11 @@ mod tests {
             2,
             "the one entry still names both declaring modules"
         );
-    }
-
-    #[test]
-    fn reach_stops_at_an_ambiguous_binding_and_reports_candidates() {
-        let session = session_with_ambiguous_binding();
-        let result = session.reach("caller", "target");
-        assert!(
-            result.path.is_none(),
-            "must not invent a path through an ambiguous link"
+        assert_eq!(
+            result.frontier[0].candidates.len(),
+            2,
+            "the walk reports the candidates it refused to choose between"
         );
-        assert_eq!(result.frontier.len(), 1);
-        assert_eq!(result.frontier[0].candidates.len(), 2);
     }
 
     #[test]
@@ -601,9 +595,7 @@ mod tests {
 
     #[test]
     fn functions_at_finds_only_the_mapped_line() {
-        let mut only = function("m", "only", true, Linkage::Internal);
-        only.mapped_lines = [(PathBuf::from("t.c"), 2)].into_iter().collect();
-        let session = Session::new(facts(vec![only], Vec::new()), Vec::new());
+        let session = session_from_source_lines(&[("t.c", 2)]);
 
         let found = session.functions_at(Path::new("t.c"), 2);
         assert_eq!(found.len(), 1);

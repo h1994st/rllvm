@@ -548,14 +548,6 @@ fn address_taken_inventory(session: &Session) -> Vec<FunctionId> {
     inventory
 }
 
-/// Splits a `file:line` location on its last colon, so a path containing a
-/// colon earlier does not shift the parse.
-///
-/// A location that does not parse is an error, not an empty answer.
-/// `indirect-targets` exists to surface what cannot be resolved, so a typo
-/// that answered `results: []` would be byte-identical to a valid line with
-/// no indirect calls -- and over MCP an agent client would have no way to
-/// tell the two apart.
 impl Query {
     /// Check the arguments that can be rejected without reading any bitcode.
     ///
@@ -571,6 +563,14 @@ impl Query {
     }
 }
 
+/// Splits a `file:line` location on its last colon, so a path containing a
+/// colon earlier does not shift the parse.
+///
+/// A location that does not parse is an error, not an empty answer.
+/// `indirect-targets` exists to surface what cannot be resolved, so a typo
+/// that answered `results: []` would be byte-identical to a valid line with
+/// no indirect calls -- and over MCP an agent client would have no way to
+/// tell the two apart.
 fn parse_location(at: &str) -> Result<(PathBuf, u32), Error> {
     let invalid = || {
         Error::InvalidArguments(format!(
@@ -682,10 +682,8 @@ mod tests {
     fn a_module_is_analyzed_only_after_it_parses() {
         // The loader marks Verified; only extraction may promote to Analyzed.
         let scratch = tempfile::tempdir().unwrap();
-        let (catalog_path, module_path) = write_catalog_with_one_module(&scratch);
-        let loaded = load_catalog(&catalog_path).unwrap();
+        let loaded = load_catalog(&write_catalog_with_one_module(&scratch)).unwrap();
         assert_eq!(loaded.reports[0].status, ModuleAnalysis::Verified);
-        let _ = module_path;
     }
 
     #[test]
@@ -943,7 +941,7 @@ mod tests {
     /// bitcode: `load_catalog` only verifies bytes against the recorded
     /// hash and never parses, so arbitrary content with a matching hash is
     /// enough to exercise the Verified status this test pins.
-    fn write_catalog_with_one_module(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+    fn write_catalog_with_one_module(scratch: &tempfile::TempDir) -> PathBuf {
         let module_path = scratch.path().join("m.bc");
         let bytes = b"not real bitcode, only its hash matters here";
         std::fs::write(&module_path, bytes).unwrap();
@@ -964,6 +962,6 @@ mod tests {
         );
         let catalog_path = scratch.path().join("catalog.json");
         write_catalog(&catalog_path, &catalog).unwrap();
-        (catalog_path, module_path)
+        catalog_path
     }
 }

@@ -56,6 +56,68 @@ pub(crate) fn direct_call(
     }
 }
 
+/// An indirect call site in `caller`: `llvm_target_bound` is what CVP
+/// managed to bound it to, or `None` for a site it could not bound.
+pub(crate) fn indirect_call(
+    caller: &FunctionFact,
+    index: u32,
+    location: Option<SourceLocation>,
+    llvm_target_bound: Option<Vec<FunctionId>>,
+) -> CallSiteFact {
+    CallSiteFact {
+        id: CallSiteId {
+            function: caller.id.clone(),
+            block_index: 0,
+            instruction_index: index,
+        },
+        location,
+        target: CallTarget::Indirect {
+            signature: "i32 (i32, i32)".into(),
+            llvm_target_bound,
+        },
+    }
+}
+
+/// A module report with only its id and status set; fixtures override the
+/// one or two other fields they actually pin.
+pub(crate) fn report(id: &str, status: ModuleAnalysis) -> ModuleReport {
+    ModuleReport {
+        id: id.into(),
+        status,
+        ir_stage: None,
+        debug_info: None,
+        compiler: None,
+        configuration_id: None,
+        content_sha256: None,
+        target_triple: None,
+        diagnostic: None,
+    }
+}
+
+/// An ambiguous binding for `symbol`, declared in `declared_in` and defined
+/// once per `(module, configuration)` candidate.
+pub(crate) fn ambiguous_binding(
+    symbol: &str,
+    declared_in: &[&str],
+    candidates: &[(&str, Option<&str>)],
+) -> SymbolBinding {
+    SymbolBinding {
+        symbol: symbol.into(),
+        declared_in: declared_in.iter().map(|id| (*id).to_string()).collect(),
+        candidates: candidates
+            .iter()
+            .map(|(module, configuration)| BindingCandidate {
+                function: FunctionId {
+                    module_id: (*module).into(),
+                    symbol: symbol.into(),
+                },
+                configuration_id: configuration.map(str::to_string),
+            })
+            .collect(),
+        status: BindingStatus::Ambiguous,
+    }
+}
+
 pub(crate) fn facts(functions: Vec<FunctionFact>, call_sites: Vec<CallSiteFact>) -> ProgramFacts {
     ProgramFacts {
         functions,
@@ -108,46 +170,8 @@ pub(crate) fn session_with_bounded_indirect() -> Session {
     let a = function("m", "a", true, Linkage::Internal);
     let target = function("m", "target", true, Linkage::Internal);
     let other = function("m", "other", true, Linkage::Internal);
-    let site = CallSiteFact {
-        id: CallSiteId {
-            function: a.id.clone(),
-            block_index: 0,
-            instruction_index: 0,
-        },
-        location: None,
-        target: CallTarget::Indirect {
-            signature: "i32 (i32, i32)".into(),
-            llvm_target_bound: Some(vec![target.id.clone(), other.id.clone()]),
-        },
-    };
+    let site = indirect_call(&a, 0, None, Some(vec![target.id.clone(), other.id.clone()]));
     Session::new(facts(vec![a, target, other], vec![site]), Vec::new())
-}
-
-/// `caller` calls a symbol two modules define under different configurations.
-pub(crate) fn session_with_ambiguous_binding() -> Session {
-    let caller = function("c", "caller", true, Linkage::External);
-    let declaration = function("c", "target", false, Linkage::External);
-    let first = function("a", "target", true, Linkage::External);
-    let second = function("b", "target", true, Linkage::External);
-    let call = direct_call(&caller, &declaration, 0);
-    let functions = vec![caller, declaration, first.clone(), second.clone()];
-
-    let binding = SymbolBinding {
-        symbol: "target".into(),
-        declared_in: vec!["c".into()],
-        candidates: vec![
-            BindingCandidate {
-                function: first.id,
-                configuration_id: Some("debug".into()),
-            },
-            BindingCandidate {
-                function: second.id,
-                configuration_id: Some("release".into()),
-            },
-        ],
-        status: BindingStatus::Ambiguous,
-    };
-    Session::new(facts(functions, vec![call]), vec![binding])
 }
 
 /// `a` calls `b`; `b` reaches `c` only through an indirect call CVP could not
@@ -157,18 +181,7 @@ pub(crate) fn session_with_indirect_gap() -> Session {
     let b = function("m", "b", true, Linkage::Internal);
     let c = function("m", "c", true, Linkage::Internal);
     let call = direct_call(&a, &b, 0);
-    let indirect = CallSiteFact {
-        id: CallSiteId {
-            function: b.id.clone(),
-            block_index: 0,
-            instruction_index: 1,
-        },
-        location: None,
-        target: CallTarget::Indirect {
-            signature: "i32 (i32, i32)".into(),
-            llvm_target_bound: None,
-        },
-    };
+    let indirect = indirect_call(&b, 1, None, None);
     Session::new(facts(vec![a, b, c], vec![call, indirect]), Vec::new())
 }
 
@@ -178,13 +191,10 @@ pub(crate) fn session_with_address_taken_function() -> Session {
     let caller = function("m", "caller", true, Linkage::Internal);
     let mut base = facts(
         vec![add.clone(), caller.clone()],
-        vec![CallSiteFact {
-            id: CallSiteId {
-                function: caller.id.clone(),
-                block_index: 0,
-                instruction_index: 0,
-            },
-            location: Some(SourceLocation {
+        vec![indirect_call(
+            &caller,
+            0,
+            Some(SourceLocation {
                 file: "t.c".into(),
                 directory: None,
                 line: 4,
@@ -192,11 +202,8 @@ pub(crate) fn session_with_address_taken_function() -> Session {
                 source_status: SourceStatus::Unknown,
                 inlined_at: Vec::new(),
             }),
-            target: CallTarget::Indirect {
-                signature: "i32 (i32, i32)".into(),
-                llvm_target_bound: None,
-            },
-        }],
+            None,
+        )],
     );
     base.uses = vec![UseFact {
         used: add.id,
@@ -216,26 +223,12 @@ pub(crate) fn facts_with_one_failed_module() -> ProgramFacts {
     base.scope.selected_entries = 2;
     base.modules = vec![
         ModuleReport {
-            id: "a".into(),
-            status: ModuleAnalysis::Analyzed,
-            ir_stage: None,
             debug_info: Some(true),
-            compiler: None,
-            configuration_id: None,
-            content_sha256: None,
-            target_triple: None,
-            diagnostic: None,
+            ..report("a", ModuleAnalysis::Analyzed)
         },
         ModuleReport {
-            id: "b".into(),
-            status: ModuleAnalysis::Failed,
-            ir_stage: None,
-            debug_info: None,
-            compiler: None,
-            configuration_id: None,
-            content_sha256: None,
-            target_triple: None,
             diagnostic: Some("truncated".into()),
+            ..report("b", ModuleAnalysis::Failed)
         },
     ];
     base
@@ -269,47 +262,15 @@ pub(crate) fn session_with_ambiguous_bindings() -> Session {
         functions.push(caller);
         functions.push(declaration);
     }
-    let first = function("a", "target", true, Linkage::External);
-    let second = function("b", "target", true, Linkage::External);
-    functions.push(first.clone());
-    functions.push(second.clone());
+    functions.push(function("a", "target", true, Linkage::External));
+    functions.push(function("b", "target", true, Linkage::External));
 
-    let target = SymbolBinding {
-        symbol: "target".into(),
-        declared_in: vec!["c1".into(), "c2".into()],
-        candidates: vec![
-            BindingCandidate {
-                function: first.id,
-                configuration_id: Some("debug".into()),
-            },
-            BindingCandidate {
-                function: second.id,
-                configuration_id: Some("release".into()),
-            },
-        ],
-        status: BindingStatus::Ambiguous,
-    };
-    let unused = SymbolBinding {
-        symbol: "unused".into(),
-        declared_in: vec!["z".into()],
-        candidates: vec![
-            BindingCandidate {
-                function: FunctionId {
-                    module_id: "a".into(),
-                    symbol: "unused".into(),
-                },
-                configuration_id: None,
-            },
-            BindingCandidate {
-                function: FunctionId {
-                    module_id: "b".into(),
-                    symbol: "unused".into(),
-                },
-                configuration_id: None,
-            },
-        ],
-        status: BindingStatus::Ambiguous,
-    };
+    let target = ambiguous_binding(
+        "target",
+        &["c1", "c2"],
+        &[("a", Some("debug")), ("b", Some("release"))],
+    );
+    let unused = ambiguous_binding("unused", &["z"], &[("a", None), ("b", None)]);
     Session::new(facts(functions, call_sites), vec![target, unused])
 }
 
@@ -319,16 +280,6 @@ pub(crate) fn facts_with_one_verified_module() -> ProgramFacts {
     let mut base = facts(vec![], vec![]);
     base.scope.total_entries = 1;
     base.scope.selected_entries = 1;
-    base.modules = vec![ModuleReport {
-        id: "v".into(),
-        status: ModuleAnalysis::Verified,
-        ir_stage: None,
-        debug_info: None,
-        compiler: None,
-        configuration_id: None,
-        content_sha256: None,
-        target_triple: None,
-        diagnostic: None,
-    }];
+    base.modules = vec![report("v", ModuleAnalysis::Verified)];
     base
 }

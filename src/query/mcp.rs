@@ -290,6 +290,26 @@ query_tool_surface! {
     Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
 }
 
+/// The `name` argument four of the nine tools take, identically. Spelled
+/// once: four copies of one schema drift apart, and a client reads the
+/// drifted one as a real difference between the tools.
+fn symbol_property() -> Value {
+    json!({ "type": "string", "description": "Symbol to look up" })
+}
+
+/// A tool whose only argument is that symbol name.
+fn symbol_tool(name: &str, description: &str) -> Value {
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": {
+            "type": "object",
+            "properties": { "name": symbol_property() },
+            "required": ["name"]
+        }
+    })
+}
+
 /// The MCP tool definition for one `Query` variant: name, description, and
 /// JSON input schema. Exhaustive over `Query` with no wildcard arm, and the
 /// name is taken from `tool_name_of` so the listing and the name a client
@@ -297,17 +317,10 @@ query_tool_surface! {
 fn tool_for(query: &Query) -> Value {
     let name = tool_name_of(query);
     match query {
-        Query::Defs { .. } => json!({
-            "name": name,
-            "description": "Every definition of the symbol, with module and configuration.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Symbol to look up" }
-                },
-                "required": ["name"]
-            }
-        }),
+        Query::Defs { .. } => symbol_tool(
+            name,
+            "Every definition of the symbol, with module and configuration.",
+        ),
         Query::At { .. } => json!({
             "name": name,
             "description": "Functions with at least one instruction mapped to file:line, and the call sites recorded there.",
@@ -320,39 +333,18 @@ fn tool_for(query: &Query) -> Value {
                 "required": ["file", "line"]
             }
         }),
-        Query::Callers { .. } => json!({
-            "name": name,
-            "description": "Functions containing a call to the target, each with its call sites.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Symbol to look up" }
-                },
-                "required": ["name"]
-            }
-        }),
-        Query::Callees { .. } => json!({
-            "name": name,
-            "description": "Outgoing call sites of the target, classified. Includes unresolved indirect sites.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Symbol to look up" }
-                },
-                "required": ["name"]
-            }
-        }),
-        Query::Uses { .. } => json!({
-            "name": name,
-            "description": "Non-call uses: how and where the function's address is taken.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "Symbol to look up" }
-                },
-                "required": ["name"]
-            }
-        }),
+        Query::Callers { .. } => symbol_tool(
+            name,
+            "Functions containing a call to the target, each with its call sites.",
+        ),
+        Query::Callees { .. } => symbol_tool(
+            name,
+            "Outgoing call sites of the target, classified. Includes unresolved indirect sites.",
+        ),
+        Query::Uses { .. } => symbol_tool(
+            name,
+            "Non-call uses: how and where the function's address is taken.",
+        ),
         Query::Reach { .. } => json!({
             "name": name,
             "description": "One supporting path from `from` to `to`, or its explicit absence.",
@@ -371,7 +363,7 @@ fn tool_for(query: &Query) -> Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "description": "Symbol to look up" },
+                    "name": symbol_property(),
                     "direction": {
                         "type": "string",
                         "enum": ["in", "out"],
