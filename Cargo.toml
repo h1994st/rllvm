@@ -20,6 +20,12 @@ readme = "README.md"
 repository = "https://github.com/h1994st/rllvm"
 version = "0.5.0"
 
+[features]
+# Links LLVM via llvm-sys for source-level queries over captured bitcode.
+# Kept as the crate's only feature: mutually exclusive LLVM features would
+# break `cargo llvm-cov --all-features` in CI.
+query = ["dep:llvm-sys", "llvm-sys/force-static"]
+
 [dependencies]
 clap = {version = "~4.5.48", features = ["derive"]}
 clap_complete = "~4.5"
@@ -37,6 +43,9 @@ which = "~8.0.0"
 tempfile = "~3"
 serde_json = "1.0"
 sha2 = "0.10"
+# Optional: only pulled in by the `query` feature. Needs LLVM_SYS_231_PREFIX
+# pointing at an LLVM 23 install when llvm-config is not on PATH.
+llvm-sys = { version = "231", optional = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 glob = "~0.3.3"
@@ -73,12 +82,24 @@ path = "src/bin/rllvm_info.rs"
 name = "rllvm-compdb"
 path = "src/bin/rllvm_compdb.rs"
 
+[[bin]]
+name = "rllvm-query"
+path = "src/bin/rllvm_query.rs"
+required-features = ["query"]
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "rllvm_benchmarks"
 harness = false
+
+# Without this the test target compiles by default, and its `rllvm::query`
+# imports break `cargo test` for anyone not building the `query` feature.
+[[test]]
+name = "query"
+path = "tests/query.rs"
+required-features = ["query"]
 
 [profile.bench]
 debug = true

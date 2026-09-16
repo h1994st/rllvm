@@ -341,6 +341,118 @@ pub struct CompletionArgs {
     pub bin: BinName,
 }
 
+/// Arguments for `rllvm-query`.
+///
+/// The subcommand is optional so `rllvm-query --llvm-version` keeps working
+/// with no query requested.
+#[derive(Debug, Parser)]
+#[command(name = "rllvm-query", about = "Query captured bitcode at source level")]
+pub struct QueryArgs {
+    /// Print the LLVM version this binary links and exit
+    #[arg(long = "llvm-version")]
+    pub llvm_version: bool,
+
+    /// Catalog JSON to query, e.g. from `rllvm-get-bc` or `rllvm-compdb generate`
+    #[arg(long)]
+    pub catalog: Option<PathBuf>,
+
+    /// Include the heuristic address-taken inventory in `indirect-targets` answers
+    ///
+    /// Global so it may trail its subcommand -- `indirect-targets t.c:8
+    /// --heuristics` -- which is how the README writes it and the only
+    /// placement that reads naturally for a flag that modifies one query.
+    #[arg(long, global = true)]
+    pub heuristics: bool,
+
+    #[command(subcommand)]
+    pub command: Option<QueryCommand>,
+}
+
+/// Direction for the `closure` query.
+///
+/// Mirrors `query::Direction` field-for-field, but is not that type: `cli.rs`
+/// builds without the `query` feature, under which `query::Direction` does
+/// not exist. The binary converts between the two.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum ClosureDirection {
+    /// Functions that reach the named function.
+    In,
+    /// Functions the named function reaches.
+    Out,
+}
+
+/// The nine source-level queries `rllvm-query` answers, plus `Mcp` to serve
+/// them over MCP stdio instead of running one and exiting.
+///
+/// The nine query variants mirror `query::Query` field-for-field, for the
+/// same reason [`ClosureDirection`] mirrors `query::Direction`: this type
+/// must build without the `query` feature. The binary converts a parsed
+/// variant into a `query::Query` before running it; `Mcp` has no
+/// `query::Query` counterpart; it selects `query::mcp::serve` instead.
+///
+/// This mirror can drift: `to_query` in `rllvm_query.rs` is exhaustive over
+/// this type, so a variant added here without an arm there fails to compile,
+/// but a variant added to `query::Query` with no matching variant here
+/// compiles cleanly on its own. `rllvm_query.rs`'s tests close that gap with
+/// a reverse match, exhaustive over `query::Query`, so that drift also fails
+/// to compile.
+#[derive(clap::Subcommand, Debug)]
+#[command(rename_all = "kebab-case")]
+pub enum QueryCommand {
+    /// Every definition of the symbol, with module and configuration.
+    Defs {
+        /// Symbol to look up
+        name: String,
+    },
+    /// Functions with at least one instruction mapped to `file:line`, and
+    /// the call sites recorded there.
+    At {
+        /// Source file, as recorded in debug info
+        file: String,
+        /// One-based source line
+        line: u32,
+    },
+    /// Functions containing a call to the target, each with its call sites.
+    Callers {
+        /// Symbol to look up
+        name: String,
+    },
+    /// Outgoing call sites of the target, classified.
+    Callees {
+        /// Symbol to look up
+        name: String,
+    },
+    /// Non-call uses: how and where the function's address is taken.
+    Uses {
+        /// Symbol to look up
+        name: String,
+    },
+    /// One supporting path from `from` to `to`, or its explicit absence.
+    Reach {
+        /// Symbol to start from
+        from: String,
+        /// Symbol to reach
+        to: String,
+    },
+    /// The set that can reach the target, or that it can reach.
+    Closure {
+        /// Symbol to look up
+        name: String,
+        /// `in` for functions that reach it, `out` for functions it reaches
+        #[arg(value_enum)]
+        direction: ClosureDirection,
+    },
+    /// Unbound symbols: the captured program's boundary.
+    Externals,
+    /// `!callees` at a call site, when CVP produced it; otherwise unresolved.
+    IndirectTargets {
+        /// `file:line` location, e.g. `t.c:4`
+        at: String,
+    },
+    /// Serve the nine queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
+    Mcp,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -193,6 +193,15 @@ Test `rllvm-info` against real `llvm-dis` output as well as literal fixtures.
 Basic-block labels can have quoted names and trailing predecessor comments; the
 entry block can be implicit.
 
+### Queries
+
+`query/extract.rs` is the only module containing `unsafe`; no LLVM handle
+leaves it. `scope` is quoted from the catalog and never shrinks — what was
+actually read is reported under `analysis`. `!callees` is an upper bound, not
+a reachable set, and CVP propagates within one module only. The heuristic
+address-taken inventory is opt-in and contributes no graph edges. MCP stdout
+carries protocol frames only.
+
 ## Current limitations
 
 - Universal builds are unsupported.

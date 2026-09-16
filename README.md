@@ -276,6 +276,82 @@ users to `skip`. A `save-temps` link producing no merged module is an error.
 Universal (multiple `-arch`) builds and combined universal binaries are unsupported;
 build and extract one architecture at a time.
 
+## Querying captured bitcode
+
+Build with the optional `query` feature to ask nine source-level questions
+about captured bitcode, from the command line or over MCP. It links LLVM
+statically via `llvm-sys`:
+
+```bash
+cargo install rllvm --features query
+# When llvm-config is not on PATH, point at an LLVM 23 install:
+LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install rllvm --features query
+```
+
+On Ubuntu/Debian, also install `libpolly-N-dev` alongside `llvm-N-dev` and
+`libclang-N-dev`: `llvm-sys` links statically, and `llvm-config --libs` lists
+Polly even though rllvm does not use it.
+
+`--catalog` takes JSON from `rllvm-get-bc --output-dir` or `rllvm-compdb
+generate` (see Module catalogs and selection above):
+
+```bash
+rllvm-query --catalog catalog.json defs parse_frame            # every definition of the symbol
+rllvm-query --catalog catalog.json at parser.c 4               # functions/call sites mapped to a source line
+rllvm-query --catalog catalog.json callers parse_frame         # functions that call it
+rllvm-query --catalog catalog.json callees main                # its outgoing call sites
+rllvm-query --catalog catalog.json uses parse_frame            # non-call uses (address taken)
+rllvm-query --catalog catalog.json reach main parse_frame       # one path from `main` to `parse_frame`
+rllvm-query --catalog catalog.json closure parse_frame in       # functions that reach it (`out`: functions it reaches)
+rllvm-query --catalog catalog.json externals                   # symbols the captured program leaves unbound
+rllvm-query --catalog catalog.json indirect-targets parser.c:8 # the `!callees` bound at an indirect call site
+```
+
+Add `--heuristics` to include a heuristic address-taken inventory alongside
+`indirect-targets`. Every answer is one JSON envelope: `results`, the catalog
+`scope` it was computed over, an `analysis` of which modules actually parsed,
+and an `uncertainty` block naming indirect call sites, functions without debug
+locations, and ambiguous symbol bindings the answer could not see through.
+
+CLI subcommands are kebab-case (`indirect-targets`); MCP tool names are
+snake_case (`indirect_targets`), matching `Query`'s own serde tag. The two
+spellings coincide for every other query, which is one word either way.
+
+### MCP server
+
+```bash
+rllvm-query mcp
+```
+
+Serves the same nine queries as JSON-RPC 2.0 tools, newline-delimited over
+stdio, and answers both the modern and legacy MCP protocol revisions. Point a
+client at it:
+
+```json
+{
+  "mcpServers": {
+    "rllvm": {
+      "command": "rllvm-query",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The client chooses what to analyse, and several programs can be loaded at once:
+
+- `load_catalog` — read a catalog JSON and keep it queryable
+- `inventory` — inventory a captured binary, archive or `.bc` and load the result, with no catalog JSON on disk
+- `list_catalogs`, `unload_catalog`
+
+Both loaders answer with the catalog's `scope` and the `analysis` of what
+actually parsed, so a client sees that before its first question. Each catalog
+is analysed once and answers every query after it from memory. Queries take an
+optional `catalog` argument, needed only when more than one is loaded.
+
+`--catalog` still works and preloads one, for a client that always analyses the
+same program.
+
 ## Configuration
 
 The TOML file lives at `$RLLVM_CONFIG` or `~/.rllvm/config.toml`.
