@@ -556,6 +556,21 @@ fn address_taken_inventory(session: &Session) -> Vec<FunctionId> {
 /// that answered `results: []` would be byte-identical to a valid line with
 /// no indirect calls -- and over MCP an agent client would have no way to
 /// tell the two apart.
+impl Query {
+    /// Check the arguments that can be rejected without reading any bitcode.
+    ///
+    /// `open` loads and extracts every selected module, which for a real
+    /// program is the expensive part. A mistyped location is the one input
+    /// that can be known bad beforehand, so callers check it first and a typo
+    /// costs a diagnostic rather than a full analysis.
+    pub fn validate(&self) -> Result<(), Error> {
+        match self {
+            Query::IndirectTargets { at, .. } => parse_location(at).map(|_| ()),
+            _ => Ok(()),
+        }
+    }
+}
+
 fn parse_location(at: &str) -> Result<(PathBuf, u32), Error> {
     let invalid = || {
         Error::InvalidArguments(format!(
@@ -642,8 +657,14 @@ fn uncertainty_of(
         // Program-wide on every query, `reach` included: `frontier.len()`
         // would mean "reached by this walk" here and "program-wide"
         // everywhere else, and a `reach` frontier counts one symbol once
-        // however many declarations reached it.
-        ambiguous_bindings: ambiguous_bindings(session).len(),
+        // however many declarations reached it. Counted in place rather than
+        // through `ambiguous_bindings`, which clones each binding -- on a
+        // non-`reach` query that helper already ran once to build `frontier`.
+        ambiguous_bindings: session
+            .bindings()
+            .iter()
+            .filter(|binding| binding.status == BindingStatus::Ambiguous)
+            .count(),
         frontier,
         conditional_path_steps,
     }

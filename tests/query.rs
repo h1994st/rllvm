@@ -1151,7 +1151,7 @@ mod mcp {
     }
 
     /// An empty catalog: no modules to load or extract, just enough for
-    /// `build_session` to produce a `Session` the server can answer over. The
+    /// `query::open` to produce a `Session` the server can answer over. The
     /// MCP tests below only need a session to exist, not any particular
     /// program in it.
     fn empty_catalog(scratch: &tempfile::TempDir) -> PathBuf {
@@ -1489,3 +1489,26 @@ mod mcp {
         }
     }
 } // mod mcp
+
+#[test]
+fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
+    // `open` reads and extracts every selected module; a location that cannot
+    // parse is knowable beforehand. Point the command at a catalog path that
+    // does not exist: if validation ran first the error names the location,
+    // and if it ran after `open` the error would name the missing catalog.
+    let scratch = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .arg("--catalog")
+        .arg(scratch.path().join("absent-catalog.json"))
+        .args(["indirect-targets", "parser.c"])
+        .env("RLLVM_CONFIG", scratch.path().join("config.toml"))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("parser.c"),
+        "the location, not the catalog, must be reported: {stderr}"
+    );
+}

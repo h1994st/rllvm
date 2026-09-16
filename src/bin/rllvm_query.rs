@@ -62,12 +62,18 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         .with_writer(std::io::stderr)
         .init();
 
+    // `Mcp` names a mode, not a query: `to_query` returns `None` for it, and
+    // the session loaded below is handed to `serve` so the first `tools/call`
+    // pays no analysis cost. Building the query first also lets a mistyped
+    // location fail before `open` reads and extracts the whole catalog.
+    let query = to_query(command, args.heuristics);
+    if let Some(query) = &query {
+        query.validate()?;
+    }
+
     let session = open(&catalog)?;
 
-    // `Mcp` names a mode, not a query: `to_query` returns `None` for it, and
-    // the session already loaded above is handed to `serve` so the first
-    // `tools/call` pays no analysis cost.
-    let Some(query) = to_query(command, args.heuristics) else {
+    let Some(query) = query else {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
         return query::mcp::serve(&session, stdin.lock(), stdout.lock());
