@@ -433,16 +433,15 @@ unsafe fn build_location(
 }
 
 /// Only the linkages the facts distinguish. Everything else is `Other`
-/// rather than being forced into a neighbouring meaning.
+/// rather than being forced into a neighbouring meaning -- `extern_weak`
+/// included, which is a declaration and so says nothing about a definition.
 fn linkage_of(linkage: LLVMLinkage) -> Linkage {
     match linkage {
         LLVMLinkage::LLVMExternalLinkage => Linkage::External,
         LLVMLinkage::LLVMInternalLinkage | LLVMLinkage::LLVMPrivateLinkage => Linkage::Internal,
-        LLVMLinkage::LLVMWeakAnyLinkage
-        | LLVMLinkage::LLVMWeakODRLinkage
-        | LLVMLinkage::LLVMLinkOnceAnyLinkage
-        | LLVMLinkage::LLVMLinkOnceODRLinkage
-        | LLVMLinkage::LLVMExternalWeakLinkage => Linkage::Weak,
+        LLVMLinkage::LLVMWeakODRLinkage | LLVMLinkage::LLVMLinkOnceODRLinkage => Linkage::Odr,
+        LLVMLinkage::LLVMWeakAnyLinkage | LLVMLinkage::LLVMLinkOnceAnyLinkage => Linkage::Weak,
+        LLVMLinkage::LLVMAvailableExternallyLinkage => Linkage::AvailableExternally,
         _ => Linkage::Other,
     }
 }
