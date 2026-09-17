@@ -23,17 +23,39 @@ rllvm-get-bc hello       # writes hello.bc
 rllvm-info hello.bc      # target, function, block, instruction counts
 ```
 
-Use `rllvm-cxx` for C++. `rllvm-get-bc` also accepts objects and archives, and
-`-o out.bc` chooses the output path.
-
-Capture covers objects and archive members that carry rllvm metadata, so build
-every dependency you need through the wrappers. Linking a prebuilt native
-library does not capture its code.
-
 On first run, tool paths are detected from `llvm-config` and written to
 `~/.rllvm/config.toml`.
 
-## Build systems
+## How it works
+
+The wrappers run Clang normally and also emit bitcode. Each object gets a custom
+section recording its bitcode path. The linker concatenates those sections, so
+the finished binary carries a list of every module that went into it; extraction
+reads the paths back out and merges the modules.
+
+```text
+source.c → rllvm-cc → object + bitcode
+                         ↓
+                      linker → executable
+                                   ↓
+                              rllvm-get-bc → whole-program.bc
+```
+
+Rust captures bitcode per crate: linked crates carry paths through a marker
+object, library crates in archive members.
+
+This is why capture only covers what you build through the wrappers. Linking a
+prebuilt native library contributes no bitcode, so build every dependency you
+need for a whole-program view.
+
+## Capturing bitcode
+
+### Languages
+
+#### C, C++ and Objective-C
+
+`rllvm-cc` wraps `clang` and `rllvm-cxx` wraps `clang++`. Objective-C (`.m`) and
+Objective-C++ (`.mm`) sources go through the same two wrappers.
 
 ```bash
 # Autotools
@@ -43,19 +65,22 @@ rllvm-get-bc path/to/program
 # CMake
 CC=rllvm-cc CXX=rllvm-cxx cmake -S . -B build && cmake --build build
 rllvm-get-bc build/my_program
+```
 
-# Cargo
+Add `OBJC=rllvm-cc OBJCXX=rllvm-cxx` for Objective-C projects. CMake also
+accepts `-DCMAKE_TOOLCHAIN_FILE=path/to/rllvm/cmake/rllvm-toolchain.cmake`,
+which sets the C and C++ compilers; see the [CMake example](examples/cmake/).
+
+#### Rust
+
+```bash
 RUSTC_WRAPPER=rllvm-rustc cargo build
 rllvm-get-bc target/debug/my_program
 ```
 
-CMake also accepts
-`-DCMAKE_TOOLCHAIN_FILE=path/to/rllvm/cmake/rllvm-toolchain.cmake`; see the
-[CMake example](examples/cmake/).
-
-For Rust, wrapped dependency crates contribute modules when their archive
-members reach the link. You can also extract an `.rlib` directly, or invoke the
-wrapper without Cargo:
+Wrapped dependency crates contribute modules when their archive members reach
+the link. You can also extract an `.rlib` directly, or invoke the wrapper
+without Cargo:
 
 ```bash
 rllvm-get-bc 'target/debug/deps/libmylib-<hash>.rlib'
@@ -67,7 +92,7 @@ prebuilt dependencies — including the standard library — are not rebuilt. Yo
 LLVM readers must be compatible with the version `rustc -vV` reports. Use
 `RLLVM_LOG_LEVEL=3` for diagnostics under Cargo.
 
-## Wrapper options
+### Wrapper options
 
 Every compiler flag reaches the real compiler, including `-c`, `-v`, `--help`
 and `--version`. Wrapper options are long-only, prefixed `--rllvm-`, and go
@@ -88,53 +113,41 @@ rllvm-cc @compile.rsp
 Response files follow Clang's GNU UTF-8 syntax, including quoting and nested
 references. Large generated commands use them automatically.
 
-## Extraction
+### From a compilation database
+
+`rllvm-compdb` compiles selected entries from an existing
+`compile_commands.json`, so you can capture bitcode without rebuilding through
+the wrappers:
 
 ```bash
-rllvm-get-bc --merge-strategy archive libfoo.a  # writes libfoo.bca
-rllvm-get-bc --merge-strategy partial app       # merge by directory, then combine
-rllvm-get-bc -m app                             # also write app.bc.manifest
+rllvm-compdb list build/ > compilations.json
+rllvm-compdb generate build/ --source src/example.c --output-dir analysis/example
 ```
 
-The default links every module into one `.bc`; `-b` is shorthand for archive
-mode. Archive outputs are rewritten from the current modules, so removed members
-do not persist.
+`list` reports entry and configuration IDs without compiling. `generate` takes
+all entries by default; repeat `--source` or `--entry` to narrow, and combine
+them to intersect. Only direct `clang`/`clang++` drivers are supported, and the
+output directory must be new.
 
-**Relocating a build tree.** Recorded paths are absolute by default. Record them
-relative to a root instead, then supply that root's new location:
+These modules describe the **current source tree**, not membership in a real
+link. Use wrapper capture when participation in the actual build matters.
+
+### Caching
+
+Off by default. `RLLVM_CACHE=1` enables it, storing in `~/.rllvm/cache`:
 
 ```bash
-RLLVM_BITCODE_ROOT="$PWD/build" cmake --build build
-# after moving build/ to moved-build/:
-rllvm-get-bc --bitcode-root moved-build moved-build/my_program
+RLLVM_CACHE=1 cmake --build build
 ```
 
-**Caching.** Off by default; `RLLVM_CACHE=1` enables it, storing in
-`~/.rllvm/cache`. Native compilation still runs — a hit only skips the extra
-bitcode compilation, after checking preprocessed inputs, dependencies, compiler,
-command, directory and environment. Keep it off when side inputs that
-preprocessing cannot see, such as optimization profiles, change between builds.
+Native compilation still runs — a hit only skips the extra bitcode compilation,
+after checking preprocessed inputs, dependencies, compiler, command, directory
+and environment. Keep it off when side inputs that preprocessing cannot see,
+such as optimization profiles, change between builds.
 
-## Targets
+### Build modes and targets
 
-```bash
-rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry \
-  lib.o main.o -o app.wasm
-rllvm-get-bc app.wasm -o app.bc
-
-rllvm-cc --target=bpf -O2 -g -c prog.c -o prog.o
-rllvm-get-bc prog.o -o prog.bc
-```
-
-WebAssembly linking needs a matching `wasm-ld` from LLD; see the
-[WebAssembly example](examples/wasm/). eBPF works without special handling:
-libbpf skips rllvm's section on load and preserves it through linking. That
-linker requires BTF, so compile with `-g`.
-
-Universal (multiple `-arch`) builds are unsupported; build and extract one
-architecture at a time.
-
-## LTO
+#### LTO
 
 Select `lto_mode` in the config or `RLLVM_LTO_MODE`, and use the same mode when
 compiling and linking:
@@ -154,18 +167,50 @@ rllvm-get-bc hello -o hello.bc
 enough — and ThinLTO has no single merged module, so use `marker` for it.
 COFF and WebAssembly reject `marker` and direct you to `skip`.
 
-## Catalogs
+#### WebAssembly and eBPF
 
-A catalog is a JSON record of known modules and where they came from. Build one
-by inventorying an artifact, or by compiling selected entries from an existing
-`compile_commands.json` without rebuilding through the wrappers:
+```bash
+rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry \
+  lib.o main.o -o app.wasm
+rllvm-get-bc app.wasm -o app.bc
+
+rllvm-cc --target=bpf -O2 -g -c prog.c -o prog.o
+rllvm-get-bc prog.o -o prog.bc
+```
+
+WebAssembly linking needs a matching `wasm-ld` from LLD; see the
+[WebAssembly example](examples/wasm/). eBPF works without special handling:
+libbpf skips rllvm's section on load and preserves it through linking. That
+linker requires BTF, so compile with `-g`.
+
+Universal (multiple `-arch`) builds are unsupported; build and extract one
+architecture at a time.
+
+## Extracting bitcode
+
+### Merge strategies
+
+```bash
+rllvm-get-bc app                                # one whole-program .bc
+rllvm-get-bc --merge-strategy archive libfoo.a  # writes libfoo.bca
+rllvm-get-bc --merge-strategy partial app       # merge by directory, then combine
+rllvm-get-bc -m app                             # also write app.bc.manifest
+```
+
+`rllvm-get-bc` accepts executables, objects and archives, and `-o` chooses the
+output path. The default links every module into one `.bc`; `-b` is shorthand
+for archive mode. Archive outputs are rewritten from the current modules, so
+removed members do not persist.
+
+### Catalogs
+
+A catalog is a JSON record of which modules were found and where they came from.
+Use one to select a subset, or to feed [queries](#analyzing-bitcode):
 
 ```bash
 rllvm-info app --json > catalog.json
 rllvm-get-bc app --module MODULE_ID --output-dir analysis/selected
-
-rllvm-compdb list build/ > compilations.json
-rllvm-compdb generate build/ --source src/example.c --output-dir analysis/example
+rllvm-get-bc analysis/selected/catalog.json -o selected.bc
 ```
 
 `--module`, `--source` and `--configuration` are repeatable: alternatives within
@@ -174,14 +219,28 @@ fails. `--output-dir` must be new, and copies hash-checked modules into it with
 relative paths so the directory can move.
 
 A catalog describes the evidence it collected and the scope it selected — not
-proven whole-program completeness. Modules from `rllvm-compdb` describe the
-**current source tree**, not membership in a real link. See the
-[format reference](docs/CATALOG.md).
+proven whole-program completeness. See the [format reference](docs/CATALOG.md).
 
-## Querying
+### Moving a build tree
+
+Recorded paths are absolute by default. Record them relative to a root instead,
+then supply that root's new location:
+
+```bash
+RLLVM_BITCODE_ROOT="$PWD/build" cmake --build build
+# after moving build/ to moved-build/:
+rllvm-get-bc --bitcode-root moved-build moved-build/my_program
+```
+
+The root must contain the bitcode files, including a central
+`bitcode_store_path` if you use one.
+
+## Analyzing bitcode
+
+### Queries
 
 The optional `query` feature answers source-level questions about captured
-bitcode, from the command line or over MCP. It links LLVM statically:
+bitcode. It links LLVM statically:
 
 ```bash
 cargo install rllvm --features query
@@ -271,23 +330,6 @@ and `-o` selects the file to write.
 | `log_level` | No | 0=error (default), 1=warn, 2=info, 3=debug, 4+=trace; `RLLVM_LOG_LEVEL` overrides |
 
 </details>
-
-## How it works
-
-C/C++ wrappers run Clang normally and also emit bitcode. Each object gets a
-custom section recording its bitcode path. The linker concatenates those
-sections; extraction reads the paths back out and merges the modules.
-
-```text
-source.c → rllvm-cc → object + bitcode
-                         ↓
-                      linker → executable
-                                   ↓
-                              rllvm-get-bc → whole-program.bc
-```
-
-Rust captures bitcode per crate: linked crates carry paths through a marker
-object, library crates in archive members.
 
 ## Benchmarks
 
