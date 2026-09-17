@@ -23,14 +23,41 @@ prefer what is already in `Cargo.toml`.
 Make the smallest coherent change that satisfies the request. Follow existing
 patterns. Keep unrelated refactoring separate.
 
+### Code
+
+- Library code returns `Result` using the `thiserror` enum in `error.rs`; avoid
+  exiting or panicking. Logging uses `tracing`.
+- `constants.rs` is internal. Public items in `utils/` are public API; use
+  `pub(crate)` for internal helpers.
+- Do not define constants or lookup tables inside functions; lift them to module
+  level.
+
+### Changes
+
 - Carry authorized work through the relevant checks and PR submission or update.
-  Stop at PR handoff unless asked to monitor CI or continue.
-- Do not request approval again for steps already authorized.
+  Stop at PR handoff unless asked to monitor CI or continue, and do not request
+  approval again for steps already authorized.
 - One PR per issue. Use [Conventional Branch](https://conventionalbranch.org/)
   names, and separate worktrees only for concurrent independent work. Order
   dependent work and make stacked PR bases explicit.
 - After a parent is squash-merged, rebase the dependent commits onto current
   `main` and then retarget. Retargeting alone leaves the parent's diff.
+- Commits and PR titles use Conventional Commits; keep commit bodies short, and
+  empty in most cases. Do not bump `version` by hand — releases derive from
+  commit types, and below 1.0 `feat:`/`fix:` bump the patch while `feat!:` bumps
+  the minor. See [RELEASING.md](RELEASING.md).
+
+### Writing
+
+- Issues and PRs state problem, cause, fix, verification — briefly, in plain
+  language, without conversational framing. Follow the templates.
+- `README.md` is the user-facing source of truth: keep it short and practical,
+  and put rationale in issues or the code, not there. `site/build.py` generates
+  `site/index.md`, which is never committed. Validate links and site generation
+  when changing the README.
+- `docs/` is gitignored except `docs/CATALOG.md`.
+- Use repository-relative paths. Keep committed benchmark evidence to compact
+  summaries; raw logs stay out of Git.
 
 ## Development and verification
 
@@ -174,27 +201,3 @@ MCP stdout carries protocol frames only.
 - Human-readable binary inspection uses the first recorded module; `--json`
   inventories all of them. Whole-program inspection uses extracted `.bc`.
 - Link mode performs repeated compilations (#51).
-
-## Conventions
-
-- Library code returns `Result` using the `thiserror` enum in `error.rs`; avoid
-  exiting or panicking. Logging uses `tracing`.
-- `constants.rs` is internal. Public items in `utils/` are public API; use
-  `pub(crate)` for internal helpers.
-- Do not define constants or lookup tables inside functions; lift them to module
-  level.
-- `docs/` is gitignored except `docs/CATALOG.md`.
-- `README.md` is the user-facing source of truth: keep it short and practical,
-  and put rationale in issues or the code, not there. `site/build.py` generates
-  `site/index.md`, which is never committed. Validate links and site generation
-  when changing the README.
-- Documentation, issues, and PRs use repository-relative paths. Keep committed
-  benchmark evidence to compact summaries; raw logs stay out of Git.
-
-Issues and PRs state problem, cause, fix, verification — briefly, in plain
-language, without conversational framing. Follow the templates.
-
-Commits and PR titles use Conventional Commits. Keep commit bodies short, and
-empty in most cases. Do not bump `version` by hand; releases derive from commit
-types, and below 1.0 `feat:`/`fix:` bump the patch while `feat!:` bumps the
-minor. See [RELEASING.md](RELEASING.md).
