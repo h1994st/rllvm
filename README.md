@@ -58,6 +58,11 @@ need for a whole-program view.
 Objective-C++ (`.mm`) sources go through the same two wrappers.
 
 ```bash
+rllvm-cc hello.m -o hello -framework Foundation
+rllvm-get-bc hello       # writes hello.bc
+```
+
+```bash
 # Autotools
 CC=rllvm-cc CXX=rllvm-cxx ./configure && make
 rllvm-get-bc path/to/program
@@ -69,7 +74,8 @@ rllvm-get-bc build/my_program
 
 Add `OBJC=rllvm-cc OBJCXX=rllvm-cxx` for Objective-C projects. CMake also
 accepts `-DCMAKE_TOOLCHAIN_FILE=path/to/rllvm/cmake/rllvm-toolchain.cmake`,
-which sets the C and C++ compilers; see the [CMake example](examples/cmake/).
+which sets all four compilers; see the [CMake](examples/cmake/) and
+[Objective-C](examples/objc/) examples.
 
 #### Rust
 
