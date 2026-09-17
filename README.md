@@ -333,6 +333,25 @@ Answers keep the mangled symbol as the identity, and add a `symbols` table
 mapping each one to its reading. A C program's answers have neither block's
 noise: its names are already readable.
 
+### Stale sources
+
+Each location carries a `source_status` — `current`, `modified`, `missing`, or
+`unknown` — and a `status_basis` saying what that was decided against:
+
+- `compiler` — the digest clang recorded in the module's debug info, so
+  `modified` means the source no longer matches the bitcode it was built from
+- `capture` — taken by `rllvm-compdb generate`, which ran the compiler itself
+- `inventory` — taken when the catalog was written, which is after the build,
+  so `current` proves only that nothing has changed since then
+
+Headers count. Editing a header that several modules include marks every
+location in it `modified`, which is the usual way one edit invalidates line
+numbers across a program.
+
+`unknown` means the digest could not be established — a module built with
+`-gdwarf-4`, which has no field for a checksum, and whose source was not
+readable at inventory. It never means "unchecked".
+
 CLI subcommands are kebab-case (`indirect-targets`); MCP tool names are
 snake_case (`indirect_targets`), matching `Query`'s own serde tag. The two
 spellings coincide for every other query, which is one word either way.

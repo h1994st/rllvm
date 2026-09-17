@@ -209,6 +209,15 @@ Names resolve mangled, then demangled, then as an identifier search, and the
 `demangle` refuses anything without the Itanium `_Z` marker rather than
 guessing.
 
+A source digest records when it was taken, and that decides what a match
+proves. `compiler` (clang's `!DIFile` checksum) and `capture` (rllvm hashing
+while it drives the compilation) are build-time, so `current` is a claim about
+the bitcode. `inventory` is taken after the build and is not: hashing at
+inventory would otherwise report `current` for a source edited between the
+build and the extraction. One file can be associated twice, from
+`source_filename` and from `!DIFile`; only the second carries a compiler
+digest, and the one that has a digest wins.
+
 ## Current limitations
 
 - Universal builds are unsupported.
