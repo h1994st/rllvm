@@ -1,34 +1,36 @@
 # Engineering Guidance
 
-## Scope and workflow
+## Scope
 
 `rllvm-cc`, `rllvm-cxx`, and `rllvm-rustc` capture LLVM bitcode alongside normal
-builds. `rllvm-get-bc` extracts it; `rllvm-info` inspects a module. Helpers:
+builds. `rllvm-get-bc` extracts it; `rllvm-info` inspects a module;
+`rllvm-compdb` generates modules from `compile_commands.json`;
+`rllvm-query` answers source-level questions about a catalog. Helpers:
 `rllvm-init` and `rllvm-completions`.
-
-`rllvm-compdb` generates selected bitcode modules from `compile_commands.json`.
 
 `rules_rllvm` is a separate Bazel-only project that does not use these binaries.
 Do not change anything here to serve it.
 
-Make the smallest coherent change that satisfies the request. Follow existing
-patterns; add abstractions or dependencies only when needed for the requested
-behavior. Keep unrelated refactoring separate.
+## How to work
 
-- Carry authorized implementation work through relevant checks and PR submission
-  or update. Stop at PR handoff unless asked to monitor CI or continue.
-- For CI repairs, confirm the affected CI check passes. For analysis and review,
-  report findings unless changes were requested.
+**Reuse before you add.** Look for the existing helper, type, or test fixture
+before writing a new one. Duplicated logic and parallel abstractions for the
+same idea are the main way this codebase decays: two copies drift, and the
+drifted one becomes a bug nobody sees. If something almost fits, extend it or
+lift the shared part out — don't clone it. The same goes for dependencies:
+prefer what is already in `Cargo.toml`.
+
+Make the smallest coherent change that satisfies the request. Follow existing
+patterns. Keep unrelated refactoring separate.
+
+- Carry authorized work through the relevant checks and PR submission or update.
+  Stop at PR handoff unless asked to monitor CI or continue.
 - Do not request approval again for steps already authorized.
-- A single ongoing job does not require a worktree. Use separate worktrees for
-  concurrent independent issue work. Follow
-  [Conventional Branch](https://conventionalbranch.org/) for task branches.
-  Keep each issue reviewable in its own PR. Order dependent work and make stacked
-  PR bases explicit.
-- After a parent is squash-merged, rebase only the dependent commits onto current
-  `main`, then retarget the PR. Retargeting alone can leave the parent's diff.
-- Clean up task-owned temporary files and merged worktrees when requested,
-  preserving uncommitted user work.
+- One PR per issue. Use [Conventional Branch](https://conventionalbranch.org/)
+  names, and separate worktrees only for concurrent independent work. Order
+  dependent work and make stacked PR bases explicit.
+- After a parent is squash-merged, rebase the dependent commits onto current
+  `main` and then retarget. Retargeting alone leaves the parent's diff.
 
 ## Development and verification
 
@@ -36,215 +38,163 @@ Rust edition 2024, MSRV 1.88. LLVM/Clang is required: `brew install llvm` or
 `apt install llvm llvm-dev clang libclang-dev`. Rust bitcode needs compatible
 LLVM readers; `rustc -vV` reports its LLVM version.
 
-Choose checks that validate the changed behavior. Reuse recorded passing results
-when relevant code and test conditions are unchanged. After a fix, rerun affected
-checks; broaden testing only for a failure or unresolved concern.
-
 ```bash
 cargo build
 cargo test --all
-cargo test parsing_lto                    # one test by name
+cargo test parsing_lto                     # one test by name
 cargo clippy --all-targets -- -D warnings  # CI gate
-cargo fmt --all --check                   # CI gate
+cargo fmt --all --check                    # CI gate
 ```
 
-- Integration tests use the `rllvm()` helper and isolated `RLLVM_CONFIG` files.
-  Manual wrapper checks also use a scratch `RLLVM_CONFIG`; never change or depend
-  on the developer's home configuration. Use temporary sources and out-of-tree
-  builds when checking another repository. Put `--rllvm-verbose=3` before compiler
-  arguments to log subcommands.
-- Name Rust tests after behavior, without a `test_` prefix. Confirm new regressions
-  fail before their fix at the layer that can break. Prefer native and extracted
-  behavior checks over file-existence assertions.
-- Parallel workers use bounded job counts and separate Cargo target directories.
-  Do not move a built target directory: integration binaries embed executable paths.
-- Performance measurements require coordinated, otherwise idle resources and
-  recorded build/cache conditions. Parallel correctness runs are not benchmarks.
+The optional `query` feature is not covered by those gates. CI runs both forms,
+so run both when touching it:
+
+```bash
+cargo test --features query --lib --test query
+cargo clippy --all-targets --features query -- -D warnings
+```
+
+Choose checks that validate the changed behavior; rerun affected checks after a
+fix rather than broadening by default.
+
+- Tests use isolated `RLLVM_CONFIG` files. Never depend on or modify the
+  developer's home configuration.
+- Name tests after the behavior, without a `test_` prefix. Confirm a regression
+  test fails before its fix, at the layer that can actually break. Prefer
+  behavioral assertions over file-existence checks.
+- Shared integration fixtures live in `tests/common/`.
+- Do not move a built target directory: integration binaries embed paths.
+- Benchmarks need idle, coordinated resources and recorded conditions. Parallel
+  correctness runs are not benchmarks.
 
 ### Python utilities
 
-Python 3.14+ is for repository utilities, including benchmarks and site generation.
-Use `uv` to manage this utility-script project:
-
-- Add dependencies with `uv add` or `uv add --dev`, updating `pyproject.toml` and
-  `uv.lock` together. Run Python with `uv run python`, never bare `python` or `python3`.
-- Use Typer for CLIs and pytest fixtures and plain assertions for tests.
-- Default tests focus on basic correctness. Mark real compiler, build-system,
-  and complete workflow tests with `pytest.mark.full`; they are excluded by default
-  and selected in CI only for release-please PRs. Use test doubles when only an
-  external tool's data matters.
-- Ruff and ty configuration lives in `pyproject.toml`.
+Python 3.14+ handles repository utilities (benchmarks, site generation), managed
+with `uv`. Run Python as `uv run python`, never bare `python`/`python3`. Add
+dependencies with `uv add`, updating `pyproject.toml` and `uv.lock` together.
+Typer for CLIs; pytest with plain assertions for tests. Mark real
+compiler/build-system tests `pytest.mark.full` — they are excluded by default.
 
 ```bash
-uv sync
-uv run pytest
-uv run pytest -m full  # opt-in compiler/build-system integration tests
-uv run ruff check .
-uv run ruff format --check .
-uv run ty check
+uv sync && uv run pytest
+uv run ruff check . && uv run ruff format --check . && uv run ty check
 uv run python site/build.py
 ```
 
-## Compiler contracts
+## Contracts
 
-Paths below are relative to `src/`. Preserve these contracts; current limitations
-listed afterward may change through work explicitly scoped to address them.
+These invariants hold across the codebase. The reasoning is in the code; what
+follows is what must stay true.
 
 ### Compiler arguments
 
 Every compiler-owned flag reaches the real compiler, including `-c`, `-v`,
-`--help`, and `--version`. Wrapper options are long-only and prefixed `--rllvm-`.
-Diagnostics go to stderr; build systems depend on compiler stdout for queries,
-identification, and preprocessing.
+`--help`, and `--version`. Wrapper options are long-only and prefixed
+`--rllvm-`. Diagnostics go to stderr — build systems read compiler stdout.
 
-`arg_parser.rs` uses the tables in `constants.rs` to separate compile and link
-arguments. Arity controls consumption independently of the handler: a wrong arity
-swallows the next argument. Flags needed in both phases, such as `-pthread` and
-`-arch`, must reach secondary compilations and relinks. Recognize `-oFILE` before
-filename patterns while preserving both forms of `-object-file-name`.
-`is_object_file()` returns `Ok(false)` for unrecognized arguments.
+Argument tables live in `constants.rs`. Arity controls consumption independently
+of the handler, so a wrong arity silently swallows the next argument. Flags
+needed in both phases, such as `-pthread` and `-arch`, must reach secondary
+compilations and relinks.
 
-### Response files and command transport
+### Response files and transport
 
-`utils/response_file.rs` follows Clang's GNU UTF-8 response syntax. Nested paths
-resolve from the process working directory; nonexistent `@` names remain literal
-so linker values such as `@rpath/...` survive. Repeated references are not cycles.
-Check tokenizer changes against real Clang, including quotes, escapes, BOMs, and
-whitespace.
+`utils/response_file.rs` follows Clang's GNU UTF-8 syntax. A nonexistent `@`
+name stays literal so linker values like `@rpath/...` survive. Check tokenizer
+changes against real Clang.
 
-`CompilerArgsInfo::input_args()` retains original argv for the real compiler;
-classification and internal consumers use expanded arguments. Save-temps ownership
-must inspect `expanded_args()`.
+Original argv goes to the real compiler; classification uses expanded arguments.
+Generated commands use the shared transport helper for OS argument-size limits,
+preserving `OsStr` bytes and inline empty arguments, which GNU response files
+would discard.
 
-Generated commands and marker compilations use the shared transport helper for
-OS argument-size limits. Preserve `OsStr` bytes and direct empty arguments: GNU
-response files discard quoted empties, so keep them inline between response-file
-segments. Temporary files must outlive the child.
+### Recorded paths
 
-### Artifact identity and recorded paths
+Each object's dedicated section records a **newline-terminated** bitcode path,
+and linkers concatenate these sections. Use `__RLLVM,__rllvm_bc` on Mach-O and
+`.rllvm_bc` elsewhere — never LLVM's `.llvmbc`/`.llvmcmd`, which wasm-ld
+discards. Keeping an unclaimed section is also what makes eBPF work unchanged.
+Every Mach-O writer sets `no_dead_strip`. Prefer `llvm-objcopy` for embedding;
+the `object`-crate rebuild can lose unmodelled load commands.
 
-`arg_parser.rs` and `utils/path_utils.rs` derive C/C++ artifacts from the source,
-requested output, compiler, and settings. Keep variants distinct even in a shared
-`bitcode_store_path`. Wrapper constructors and builders retain the actual compiler
-so public `args().artifact_filepaths()` queries match generated paths. Keep the
-public path hash stable.
+Artifact identity derives from source, requested output, compiler, and settings,
+so variants stay distinct in a shared `bitcode_store_path`. The public path hash
+is stable. Every writer resolves `bitcode_root` the same way.
 
-Each object's dedicated section records a **newline-terminated** bitcode path;
-linkers concatenate these sections. Every writer uses the same `bitcode_root`
-resolution.
+### Cache validity
 
-Use `__RLLVM,__rllvm_bc` on Mach-O and `.rllvm_bc` elsewhere. Do not rename them
-to LLVM's `.llvmbc` or `.llvmcmd`, which wasm-ld discards. Keeping an unclaimed
-section also supports eBPF without special handling: libbpf skips it on load and
-copies it through linking. Every Mach-O writer sets `no_dead_strip`; preserve
-the user's dead-stripping flags.
+A hit is valid only against freshly preprocessed input, current dependency
+contents, command and compiler identity, working directory, and environment.
+Generate uncached bitcode when inputs cannot be validated; side inputs absent
+from preprocessing are out of scope.
 
-Prefer `llvm-objcopy` for embedding: the `object`-crate rebuild can lose unmodelled
-load commands.
-
-### Cache validity and file ownership
-
-`cache.rs` validates hits against fresh preprocessed input, current dependency
-contents, command/compiler identity, working directory, and environment. A prior
-depfile misses newly selected headers and changed `__has_include` results.
-Generate uncached bitcode when current inputs cannot be validated. Side inputs
-absent from preprocessing/dependencies are outside this cache's scope.
-
-Only the user's original compilation may write its dependency outputs. Use
-`without_dependency_flags()` for secondary compilations and markers; cache
-validation uses private output and dependency files.
-
-Publish cache entries atomically. Partial merges own a unique temporary directory.
-Archive extraction builds a fresh archive beside the destination and replaces it
-only after success: `llvm-ar rs` against an existing output retains stale members.
-Cleanup must never remove preexisting files merely because their names match.
+Only the user's original compilation may write its dependency outputs. Publish
+cache entries atomically, and never delete a preexisting file because its name
+matches.
 
 ### LTO
 
-Dispatch on object content, not just `-flto`: fat LTO produces a native object.
-For bitcode objects, `lto.rs` and `compiler_wrapper/llvm/lto_marker.rs` record paths
-through module assembly. Keep the `.ascii` newline and two-layer C/assembler
-escaping. A `used` global introduces NUL termination and allocation/section-merging
-problems. Fat objects need the path in both their native and bitcode halves.
+Dispatch on object content, not just `-flto`: fat LTO produces a native object,
+and needs the path in both halves. Full LTO provides a merged module; ThinLTO
+does not. Queries, non-linking actions, and configure-only mode must not stage a
+linker marker. Preserve user-requested linker temporaries.
 
-Save-temps eligibility includes combined source/link invocations. Queries,
-non-linking actions, and configure-only mode must not stage a linker marker.
-Build markers for the requested target/language, then reset `-x` to `none` before
-appending the marker object after the user's inputs.
+### Rust
 
-Preserve user-requested linker temporaries, including the selected module: copy
-it to the retained rllvm path rather than renaming it away. Full LTO provides a
-merged module; ThinLTO does not. Mixed marker/save-temps inputs require the existing
-diagnostic rather than silently merging a translation unit twice.
-
-### Rust and inspection
-
-`compiler_wrapper/llvm/rustc_args.rs` handles explicit `-o` and Cargo's `--out-dir`,
-crate name, and extra filename. Make future bitcode paths absolute without
-canonicalizing files rustc has not created yet. Linked crates carry paths through
-a marker; archive members are patched after compilation. Never patch a finished
-Rust binary: doing so invalidates its Darwin code signature.
-
-Cargo supplies the real compiler path in `RUSTC_WRAPPER` mode. Configured rustc and
-`RLLVM_REAL_RUSTC` selection apply to direct invocation. Metadata-only and
-procedural-macro invocations pass through without capture.
-
-Test `rllvm-info` against real `llvm-dis` output as well as literal fixtures.
-Basic-block labels can have quoted names and trailing predecessor comments; the
-entry block can be implicit.
+Make future bitcode paths absolute without canonicalizing files rustc has not
+created yet. Linked crates carry paths through a marker; archive members are
+patched after compilation. Never patch a finished Rust binary — it invalidates
+the Darwin code signature. Metadata-only and procedural-macro invocations pass
+through without capture.
 
 ### Queries
 
-`query/extract.rs` is the only module containing `unsafe`; no LLVM handle
-leaves it. `scope` is quoted from the catalog and never shrinks — what was
-actually read is reported under `analysis`. `!callees` is an upper bound, not
-a reachable set, and CVP propagates within one module only. The heuristic
-address-taken inventory is opt-in and contributes no graph edges. MCP stdout
-carries protocol frames only.
+`query/extract.rs` is the only module containing `unsafe`, and no LLVM handle
+leaves it.
 
-The mangled symbol is the identity: `FunctionId` is a map key, so demangled
-readings live in the envelope's `symbols` table, never beside each `symbol`.
-Names resolve mangled, then demangled, then as an identifier search, and the
-`resolution` block always says which — a fuzzy match must not read as exact.
-`demangle` refuses anything without the Itanium `_Z` marker rather than
-guessing.
+Answers never claim more than they know. `scope` is quoted from the catalog and
+never shrinks; what was actually read is reported under `analysis`. `!callees`
+is an upper bound, not a reachable set. The address-taken inventory is a
+heuristic: opt-in, and never a graph edge. An empty `reach` is not
+unreachability.
 
-A source digest records when it was taken, and that decides what a match
-proves. `compiler` (clang's `!DIFile` checksum) and `capture` (rllvm hashing
-while it drives the compilation) are build-time, so `current` is a claim about
-the bitcode. `inventory` is taken after the build and is not: hashing at
-inventory would otherwise report `current` for a source edited between the
-build and the extraction. One file can be associated twice, from
-`source_filename` and from `!DIFile`; only the second carries a compiler
-digest, and the one that has a digest wins.
+The mangled symbol is the identity, so demangled readings live in the envelope's
+`symbols` table rather than beside each symbol. A name resolves exactly before
+fuzzily, and the answer always says which.
+
+A source digest records *when* it was taken, because that decides what a match
+proves: a `compiler` or `capture` digest dates from the build, an `inventory`
+one only from when the catalog was written.
+
+MCP stdout carries protocol frames only.
 
 ## Current limitations
 
 - Universal builds are unsupported.
 - Human-readable binary inspection uses the first recorded module; `--json`
-  inventories all recorded modules. Whole-program inspection uses extracted `.bc`.
-- Link mode performs repeated compilations (#51). Changing this is a separate
-  behavior/performance task.
+  inventories all of them. Whole-program inspection uses extracted `.bc`.
+- Link mode performs repeated compilations (#51).
 
-## Conventions and documentation
+## Conventions
 
 - Library code returns `Result` using the `thiserror` enum in `error.rs`; avoid
   exiting or panicking. Logging uses `tracing`.
 - `constants.rs` is internal. Public items in `utils/` are public API; use
   `pub(crate)` for internal helpers.
-- The `docs/` directory is intentionally excluded except `docs/CATALOG.md`.
-- Published documentation, issues, and PRs use repository-relative paths or generic
-  placeholders. Limit committed benchmark evidence to compact summaries and
-  provenance; keep raw logs and build artifacts outside Git.
-- `README.md` is the user-facing source of truth. `site/build.py` generates
-  `site/index.md`; do not edit or commit that page. Validate links and site
-  generation when changing the README.
+- Do not define constants or lookup tables inside functions; lift them to module
+  level.
+- `docs/` is gitignored except `docs/CATALOG.md`.
+- `README.md` is the user-facing source of truth: keep it short and practical,
+  and put rationale in issues or the code, not there. `site/build.py` generates
+  `site/index.md`, which is never committed. Validate links and site generation
+  when changing the README.
+- Documentation, issues, and PRs use repository-relative paths. Keep committed
+  benchmark evidence to compact summaries; raw logs stay out of Git.
 
-Issues, PRs, and comments use the project's voice: problem, cause, fix,
-verification. Follow issue and PR templates and omit conversational framing.
+Issues and PRs state problem, cause, fix, verification — briefly, in plain
+language, without conversational framing. Follow the templates.
 
-Commits and PR titles use Conventional Commits (`fix:`, `feat:`, `docs:`, etc.).
-Keep commit bodies short, and leave them empty in most cases. Do not bump `version`
-by hand; releases derive from commit types. Below 1.0, `feat:`/`fix:` bump the patch
-and `feat!:` bumps the minor. Mark breaking changes. Pushing a tag does not trigger
-a release; see [RELEASING.md](RELEASING.md).
+Commits and PR titles use Conventional Commits. Keep commit bodies short, and
+empty in most cases. Do not bump `version` by hand; releases derive from commit
+types, and below 1.0 `feat:`/`fix:` bump the patch while `feat!:` bumps the
+minor. See [RELEASING.md](RELEASING.md).
