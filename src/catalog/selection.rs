@@ -245,7 +245,7 @@ mod tests {
                     path: "src/source.c".into(),
                     directory: Some(root.into()),
                     origin: "compilation_database".into(),
-                    content_sha256: None,
+                    digest: None,
                 });
                 module
             })

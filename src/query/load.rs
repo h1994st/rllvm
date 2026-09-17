@@ -4,14 +4,14 @@
 //! actually on disk now, which is not what the catalog remembers.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::Entry},
     path::{Path, PathBuf},
 };
 
 use crate::{
     catalog::{
-        ArchiveCache, ArchiveMember, CatalogOrigin, CatalogScope, ModuleCatalog, ModuleRecord,
-        ModuleStatus, hash_bytes, read_catalog,
+        ArchiveCache, ArchiveMember, CatalogOrigin, CatalogScope, DigestOrigin, ModuleCatalog,
+        ModuleRecord, ModuleStatus, hash_bytes, read_catalog,
     },
     error::Error,
     query::facts::{ModuleAnalysis, ModuleReport, SourceStatus},
@@ -37,7 +37,14 @@ pub struct Loaded {
     /// hashes for one source, and a path-only key lets the last one read
     /// overwrite the status of every other. This records what was observed
     /// at load time and is not refreshed while answering queries.
-    pub source_status: HashMap<(String, PathBuf), SourceStatus>,
+    pub source_status: HashMap<(String, PathBuf), SourceState>,
+}
+
+/// One source's freshness, and the digest origin it was decided against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SourceState {
+    pub status: SourceStatus,
+    pub basis: Option<DigestOrigin>,
 }
 
 /// A verified module whose bytes have not been read yet.
@@ -74,7 +81,7 @@ pub fn load_catalog_value(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<
 
     let mut pending = Vec::new();
     let mut reports = Vec::new();
-    let mut source_status = HashMap::new();
+    let mut source_status: HashMap<(String, PathBuf), SourceState> = HashMap::new();
     let mut archives = ArchiveCache::default();
 
     for record in &catalog.modules {
@@ -161,23 +168,40 @@ pub fn load_catalog_value(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<
         }
 
         for association in &record.sources {
-            let source = association
-                .directory
-                .as_ref()
-                .map(|d| d.join(&association.path))
-                .unwrap_or_else(|| association.path.clone());
-            let status = match (&association.content_sha256, std::fs::read(&source)) {
-                (_, Err(_)) => SourceStatus::Missing,
-                (None, Ok(_)) => SourceStatus::Unknown,
-                (Some(recorded), Ok(current)) => {
-                    if hash_bytes(&current) == *recorded {
+            let source = association.resolved_path();
+            let state = match (&association.digest, std::fs::read(&source)) {
+                (_, Err(_)) => SourceState {
+                    status: SourceStatus::Missing,
+                    basis: None,
+                },
+                (None, Ok(_)) => SourceState {
+                    status: SourceStatus::Unknown,
+                    basis: None,
+                },
+                (Some(digest), Ok(current)) => SourceState {
+                    status: if digest.matches(&current) {
                         SourceStatus::Current
                     } else {
                         SourceStatus::Modified
-                    }
-                }
+                    },
+                    // Carried through so an answer can say what `current`
+                    // was decided against: an inventory digest was taken
+                    // after the build and proves less than a compiler one.
+                    basis: Some(digest.origin),
+                },
             };
-            source_status.insert((record.id.clone(), source), status);
+            // Two associations can name one file, and only one of them may
+            // carry a digest. Keep whichever actually had something to check
+            // so the status does not depend on the order they were recorded.
+            match source_status.entry((record.id.clone(), source)) {
+                Entry::Occupied(mut slot) if slot.get().basis.is_none() => {
+                    slot.insert(state);
+                }
+                Entry::Occupied(_) => {}
+                Entry::Vacant(slot) => {
+                    slot.insert(state);
+                }
+            }
         }
 
         // Verified, not yet analysed: extraction decides that, and it has not

@@ -200,6 +200,7 @@ pub(crate) fn session_with_address_taken_function() -> Session {
                 line: 4,
                 column: 3,
                 source_status: SourceStatus::Unknown,
+                status_basis: None,
                 inlined_at: Vec::new(),
             }),
             None,

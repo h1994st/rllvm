@@ -11,63 +11,67 @@ single `.bc` for the whole program back out of the finished binary.
 
 ## Quick start
 
-Install rllvm and LLVM/Clang:
-
 ```bash
 brew install h1994st/tap/rllvm llvm   # macOS or Linux with Homebrew
-# Or build rllvm from source:
-cargo install rllvm
-# LLVM dependencies on Ubuntu / Debian:
-sudo apt install llvm llvm-dev clang libclang-dev
+# Or: cargo install rllvm
+# LLVM on Ubuntu/Debian: sudo apt install llvm llvm-dev clang libclang-dev
 ```
-
-Build, extract, and inspect:
 
 ```bash
 rllvm-cc hello.c -o hello
-rllvm-get-bc hello             # writes hello.bc in the current directory
-rllvm-info hello.bc            # target, function, block, and instruction counts
-rllvm-info -f hello.bc         # also list individual functions
+rllvm-get-bc hello       # writes hello.bc
+rllvm-info hello.bc      # target, function, block, instruction counts
 ```
 
-Use `rllvm-cxx` for C++. `rllvm-get-bc` also accepts objects and archives;
-`-o out.bc` chooses an output path. Inspect the extracted `.bc` for a
-whole-program view: human-readable inspection of a native binary uses only
-its first recorded module.
+On first run, tool paths are detected from `llvm-config` and written to
+`~/.rllvm/config.toml`.
 
-On first run, tool paths are inferred from `llvm-config` and saved in
-`~/.rllvm/config.toml`. Set `RLLVM_CONFIG` to use another file, or run
-`rllvm-init --dry-run` to preview the detected configuration.
+## How it works
 
-Capture covers the objects and archive members that carry rllvm metadata.
-Build every dependency whose bitcode you need through the wrappers; linking
-prebuilt native libraries does not capture their code.
+The wrappers run Clang normally and also emit bitcode. Each object gets a custom
+section recording its bitcode path. The linker concatenates those sections, so
+the finished binary carries a list of every module that went into it; extraction
+reads the paths back out and merges the modules.
 
-## Language support
+```text
+source.c → rllvm-cc → object + bitcode
+                         ↓
+                      linker → executable
+                                   ↓
+                              rllvm-get-bc → whole-program.bc
+```
 
-### C and C++
+Rust captures bitcode per crate: linked crates carry paths through a marker
+object, library crates in archive members.
 
-Point the build system at the wrappers. For Autotools:
+This is why capture only covers what you build through the wrappers. Linking a
+prebuilt native library contributes no bitcode, so build every dependency you
+need for a whole-program view.
+
+## Capturing bitcode
+
+### Languages
+
+#### C, C++ and Objective-C
+
+`rllvm-cc` wraps `clang` and `rllvm-cxx` wraps `clang++`. Objective-C (`.m`) and
+Objective-C++ (`.mm`) sources go through the same two wrappers.
 
 ```bash
-CC=rllvm-cc CXX=rllvm-cxx ./configure
-make
+# Autotools
+CC=rllvm-cc CXX=rllvm-cxx ./configure && make
 rllvm-get-bc path/to/program
-```
 
-For CMake, configure a new build directory:
-
-```bash
-CC=rllvm-cc CXX=rllvm-cxx cmake -S . -B build
-cmake --build build
+# CMake
+CC=rllvm-cc CXX=rllvm-cxx cmake -S . -B build && cmake --build build
 rllvm-get-bc build/my_program
 ```
 
-Alternatively, pass
-`-DCMAKE_TOOLCHAIN_FILE=path/to/rllvm/cmake/rllvm-toolchain.cmake`.
-See the [CMake example](examples/cmake/).
+Add `OBJC=rllvm-cc OBJCXX=rllvm-cxx` for Objective-C projects. CMake also
+accepts `-DCMAKE_TOOLCHAIN_FILE=path/to/rllvm/cmake/rllvm-toolchain.cmake`,
+which sets the C and C++ compilers; see the [CMake example](examples/cmake/).
 
-### Rust and Cargo
+#### Rust
 
 ```bash
 RUSTC_WRAPPER=rllvm-rustc cargo build
@@ -75,184 +79,78 @@ rllvm-get-bc target/debug/my_program
 ```
 
 Wrapped dependency crates contribute modules when their archive members reach
-the link. Extract an `.rlib` directly, or invoke the wrapper without Cargo:
+the link. You can also extract an `.rlib` directly, or invoke the wrapper
+without Cargo:
 
 ```bash
 rllvm-get-bc 'target/debug/deps/libmylib-<hash>.rlib'
-rllvm-rustc main.rs -o app
-rllvm-get-bc app
+rllvm-rustc main.rs -o app && rllvm-get-bc app
 ```
 
-Replace `<hash>` with the artifact's hash. Cargo supplies the real compiler;
-direct invocation uses `RLLVM_REAL_RUSTC`, then `rustc_filepath`, then `rustc`
-on `PATH`. Use `RLLVM_LOG_LEVEL=3` for diagnostics under Cargo.
+`cargo check` and procedural-macro crates pass through without capture, and
+prebuilt dependencies — including the standard library — are not rebuilt. Your
+LLVM readers must be compatible with the version `rustc -vV` reports. Use
+`RLLVM_LOG_LEVEL=3` for diagnostics under Cargo.
 
-`cargo check` and procedural-macro crates pass through without capture.
-Prebuilt dependencies, including the supplied standard library, are not rebuilt.
-Use LLVM readers compatible with the LLVM version reported by `rustc -vV`.
+### Wrapper options
 
-## Advanced usage
-
-### Importing a compilation database
-
-Analyze selected C/C++ sources from an existing `compile_commands.json` without
-rebuilding through wrappers:
-
-```bash
-rllvm-compdb list build/ > compilations.json
-rllvm-compdb generate build/ --source src/example.c --output-dir analysis/example
-rllvm-compdb generate build/ --entry ENTRY_ID \
-  --extra-arg=-O0 --output-dir analysis/debug --jobs 4
-```
-
-`list` reports entry/configuration IDs and unsupported commands without compiling
-or requiring sources to exist. `generate` selects all entries by default;
-repeat `--source` or `--entry` for alternatives, and combine them to intersect
-filters. Source selectors resolve from the current directory. Duplicate
-compilations remain distinct; unmatched and empty selections fail.
-
-The output directory must be new. It contains separate modules, diagnostics,
-and `catalog.json`. Successful entries survive partial failures, which return
-nonzero. Original object and dependency outputs are preserved.
-
-On macOS, macOS-target compilations infer the active SDK with `xcrun` when no
-SDK is specified. Set `SDKROOT` or supply `-isysroot`/`--sysroot` in the database
-or through `--extra-arg` to choose another SDK. Explicit settings take precedence;
-other targets do not receive an inferred macOS SDK.
-
-Only direct `clang`/`clang++` drivers and version-suffixed variants are supported.
-Entries use their recorded working directory; relative directories resolve from
-the database's directory. Structured `arguments` take precedence over `command`,
-which is decoded without a shell. Response files are expanded, and generated
-sources/headers must already exist. `--jobs` defaults to one.
-
-The catalog records effective arguments and the supplied or inferred analysis
-environment. Implicit Clang configs remain disabled; wrapper configuration flags
-do not apply. Launchers, shell operations, multiple-source commands, and flags
-with uncontrolled side outputs are unsupported. See the
-[catalog reference](docs/CATALOG.md#compilation-database-provenance) for details.
-
-These modules describe the **current source tree**, not executable membership or
-a historical build. They are not automatically merged; use wrapper capture when
-participation in the real link matters.
-
-### Module catalogs and selection
-
-```bash
-rllvm-info app --json > catalog.json
-rllvm-info app --json --source src/example.c
-rllvm-get-bc app --module MODULE_ID --output-dir analysis/selected
-rllvm-get-bc analysis/selected/catalog.json -o selected.bc
-```
-
-JSON inventory accepts bitcode, objects, executables, regular archives, and
-catalogs. It inspects all selected modules without merging; missing or unreadable
-entries remain in the output and cause a nonzero exit. Thin archives are unsupported.
-
-`--module`, `--source`, and `--configuration` are repeatable. Alternatives within
-each option are combined; different options intersect. Unmatched selectors fail.
-Configuration selection requires recorded metadata, which legacy path sections
-do not contain. Replace `MODULE_ID` with an inventory ID.
-
-`--output-dir` copies separate, hash-checked modules into a new directory.
-The resulting catalog uses relative module paths and moves with that directory.
-Catalogs describe known evidence and selection scope, not proven whole-program
-completeness. See the [format reference](docs/CATALOG.md).
-
-### Extraction modes
-
-```bash
-rllvm-get-bc --merge-strategy archive libfoo.a  # writes libfoo.bca
-rllvm-get-bc --merge-strategy partial app      # merge by directory, then combine
-rllvm-get-bc -m app                           # also write app.bc.manifest
-```
-
-The default strategy links modules into one `.bc`. `-b` is shorthand for archive
-mode. Archive outputs are replaced with the current modules, so removed members
-do not persist. `-m` writes contributing paths beside the input; use a catalog
-when provenance or embedded bitcode archive members must be represented.
-
-### Wrapper options and response files
-
-Compiler flags, including `-c`, `-v`, `--help`, and `--version`, reach the real
-compiler. Put wrapper options before them:
+Every compiler flag reaches the real compiler, including `-c`, `-v`, `--help`
+and `--version`. Wrapper options are long-only, prefixed `--rllvm-`, and go
+first:
 
 ```text
 --rllvm-compiler <PATH>   Override clang/clang++ (C/C++ wrappers only)
 --rllvm-verbose[=LEVEL]   Bare flag is 1; 3 logs subcommands, 4 enables trace
---rllvm-help             Print wrapper help
---rllvm-version          Print wrapper version
+--rllvm-help              Print wrapper help
+--rllvm-version           Print wrapper version
 ```
 
 ```bash
-rllvm-cc --rllvm-verbose=3 -pthread -c hello.c -ohello.o
+rllvm-cc --rllvm-verbose=3 -pthread -c hello.c -o hello.o
 rllvm-cc @compile.rsp
 ```
 
-Use `=` for verbosity values; diagnostics go to stderr. Both `-o hello.o` and
-`-ohello.o` work, and `--` remains supported for existing shims. C/C++ response
-files follow Clang's GNU UTF-8 syntax, including quoting and nested references;
-relative paths resolve from the compiler's working directory. Large generated
-commands use response files automatically.
+Response files follow Clang's GNU UTF-8 syntax, including quoting and nested
+references. Large generated commands use them automatically.
 
-### WebAssembly and eBPF
+### From a compilation database
 
-```bash
-rllvm-cc --target=wasm32-unknown-unknown -c lib.c -o lib.o
-rllvm-cc --target=wasm32-unknown-unknown -c main.c -o main.o
-rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry \
-  lib.o main.o -o app.wasm
-rllvm-get-bc app.wasm -o app.bc
-
-rllvm-cc --target=bpf -O2 -g -c prog.c -o prog.o
-rllvm-get-bc prog.o -o prog.bc
-```
-
-WebAssembly linking needs a matching `wasm-ld` from LLD; see the
-[WebAssembly example](examples/wasm/). BPF objects retain their native payload;
-libbpf skips the extra `.rllvm_bc` section when loading and preserves it when
-linking. `bpftool gen object` therefore retains contributing module paths.
-That linker requires BTF, so compile with `-g`.
-
-### Bitcode storage and relocation
-
-C/C++ bitcode defaults to hidden files beside the requested output. Names
-distinguish source, output, compiler, and settings. `bitcode_store_path` selects
-an absolute directory for a central store. Preserve these files with the native
-artifacts, including when restoring compiler-cache outputs.
-
-Recorded paths are absolute by default. To move a build tree, record paths
-relative to a common root and supply its new location during extraction:
+`rllvm-compdb` compiles selected entries from an existing
+`compile_commands.json`, so you can capture bitcode without rebuilding through
+the wrappers:
 
 ```bash
-RLLVM_BITCODE_ROOT="$PWD/build" cmake --build build
-# After moving build/ to moved-build/:
-rllvm-get-bc --bitcode-root moved-build moved-build/my_program
+rllvm-compdb list build/ > compilations.json
+rllvm-compdb generate build/ --source src/example.c --output-dir analysis/example
 ```
 
-The root must contain the bitcode files, including a central store if used.
-It changes recorded paths, not storage locations. Absolute and relative records
-can coexist; `--bitcode-root` resolves only relative records.
+`list` reports entry and configuration IDs without compiling. `generate` takes
+all entries by default; repeat `--source` or `--entry` to narrow, and combine
+them to intersect. Only direct `clang`/`clang++` drivers are supported, and the
+output directory must be new.
 
-### Bitcode caching
+These modules describe the **current source tree**, not membership in a real
+link. Use wrapper capture when participation in the actual build matters.
+
+### Caching
+
+Off by default. `RLLVM_CACHE=1` enables it, storing in `~/.rllvm/cache`:
 
 ```bash
-RLLVM_CACHE=1 cmake --build build   # a build already configured with the wrappers
+RLLVM_CACHE=1 cmake --build build
 ```
 
-The C/C++ cache is off by default. `RLLVM_CACHE=1` enables it; `0` disables it,
-overriding `cache_enabled`. Storage defaults to `~/.rllvm/cache`; `cache_dir`
-changes it.
+Native compilation still runs — a hit only skips the extra bitcode compilation,
+after checking preprocessed inputs, dependencies, compiler, command, directory
+and environment. Keep it off when side inputs that preprocessing cannot see,
+such as optimization profiles, change between builds.
 
-Native compilation still runs. Hits avoid the extra bitcode compilation but
-still preprocess current inputs and check dependencies, compiler, command,
-directory, and environment. Unverifiable inputs generate uncached bitcode.
-Disable caching for changing side inputs absent from preprocessing, such as
-optimization profiles, and keep inputs stable during a build.
+### Build modes and targets
 
-### LTO
+#### LTO
 
-Select `lto_mode` in the config or `RLLVM_LTO_MODE`:
+Select `lto_mode` in the config or `RLLVM_LTO_MODE`, and use the same mode when
+compiling and linking:
 
 | Mode | Captured bitcode | Support |
 | --- | --- | --- |
@@ -265,77 +163,119 @@ RLLVM_LTO_MODE=save-temps rllvm-cc -flto hello.c -o hello
 rllvm-get-bc hello -o hello.bc
 ```
 
-Use the same mode when compiling and linking. `marker` supports mixed ordinary
-and LTO objects, and records paths in both halves of fat-LTO objects.
-`save-temps` needs actual LTO inputs; adding `-flto` only at link time is insufficient.
-ThinLTO has no single merged module, so use `marker` for it.
+`save-temps` needs real LTO inputs — adding `-flto` only at link time is not
+enough — and ThinLTO has no single merged module, so use `marker` for it.
+COFF and WebAssembly reject `marker` and direct you to `skip`.
 
-Queries and non-linking invocations do not collect linker modules. User-requested
-linker temporaries are preserved. COFF/WebAssembly reject `marker` and direct
-users to `skip`. A `save-temps` link producing no merged module is an error.
-Universal (multiple `-arch`) builds and combined universal binaries are unsupported;
-build and extract one architecture at a time.
+#### WebAssembly and eBPF
 
-## Querying captured bitcode
+```bash
+rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry \
+  lib.o main.o -o app.wasm
+rllvm-get-bc app.wasm -o app.bc
 
-Build with the optional `query` feature to ask nine source-level questions
-about captured bitcode, from the command line or over MCP. It links LLVM
-statically via `llvm-sys`:
+rllvm-cc --target=bpf -O2 -g -c prog.c -o prog.o
+rllvm-get-bc prog.o -o prog.bc
+```
+
+WebAssembly linking needs a matching `wasm-ld` from LLD; see the
+[WebAssembly example](examples/wasm/). eBPF works without special handling:
+libbpf skips rllvm's section on load and preserves it through linking. That
+linker requires BTF, so compile with `-g`.
+
+Universal (multiple `-arch`) builds are unsupported; build and extract one
+architecture at a time.
+
+## Extracting bitcode
+
+### Merge strategies
+
+```bash
+rllvm-get-bc app                                # one whole-program .bc
+rllvm-get-bc --merge-strategy archive libfoo.a  # writes libfoo.bca
+rllvm-get-bc --merge-strategy partial app       # merge by directory, then combine
+rllvm-get-bc -m app                             # also write app.bc.manifest
+```
+
+`rllvm-get-bc` accepts executables, objects and archives, and `-o` chooses the
+output path. The default links every module into one `.bc`; `-b` is shorthand
+for archive mode. Archive outputs are rewritten from the current modules, so
+removed members do not persist.
+
+### Catalogs
+
+A catalog is a JSON record of which modules were found and where they came from.
+Use one to select a subset, or to feed [queries](#analyzing-bitcode):
+
+```bash
+rllvm-info app --json > catalog.json
+rllvm-get-bc app --module MODULE_ID --output-dir analysis/selected
+rllvm-get-bc analysis/selected/catalog.json -o selected.bc
+```
+
+`--module`, `--source` and `--configuration` are repeatable: alternatives within
+one option combine, different options intersect, and an unmatched selector
+fails. `--output-dir` must be new, and copies hash-checked modules into it with
+relative paths so the directory can move.
+
+A catalog describes the evidence it collected and the scope it selected — not
+proven whole-program completeness. See the [format reference](docs/CATALOG.md).
+
+### Moving a build tree
+
+Recorded paths are absolute by default. Record them relative to a root instead,
+then supply that root's new location:
+
+```bash
+RLLVM_BITCODE_ROOT="$PWD/build" cmake --build build
+# after moving build/ to moved-build/:
+rllvm-get-bc --bitcode-root moved-build moved-build/my_program
+```
+
+The root must contain the bitcode files, including a central
+`bitcode_store_path` if you use one.
+
+## Analyzing bitcode
+
+### Queries
+
+The optional `query` feature answers source-level questions about captured
+bitcode. It links LLVM statically:
 
 ```bash
 cargo install rllvm --features query
-# When llvm-config is not on PATH, point at an LLVM 23 install:
+# if llvm-config is not on PATH:
 LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install rllvm --features query
 ```
 
-On Ubuntu/Debian, also install `libpolly-N-dev` alongside `llvm-N-dev` and
-`libclang-N-dev`: `llvm-sys` links statically, and `llvm-config --libs` lists
-Polly even though rllvm does not use it.
-
-`--catalog` takes JSON from `rllvm-get-bc --output-dir` or `rllvm-compdb
-generate` (see Module catalogs and selection above):
+On Ubuntu/Debian, install `libpolly-N-dev` alongside `llvm-N-dev` and
+`libclang-N-dev`.
 
 ```bash
-rllvm-query --catalog catalog.json defs parse_frame            # every definition of the symbol
-rllvm-query --catalog catalog.json at parser.c 4               # functions/call sites mapped to a source line
-rllvm-query --catalog catalog.json callers parse_frame         # functions that call it
-rllvm-query --catalog catalog.json callees main                # its outgoing call sites
-rllvm-query --catalog catalog.json uses parse_frame            # non-call uses (address taken)
-rllvm-query --catalog catalog.json reach main parse_frame       # one path from `main` to `parse_frame`
-rllvm-query --catalog catalog.json closure parse_frame in       # functions that reach it (`out`: functions it reaches)
-rllvm-query --catalog catalog.json externals                   # symbols the captured program leaves unbound
-rllvm-query --catalog catalog.json indirect-targets parser.c:8 # the `!callees` bound at an indirect call site
+rllvm-query --catalog catalog.json defs parse_frame            # where it is defined
+rllvm-query --catalog catalog.json at parser.c 4               # what is at a source line
+rllvm-query --catalog catalog.json callers parse_frame         # who calls it
+rllvm-query --catalog catalog.json callees main                # what it calls
+rllvm-query --catalog catalog.json uses parse_frame            # where its address is taken
+rllvm-query --catalog catalog.json reach main parse_frame      # a path between two functions
+rllvm-query --catalog catalog.json closure parse_frame in      # everything that reaches it
+rllvm-query --catalog catalog.json externals                   # unbound symbols
+rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an indirect call
 ```
 
-Add `--heuristics` to include a heuristic address-taken inventory alongside
-`indirect-targets`. Every answer is one JSON envelope: `results`, the catalog
-`scope` it was computed over, an `analysis` of which modules actually parsed,
-and an `uncertainty` block naming indirect call sites, functions without debug
-locations, and ambiguous symbol bindings the answer could not see through.
+Every answer is one JSON envelope carrying the results plus what the answer
+could *not* see: which modules failed to parse, which call sites are indirect,
+which symbols bind ambiguously, and whether each location's source has changed
+since it was compiled.
 
-### C++ names
-
-A query naming a symbol takes any of three spellings, tried in that order:
+A symbol can be named three ways — the mangled symbol, its demangled reading, or
+a bare identifier that searches:
 
 ```bash
-rllvm-query --catalog catalog.json defs _Z5twiceIiET_S0_      # the mangled symbol
-rllvm-query --catalog catalog.json defs 'int twice<int>(int)' # its full demangled reading
-rllvm-query --catalog catalog.json defs twice                 # any reading containing that identifier
+rllvm-query --catalog catalog.json defs _Z5twiceIiET_S0_
+rllvm-query --catalog catalog.json defs 'int twice<int>(int)'
+rllvm-query --catalog catalog.json defs twice
 ```
-
-The first two name one function. The third is a search: it matches every
-function whose reading contains `twice` as a whole identifier — both
-instantiations above, and `ns::twice`, but not `twice_helper`. Every answer
-carries a `resolution` block saying which applied, so a search that gathered
-several unrelated functions never reads like an exact hit.
-
-Answers keep the mangled symbol as the identity, and add a `symbols` table
-mapping each one to its reading. A C program's answers have neither block's
-noise: its names are already readable.
-
-CLI subcommands are kebab-case (`indirect-targets`); MCP tool names are
-snake_case (`indirect_targets`), matching `Query`'s own serde tag. The two
-spellings coincide for every other query, which is one word either way.
 
 ### MCP server
 
@@ -343,9 +283,7 @@ spellings coincide for every other query, which is one word either way.
 rllvm-query mcp
 ```
 
-Serves the same nine queries as JSON-RPC 2.0 tools, newline-delimited over
-stdio, and answers both the modern and legacy MCP protocol revisions. Point a
-client at it:
+Serves the same queries as JSON-RPC 2.0 tools over stdio. Point a client at it:
 
 ```json
 {
@@ -358,19 +296,9 @@ client at it:
 }
 ```
 
-The client chooses what to analyse, and several programs can be loaded at once:
-
-- `load_catalog` — read a catalog JSON and keep it queryable
-- `inventory` — inventory a captured binary, archive or `.bc` and load the result, with no catalog JSON on disk
-- `list_catalogs`, `unload_catalog`
-
-Both loaders answer with the catalog's `scope` and the `analysis` of what
-actually parsed, so a client sees that before its first question. Each catalog
-is analysed once and answers every query after it from memory. Queries take an
-optional `catalog` argument, needed only when more than one is loaded.
-
-`--catalog` still works and preloads one, for a client that always analyses the
-same program.
+The client chooses what to analyse with `load_catalog` (a catalog JSON) or
+`inventory` (a binary, archive or `.bc`), and can keep several loaded at once.
+Each is analysed once and answers from memory after that.
 
 ## Configuration
 
@@ -401,32 +329,12 @@ and `-o` selects the file to write.
 | `cache_dir` | No | Cache directory (default: `~/.rllvm/cache`) |
 | `log_level` | No | 0=error (default), 1=warn, 2=info, 3=debug, 4+=trace; `RLLVM_LOG_LEVEL` overrides |
 
-
 </details>
 
-## How it works
+## Benchmarks
 
-C/C++ wrappers run Clang normally and also emit bitcode. Each object's custom
-section records its bitcode path, newline-terminated. The linker combines those
-sections; extraction reads the paths, deduplicates them, and merges or archives
-the modules.
-
-```text
-source.c → rllvm-cc → object + bitcode
-                         ↓
-                      linker → executable
-                                   ↓
-                              rllvm-get-bc → whole-program.bc
-```
-
-Rust captures bitcode per crate. Linked crates carry paths through a marker
-object; library crates carry them in archive members.
-
-## Workflow benchmarks
-
-The [baseline](benchmarks/baselines/2026-09-12-apple-m4/README.md) compares
-validated builds on an Apple M4 with LLVM 22.1.8, eight jobs, and three
-repetitions. Clean **build-only** time relative to native compilation:
+Clean build-only time relative to native compilation, on an Apple M4 with
+LLVM 22.1.8:
 
 | Workload | Cache disabled | Primed C/C++ cache |
 |---|---:|---:|
@@ -434,25 +342,12 @@ repetitions. Clean **build-only** time relative to native compilation:
 | nghttp2 C++ (CMake) | 1.83× | 1.20× |
 | Quiche (Cargo) | 1.59× | 1.50× |
 
-Values are median paired ratios; 1× means native build time. Configuration,
-extraction, inspection, priming, validation, and diagnostics are excluded.
-Cargo uses one codegen unit for target and host crates in both builds.
-Filesystem cache and desktop activity were uncontrolled.
+C/C++ capture adds a bitcode compilation per source; Rust emits bitcode in the
+same rustc invocation. Unchanged rebuilds stay near native time, but extraction
+repeats its merge every run.
 
-C/C++ capture adds a bitcode compilation and embeds its path in object files.
-Rust emits bitcode in the same rustc invocation; bitcode writes, marker
-compilations, and archive updates add work. The optional bitcode cache covers C/C++,
-including Rust projects' native dependencies. Hits skip bitcode compilation
-but still preprocess and hash inputs; misses also pay cache storage costs.
-Priming helped C++ most, while Rust compilation remains uncached.
-
-Unchanged C/C++ rebuilds stayed near native time. Extraction and inspection add
-work even when nothing recompiles: extraction merges modules with `llvm-link`,
-and repeated extraction repeats that work. Complete-workflow ratios therefore
-include more than compiler-wrapper overhead.
-
-See the [benchmark guide](benchmarks/README.md) for reproduction and coverage
-details. `cargo bench` runs the separate Criterion microbenchmarks.
+See the [baseline](benchmarks/baselines/2026-09-12-apple-m4/README.md) for
+conditions and the [benchmark guide](benchmarks/README.md) for reproduction.
 
 ## Relationship to gllvm and wllvm
 

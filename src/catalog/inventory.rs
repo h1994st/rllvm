@@ -9,8 +9,8 @@ use std::{
 };
 
 use super::{
-    ArchiveMember, CatalogOrigin, ModuleCatalog, ModuleRecord, ModuleStatus, SourceAssociation,
-    hash_bytes, hash_file, identity, read_catalog,
+    ArchiveMember, CatalogOrigin, DigestAlgorithm, DigestOrigin, ModuleCatalog, ModuleRecord,
+    ModuleStatus, SourceAssociation, SourceDigest, hash_bytes, hash_file, identity, read_catalog,
 };
 use crate::{
     bitcode_info::find_llvm_dis,
@@ -102,6 +102,75 @@ fn quoted(text: &str) -> Option<String> {
     None
 }
 
+/// Gives every association without a compiler-recorded digest one taken now,
+/// and hands the record back so a call site can wrap `inspect_bitcode` inline.
+///
+/// Only for the inventory path, never for a capture: inventory runs after the
+/// build, so this digest describes the source as it is now, not as it was
+/// compiled. It is recorded as `Inventory` for exactly that reason, and a
+/// match against it proves only that nothing changed since -- never that the
+/// source still matches the bitcode.
+///
+/// Skipped for a path that cannot be resolved to one file: a bare relative
+/// `source_filename` names a file relative to the compilation directory,
+/// which is not where this is running, and hashing whatever sits at that
+/// relative path here would attest to the wrong file.
+fn fill_inventory_digests(mut module: ModuleRecord) -> ModuleRecord {
+    // One file is associated twice when the IR names it in both
+    // `source_filename` and `!DIFile`, and only the second carries the
+    // compiler's digest. Stamping an inventory digest on the other would
+    // leave one file with two digests of different origins, and which one a
+    // reader saw would depend on the order they happened to be recorded in.
+    let recorded: BTreeSet<PathBuf> = module
+        .sources
+        .iter()
+        .filter(|association| association.digest.is_some())
+        .map(SourceAssociation::resolved_path)
+        .collect();
+    for association in &mut module.sources {
+        if association.digest.is_some() || recorded.contains(&association.resolved_path()) {
+            continue;
+        }
+        let path = association.resolved_path();
+        if !path.is_absolute() {
+            continue;
+        }
+        if let Ok(value) = hash_file(&path) {
+            association.digest = Some(SourceDigest {
+                algorithm: DigestAlgorithm::Sha256,
+                value,
+                origin: DigestOrigin::Inventory,
+            });
+        }
+    }
+    module
+}
+
+/// The digest the compiler recorded on one `!DIFile` line, if it recorded
+/// one.
+///
+/// Clang emits `checksumkind`/`checksum` under DWARF 5, which is its default;
+/// `-gdwarf-4` has no field to put them in and so carries none. This is the
+/// only digest that means "what the compiler compiled" -- anything hashed
+/// later is a statement about a later moment.
+fn difile_digest(line: &str) -> Option<SourceDigest> {
+    let kind = line
+        .split_once("checksumkind:")
+        .map(|(_, rest)| rest.trim_start())?;
+    let algorithm = DigestAlgorithm::from_checksum_kind(
+        kind.split([',', ' ', ')'])
+            .next()
+            .unwrap_or_default()
+            .trim(),
+    )?;
+    let value = line.split_once("checksum:").and_then(|(_, s)| quoted(s))?;
+    (!value.is_empty()).then_some(SourceDigest {
+        algorithm,
+        value,
+        origin: DigestOrigin::Compiler,
+    })
+}
+
 fn parse_metadata(ir: &str, module: &mut ModuleRecord) {
     let mut sources = BTreeSet::new();
     for line in ir.lines().map(str::trim) {
@@ -120,7 +189,10 @@ fn parse_metadata(ir: &str, module: &mut ModuleRecord) {
                 path: path.into(),
                 directory: None,
                 origin: "ir_source_filename".into(),
-                content_sha256: None,
+                // `source_filename` carries no checksum and no directory to
+                // resolve against; `!DIFile` below is where a digest can
+                // come from.
+                digest: None,
             });
         }
         if line.contains("!DIFile(")
@@ -136,7 +208,7 @@ fn parse_metadata(ir: &str, module: &mut ModuleRecord) {
                     path: path.into(),
                     directory: directory.map(PathBuf::from),
                     origin: "debug_info".into(),
-                    content_sha256: None,
+                    digest: difile_digest(line),
                 });
             }
         }
@@ -308,7 +380,7 @@ pub fn inventory(
                     archives.module(&path, member),
                 )
             } else {
-                inspect_bitcode(&path, &tool, &module.id)
+                fill_inventory_digests(inspect_bitcode(&path, &tool, &module.id))
             };
             if module
                 .content_sha256
@@ -349,11 +421,11 @@ pub fn inventory(
     let mut references = BTreeSet::new();
     let mut boundaries = Vec::new();
     if kind == InputKind::Bitcode {
-        modules.push(inspect_bitcode(
+        modules.push(fill_inventory_digests(inspect_bitcode(
             &input,
             &tool,
             identity(&["bitcode", &hash_bytes(&data)]),
-        ));
+        )));
     } else if let Ok(object) = object::File::parse(&*data) {
         references.extend(extract_bitcode_filepaths_from_parsed_object(&object)?);
         if references.is_empty() {
@@ -457,11 +529,11 @@ pub fn inventory(
         } else {
             std::env::current_dir()?.join(path)
         };
-        let mut module = inspect_bitcode(
+        let mut module = fill_inventory_digests(inspect_bitcode(
             &path,
             &tool,
             identity(&["recorded_module", &recorded.to_string_lossy()]),
-        );
+        ));
         module.recorded_path = Some(recorded);
         modules.push(module);
     }
