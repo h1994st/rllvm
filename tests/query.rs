@@ -5,8 +5,8 @@ use std::{
 };
 
 use rllvm::catalog::read_catalog;
-use rllvm::query::CallTarget;
 use rllvm::query::load::{for_each_module, load_catalog};
+use rllvm::query::{CallTarget, Linkage};
 
 mod common;
 use common::{
@@ -640,6 +640,64 @@ fn two_plain_module_catalog(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     (path, first.expect("at least one module"))
 }
 
+/// The shape every C++ program that uses templates or `inline` has: a
+/// definition in a header, emitted into each translation unit that
+/// instantiates it, and called from one that does not.
+fn odr_template_catalog(scratch: &tempfile::TempDir) -> PathBuf {
+    std::fs::write(
+        scratch.path().join("shared.h"),
+        "template <typename T> T twice(T x) { return x + x; }\n",
+    )
+    .unwrap();
+    archive_catalog_of(
+        scratch,
+        "odr",
+        &[
+            (
+                "a.cpp",
+                "#include \"shared.h\"\nint use_a(int x){ return twice(x); }\n",
+            ),
+            (
+                "b.cpp",
+                "#include \"shared.h\"\nint use_b(int x){ return twice(x); }\n",
+            ),
+            (
+                "c.cpp",
+                "#include \"shared.h\"\n\
+                 extern template int twice<int>(int);\n\
+                 int use_c(int x){ return twice(x); }\n",
+            ),
+        ],
+    )
+}
+
+#[test]
+fn a_template_instantiated_in_two_modules_resolves_to_one_definition() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = odr_template_catalog(&scratch);
+    let answer = query_json(&scratch, &catalog, &["reach", "_Z5use_ci", TWICE_INT]);
+
+    let path = answer["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("use_c calls twice, so reach must find a path: {answer}"));
+    let binding = path
+        .iter()
+        .find(|step| step["kind"] == "binding")
+        .unwrap_or_else(|| panic!("the path must cross a binding: {answer}"));
+    assert_eq!(binding["symbol"], TWICE_INT);
+    assert_eq!(
+        binding["status"], "unique",
+        "two linkonce_odr copies are one function, not two candidates"
+    );
+    assert!(
+        answer["uncertainty"]["frontier"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "nothing about this program is ambiguous: {answer}"
+    );
+}
+
 #[test]
 fn direct_calls_carry_caller_callee_and_line() {
     let scratch = tempfile::tempdir().unwrap();
@@ -812,7 +870,7 @@ fn an_inlined_frame_carries_its_own_file_not_the_leaf_s() {
          int main(void){ return add(2,3); }\n",
     )
     .unwrap();
-    let facts = compile_and_extract(&scratch, &["-g", "-O1"]);
+    let facts = compile_and_extract(&scratch, "t.c", &["-g", "-O1"]);
 
     let call = facts
         .call_sites
@@ -1056,6 +1114,93 @@ fn assert_unresolved_indirect_site(facts: &rllvm::query::ModuleFacts, message: &
     );
 }
 
+/// A source clang compiles into one named function, and the category that
+/// function's linkage must arrive as.
+struct LinkageCase {
+    file: &'static str,
+    source: &'static str,
+    flags: &'static [&'static str],
+    symbol: &'static str,
+    linkage: Linkage,
+}
+
+/// One case per linkage kind a C or C++ compile can produce. Both ODR kinds
+/// are here because they reach `bind` as one category while meaning slightly
+/// different things to the linker, and `weak` is here beside them because it
+/// looks identical in the IR yet promises nothing about the copies.
+const LINKAGE_CASES: &[LinkageCase] = &[
+    LinkageCase {
+        file: "external.c",
+        source: "int f(int x){return x;}\n",
+        flags: &["-g", "-O0"],
+        symbol: "f",
+        linkage: Linkage::External,
+    },
+    LinkageCase {
+        file: "internal.c",
+        source: "static int s(int x){return x;}\nint (*take(void))(int){return s;}\n",
+        flags: &["-g", "-O0"],
+        symbol: "s",
+        linkage: Linkage::Internal,
+    },
+    // An implicit instantiation: every translation unit that uses the
+    // template emits its own copy as `linkonce_odr`.
+    LinkageCase {
+        file: "implicit.cpp",
+        source: "template <typename T> T twice(T x){return x+x;}\nint use(int x){return twice(x);}\n",
+        flags: &["-g", "-O0"],
+        symbol: TWICE_INT,
+        linkage: Linkage::Odr,
+    },
+    // An explicit instantiation definition: `weak_odr`, which differs from
+    // `linkonce_odr` only in that the linker may not discard it when unused.
+    LinkageCase {
+        file: "explicit.cpp",
+        source: "template <typename T> T twice(T x){return x+x;}\ntemplate int twice<int>(int);\n",
+        flags: &["-g", "-O0"],
+        symbol: TWICE_INT,
+        linkage: Linkage::Odr,
+    },
+    LinkageCase {
+        file: "weak.c",
+        source: "__attribute__((weak)) int pick(void){return 1;}\n",
+        flags: &["-g", "-O0"],
+        symbol: "pick",
+        linkage: Linkage::Weak,
+    },
+    // A body kept only so callers can inline it. Nothing emits the symbol,
+    // so it cannot satisfy another module's declaration.
+    LinkageCase {
+        file: "available.c",
+        source: "__attribute__((always_inline)) inline int ei(int x){return x+1;}\n\
+                 int (*take(void))(int){return ei;}\n",
+        flags: &["-g", "-O0", "-std=c99"],
+        symbol: "ei",
+        linkage: Linkage::AvailableExternally,
+    },
+];
+
+/// `int twice<int>(int)`, the instantiation both C++ linkage cases emit.
+const TWICE_INT: &str = "_Z5twiceIiET_S0_";
+
+#[test]
+fn every_linkage_kind_clang_emits_reaches_the_facts_as_its_own_category() {
+    let scratch = tempfile::tempdir().unwrap();
+    for case in LINKAGE_CASES {
+        let facts = extract_named(&scratch, case.file, case.source, case.flags);
+        let function = facts
+            .functions
+            .iter()
+            .find(|function| function.id.symbol == case.symbol)
+            .unwrap_or_else(|| panic!("{} must define {}", case.file, case.symbol));
+        assert_eq!(
+            function.linkage, case.linkage,
+            "{} defines {} with the wrong category",
+            case.file, case.symbol
+        );
+    }
+}
+
 fn extract_source(scratch: &tempfile::TempDir, source: &str) -> rllvm::query::ModuleFacts {
     extract_source_with_flags(scratch, source, &["-g", "-O0"])
 }
@@ -1065,14 +1210,29 @@ fn extract_source_with_flags(
     source: &str,
     flags: &[&str],
 ) -> rllvm::query::ModuleFacts {
-    std::fs::write(scratch.path().join("t.c"), source).unwrap();
-    compile_and_extract(scratch, flags)
+    extract_named(scratch, "t.c", source, flags)
 }
 
-/// Compiles the `t.c` already written into `scratch`, so a fixture can put a
+/// Writes `name` and extracts from its bitcode. The extension decides the
+/// language: clang's driver compiles a `.cpp` fixture as C++.
+fn extract_named(
+    scratch: &tempfile::TempDir,
+    name: &str,
+    source: &str,
+    flags: &[&str],
+) -> rllvm::query::ModuleFacts {
+    std::fs::write(scratch.path().join(name), source).unwrap();
+    compile_and_extract(scratch, name, flags)
+}
+
+/// Compiles a source already written into `scratch`, so a fixture can put a
 /// header beside it first.
-fn compile_and_extract(scratch: &tempfile::TempDir, flags: &[&str]) -> rllvm::query::ModuleFacts {
-    let module = compile_bitcode_file(&scratch.path().join("t.c"), flags);
+fn compile_and_extract(
+    scratch: &tempfile::TempDir,
+    name: &str,
+    flags: &[&str],
+) -> rllvm::query::ModuleFacts {
+    let module = compile_bitcode_file(&scratch.path().join(name), flags);
     let loaded = rllvm::query::load::LoadedModule {
         id: "t".into(),
         bytes: std::fs::read(&module).unwrap(),

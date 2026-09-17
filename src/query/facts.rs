@@ -61,7 +61,16 @@ pub struct SourceLocation {
 pub enum Linkage {
     External,
     Internal,
+    /// `linkonce_odr` and `weak_odr`: one language entity, emitted into every
+    /// translation unit that used it. The One Definition Rule makes the
+    /// copies the same function, so they are one definition, not a conflict.
+    Odr,
+    /// `weak` and `linkonce` without ODR. Replaceable by design, and the
+    /// copies may genuinely differ.
     Weak,
+    /// `available_externally`: a body carried for inlining that no object
+    /// file emits, so it cannot satisfy another module's declaration.
+    AvailableExternally,
     Other,
 }
 

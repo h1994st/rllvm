@@ -185,6 +185,10 @@ is an upper bound, not a reachable set. The address-taken inventory is a
 heuristic: opt-in, and never a graph edge. An empty `reach` is not
 unreachability.
 
+ODR copies of a symbol are one definition: C++ emits a template or `inline`
+body into every translation unit that used it. Plain `weak` copies may differ
+and stay ambiguous, and `available_externally` is never a binding candidate.
+
 The mangled symbol is the identity, so demangled readings live in the envelope's
 `symbols` table rather than beside each symbol. A name resolves exactly before
 fuzzily, and the answer always says which.
