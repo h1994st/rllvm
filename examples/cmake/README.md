@@ -12,5 +12,5 @@ cmake --build build
 ## Extract bitcode
 
 ```bash
-rllvm-get-bc build/hello    # produces build/hello.bc
+rllvm-get-bc build/hello -o build/hello.bc
 ```

@@ -1412,6 +1412,121 @@ fn compile_objective_c_file_and_extract_bitcode() {
     assert_valid_bitcode(&bitcode_path);
 }
 
+/// True when CMake is on PATH.
+fn cmake_available() -> bool {
+    which("cmake").is_ok()
+}
+
+/// One CMake Objective-C language, enabled on its own: the source it
+/// compiles and the symbol that source must contribute.
+///
+/// Each carries plain C or C++ rather than real Objective-C. The extension is
+/// what routes the file to the language under test, and content without
+/// Objective-C keeps the fixture free of a runtime, so this runs on Linux as
+/// well as macOS.
+const OBJECTIVE_C_LANGUAGES: &[(&str, &str, &str, &str)] = &[
+    (
+        "OBJC",
+        "answer.m",
+        "int answer_objc(void){return 7;}\n",
+        "answer_objc",
+    ),
+    (
+        "OBJCXX",
+        "answer.mm",
+        "extern \"C\" int answer_objcxx(void){return 8;}\n",
+        "answer_objcxx",
+    ),
+];
+
+/// The toolchain file must name a wrapper for every language the wrappers
+/// handle, not rely on CMake inferring one.
+///
+/// It used to set only `CMAKE_C_COMPILER` and `CMAKE_CXX_COMPILER`. CMake
+/// hands `OBJC` down from the C compiler and `OBJCXX` from the C++ one, so a
+/// project enabling `C OBJC` was already captured -- but a project that
+/// enables `OBJC` alone has nothing to inherit from, and CMake goes and finds
+/// the system clang. Nothing fails: the build succeeds, extraction succeeds,
+/// and the translation unit is simply absent from the bitcode.
+#[test]
+fn objective_c_sources_are_captured_when_only_their_language_is_enabled() {
+    if !cmake_available() {
+        eprintln!("skipping: cmake is not installed");
+        return;
+    }
+    // `find_program` in the toolchain file must reach the binaries under
+    // test, not an rllvm the developer happens to have installed.
+    let wrappers = cargo_bin("rllvm-cc");
+    let path = format!(
+        "{}:{}",
+        wrappers.parent().unwrap().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let toolchain = Path::new(env!("CARGO_MANIFEST_DIR")).join("cmake/rllvm-toolchain.cmake");
+
+    for (language, file, contents, symbol) in OBJECTIVE_C_LANGUAGES {
+        let tmp = TempDir::new().unwrap();
+        let source = tmp.path();
+        fs::write(source.join(file), contents).unwrap();
+        fs::write(
+            source.join("CMakeLists.txt"),
+            format!(
+                "cmake_minimum_required(VERSION 3.16)\n\
+                 project(objc_capture LANGUAGES {language})\n\
+                 add_library(answers STATIC {file})\n"
+            ),
+        )
+        .unwrap();
+
+        let build = source.join("build");
+        for arguments in [
+            vec![
+                "-S".into(),
+                source.to_path_buf(),
+                "-B".into(),
+                build.clone(),
+                format!("-DCMAKE_TOOLCHAIN_FILE={}", toolchain.display()).into(),
+            ],
+            vec!["--build".into(), build.clone()],
+        ] {
+            let output = Command::new("cmake")
+                .args(&arguments)
+                .env("PATH", &path)
+                .env("RLLVM_CONFIG", shared_config_path())
+                .output()
+                .expect("Failed to run cmake");
+            assert!(
+                output.status.success(),
+                "cmake {arguments:?} failed for {language}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let bitcode = source.join("answers.bc");
+        let output = rllvm("rllvm-get-bc")
+            .arg(build.join("libanswers.a"))
+            .arg("-o")
+            .arg(&bitcode)
+            .output()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(
+            output.status.success(),
+            "{language} sources produced no bitcode to extract: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let output = Command::new(find_llvm_nm().expect("llvm-nm not found"))
+            .arg(&bitcode)
+            .output()
+            .expect("Failed to run llvm-nm");
+        let symbols = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            symbols.contains(symbol),
+            "{language}: {symbol} must reach the extracted bitcode: {symbols}"
+        );
+    }
+}
+
 /// `rllvm-init` must write where `RLLVM_CONFIG` points.
 ///
 /// The path is chosen in two places — `RLLVMConfig::new()` for reading and
