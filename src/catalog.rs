@@ -83,7 +83,7 @@ impl DigestAlgorithm {
         match self {
             DigestAlgorithm::Md5 => format!("{:x}", md5::Md5::digest(bytes)),
             DigestAlgorithm::Sha1 => format!("{:x}", sha1::Sha1::digest(bytes)),
-            DigestAlgorithm::Sha256 => format!("{:x}", Sha256::digest(bytes)),
+            DigestAlgorithm::Sha256 => hash_bytes(bytes),
         }
     }
 
@@ -113,18 +113,6 @@ pub enum DigestOrigin {
     Capture,
     /// Taken while writing the catalog, which is after the build.
     Inventory,
-}
-
-impl DigestOrigin {
-    /// Whether a match proves the source still matches the bitcode.
-    ///
-    /// `Inventory` does not, and that is not a technicality: a source edited
-    /// between the build and the inventory already hashes to the recorded
-    /// value, so a match there proves only that nothing changed since the
-    /// catalog was written.
-    pub fn proves_build_match(self) -> bool {
-        matches!(self, DigestOrigin::Compiler | DigestOrigin::Capture)
-    }
 }
 
 /// A source digest, with the algorithm it used and when it was taken.

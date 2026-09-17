@@ -8,42 +8,27 @@ use rllvm::catalog::{DigestOrigin, ModuleCatalog, ModuleStatus, write_catalog};
 use tempfile::TempDir;
 
 mod common;
-use common::{compile_bitcode_file, source_and_header};
+use common::{compile_bitcode_file, compile_bitcode_to, llvm_bin, source_and_header};
 
 struct Fixture {
     root: TempDir,
-    tools: PathBuf,
     config: PathBuf,
 }
 
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let llvm = rllvm::utils::find_llvm_config().unwrap();
-        let output = Command::new(llvm).arg("--bindir").output().unwrap();
-        assert!(output.status.success());
-        let tools = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
-        let config = root.path().join("config.toml");
-        fs::write(&config, format!("clang_filepath = '{}'\nclangxx_filepath = '{}'\nllvm_link_filepath = '{}'\nllvm_ar_filepath = '{}'\nllvm_config_filepath = '{}'\n",tools.join("clang").display(),tools.join("clang++").display(),tools.join("llvm-link").display(),tools.join("llvm-ar").display(),tools.join("llvm-config").display())).unwrap();
-        Self {
-            root,
-            tools,
-            config,
-        }
+        let config = common::scratch_rllvm_config(root.path());
+        Self { root, config }
     }
 
+    /// One module named `name` from `source`. The two are separate because
+    /// several tests build distinct modules from one source filename.
     fn module(&self, name: &str, source: &str, code: &str) -> PathBuf {
         let input = self.root.path().join(source);
         fs::write(&input, code).unwrap();
         let output = self.root.path().join(format!("{name}.bc"));
-        let status = Command::new(self.tools.join("clang"))
-            .args(["-emit-llvm", "-c", "-g", "-O0"])
-            .arg(&input)
-            .arg("-o")
-            .arg(&output)
-            .status()
-            .unwrap();
-        assert!(status.success());
+        compile_bitcode_to(&input, &output, &["-g", "-O0"]);
         output
     }
 
@@ -77,7 +62,7 @@ impl Fixture {
         command
             .current_dir(self.root.path())
             .env("RLLVM_CONFIG", &self.config)
-            .env("LLVM_CONFIG", self.tools.join("llvm-config"));
+            .env("LLVM_CONFIG", llvm_bin("llvm-config"));
         command
     }
 
@@ -91,7 +76,7 @@ impl Fixture {
     }
 
     fn ir(&self, input: &Path) -> String {
-        let output = Command::new(self.tools.join("llvm-dis"))
+        let output = Command::new(llvm_bin("llvm-dis"))
             .arg(input)
             .args(["-o", "-"])
             .output()
@@ -249,7 +234,7 @@ fn bitcode_archive_inventory_and_copy_preserve_member_modules() {
     let b = f.module("second", "second.c", "int second(void){return 2;}");
     let archive = f.root.path().join("modules.bca");
     assert!(
-        Command::new(f.tools.join("llvm-ar"))
+        Command::new(llvm_bin("llvm-ar"))
             .args(["--format=gnu", "rcs"])
             .arg(&archive)
             .args([a, b])
@@ -317,13 +302,13 @@ fn selected_partial_merge_preserves_original_directory_groups() {
         format!(
             "#!/bin/sh\nprintf 'link\\n' >> {}\nexec {} \"$@\"\n",
             quote(log.clone()),
-            quote(f.tools.join("llvm-link"))
+            quote(llvm_bin("llvm-link"))
         ),
     )
     .unwrap();
     fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
     let config = fs::read_to_string(&f.config).unwrap().replace(
-        &f.tools.join("llvm-link").display().to_string(),
+        &llvm_bin("llvm-link").display().to_string(),
         &shim.display().to_string(),
     );
     fs::write(&f.config, config).unwrap();
@@ -416,8 +401,7 @@ fn a_module_without_compiler_checksums_falls_back_to_an_inventory_digest() {
     let module = compile_bitcode_file(&source, &["-gdwarf-4", "-g", "-O0"]);
 
     let catalog =
-        rllvm::catalog::inventory(&module, scratch.path(), Some(&common::llvm_bin("llvm-dis")))
-            .unwrap();
+        rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
     let origins: Vec<_> = catalog.modules[0]
         .sources
         .iter()

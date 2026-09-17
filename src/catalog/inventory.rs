@@ -102,14 +102,8 @@ fn quoted(text: &str) -> Option<String> {
     None
 }
 
-/// [`fill_inventory_digests`] applied to a record, for call sites that build
-/// one inline.
-fn inspected_with_digests(mut module: ModuleRecord) -> ModuleRecord {
-    fill_inventory_digests(&mut module);
-    module
-}
-
-/// Gives every association without a compiler-recorded digest one taken now.
+/// Gives every association without a compiler-recorded digest one taken now,
+/// and hands the record back so a call site can wrap `inspect_bitcode` inline.
 ///
 /// Only for the inventory path, never for a capture: inventory runs after the
 /// build, so this digest describes the source as it is now, not as it was
@@ -121,7 +115,7 @@ fn inspected_with_digests(mut module: ModuleRecord) -> ModuleRecord {
 /// `source_filename` names a file relative to the compilation directory,
 /// which is not where this is running, and hashing whatever sits at that
 /// relative path here would attest to the wrong file.
-fn fill_inventory_digests(module: &mut ModuleRecord) {
+fn fill_inventory_digests(mut module: ModuleRecord) -> ModuleRecord {
     // One file is associated twice when the IR names it in both
     // `source_filename` and `!DIFile`, and only the second carries the
     // compiler's digest. Stamping an inventory digest on the other would
@@ -141,14 +135,15 @@ fn fill_inventory_digests(module: &mut ModuleRecord) {
         if !path.is_absolute() {
             continue;
         }
-        if let Ok(bytes) = fs::read(&path) {
+        if let Ok(value) = hash_file(&path) {
             association.digest = Some(SourceDigest {
                 algorithm: DigestAlgorithm::Sha256,
-                value: hash_bytes(&bytes),
+                value,
                 origin: DigestOrigin::Inventory,
             });
         }
     }
+    module
 }
 
 /// The digest the compiler recorded on one `!DIFile` line, if it recorded
@@ -385,11 +380,7 @@ pub fn inventory(
                     archives.module(&path, member),
                 )
             } else {
-                {
-                    let mut inspected = inspect_bitcode(&path, &tool, &module.id);
-                    fill_inventory_digests(&mut inspected);
-                    inspected
-                }
+                fill_inventory_digests(inspect_bitcode(&path, &tool, &module.id))
             };
             if module
                 .content_sha256
@@ -430,7 +421,7 @@ pub fn inventory(
     let mut references = BTreeSet::new();
     let mut boundaries = Vec::new();
     if kind == InputKind::Bitcode {
-        modules.push(inspected_with_digests(inspect_bitcode(
+        modules.push(fill_inventory_digests(inspect_bitcode(
             &input,
             &tool,
             identity(&["bitcode", &hash_bytes(&data)]),
@@ -538,7 +529,7 @@ pub fn inventory(
         } else {
             std::env::current_dir()?.join(path)
         };
-        let mut module = inspected_with_digests(inspect_bitcode(
+        let mut module = fill_inventory_digests(inspect_bitcode(
             &path,
             &tool,
             identity(&["recorded_module", &recorded.to_string_lossy()]),

@@ -32,20 +32,46 @@ pub fn compile_bitcode(scratch: &TempDir, name: &str, source: &str) -> PathBuf {
     compile_bitcode_file(&source_path, &["-g", "-O0"])
 }
 
-/// Compiles a source already on disk, for a fixture that puts a header beside
-/// it first or chooses its own debug format.
+/// Compiles a source already on disk to a `.bc` beside it, for a fixture that
+/// puts a header there first or chooses its own debug format.
 pub fn compile_bitcode_file(source: &Path, flags: &[&str]) -> PathBuf {
     let module = source.with_extension("bc");
+    compile_bitcode_to(source, &module, flags);
+    module
+}
+
+/// Compiles to an explicitly named module, so one source can produce several
+/// under different names.
+pub fn compile_bitcode_to(source: &Path, module: &Path, flags: &[&str]) {
     let status = Command::new(llvm_bin("clang"))
         .args(flags)
         .args(["-emit-llvm", "-c"])
         .arg(source)
         .arg("-o")
-        .arg(&module)
+        .arg(module)
         .status()
         .unwrap();
     assert!(status.success(), "clang failed on {}", source.display());
-    module
+}
+
+/// Writes an `RLLVM_CONFIG` pointing at the configured toolchain. Tests must
+/// never read or modify the developer's own configuration.
+pub fn scratch_rllvm_config(directory: &Path) -> PathBuf {
+    let contents = format!(
+        "llvm_config_filepath = '{}'\n\
+         clang_filepath = '{}'\n\
+         clangxx_filepath = '{}'\n\
+         llvm_ar_filepath = '{}'\n\
+         llvm_link_filepath = '{}'\n",
+        llvm_bin("llvm-config").display(),
+        llvm_bin("clang").display(),
+        llvm_bin("clang++").display(),
+        llvm_bin("llvm-ar").display(),
+        llvm_bin("llvm-link").display(),
+    );
+    let path = directory.join("rllvm-config.toml");
+    std::fs::write(&path, contents).unwrap();
+    path
 }
 
 /// Writes a catalog straight to `path`. Not `catalog::write_catalog`, whose

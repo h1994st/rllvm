@@ -10,8 +10,8 @@ use rllvm::query::load::{for_each_module, load_catalog};
 
 mod common;
 use common::{
-    MODULE_ID, SourceFixture, compile_bitcode, compile_bitcode_file, llvm_bin, source_and_header,
-    write_catalog_json,
+    MODULE_ID, SourceFixture, compile_bitcode, compile_bitcode_file, llvm_bin,
+    scratch_rllvm_config, source_and_header, write_catalog_json,
 };
 
 #[test]
@@ -66,7 +66,7 @@ fn the_cli_prints_callers_as_json() {
     let scratch = tempfile::tempdir().unwrap();
     let catalog = two_module_catalog(&scratch); // main calls add
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
         .arg(&catalog)
         .args(["callers", "add"])
@@ -85,29 +85,6 @@ const ADD_AND_MAIN: &[(&str, &str)] = &[
         "int add(int a,int b);\nint main(void){ return add(2,3); }\n",
     ),
 ];
-
-/// Points `RLLVM_CONFIG` at a scratch file, matching `tests/integration.rs`'s
-/// isolation convention: `rllvm-query` now reads the configured log level
-/// (`rllvm_query.rs`, so a module that fails to extract is actually reported
-/// on stderr), and without this the CLI test would depend on whatever the
-/// developer happens to have at `~/.rllvm/config.toml`.
-fn scratch_rllvm_config(scratch: &tempfile::TempDir) -> PathBuf {
-    let contents = format!(
-        "llvm_config_filepath = '{}'\n\
-         clang_filepath = '{}'\n\
-         clangxx_filepath = '{}'\n\
-         llvm_ar_filepath = '{}'\n\
-         llvm_link_filepath = '{}'\n",
-        rllvm::utils::find_llvm_config().unwrap().display(),
-        llvm_bin("clang").display(),
-        llvm_bin("clang++").display(),
-        llvm_bin("llvm-ar").display(),
-        llvm_bin("llvm-link").display(),
-    );
-    let config_path = scratch.path().join("rllvm-config.toml");
-    std::fs::write(&config_path, contents).unwrap();
-    config_path
-}
 
 #[test]
 fn a_module_whose_bytes_changed_is_excluded_without_shrinking_scope() {
@@ -536,7 +513,7 @@ fn a_compdb_catalog_carries_source_status_into_an_answer() {
     .unwrap();
 
     let generate = Command::new(env!("CARGO_BIN_EXE_rllvm-compdb"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .current_dir(scratch.path())
         .args(["generate", ".", "--output-dir", "analysis"])
         .output()
@@ -584,7 +561,7 @@ fn a_location_without_a_line_is_an_error_not_an_empty_answer() {
     let scratch = tempfile::tempdir().unwrap();
     let catalog = two_module_catalog(&scratch);
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(&scratch))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
         .arg(&catalog)
         .args(["indirect-targets", "main.c"])
@@ -623,7 +600,7 @@ fn the_heuristics_flag_may_follow_its_subcommand() {
 /// Runs `rllvm-query --catalog <catalog> <args...>` and parses its stdout.
 fn query_json(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
         .arg(catalog)
         .args(args)
@@ -1267,7 +1244,7 @@ mod mcp {
         requests: &[&str],
     ) -> String {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rllvm-query"));
-        command.env("RLLVM_CONFIG", scratch_rllvm_config(scratch));
+        command.env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()));
         if let Some(catalog) = catalog {
             command.arg("--catalog").arg(catalog);
         }
@@ -1400,7 +1377,7 @@ mod mcp {
 
         let cli: serde_json::Value = serde_json::from_slice(
             &Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-                .env("RLLVM_CONFIG", super::scratch_rllvm_config(&scratch))
+                .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
                 .arg("--catalog")
                 .arg(&catalog)
                 .args(["callers", "add"])
