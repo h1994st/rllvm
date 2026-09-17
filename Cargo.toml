@@ -46,6 +46,8 @@ sha2 = "0.10"
 # Optional: only pulled in by the `query` feature. Needs LLVM_SYS_231_PREFIX
 # pointing at an LLVM 23 install when llvm-config is not on PATH.
 llvm-sys = { version = "231", optional = true }
+md-5 = "0.10"
+sha1 = "0.10"
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 glob = "~0.3.3"

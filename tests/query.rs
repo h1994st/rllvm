@@ -8,6 +8,12 @@ use rllvm::catalog::read_catalog;
 use rllvm::query::CallTarget;
 use rllvm::query::load::{for_each_module, load_catalog};
 
+mod common;
+use common::{
+    MODULE_ID, SourceFixture, compile_bitcode, compile_bitcode_file, llvm_bin, source_and_header,
+    write_catalog_json,
+};
+
 #[test]
 fn query_binary_reports_its_llvm_major() {
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
@@ -72,15 +78,6 @@ fn the_cli_prints_callers_as_json() {
     assert_eq!(value["results"][0]["function"]["symbol"], "main");
 }
 
-fn llvm_bin(name: &str) -> PathBuf {
-    let config = rllvm::utils::find_llvm_config().unwrap();
-    let output = Command::new(config).arg("--bindir").output().unwrap();
-    assert!(output.status.success());
-    Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)
-}
-
-/// Two modules where `main` calls `add`: the smallest catalog carrying a
-/// real cross-module call. Shared by the archive and plain-file fixtures.
 const ADD_AND_MAIN: &[(&str, &str)] = &[
     ("add.c", "int add(int a,int b){return a+b;}\n"),
     (
@@ -88,36 +85,6 @@ const ADD_AND_MAIN: &[(&str, &str)] = &[
         "int add(int a,int b);\nint main(void){ return add(2,3); }\n",
     ),
 ];
-
-/// Writes `source` into the scratch directory and compiles it to bitcode
-/// beside itself, with the flags every catalog fixture here wants.
-fn compile_bitcode(scratch: &tempfile::TempDir, name: &str, source: &str) -> PathBuf {
-    let source_path = scratch.path().join(name);
-    std::fs::write(&source_path, source).unwrap();
-    compile_bitcode_file(&source_path, &["-g", "-O0"])
-}
-
-/// Compiles a source already on disk, for a fixture that puts a header
-/// beside it first or chooses its own optimization level.
-fn compile_bitcode_file(source: &Path, flags: &[&str]) -> PathBuf {
-    let module = source.with_extension("bc");
-    let status = Command::new(llvm_bin("clang"))
-        .args(flags)
-        .args(["-emit-llvm", "-c"])
-        .arg(source)
-        .arg("-o")
-        .arg(&module)
-        .status()
-        .unwrap();
-    assert!(status.success(), "clang failed on {}", source.display());
-    module
-}
-
-/// Writes a catalog straight to `path`. Not `catalog::write_catalog`, whose
-/// no-clobber publish these fixtures do not need.
-fn write_catalog_json(path: &Path, catalog: &rllvm::catalog::ModuleCatalog) {
-    std::fs::write(path, serde_json::to_vec_pretty(catalog).unwrap()).unwrap();
-}
 
 /// Points `RLLVM_CONFIG` at a scratch file, matching `tests/integration.rs`'s
 /// isolation convention: `rllvm-query` now reads the configured log level
@@ -166,45 +133,128 @@ fn a_module_whose_bytes_changed_is_excluded_without_shrinking_scope() {
     );
 }
 
+/// The state the loader derives for one of the fixture's files. Stays here
+/// rather than in the shared fixture: `SourceStatus` only exists with the
+/// `query` feature, while the digests it reads do not.
+fn source_state(fixture: &SourceFixture, file: &Path) -> rllvm::query::load::SourceState {
+    load_catalog(&fixture.catalog)
+        .unwrap()
+        .source_status
+        .get(&(MODULE_ID.to_string(), file.to_path_buf()))
+        .copied()
+        .unwrap_or_else(|| panic!("no association recorded for {}", file.display()))
+}
+
+fn source_status(fixture: &SourceFixture, file: &Path) -> rllvm::query::SourceStatus {
+    source_state(fixture, file).status
+}
+
+/// The case the whole change exists for: the source is untouched and only the
+/// header changed. Every module that included it has stale line numbers, and
+/// before this nothing could say so.
 #[test]
-fn an_edited_source_marks_its_locations_modified() {
+fn editing_only_the_header_marks_the_header_modified_and_leaves_the_source_current() {
     let scratch = tempfile::tempdir().unwrap();
-    let (catalog_path, _) = write_catalog_with_one_module(&scratch);
-    let source = scratch.path().join("add.c");
+    let fixture = source_and_header(&scratch);
 
-    // `inventory()` records source associations with `content_sha256: None`
-    // (`catalog/inventory.rs:123`), so staleness is undecidable from its
-    // output alone. Stamp the hash the capture would have had, then edit.
-    record_source_hash(&catalog_path, &source);
-    std::fs::write(&source, "int add(int a,int b){return a+b;} /* edited */\n").unwrap();
-
-    let loaded = load_catalog(&catalog_path).unwrap();
     assert_eq!(
-        loaded
-            .source_status
-            .get(&("add".to_string(), source))
-            .copied(),
-        Some(rllvm::query::SourceStatus::Modified)
+        source_status(&fixture, &fixture.source),
+        rllvm::query::SourceStatus::Current
+    );
+    assert_eq!(
+        source_status(&fixture, &fixture.header),
+        rllvm::query::SourceStatus::Current
+    );
+
+    std::fs::write(&fixture.header, "int helper(int x){return x+2;}\n").unwrap();
+
+    assert_eq!(
+        source_status(&fixture, &fixture.header),
+        rllvm::query::SourceStatus::Modified,
+        "the edited header must be reported, not just the translation unit"
+    );
+    assert_eq!(
+        source_status(&fixture, &fixture.source),
+        rllvm::query::SourceStatus::Current,
+        "and the untouched source must not be dragged along with it"
     );
 }
 
+/// The same edit, seen through a query answer rather than the loader: a
+/// location in the header carries `modified`, so a reader is told the line
+/// numbers may no longer apply.
 #[test]
-fn a_source_without_a_recorded_hash_is_unknown_not_modified() {
+fn a_location_in_an_edited_header_answers_modified() {
     let scratch = tempfile::tempdir().unwrap();
-    let (catalog_path, _) = write_catalog_with_one_module(&scratch);
-    let source = scratch.path().join("add.c");
-    std::fs::write(&source, "int add(int a,int b){return a+b;} /* edited */\n").unwrap();
+    let fixture = source_and_header(&scratch);
+    std::fs::write(&fixture.header, "int helper(int x){return x+2;}\n").unwrap();
 
-    // No hash was recorded, so an edit cannot be detected and must not be
-    // claimed. This is the behaviour `inventory()` actually produces today.
-    let loaded = load_catalog(&catalog_path).unwrap();
+    let answer = query_json(&scratch, &fixture.catalog, &["defs", "helper"]);
+    let location = &answer["results"][0]["location"];
     assert_eq!(
-        loaded
-            .source_status
-            .get(&("add".to_string(), source))
-            .copied(),
-        Some(rllvm::query::SourceStatus::Unknown)
+        location["source_status"], "modified",
+        "the definition lives in the edited header: {answer}"
     );
+    assert_eq!(
+        location["status_basis"], "compiler",
+        "and the digest came from the compiler, so this is a claim about the bitcode"
+    );
+
+    let main = query_json(&scratch, &fixture.catalog, &["defs", "main"]);
+    assert_eq!(
+        main["results"][0]["location"]["source_status"], "current",
+        "while the untouched translation unit stays current"
+    );
+}
+
+/// The whole of #186 in one test: a catalog from the inventory path -- what
+/// `rllvm-get-bc` writes -- now decides staleness on its own, with no hash
+/// stamped in by hand.
+/// A catalog from the inventory path -- what `rllvm-get-bc` writes -- now
+/// decides staleness on its own, with no hash stamped in by hand, and the
+/// three outcomes stay distinct.
+#[test]
+fn an_inventoried_source_is_current_until_it_is_edited_then_missing() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = source_and_header(&scratch);
+
+    let state = source_state(&fixture, &fixture.source);
+    assert_eq!(state.status, rllvm::query::SourceStatus::Current);
+    assert_eq!(
+        state.basis,
+        Some(rllvm::catalog::DigestOrigin::Compiler),
+        "clang records the digest in !DIFile, so this is a claim about the bitcode"
+    );
+
+    std::fs::write(&fixture.source, "int main(void){return 0;}\n").unwrap();
+    assert_eq!(
+        source_status(&fixture, &fixture.source),
+        rllvm::query::SourceStatus::Modified
+    );
+
+    std::fs::remove_file(&fixture.source).unwrap();
+    let state = source_state(&fixture, &fixture.source);
+    assert_eq!(state.status, rllvm::query::SourceStatus::Missing);
+    assert_eq!(state.basis, None, "nothing was compared");
+}
+
+/// An association carrying no digest still answers `unknown` rather than
+/// guessing, so `unknown` keeps meaning "cannot tell" and not "unchecked".
+#[test]
+fn a_source_without_a_recorded_digest_is_unknown_not_modified() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = source_and_header(&scratch);
+    assert!(
+        fixture.digest(&fixture.header).is_some(),
+        "the fixture must start with a digest, or this proves nothing"
+    );
+    strip_source_digests(&fixture.catalog);
+    assert!(fixture.digest(&fixture.header).is_none(), "strip failed");
+    std::fs::write(&fixture.header, "int helper(int x){return x+9;}\n").unwrap();
+
+    let state = source_state(&fixture, &fixture.header);
+    assert_eq!(state.status, rllvm::query::SourceStatus::Unknown);
+    assert_eq!(state.basis, None);
 }
 
 #[test]
@@ -218,14 +268,14 @@ fn two_modules_recording_one_source_keep_separate_statuses() {
         loaded
             .source_status
             .get(&("fresh".to_string(), source.clone()))
-            .copied(),
+            .map(|state| state.status),
         Some(rllvm::query::SourceStatus::Current)
     );
     assert_eq!(
         loaded
             .source_status
             .get(&("stale".to_string(), source))
-            .copied(),
+            .map(|state| state.status),
         Some(rllvm::query::SourceStatus::Modified),
         "a path-only key would let one module overwrite the other"
     );
@@ -319,15 +369,14 @@ fn write_catalog_with_one_module(scratch: &tempfile::TempDir) -> (PathBuf, PathB
     (catalog_path, module)
 }
 
-/// Stamps the current source hash into the catalog's association, standing in
-/// for a capture that recorded one.
-fn record_source_hash(catalog_path: &Path, source: &Path) {
+/// Removes every recorded digest, standing in for a capture that could not
+/// establish one.
+fn strip_source_digests(catalog_path: &Path) {
     let mut catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(catalog_path).unwrap()).unwrap();
-    let hash = rllvm::catalog::hash_bytes(&std::fs::read(source).unwrap());
     for module in catalog["modules"].as_array_mut().unwrap() {
         for association in module["sources"].as_array_mut().unwrap() {
-            association["content_sha256"] = serde_json::Value::String(hash.clone());
+            association["digest"] = serde_json::Value::Null;
         }
     }
     std::fs::write(catalog_path, serde_json::to_vec_pretty(&catalog).unwrap()).unwrap();
@@ -345,19 +394,24 @@ fn two_modules_one_source(scratch: &tempfile::TempDir) -> PathBuf {
         rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
     let template = base.modules[0].clone();
 
-    let current_hash = rllvm::catalog::hash_bytes(&std::fs::read(&source).unwrap());
-    let stale_hash = rllvm::catalog::hash_bytes(b"stale content, does not match shared.c");
+    let digest = |bytes: &[u8]| rllvm::catalog::SourceDigest {
+        algorithm: rllvm::catalog::DigestAlgorithm::Sha256,
+        value: rllvm::catalog::hash_bytes(bytes),
+        origin: rllvm::catalog::DigestOrigin::Capture,
+    };
+    let current = digest(&std::fs::read(&source).unwrap());
+    let stale_digest = digest(b"stale content, does not match shared.c");
 
     let mut fresh = template.clone();
     fresh.id = "fresh".to_string();
     for association in &mut fresh.sources {
-        association.content_sha256 = Some(current_hash.clone());
+        association.digest = Some(current.clone());
     }
 
     let mut stale = template;
     stale.id = "stale".to_string();
     for association in &mut stale.sources {
-        association.content_sha256 = Some(stale_hash.clone());
+        association.digest = Some(stale_digest.clone());
     }
 
     let catalog =

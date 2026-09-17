@@ -67,14 +67,103 @@ pub struct CatalogScope {
     pub limitations: Vec<String>,
 }
 
+/// Hash a recorded source digest was taken with. Only the kinds `!DIFile`
+/// can carry, since that is where a compiler-recorded digest comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestAlgorithm {
+    Md5,
+    Sha1,
+    Sha256,
+}
+
+impl DigestAlgorithm {
+    /// The digest of `bytes` under this algorithm, lowercase hex.
+    pub fn hash(self, bytes: &[u8]) -> String {
+        match self {
+            DigestAlgorithm::Md5 => format!("{:x}", md5::Md5::digest(bytes)),
+            DigestAlgorithm::Sha1 => format!("{:x}", sha1::Sha1::digest(bytes)),
+            DigestAlgorithm::Sha256 => format!("{:x}", Sha256::digest(bytes)),
+        }
+    }
+
+    /// The `DIFile` checksum kind spelling, as it appears in LLVM IR.
+    pub fn from_checksum_kind(kind: &str) -> Option<DigestAlgorithm> {
+        match kind {
+            "CSK_MD5" => Some(DigestAlgorithm::Md5),
+            "CSK_SHA1" => Some(DigestAlgorithm::Sha1),
+            "CSK_SHA256" => Some(DigestAlgorithm::Sha256),
+            _ => None,
+        }
+    }
+}
+
+/// When a source digest was taken, which decides what a match proves.
+///
+/// One definition of the digest across the project; only the moment differs.
+/// That moment is the whole point: a digest taken during inventory runs after
+/// the build and cannot see what the source looked like then.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigestOrigin {
+    /// The compiler recorded it while compiling the module, in `!DIFile`.
+    Compiler,
+    /// rllvm took it while driving that compilation, so it describes the
+    /// same moment the compiler saw.
+    Capture,
+    /// Taken while writing the catalog, which is after the build.
+    Inventory,
+}
+
+impl DigestOrigin {
+    /// Whether a match proves the source still matches the bitcode.
+    ///
+    /// `Inventory` does not, and that is not a technicality: a source edited
+    /// between the build and the inventory already hashes to the recorded
+    /// value, so a match there proves only that nothing changed since the
+    /// catalog was written.
+    pub fn proves_build_match(self) -> bool {
+        matches!(self, DigestOrigin::Compiler | DigestOrigin::Capture)
+    }
+}
+
+/// A source digest, with the algorithm it used and when it was taken.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SourceDigest {
+    pub algorithm: DigestAlgorithm,
+    /// Lowercase hex.
+    pub value: String,
+    pub origin: DigestOrigin,
+}
+
+impl SourceDigest {
+    /// Whether `bytes` hash to this digest under its own algorithm.
+    pub fn matches(&self, bytes: &[u8]) -> bool {
+        self.algorithm.hash(bytes).eq_ignore_ascii_case(&self.value)
+    }
+}
+
 /// A source association with an explicit origin (IR, debug information, or database).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceAssociation {
     pub path: PathBuf,
     pub directory: Option<PathBuf>,
     pub origin: String,
-    /// Hash of an observed current source file, not its dependency closure.
-    pub content_sha256: Option<String>,
+    /// The digest of this source file, not of its dependency closure.
+    /// `None` when none could be established, which stays distinct from a
+    /// digest that fails to match.
+    pub digest: Option<SourceDigest>,
+}
+
+impl SourceAssociation {
+    /// The file this association points at: the path, under its recorded
+    /// directory when it has one.
+    pub fn resolved_path(&self) -> PathBuf {
+        match &self.directory {
+            Some(directory) => directory.join(&self.path),
+            None => self.path.clone(),
+        }
+    }
 }
 
 /// Identity of the compiler used for a recorded analysis compilation.

@@ -5,14 +5,15 @@ mod sdk;
 use crate::{
     arg_parser::CompilerArgsInfo,
     catalog::{
-        CatalogOrigin, CompilationRecord, CompilerIdentity, ModuleCatalog, ModuleRecord,
-        ModuleStatus, SourceAssociation, hash_bytes, hash_file, identity, write_catalog,
+        CatalogOrigin, CompilationRecord, CompilerIdentity, DigestAlgorithm, DigestOrigin,
+        ModuleCatalog, ModuleRecord, ModuleStatus, SourceAssociation, SourceDigest, hash_bytes,
+        hash_file, identity, write_catalog,
     },
     error::Error,
 };
 use serde::Deserialize;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -433,7 +434,12 @@ fn materialize_entry(
         module.status = ModuleStatus::Unsupported;
         return Err(invalid("analysis overrides changed source input"));
     }
-    source.content_sha256 = hash_file(&source.path).ok();
+    // Taken before the compile below and re-checked after it, so it
+    // describes the bytes this module was actually built from -- the same
+    // thing `!DIFile` records, under the same definition, differing only in
+    // who observed it.
+    let before = source_digest(&source.path);
+    source.digest = before.clone();
     let temporary = tempfile::NamedTempFile::new_in(output)?;
     let mut arguments = crate::materialize::bitcode_arguments(
         &compile_args,
@@ -479,12 +485,31 @@ fn materialize_entry(
     module.status = inspected.status;
     module.diagnostics.extend(inspected.diagnostics);
     module.ir_stage = Some("translation_unit_before_link".into());
-    if source.content_sha256 != hash_file(&source.path).ok() {
-        source.content_sha256 = None;
+    if digest_value(&before) != digest_value(&source_digest(&source.path)) {
+        source.digest = None;
         module
             .diagnostics
             .push("source changed during compilation; current source hash unavailable".into());
     }
+
+    // `inspect_bitcode` already walked this module's debug info, which names
+    // every header that contributed a location, each with the digest the
+    // compiler recorded for it. Discarding them left a location inside a
+    // header with nothing to check, so it could only ever answer `unknown`.
+    // The database's own association for the translation unit stays: it was
+    // verified across the compilation just above.
+    let known: HashSet<PathBuf> = module
+        .sources
+        .iter()
+        .map(SourceAssociation::resolved_path)
+        .collect();
+    module.sources.extend(
+        inspected
+            .sources
+            .into_iter()
+            .filter(|association| !known.contains(&association.resolved_path())),
+    );
+
     let relative = PathBuf::from("modules").join(format!("{}.bc", module.id));
     fs::File::open(temporary.path())?.sync_all()?;
     temporary
@@ -492,6 +517,22 @@ fn materialize_entry(
         .map_err(|error| Error::Io(error.error))?;
     module.path = Some(relative);
     Ok(())
+}
+
+/// The digest of one source, taken by rllvm while it drives the compilation.
+/// SHA-256 because that is this project's default, and recorded as
+/// `Capture`: rllvm observed it rather than the compiler reporting it, but
+/// at the same moment.
+fn source_digest(path: &Path) -> Option<SourceDigest> {
+    hash_file(path).ok().map(|value| SourceDigest {
+        algorithm: DigestAlgorithm::Sha256,
+        value,
+        origin: DigestOrigin::Capture,
+    })
+}
+
+fn digest_value(digest: &Option<SourceDigest>) -> Option<&str> {
+    digest.as_ref().map(|digest| digest.value.as_str())
 }
 
 fn import_entry(
@@ -506,7 +547,9 @@ fn import_entry(
         path: source.clone(),
         directory: Some(directory.clone()),
         origin: "compilation_database".into(),
-        content_sha256: None,
+        // Filled in by `compile_entry`, which is the only caller that knows
+        // when the compilation happened.
+        digest: None,
     });
     let arguments = match entry.arguments {
         Some(arguments) => arguments,

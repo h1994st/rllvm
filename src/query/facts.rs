@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{CatalogOrigin, CatalogScope};
+use crate::catalog::{CatalogOrigin, CatalogScope, DigestOrigin};
 
 /// A function is identified by module and symbol, never by symbol alone: the
 /// catalog preserves separate compilations of one source on purpose.
@@ -25,12 +25,14 @@ pub struct CallSiteId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceStatus {
-    /// Current file hashes to the value recorded at capture.
+    /// Current file hashes to the recorded digest. Read with `status_basis`:
+    /// only a `compiler` or `capture` digest makes this a statement about
+    /// the bitcode rather than about the catalog.
     Current,
     /// File exists and differs; recorded line numbers may no longer apply.
     Modified,
     Missing,
-    /// No hash was recorded, so staleness cannot be determined.
+    /// No digest was recorded, so staleness cannot be determined.
     Unknown,
 }
 
@@ -41,6 +43,14 @@ pub struct SourceLocation {
     pub line: u32,
     pub column: u32,
     pub source_status: SourceStatus,
+    /// What `source_status` was decided against. `compiler` and `capture`
+    /// were both taken when the module was built, so `current` proves the
+    /// source still matches the bitcode. `inventory` was taken when the
+    /// catalog was written, which is after the build: `current` there proves
+    /// only that nothing changed since. Absent when there was no digest to
+    /// check, or the file is gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_basis: Option<DigestOrigin>,
     /// Innermost-first chain of inlining frames; empty when not inlined.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inlined_at: Vec<SourceLocation>,

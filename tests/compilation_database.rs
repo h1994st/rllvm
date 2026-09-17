@@ -294,12 +294,12 @@ fn selected_current_source_generates_ir_and_preserves_native_outputs() {
     assert!(module["target_triple"].as_str().unwrap().len() > 5);
     assert!(!module["data_layout"].as_str().unwrap().is_empty());
     assert_eq!(module["content_sha256"].as_str().unwrap().len(), 64);
+    let digest = &module["sources"][0]["digest"];
+    assert_eq!(digest["value"].as_str().unwrap().len(), 64);
+    assert_eq!(digest["algorithm"], "sha256");
     assert_eq!(
-        module["sources"][0]["content_sha256"]
-            .as_str()
-            .unwrap()
-            .len(),
-        64
+        digest["origin"], "capture",
+        "compdb runs the compiler itself, so its digest describes the build"
     );
     let path = Path::new(module["path"].as_str().unwrap());
     assert!(path.is_relative());
@@ -436,8 +436,8 @@ fn explicit_overrides_and_current_source_edits_have_separate_identity() {
     );
     assert_ne!(first["content_sha256"], overridden["content_sha256"]);
     assert_ne!(
-        first["sources"][0]["content_sha256"],
-        edited["sources"][0]["content_sha256"]
+        first["sources"][0]["digest"]["value"],
+        edited["sources"][0]["digest"]["value"]
     );
 }
 

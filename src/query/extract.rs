@@ -26,7 +26,10 @@ use llvm_sys::{
 
 use crate::{
     error::Error,
-    query::{facts::*, load::LoadedModule},
+    query::{
+        facts::*,
+        load::{LoadedModule, SourceState},
+    },
 };
 
 unsafe extern "C" {
@@ -296,7 +299,7 @@ unsafe fn value_name(value: LLVMValueRef) -> String {
 unsafe fn location_of(
     value: LLVMValueRef,
     module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceStatus>,
+    source_status: &HashMap<(String, PathBuf), SourceState>,
 ) -> Option<SourceLocation> {
     // SAFETY: the caller guarantees a live value; this accessor accepts
     // functions, globals and instructions alike and answers 0 without one.
@@ -361,7 +364,7 @@ unsafe fn location_of(
 unsafe fn location_of_metadata(
     location: LLVMMetadataRef,
     module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceStatus>,
+    source_status: &HashMap<(String, PathBuf), SourceState>,
 ) -> SourceLocation {
     // SAFETY: the caller guarantees a live `DILocation`, whose scope always
     // resolves to a file.
@@ -408,7 +411,7 @@ unsafe fn build_location(
     line: u32,
     column: u32,
     module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceStatus>,
+    source_status: &HashMap<(String, PathBuf), SourceState>,
     inlined_at: Vec<SourceLocation>,
 ) -> SourceLocation {
     let file = PathBuf::from(file);
@@ -417,15 +420,14 @@ unsafe fn build_location(
     } else {
         PathBuf::from(&directory).join(&file)
     };
+    let state = source_status.get(&(module_id.to_string(), full)).copied();
     SourceLocation {
         file,
         directory: (!directory.is_empty()).then(|| PathBuf::from(directory)),
         line,
         column,
-        source_status: source_status
-            .get(&(module_id.to_string(), full))
-            .copied()
-            .unwrap_or(SourceStatus::Unknown),
+        source_status: state.map_or(SourceStatus::Unknown, |state| state.status),
+        status_basis: state.and_then(|state| state.basis),
         inlined_at,
     }
 }
@@ -567,7 +569,7 @@ unsafe fn collect_uses(
     function: LLVMValueRef,
     id: &FunctionId,
     module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceStatus>,
+    source_status: &HashMap<(String, PathBuf), SourceState>,
     uses: &mut Vec<UseFact>,
 ) {
     // SAFETY: the caller guarantees a live function.
@@ -643,7 +645,7 @@ fn parse_error(module: &LoadedModule, diagnostics: &[String]) -> Error {
 
 pub fn extract(
     module: &LoadedModule,
-    source_status: &HashMap<(String, PathBuf), SourceStatus>,
+    source_status: &HashMap<(String, PathBuf), SourceState>,
 ) -> Result<ModuleFacts, Error> {
     // SAFETY: the context, buffer and module are created here, used only
     // within this function, and disposed before returning.
@@ -655,7 +657,7 @@ pub fn extract(
 /// inside it. It is `unsafe` only because it drives the C API directly.
 unsafe fn extract_inner(
     module: &LoadedModule,
-    source_status: &HashMap<(String, PathBuf), SourceStatus>,
+    source_status: &HashMap<(String, PathBuf), SourceState>,
 ) -> Result<ModuleFacts, Error> {
     // Declaration order is drop order reversed: the parsed module is disposed
     // first, then the buffer, then the context, and the diagnostic sink last
