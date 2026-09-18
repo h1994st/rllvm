@@ -26,6 +26,28 @@ rllvm-info hello.bc      # target, function, block, instruction counts
 On first run, tool paths are detected from `llvm-config` and written to
 `~/.rllvm/config.toml`.
 
+## Coming from wllvm or gllvm?
+
+rllvm follows the `CC`/`CXX` → build → extract workflow that
+[wllvm](https://github.com/travitch/whole-program-llvm) and
+[gllvm](https://github.com/SRI-CSL/gllvm) established. `rllvm-cc` and
+`rllvm-cxx` stand in for `wllvm`/`gclang`, `rllvm-get-bc` for
+`extract-bc`/`get-bc`.
+
+Your build commands do not change. What you can capture, and what you can do
+with it afterwards, does.
+
+| | 🌟 rllvm | wllvm / gllvm |
+| --- | --- | --- |
+| 🦀 Languages | [C, C++, Objective-C, **Rust**](#languages) | C, C++; Fortran in gllvm |
+| 🔍 Analysis | [Source-level queries, MCP server](#analyzing-bitcode) | ❌ |
+| 📋 No wrapper build | [Import `compile_commands.json`](#from-a-compilation-database) | ❌ |
+| 🎯 Targets | [Native, **WebAssembly, eBPF**](#webassembly-and-ebpf) | Native |
+| 🔗 LTO | [Three modes, dispatched on object content](#lto) | `-flto` unlikely to survive extraction |
+| ♻️ Rebuilds | [Cache validated against inputs](#caching) | No bitcode cache |
+| 📦 Moving a build tree | [Paths relative to a root](#moving-a-build-tree) | Absolute bitcode paths |
+| ⚙️ Setup | [Detected from `llvm-config`](#configuration) | Environment variables |
+
 ## How it works
 
 The wrappers run Clang normally and also emit bitcode. Each object gets a custom
@@ -355,12 +377,11 @@ repeats its merge every run.
 See the [baseline](benchmarks/baselines/2026-09-12-apple-m4/README.md) for
 conditions and the [benchmark guide](benchmarks/README.md) for reproduction.
 
-## Relationship to gllvm and wllvm
+## Related projects
 
-rllvm began as a Rust port of [gllvm](https://github.com/SRI-CSL/gllvm) and
-[wllvm](https://github.com/SRI-CSL/whole-program-llvm), retaining the
-`CC`/`CXX` → build → extract workflow. It adds Rust, WebAssembly/eBPF,
-relocatable paths, catalogs, and selective compilation-database imports.
+[wllvm](https://github.com/travitch/whole-program-llvm) and
+[gllvm](https://github.com/SRI-CSL/gllvm) built the wrapper-and-extract approach
+this tool follows.
 
 [rules_rllvm](https://github.com/h1994st/rules_rllvm) is a separate Bazel-native
 project and does not use these binaries.
