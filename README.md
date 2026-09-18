@@ -34,16 +34,16 @@ rllvm follows the `CC`/`CXX` → build → extract workflow that
 `rllvm-cxx` stand in for `wllvm`/`gclang`, `rllvm-get-bc` for
 `extract-bc`/`get-bc`.
 
-| | wllvm / gllvm | rllvm |
+| | rllvm | wllvm / gllvm |
 | --- | --- | --- |
-| Languages | C, C++; Fortran in gllvm | C, C++, Objective-C, Rust |
-| Targets | Native | Also WebAssembly and eBPF |
-| LTO | gllvm: `-flto` unlikely to survive extraction | Three modes, dispatched on object content |
-| Moving a build tree | Absolute bitcode paths | Paths relative to a root |
-| Rebuilds | No bitcode cache | Optional, validated against inputs |
-| No wrapper build | — | Import `compile_commands.json` |
-| Setup | Environment variables | Detected from `llvm-config` into a config file |
-| Analysis | — | Source-level queries and an MCP server |
+| 🦀 Languages | C, C++, Objective-C, **Rust** | C, C++; Fortran in gllvm |
+| 🎯 Targets | Native, **WebAssembly, eBPF** | Native |
+| 🔗 LTO | Three modes, dispatched on object content | gllvm: `-flto` unlikely to survive extraction |
+| 📦 Moving a build tree | Paths relative to a root | Absolute bitcode paths |
+| ♻️ Rebuilds | Cache validated against inputs | No bitcode cache |
+| 📋 No wrapper build | Import `compile_commands.json` | — |
+| ⚙️ Setup | Detected from `llvm-config` | Environment variables |
+| 🔍 Analysis | Source-level queries, MCP server | — |
 
 ## How it works
 
