@@ -10,16 +10,12 @@ sources=$PWD
 build="$OUT/build"
 mkdir -p "$build"
 
-# `pwd -P`, not `$PWD`: the root is compared against the bitcode file's real
-# path, so a root reaching rllvm through a symlink -- /tmp and /var both are
-# on macOS -- matches nothing and the paths are silently recorded absolute.
-root=$(cd "$build" && pwd -P)
-
 # Without a root the recorded paths are absolute, and moving the tree strands
-# them.
+# them. The root is given as-is: rllvm resolves it against each bitcode file's
+# real path, so a path through a symlink works.
 (
     cd "$build"
-    export RLLVM_BITCODE_ROOT="$root"
+    export RLLVM_BITCODE_ROOT="$build"
     rllvm-cc -c "$sources/lib.c" -o lib.o
     rllvm-cc -c "$sources/app.c" -o app.o
     rllvm-cc lib.o app.o -o app

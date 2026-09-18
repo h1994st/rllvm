@@ -51,6 +51,19 @@ pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
 /// Returns the global [`RLLVMConfig`] singleton (test variant).
 ///
 /// Uses [`RLLVMConfig::try_default`] to infer configuration from the system.
+/// Resolve a configured bitcode root to the form paths are compared against.
+///
+/// The root is matched against each bitcode file's real path, so a root that
+/// reaches rllvm through a symlink -- `/tmp` and `/var` both are on macOS --
+/// would otherwise match nothing and the paths would be recorded absolute
+/// with no warning. Callers should not have to pass a canonical path.
+///
+/// A root that does not exist yet is kept as given: `canonicalize` fails on a
+/// missing path, and a build may create the directory later.
+fn normalize_root(root: PathBuf) -> PathBuf {
+    root.canonicalize().unwrap_or(root)
+}
+
 #[cfg(test)]
 pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
     static RLLVM_CONFIG: OnceLock<ConfigResult> = OnceLock::new();
@@ -236,6 +249,7 @@ impl RLLVMConfig {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| self.bitcode_root.clone())
+            .map(normalize_root)
     }
 
     /// Returns the configured `rustc`, if any.

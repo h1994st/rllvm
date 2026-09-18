@@ -5864,3 +5864,83 @@ fn linking_with_lld_keeps_the_bitcode_path() {
     assert!(status.success(), "extraction failed after an lld link");
     assert_bitcode_magic(&bitcode);
 }
+
+/// A bitcode root reaching rllvm through a symlink must still produce
+/// relative paths.
+///
+/// The root is compared against the bitcode file's path, and that comparison
+/// used to be purely lexical: a root of `/var/...` never matched a file at
+/// `/private/var/...`, so the paths were recorded absolute and nothing said
+/// so. On macOS both `/tmp` and `/var` are symlinks, so any tmpdir-based
+/// build hit it, and the failure only surfaced later when the moved tree
+/// could not be extracted.
+#[test]
+fn a_bitcode_root_given_through_a_symlink_still_records_relative_paths() {
+    let tmp = TempDir::new().unwrap();
+    let real = tmp.path().join("real-build");
+    fs::create_dir(&real).unwrap();
+
+    // The root the caller passes points at the symlink, not the real path.
+    let linked = tmp.path().join("linked-build");
+    std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+    let source = tmp.path().join("unit.c");
+    fs::write(&source, "int helper(void){return 7;}\n").unwrap();
+    let object = real.join("unit.o");
+
+    let status = rllvm("rllvm-cc")
+        .env("RLLVM_BITCODE_ROOT", &linked)
+        .args(["--", "-c", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc failed");
+
+    let recorded = recorded_bitcode_path(&object);
+    assert!(
+        !recorded.starts_with('/'),
+        "the root was ignored and an absolute path was recorded: {recorded}"
+    );
+}
+
+/// Configuring a root that cannot contain the bitcode must say so.
+///
+/// Even with both paths normalized, a path genuinely outside the root cannot
+/// be made relative. Falling back to an absolute path is the right answer;
+/// doing it silently is what made this class of bug invisible.
+#[test]
+fn a_bitcode_root_that_does_not_contain_the_bitcode_warns() {
+    let tmp = TempDir::new().unwrap();
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+
+    let source = tmp.path().join("unit.c");
+    fs::write(&source, "int helper(void){return 7;}\n").unwrap();
+    let object = tmp.path().join("unit.o");
+
+    let output = rllvm("rllvm-cc")
+        .env("RLLVM_BITCODE_ROOT", &elsewhere)
+        .env("RLLVM_LOG_LEVEL", "1")
+        .args(["--", "-c", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(output.status.success(), "rllvm-cc failed");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("bitcode_root"),
+        "no warning that the configured root was not used: {stderr}"
+    );
+}
+
+/// The path an object records for its bitcode, without the trailing newline
+/// the section stores.
+fn recorded_bitcode_path(object: &Path) -> String {
+    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(object)
+        .expect("the object should record a bitcode path");
+    assert_eq!(paths.len(), 1, "expected exactly one recorded path");
+    paths[0].to_string_lossy().into_owned()
+}

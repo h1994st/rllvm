@@ -105,16 +105,45 @@ pub(crate) fn recorded_bitcode_filepath(bitcode_filepath: &Path) -> Result<Strin
     // Unset is the default and keeps the historical absolute form, so objects
     // produced by older versions stay readable. The reader distinguishes the two
     // by the leading separator, which is why no format flag is needed.
-    Ok(try_rllvm_config()
+    let root = try_rllvm_config()
         .ok()
-        .and_then(|config| config.bitcode_root())
-        .and_then(|root| {
-            absolute_filepath
-                .strip_prefix(&root)
-                .ok()
-                .map(|relative| relative.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| absolute_filepath.to_string_lossy().into_owned()))
+        .and_then(|config| config.bitcode_root());
+
+    let Some(root) = root else {
+        return Ok(absolute_filepath.to_string_lossy().into_owned());
+    };
+
+    // Canonical only for the comparison against a canonical root, never for
+    // the value recorded. Rewriting an absolute path would change what every
+    // build without a root records, and that path feeds artifact identity.
+    //
+    // The file itself cannot be canonicalized -- the Rust wrapper records
+    // paths for files rustc has not created yet -- so its directory is
+    // resolved and the name rejoined.
+    let comparable = match (absolute_filepath.parent(), absolute_filepath.file_name()) {
+        (Some(directory), Some(name)) => directory
+            .canonicalize()
+            .map(|directory| directory.join(name))
+            .unwrap_or_else(|_| absolute_filepath.clone()),
+        _ => absolute_filepath.clone(),
+    };
+
+    match comparable.strip_prefix(&root) {
+        Ok(relative) => Ok(relative.to_string_lossy().into_owned()),
+        // A path outside the root cannot be made relative to it, and an
+        // absolute entry is the only honest answer. Say so: recording it
+        // silently is what made a root that matched nothing look like it had
+        // been applied, until a moved tree failed to extract.
+        Err(_) => {
+            tracing::warn!(
+                "bitcode_root {:?} does not contain {:?}; recording an absolute path, \
+                 which will not survive moving the build tree",
+                root,
+                absolute_filepath
+            );
+            Ok(absolute_filepath.to_string_lossy().into_owned())
+        }
+    }
 }
 
 /// Resolve the bitcode filepath to a string for embedding.

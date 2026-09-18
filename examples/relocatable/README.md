@@ -18,14 +18,14 @@ be proving nothing.
 ## What it does
 
 ```bash
-RLLVM_BITCODE_ROOT="$(cd build && pwd -P)" rllvm-cc -c lib.c -o build/lib.o
+RLLVM_BITCODE_ROOT="$PWD/build" rllvm-cc -c lib.c -o build/lib.o
 # ... build, then move build/ to moved/
 rllvm-get-bc --bitcode-root moved moved/app -o moved/app.bc
 ```
 
-Use `pwd -P`. The root is compared against each bitcode file's real path, so a
-root that reaches rllvm through a symlink — `/tmp` and `/var` both are on
-macOS — matches nothing, and the paths are recorded absolute with no warning.
+The root is resolved against each bitcode file's real path, so a path through
+a symlink works. A root that cannot contain the bitcode is reported rather
+than silently ignored; run with `RLLVM_LOG_LEVEL=1` to see it.
 
 The root must contain the bitcode files, including a central
 `bitcode_store_path` if you use one.
