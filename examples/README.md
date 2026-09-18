@@ -38,4 +38,7 @@ cargo test --test examples
 ```
 
 runs every example's `check.sh` under an isolated `RLLVM_CONFIG` and reports
-which passed, skipped, or failed.
+which passed, skipped, or failed. It also writes that record to
+`target/tmp/examples-summary.txt`, which CI prints: libtest hides a passing
+test's output, so without it a run that skipped most examples looks like one
+that verified them all.
