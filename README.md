@@ -26,6 +26,25 @@ rllvm-info hello.bc      # target, function, block, instruction counts
 On first run, tool paths are detected from `llvm-config` and written to
 `~/.rllvm/config.toml`.
 
+## Coming from wllvm or gllvm?
+
+rllvm follows the `CC`/`CXX` → build → extract workflow that
+[wllvm](https://github.com/travitch/whole-program-llvm) and
+[gllvm](https://github.com/SRI-CSL/gllvm) established. `rllvm-cc` and
+`rllvm-cxx` stand in for `wllvm`/`gclang`, `rllvm-get-bc` for
+`extract-bc`/`get-bc`.
+
+| | wllvm / gllvm | rllvm |
+| --- | --- | --- |
+| Languages | C, C++; Fortran in gllvm | C, C++, Objective-C, Rust |
+| Targets | Native | Also WebAssembly and eBPF |
+| LTO | gllvm: `-flto` unlikely to survive extraction | Three modes, dispatched on object content |
+| Moving a build tree | Absolute bitcode paths | Paths relative to a root |
+| Rebuilds | No bitcode cache | Optional, validated against inputs |
+| No wrapper build | — | Import `compile_commands.json` |
+| Setup | Environment variables | Detected from `llvm-config` into a config file |
+| Analysis | — | Source-level queries and an MCP server |
+
 ## How it works
 
 The wrappers run Clang normally and also emit bitcode. Each object gets a custom
@@ -355,12 +374,11 @@ repeats its merge every run.
 See the [baseline](benchmarks/baselines/2026-09-12-apple-m4/README.md) for
 conditions and the [benchmark guide](benchmarks/README.md) for reproduction.
 
-## Relationship to gllvm and wllvm
+## Related projects
 
-rllvm began as a Rust port of [gllvm](https://github.com/SRI-CSL/gllvm) and
-[wllvm](https://github.com/SRI-CSL/whole-program-llvm), retaining the
-`CC`/`CXX` → build → extract workflow. It adds Rust, WebAssembly/eBPF,
-relocatable paths, catalogs, and selective compilation-database imports.
+[wllvm](https://github.com/travitch/whole-program-llvm) and
+[gllvm](https://github.com/SRI-CSL/gllvm) built the wrapper-and-extract approach
+this tool follows.
 
 [rules_rllvm](https://github.com/h1994st/rules_rllvm) is a separate Bazel-native
 project and does not use these binaries.
