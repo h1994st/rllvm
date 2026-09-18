@@ -20,6 +20,17 @@ catalog from it, then extracts bitcode from the catalog and checks it defines
 ## What it does
 
 ```bash
+mkdir -p build
+cat >build/compile_commands.json <<JSON
+[
+  {
+    "directory": "$PWD/build",
+    "file": "$PWD/demo.c",
+    "command": "clang -c $PWD/demo.c -o $PWD/build/demo.o"
+  }
+]
+JSON
+
 rllvm-compdb list build/compile_commands.json
 rllvm-compdb generate build/compile_commands.json --output-dir build/analysis
 rllvm-get-bc build/analysis/catalog.json -o build/demo.bc
