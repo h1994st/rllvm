@@ -250,6 +250,8 @@ output path. The default links every module into one `.bc`; `-b` is shorthand
 for archive mode. Archive outputs are rewritten from the current modules, so
 removed members do not persist.
 
+See the [merge strategies example](examples/merge-strategies/).
+
 ### Catalogs
 
 A catalog is a JSON record of which modules were found and where they came from.
@@ -267,7 +269,8 @@ fails. `--output-dir` must be new, and copies hash-checked modules into it with
 relative paths so the directory can move.
 
 A catalog describes the evidence it collected and the scope it selected — not
-proven whole-program completeness. See the [format reference](docs/CATALOG.md).
+proven whole-program completeness. See the [format reference](docs/CATALOG.md)
+and the [catalogs example](examples/catalogs/).
 
 ### Moving a build tree
 
@@ -281,7 +284,9 @@ rllvm-get-bc --bitcode-root moved-build moved-build/my_program
 ```
 
 The root must contain the bitcode files, including a central
-`bitcode_store_path` if you use one.
+`bitcode_store_path` if you use one. Give a real path: a root reaching rllvm
+through a symlink records absolute paths instead. See the
+[relocatable example](examples/relocatable/).
 
 ## Analyzing bitcode
 
