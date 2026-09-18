@@ -93,6 +93,50 @@ fn run_capped(command: &mut Command, capture: &Path, timeout: Duration) -> io::R
     })
 }
 
+/// What became of one example. The harness records one per example so a CI
+/// reader can see which ran, rather than inferring it from a green tick.
+enum Outcome {
+    Verified,
+    Skipped(String),
+    Failed,
+}
+
+/// Renders the per-example record CI prints.
+///
+/// libtest captures a passing test's output, so a run that quietly degrades
+/// from three examples verified to one looks exactly like a healthy one. This
+/// is the record that makes the difference visible.
+fn summary(outcomes: &[(String, Outcome)]) -> String {
+    let mut lines = String::new();
+    let (mut verified, mut skipped, mut failed) = (0, 0, 0);
+    for (name, outcome) in outcomes {
+        match outcome {
+            Outcome::Verified => {
+                verified += 1;
+                lines.push_str(&format!("verified  {name}\n"));
+            }
+            Outcome::Skipped(reason) => {
+                skipped += 1;
+                lines.push_str(&format!("skipped   {name}  {reason}\n"));
+            }
+            Outcome::Failed => {
+                failed += 1;
+                lines.push_str(&format!("failed    {name}\n"));
+            }
+        }
+    }
+    lines.push_str(&format!(
+        "{verified} verified, {skipped} skipped, {failed} failed\n"
+    ));
+    lines
+}
+
+/// Where the record is written, for CI to print. `CARGO_TARGET_TMPDIR` is
+/// `<target>/tmp`, so the path is predictable without hardcoding `target/`.
+fn summary_path() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join("examples-summary.txt")
+}
+
 /// The directory holding the binaries under test, so a script reaches those
 /// rather than an rllvm the developer happens to have installed.
 fn binary_directory() -> PathBuf {
@@ -183,6 +227,7 @@ fn every_example_verifies_itself() {
     let root = examples_root();
     let mut verified = 0;
     let mut failures: Vec<String> = Vec::new();
+    let mut outcomes: Vec<(String, Outcome)> = Vec::new();
 
     let missing: Vec<String> = example_directories()
         .into_iter()
@@ -220,6 +265,7 @@ fn every_example_verifies_itself() {
             Ok(capped) => capped,
             Err(error) => {
                 failures.push(format!("{name}: cannot run check.sh: {error}"));
+                outcomes.push((name, Outcome::Failed));
                 continue;
             }
         };
@@ -238,29 +284,50 @@ fn every_example_verifies_itself() {
                 "{name}: wrote outside the directory it was given: {}",
                 changed.join(", ")
             ));
+            outcomes.push((name, Outcome::Failed));
             continue;
         }
 
         match capped.status {
-            None => failures.push(format!(
-                "{name}: still running after {}s, killed\n\
+            None => {
+                outcomes.push((name.clone(), Outcome::Failed));
+                failures.push(format!(
+                    "{name}: still running after {}s, killed\n\
                  --- stdout ---\n{stdout}\n\
                  --- stderr ---\n{}",
-                TIMEOUT.as_secs(),
-                capped.stderr
-            )),
-            Some(status) => match status.code() {
-                Some(0) => verified += 1,
-                Some(SKIP) => eprintln!("skipping {name}: {stdout}"),
-                code => failures.push(format!(
-                    "{name}: check.sh exited {code:?}\n\
-                     --- stdout ---\n{stdout}\n\
-                     --- stderr ---\n{}",
+                    TIMEOUT.as_secs(),
                     capped.stderr
-                )),
+                ));
+            }
+            Some(status) => match status.code() {
+                Some(0) => {
+                    verified += 1;
+                    outcomes.push((name, Outcome::Verified));
+                }
+                Some(SKIP) => {
+                    eprintln!("skipping {name}: {stdout}");
+                    outcomes.push((name, Outcome::Skipped(stdout)));
+                }
+                code => {
+                    failures.push(format!(
+                        "{name}: check.sh exited {code:?}\n\
+                         --- stdout ---\n{stdout}\n\
+                         --- stderr ---\n{}",
+                        capped.stderr
+                    ));
+                    outcomes.push((name, Outcome::Failed));
+                }
             },
         }
     }
+
+    // Written before the assertions: a failing run is exactly when a reader
+    // most wants to know what did and did not run.
+    let record = summary(&outcomes);
+    let path = summary_path();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &record).unwrap();
+    eprintln!("{record}");
 
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
     assert!(
@@ -291,5 +358,31 @@ fn a_command_that_outstays_its_timeout_is_killed() {
         started.elapsed() < Duration::from_secs(5),
         "the cap must end the wait, not the command: took {:?}",
         started.elapsed()
+    );
+}
+
+/// The record must name every example and its fate, so a reader can tell a
+/// run that verified everything from one that skipped most of it. A count
+/// alone would not: "1 verified" reads the same whether two examples were
+/// skipped or never existed.
+#[test]
+fn the_summary_names_every_example_and_its_fate() {
+    let outcomes = vec![
+        ("cmake".to_string(), Outcome::Verified),
+        (
+            "objc".to_string(),
+            Outcome::Skipped("needs Darwin, this host is Linux".to_string()),
+        ),
+        ("wasm".to_string(), Outcome::Failed),
+    ];
+
+    let record = summary(&outcomes);
+
+    assert_eq!(
+        record,
+        "verified  cmake\n\
+         skipped   objc  needs Darwin, this host is Linux\n\
+         failed    wasm\n\
+         1 verified, 1 skipped, 1 failed\n"
     );
 }

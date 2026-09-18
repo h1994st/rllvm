@@ -130,6 +130,14 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         run: cargo test --all --verbose
 
+      # libtest captures a passing test's output, so a run that quietly
+      # degrades from every example verified to one looks exactly like a
+      # healthy one. `always()` because a failing run is when this matters
+      # most.
+      - name: Show which examples ran
+        if: always() && needs.changes.outputs.code == 'true'
+        run: cat target/tmp/examples-summary.txt
+
       # The `query` feature is gated behind `required-features` so the default
       # jobs above never build or run it; run it explicitly here, on both
       # platforms in this job's matrix. `--lib` as well as `--test query`:
