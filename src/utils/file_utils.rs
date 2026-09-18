@@ -362,11 +362,20 @@ fn embed_with_macho_builder(data: &[u8], bitcode_filepath_string: &str) -> Optio
 
 /// Section specifier for `llvm-objcopy --add-section`.
 ///
-/// Mach-O needs the segment as well; the other formats name the section alone.
+/// Mach-O names a segment too, and the name given here is deliberately empty.
+/// `loader.h` defines `MH_OBJECT` as holding "all sections ... in one unnamed
+/// segment"; naming `__RLLVM` here makes objcopy append a second
+/// `LC_SEGMENT_64` instead, which is the shape of a linked image, not an
+/// object. `ld64` walks every segment command it finds and so tolerated it,
+/// but `ld64.lld` reads the one segment the format defines and never saw the
+/// section -- the link succeeded with the bitcode path silently gone.
+///
+/// The section's own `segname` is what places it in the linked image, and
+/// [`finish_macho_rllvm_section`] writes that afterwards.
 fn objcopy_section_specifier(format: BinaryFormat) -> Result<String, Error> {
     match format {
         BinaryFormat::Elf => Ok(ELF_SECTION_NAME.to_string()),
-        BinaryFormat::MachO => Ok(format!("{DARWIN_SEGMENT_NAME},{DARWIN_SECTION_NAME}")),
+        BinaryFormat::MachO => Ok(format!(",{DARWIN_SECTION_NAME}")),
         BinaryFormat::Coff => Ok(COFF_SECTION_NAME.to_string()),
         _ => Err(Error::UnsupportedBinaryFormat(format!("{format:?}"))),
     }
@@ -417,17 +426,18 @@ fn embed_with_objcopy(
         )));
     }
 
-    // `llvm-objcopy` adds the section with flags `0`, and its
-    // `--set-section-flags` only understands ELF flag names, so the Mach-O
-    // attribute has to be written afterwards.
+    // Two things objcopy cannot do for us: it adds the section with flags `0`
+    // and its `--set-section-flags` only understands ELF flag names, and it
+    // was asked for an unnamed segment so the section still needs its
+    // `segname`.
     if format == BinaryFormat::MachO {
         let written = output_object_filepath.unwrap_or(object_filepath);
         let mut data = fs::read(written)?;
-        if set_macho_no_dead_strip(&mut data) {
+        if finish_macho_rllvm_section(&mut data) {
             fs::write(written, data)?;
         } else {
             tracing::warn!(
-                "Could not mark {written:?} no_dead_strip; a stripping link will drop the section"
+                "Could not finish the {written:?} bitcode section; a stripping link will drop it"
             );
         }
     }
@@ -466,19 +476,21 @@ fn read_u32_le(data: &[u8], at: usize) -> Option<u32> {
         .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("a 4-byte slice")))
 }
 
-/// Sets `S_ATTR_NO_DEAD_STRIP` on rllvm's section in a Mach-O object.
+/// Give the bitcode section its segment name and dead-strip attribute.
 ///
-/// The section holds a path nothing references, so `ld -dead_strip` discards
-/// it and extraction from the linked output finds nothing. Marking it is what
-/// lets the wrapper pass `-dead_strip` through instead of deleting it from the
-/// user's link.
+/// `llvm-objcopy` is asked for an unnamed segment, because that is the only
+/// shape `MH_OBJECT` permits, so the section arrives with an empty `segname`
+/// and flags `0`. Both are written here: `segname` because it is what places
+/// the section in the linked image, and `S_ATTR_NO_DEAD_STRIP` because
+/// nothing references the section and a stripping link would otherwise drop
+/// it.
 ///
-/// Returns `false` when the buffer is not a Mach-O object or carries no rllvm
-/// section, so callers can leave other formats alone. Only little-endian
-/// Mach-O is handled: every target rllvm supports is little-endian, and a
-/// big-endian image would need byte swapping throughout rather than in these
-/// few fields.
-fn set_macho_no_dead_strip(data: &mut [u8]) -> bool {
+/// Matches a section already naming `__RLLVM` as well, so the marker path --
+/// which emits `.section __RLLVM,__rllvm_bc` through the assembler and is
+/// already conforming -- passes through unchanged.
+///
+/// Returns whether any section was finished.
+fn finish_macho_rllvm_section(data: &mut [u8]) -> bool {
     let (is_64, header_size) = match read_u32_le(data, 0) {
         Some(MACHO_MAGIC_64) => (true, MACHO_HEADER_64_SIZE),
         Some(MACHO_MAGIC_32) => (false, MACHO_HEADER_32_SIZE),
@@ -535,10 +547,19 @@ fn set_macho_no_dead_strip(data: &mut [u8]) -> bool {
                 let sectname = macho_name(&names[..MACHO_NAME_LENGTH]);
                 let segname = macho_name(&names[MACHO_NAME_LENGTH..]);
 
+                // Empty is what objcopy leaves behind; `__RLLVM` is the
+                // marker path, already conforming. Any other segment belongs
+                // to someone else's section that happens to share the name.
+                let ours = segname.is_empty() || segname == DARWIN_SEGMENT_NAME.as_bytes();
                 if sectname == DARWIN_SECTION_NAME.as_bytes()
-                    && segname == DARWIN_SEGMENT_NAME.as_bytes()
+                    && ours
                     && let Some(flags) = read_u32_le(data, section + flags_offset)
                 {
+                    let segname_field = section + MACHO_NAME_LENGTH;
+                    data[segname_field..segname_field + MACHO_NAME_LENGTH].fill(0);
+                    let name = DARWIN_SEGMENT_NAME.as_bytes();
+                    data[segname_field..segname_field + name.len()].copy_from_slice(name);
+
                     let flags = flags | object::macho::S_ATTR_NO_DEAD_STRIP.0;
                     data[section + flags_offset..section + flags_offset + 4]
                         .copy_from_slice(&flags.to_le_bytes());
@@ -953,10 +974,13 @@ mod tests {
 
     #[test]
     fn builds_objcopy_section_specifier() {
-        // Mach-O needs `segment,section`; the others name the section alone.
+        // Mach-O names a segment too, and it is deliberately empty: a
+        // relocatable object holds every section in one unnamed segment, and
+        // naming one here makes objcopy append a second segment command that
+        // `ld64.lld` never reads.
         assert_eq!(
             objcopy_section_specifier(BinaryFormat::MachO).unwrap(),
-            format!("{DARWIN_SEGMENT_NAME},{DARWIN_SECTION_NAME}")
+            format!(",{DARWIN_SECTION_NAME}")
         );
         assert_eq!(
             objcopy_section_specifier(BinaryFormat::Elf).unwrap(),
@@ -1279,43 +1303,72 @@ mod tests {
         data
     }
 
+    fn section_segname(data: &[u8]) -> Vec<u8> {
+        let at = MACHO_HEADER_64_SIZE + MACHO_SEGMENT_64_HEADER_SIZE + MACHO_NAME_LENGTH;
+        macho_name(&data[at..at + MACHO_NAME_LENGTH]).to_vec()
+    }
+
     fn section_flags(data: &[u8]) -> u32 {
         let at =
             MACHO_HEADER_64_SIZE + MACHO_SEGMENT_64_HEADER_SIZE + MACHO_SECTION_64_FLAGS_OFFSET;
         read_u32_le(data, at).expect("synthetic object has a flags field")
     }
 
+    /// The shape `llvm-objcopy` leaves: the section sits in the object's one
+    /// unnamed segment and carries no segment name of its own yet.
     #[test]
-    fn macho_no_dead_strip_marks_the_rllvm_section() {
-        let mut data = synthetic_macho(DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME);
-        assert!(set_macho_no_dead_strip(&mut data));
+    fn finishing_names_the_segment_and_marks_no_dead_strip() {
+        let mut data = synthetic_macho(DARWIN_SECTION_NAME, "");
+        assert!(finish_macho_rllvm_section(&mut data));
+        assert_eq!(section_segname(&data), DARWIN_SEGMENT_NAME.as_bytes());
         assert_eq!(section_flags(&data), object::macho::S_ATTR_NO_DEAD_STRIP.0);
 
-        // Setting it twice must not change anything further.
+        // Running it twice must not change anything further.
         let once = data.clone();
-        assert!(set_macho_no_dead_strip(&mut data));
+        assert!(finish_macho_rllvm_section(&mut data));
         assert_eq!(once, data);
     }
 
+    /// The marker path emits `.section __RLLVM,__rllvm_bc` through the
+    /// assembler, which is already conforming; finishing it is a no-op beyond
+    /// the attribute.
     #[test]
-    fn macho_no_dead_strip_leaves_other_sections_alone() {
-        let mut data = synthetic_macho("__text", "__TEXT");
-        assert!(!set_macho_no_dead_strip(&mut data));
+    fn finishing_an_already_named_section_keeps_its_segment() {
+        let mut data = synthetic_macho(DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME);
+        assert!(finish_macho_rllvm_section(&mut data));
+        assert_eq!(section_segname(&data), DARWIN_SEGMENT_NAME.as_bytes());
+        assert_eq!(section_flags(&data), object::macho::S_ATTR_NO_DEAD_STRIP.0);
+    }
+
+    /// A section that shares the name but names a segment we did not write is
+    /// somebody else's; leave it alone.
+    #[test]
+    fn finishing_leaves_a_foreign_segment_alone() {
+        let mut data = synthetic_macho(DARWIN_SECTION_NAME, "__DATA");
+        assert!(!finish_macho_rllvm_section(&mut data));
+        assert_eq!(section_segname(&data), b"__DATA");
         assert_eq!(section_flags(&data), 0);
     }
 
     #[test]
-    fn macho_no_dead_strip_ignores_other_formats() {
+    fn finishing_leaves_other_sections_alone() {
+        let mut data = synthetic_macho("__text", "__TEXT");
+        assert!(!finish_macho_rllvm_section(&mut data));
+        assert_eq!(section_flags(&data), 0);
+    }
+
+    #[test]
+    fn finishing_ignores_other_formats() {
         let mut elf = b"\x7fELF\x02\x01\x01\x00".to_vec();
-        assert!(!set_macho_no_dead_strip(&mut elf));
+        assert!(!finish_macho_rllvm_section(&mut elf));
 
         let mut truncated = vec![0u8; 2];
-        assert!(!set_macho_no_dead_strip(&mut truncated));
+        assert!(!finish_macho_rllvm_section(&mut truncated));
 
         // A well-formed header whose command count runs off the end.
         let mut clipped = synthetic_macho(DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME);
         clipped.truncate(MACHO_HEADER_64_SIZE + 4);
-        assert!(!set_macho_no_dead_strip(&mut clipped));
+        assert!(!finish_macho_rllvm_section(&mut clipped));
     }
 
     #[test]
