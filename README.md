@@ -34,16 +34,19 @@ rllvm follows the `CC`/`CXX` → build → extract workflow that
 `rllvm-cxx` stand in for `wllvm`/`gclang`, `rllvm-get-bc` for
 `extract-bc`/`get-bc`.
 
+Your build commands do not change. What you can capture, and what you can do
+with it afterwards, does.
+
 | | 🌟 rllvm | wllvm / gllvm |
 | --- | --- | --- |
-| 🦀 Languages | C, C++, Objective-C, **Rust** | C, C++; Fortran in gllvm |
-| 🎯 Targets | Native, **WebAssembly, eBPF** | Native |
-| 🔗 LTO | Three modes, dispatched on object content | gllvm: `-flto` unlikely to survive extraction |
-| 📦 Moving a build tree | Paths relative to a root | Absolute bitcode paths |
-| ♻️ Rebuilds | Cache validated against inputs | No bitcode cache |
-| 📋 No wrapper build | Import `compile_commands.json` | — |
-| ⚙️ Setup | Detected from `llvm-config` | Environment variables |
-| 🔍 Analysis | Source-level queries, MCP server | — |
+| 🦀 Languages | [C, C++, Objective-C, **Rust**](#languages) | C, C++; Fortran in gllvm |
+| 🔍 Analysis | [Source-level queries, MCP server](#analyzing-bitcode) | ❌ |
+| 📋 No wrapper build | [Import `compile_commands.json`](#from-a-compilation-database) | ❌ |
+| 🎯 Targets | [Native, **WebAssembly, eBPF**](#webassembly-and-ebpf) | Native |
+| 🔗 LTO | [Three modes, dispatched on object content](#lto) | `-flto` unlikely to survive extraction |
+| ♻️ Rebuilds | [Cache validated against inputs](#caching) | No bitcode cache |
+| 📦 Moving a build tree | [Paths relative to a root](#moving-a-build-tree) | Absolute bitcode paths |
+| ⚙️ Setup | [Detected from `llvm-config`](#configuration) | Environment variables |
 
 ## How it works
 
