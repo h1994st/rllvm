@@ -17,11 +17,15 @@ linked `.wasm`.
   A mismatched pair fails at link time with a dyld symbol error, not a message
   about versions.
 
-## Build
+## Build and verify
 
 ```bash
-./build.sh
+./check.sh
 ```
+
+It runs the commands below, then checks that `app.bc` defines `helper` and
+`entry` — one function from each translation unit, which is what shows the
+custom section survived the link. `cargo test --test examples` runs it in CI.
 
 ## What it does
 

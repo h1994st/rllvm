@@ -46,6 +46,10 @@ patterns. Keep unrelated refactoring separate.
   empty in most cases. Do not bump `version` by hand — releases derive from
   commit types, and below 1.0 `feat:`/`fix:` bump the patch while `feat!:` bumps
   the minor. See [RELEASING.md](RELEASING.md).
+- A user-facing feature ships an example under `examples/<name>/`, and every
+  example ships a `check.sh` that runs its documented flow and asserts the
+  outcome. `tests/examples.rs` runs them all; exit 77 means a prerequisite is
+  missing.
 
 ### Writing
 

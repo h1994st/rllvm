@@ -5,6 +5,9 @@
 //! they produce is only observable with it. Both halves have to assert
 //! against the same program, or they are not testing the same thing.
 
+pub mod toolchain;
+pub use toolchain::{llvm_bin, scratch_rllvm_config};
+
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -15,14 +18,6 @@ use tempfile::TempDir;
 /// The id [`source_and_header`] pins on its module. `inventory` derives ids
 /// from a content hash, which a test cannot predict.
 pub const MODULE_ID: &str = "unit";
-
-/// A tool from the configured LLVM's bindir.
-pub fn llvm_bin(name: &str) -> PathBuf {
-    let config = rllvm::utils::find_llvm_config().unwrap();
-    let output = Command::new(config).arg("--bindir").output().unwrap();
-    assert!(output.status.success());
-    Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)
-}
 
 /// Writes `source` into the scratch directory and compiles it to bitcode
 /// beside itself, with the flags the catalog fixtures want.
@@ -52,26 +47,6 @@ pub fn compile_bitcode_to(source: &Path, module: &Path, flags: &[&str]) {
         .status()
         .unwrap();
     assert!(status.success(), "clang failed on {}", source.display());
-}
-
-/// Writes an `RLLVM_CONFIG` pointing at the configured toolchain. Tests must
-/// never read or modify the developer's own configuration.
-pub fn scratch_rllvm_config(directory: &Path) -> PathBuf {
-    let contents = format!(
-        "llvm_config_filepath = '{}'\n\
-         clang_filepath = '{}'\n\
-         clangxx_filepath = '{}'\n\
-         llvm_ar_filepath = '{}'\n\
-         llvm_link_filepath = '{}'\n",
-        llvm_bin("llvm-config").display(),
-        llvm_bin("clang").display(),
-        llvm_bin("clang++").display(),
-        llvm_bin("llvm-ar").display(),
-        llvm_bin("llvm-link").display(),
-    );
-    let path = directory.join("rllvm-config.toml");
-    std::fs::write(&path, contents).unwrap();
-    path
 }
 
 /// Writes a catalog straight to `path`. Not `catalog::write_catalog`, whose

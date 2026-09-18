@@ -14,3 +14,8 @@ cmake --build build
 ```bash
 rllvm-get-bc build/hello -o build/hello.bc
 ```
+
+## Verify
+
+`./check.sh` runs the build and the extraction above, then checks that the
+bitcode defines `main`. `cargo test --test examples` runs it in CI.
