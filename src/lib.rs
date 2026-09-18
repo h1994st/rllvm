@@ -51,13 +51,11 @@ pub mod bitcode_info;
 /// Versioned module catalogs shared by capture inventory and materialization.
 pub mod catalog;
 
-/// Error types used throughout the crate.
 pub mod error;
 
 /// Bitcode merge strategies (full link, partial link, archive).
 pub mod merge;
 
-/// Link-time optimization modes and bitcode-path markers.
 pub mod lto;
 
 /// Utility functions for command execution, file manipulation, and LLVM tools.
