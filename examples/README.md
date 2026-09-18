@@ -14,6 +14,8 @@ result. Every example directory must ship a `check.sh`.
 - Exit 0 on success, with an `ok: ...` line on stdout.
 - Exit 77 to skip a missing prerequisite, printing why on stdout.
 - Any other exit code is a failure.
+- A script still running after 5 minutes is killed, along with anything it
+  started, and reported as a failure.
 
 ## `common.sh`
 
