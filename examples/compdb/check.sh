@@ -27,8 +27,15 @@ defines "$(cat "$OUT/entries.json")" '"selected_entries": 1' \
 rllvm-compdb generate "$OUT/compile_commands.json" \
     --output-dir "$OUT/analysis" >/dev/null
 
-[ -f "$OUT/analysis/catalog.json" ] ||
-    fail "generate produced no catalog"
+# Without this, a missing catalog surfaces as a bare NotFound from the next
+# command -- no path, no hint of what generate actually produced. Report both.
+if [ ! -f "$OUT/analysis/catalog.json" ]; then
+    if listing=$(ls -A "$OUT/analysis" 2>/dev/null); then
+        fail "generate wrote no $OUT/analysis/catalog.json; that directory holds: ${listing:-<nothing>}"
+    else
+        fail "generate created no output directory at $OUT/analysis"
+    fi
+fi
 
 rllvm-get-bc "$OUT/analysis/catalog.json" -o "$OUT/demo.bc"
 
