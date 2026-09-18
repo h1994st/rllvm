@@ -284,8 +284,8 @@ rllvm-get-bc --bitcode-root moved-build moved-build/my_program
 ```
 
 The root must contain the bitcode files, including a central
-`bitcode_store_path` if you use one. Give a real path: a root reaching rllvm
-through a symlink records absolute paths instead. See the
+`bitcode_store_path` if you use one. A root that cannot contain the bitcode is
+reported rather than silently ignored. See the
 [relocatable example](examples/relocatable/).
 
 ## Analyzing bitcode
