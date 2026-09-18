@@ -3,7 +3,11 @@
 //! Provides a unified [`Error`] enum covering I/O failures, object file
 //! manipulation errors, configuration issues, and more.
 
-use std::{str::Utf8Error, string::FromUtf8Error};
+use std::{
+    path::{Path, PathBuf},
+    str::Utf8Error,
+    string::FromUtf8Error,
+};
 
 /// The error type for rllvm operations.
 #[derive(Debug, thiserror::Error)]
@@ -11,9 +15,22 @@ pub enum Error {
     /// Invalid arguments
     #[error("Invalid arguments: {0}")]
     InvalidArguments(String),
-    /// Io error occurred
+    /// Io error occurred, with no file to attribute it to.
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    /// An I/O failure on a specific file.
+    ///
+    /// The path belongs in the error rather than only in a log line: several
+    /// of these fire before a `tracing` subscriber is installed, and a user
+    /// who mistyped a filename needs the filename, not an errno.
+    #[error("{path}: {source}")]
+    File {
+        /// The file the operation was attempted on.
+        path: PathBuf,
+        /// What the operating system reported.
+        #[source]
+        source: std::io::Error,
+    },
     /// Command execution failure
     #[error("Execution failure: {0}")]
     ExecutionFailure(String),
@@ -38,6 +55,33 @@ pub enum Error {
     /// Something else happened
     #[error("Unknown error: {0}")]
     Unknown(String),
+}
+
+impl Error {
+    /// An I/O failure on `path`, so the message can name the file.
+    pub fn file(path: impl AsRef<Path>, source: std::io::Error) -> Error {
+        Error::File {
+            path: path.as_ref().to_path_buf(),
+            source,
+        }
+    }
+}
+
+/// Print `result`'s error for a human and turn it into an exit code.
+///
+/// Binaries call this instead of returning `Result` from `main`. A `main`
+/// that returns `Err` is rendered by the runtime with `Debug`, which is how
+/// `Error: Io(Os { code: 2, kind: NotFound, ... })` used to reach someone who
+/// had merely mistyped a filename. Diagnostics go to stderr because these
+/// wrappers stand in for a compiler, and build systems read compiler stdout.
+pub fn report(result: Result<(), Error>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 impl From<Utf8Error> for Error {

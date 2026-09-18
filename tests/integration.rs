@@ -5696,3 +5696,48 @@ fn cache_distinguishes_include_search_order() {
         "the cache key ignored include order, so the second build reused the first's bitcode"
     );
 }
+
+/// Every binary that takes a path must name that path when it cannot read it,
+/// and must never print a Rust `Debug` rendering at a user.
+///
+/// Both halves matter. `rllvm-get-bc` used to answer a missing catalog with
+/// `Error: Io(Os { code: 2, kind: NotFound, ... })`: no path to act on, and
+/// the innards of an enum shown to someone who just mistyped a filename. The
+/// path was not lost -- it went into a `tracing` line, which for the catalog
+/// case runs before the subscriber is installed and so goes nowhere at all.
+const PATHLESS_ERROR_CASES: &[(&str, &[&str])] = &[
+    ("rllvm-get-bc", &["absent-catalog.json"]),
+    ("rllvm-get-bc", &["absent-binary"]),
+    ("rllvm-info", &["absent.bc"]),
+    ("rllvm-compdb", &["list", "absent-database.json"]),
+];
+
+#[test]
+fn a_missing_input_is_reported_with_its_path_and_no_debug_formatting() {
+    let tmp = TempDir::new().unwrap();
+
+    for (binary, arguments) in PATHLESS_ERROR_CASES {
+        // The last argument is the missing path; make it absolute so the
+        // assertion checks the binary echoed what it was given.
+        let missing = tmp.path().join(arguments.last().unwrap());
+        let mut command = rllvm(binary);
+        for argument in &arguments[..arguments.len() - 1] {
+            command.arg(argument);
+        }
+        let output = command.arg(&missing).output().unwrap();
+
+        assert!(
+            !output.status.success(),
+            "{binary} should have failed on a missing input"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(missing.to_str().unwrap()),
+            "{binary} did not name the missing path in its error: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Os {"),
+            "{binary} printed a Debug rendering of io::Error at the user: {stderr}"
+        );
+    }
+}

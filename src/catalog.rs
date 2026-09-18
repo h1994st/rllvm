@@ -302,8 +302,13 @@ impl ModuleCatalog {
 
 /// Read and validate a catalog; resolving its relative paths is a separate operation.
 pub fn read_catalog(path: &Path) -> Result<ModuleCatalog, Error> {
-    let catalog: ModuleCatalog = serde_json::from_reader(File::open(path)?)
-        .map_err(|error| Error::InvalidArguments(format!("invalid catalog JSON: {error}")))?;
+    let file = File::open(path).map_err(|error| Error::file(path, error))?;
+    let catalog: ModuleCatalog = serde_json::from_reader(file).map_err(|error| {
+        Error::InvalidArguments(format!(
+            "invalid catalog JSON in {}: {error}",
+            path.display()
+        ))
+    })?;
     catalog.validate()?;
     Ok(catalog)
 }

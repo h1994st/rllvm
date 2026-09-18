@@ -48,6 +48,6 @@ pub fn rllvm_main(name: &str, compiler_kind: CompilerKind) -> Result<(), Error> 
     Ok(())
 }
 
-pub fn main() -> Result<(), Error> {
-    rllvm_main("rllvm", CompilerKind::Clang)
+pub fn main() -> std::process::ExitCode {
+    rllvm::error::report(rllvm_main("rllvm", CompilerKind::Clang))
 }
