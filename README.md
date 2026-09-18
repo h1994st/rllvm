@@ -181,6 +181,18 @@ such as optimization profiles, change between builds.
 
 ### Build modes and targets
 
+#### Linkers
+
+The platform's default linker and [LLD](https://lld.llvm.org/) both work.
+`-fuse-ld=lld` selects `ld64.lld` on macOS and `ld.lld` on Linux:
+
+```bash
+rllvm-cc -fuse-ld=lld lib.c app.c -o app
+rllvm-get-bc app -o app.bc
+```
+
+See the [LLD example](examples/lld/).
+
 #### LTO
 
 Select `lto_mode` in the config or `RLLVM_LTO_MODE`, and use the same mode when
