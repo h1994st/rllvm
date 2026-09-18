@@ -10,9 +10,12 @@
 
 use std::{
     collections::BTreeMap,
+    fs::File,
+    io,
+    os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
-    process::Command,
-    time::SystemTime,
+    process::{Command, ExitStatus, Stdio},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[path = "common/toolchain.rs"]
@@ -24,6 +27,71 @@ mod toolchain;
 /// A reserved code rather than a sentinel string: the harness never has to
 /// parse output to decide an outcome.
 const SKIP: i32 = 77;
+
+/// How long one example may run before the harness kills it.
+///
+/// Far above any legitimate example -- the three in the tree finish in under a
+/// second, and a cold autotools or Cargo build is minutes at worst -- and far
+/// below a CI job limit, so a hang is reported as one example failing rather
+/// than as the whole job timing out with nothing to point at.
+const TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How often the harness checks whether the child has finished.
+const POLL: Duration = Duration::from_millis(50);
+
+/// What one capped run produced. `status` is `None` when the child outstayed
+/// its timeout and was killed.
+struct Capped {
+    status: Option<ExitStatus>,
+    stdout: String,
+    stderr: String,
+}
+
+/// Runs `command` to completion, killing it if it outstays `timeout`.
+///
+/// Child output goes to files rather than pipes. A polled wait cannot also
+/// drain a pipe, so a child that filled the buffer would block forever --
+/// exactly the hang this function exists to end.
+///
+/// On expiry the signal goes to the child's process group, not just the child:
+/// a watchdog that kills only the script leaves the hung build beneath it
+/// running.
+fn run_capped(command: &mut Command, capture: &Path, timeout: Duration) -> io::Result<Capped> {
+    let out_path = capture.join("stdout");
+    let err_path = capture.join("stderr");
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(File::create(&out_path)?)
+        .stderr(File::create(&err_path)?)
+        .process_group(0)
+        .spawn()?;
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            // Negative pid: the group, so the child's own children die too.
+            // std cannot signal a group without libc, and the alternative is
+            // orphaning the process that is actually stuck.
+            let _ = Command::new("kill")
+                .arg("-TERM")
+                .arg(format!("-{}", child.id()))
+                .status();
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(POLL);
+    };
+
+    Ok(Capped {
+        status,
+        stdout: std::fs::read_to_string(&out_path).unwrap_or_default(),
+        stderr: std::fs::read_to_string(&err_path).unwrap_or_default(),
+    })
+}
 
 /// The directory holding the binaries under test, so a script reaches those
 /// rather than an rllvm the developer happens to have installed.
@@ -134,7 +202,8 @@ fn every_example_verifies_itself() {
         let name = example.file_name().unwrap().to_string_lossy().into_owned();
         let scratch = tempfile::tempdir().unwrap();
 
-        let spawned = Command::new(example.join("check.sh"))
+        let mut command = Command::new(example.join("check.sh"));
+        command
             .arg(scratch.path())
             .current_dir(&example)
             .env("PATH", &path)
@@ -143,20 +212,19 @@ fn every_example_verifies_itself() {
             .env_remove("RLLVM_BITCODE_ROOT")
             .env_remove("RLLVM_LTO_MODE")
             .env_remove("RLLVM_LOG_LEVEL")
-            .env("LLVM_BINDIR", bindir)
-            .output();
+            .env("LLVM_BINDIR", bindir);
 
         // A non-executable or unspawnable check.sh is a failure of that one
         // example, not a reason to abort the rest.
-        let output = match spawned {
-            Ok(output) => output,
+        let capped = match run_capped(&mut command, home.path(), TIMEOUT) {
+            Ok(capped) => capped,
             Err(error) => {
                 failures.push(format!("{name}: cannot run check.sh: {error}"));
                 continue;
             }
         };
 
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stdout = capped.stdout.trim().to_string();
 
         // Checked before the exit code: an example that passed its own
         // assertions while writing outside the directory it was given still
@@ -173,15 +241,24 @@ fn every_example_verifies_itself() {
             continue;
         }
 
-        match output.status.code() {
-            Some(0) => verified += 1,
-            Some(SKIP) => eprintln!("skipping {name}: {stdout}"),
-            code => failures.push(format!(
-                "{name}: check.sh exited {code:?}\n\
+        match capped.status {
+            None => failures.push(format!(
+                "{name}: still running after {}s, killed\n\
                  --- stdout ---\n{stdout}\n\
                  --- stderr ---\n{}",
-                String::from_utf8_lossy(&output.stderr)
+                TIMEOUT.as_secs(),
+                capped.stderr
             )),
+            Some(status) => match status.code() {
+                Some(0) => verified += 1,
+                Some(SKIP) => eprintln!("skipping {name}: {stdout}"),
+                code => failures.push(format!(
+                    "{name}: check.sh exited {code:?}\n\
+                     --- stdout ---\n{stdout}\n\
+                     --- stderr ---\n{}",
+                    capped.stderr
+                )),
+            },
         }
     }
 
@@ -189,5 +266,30 @@ fn every_example_verifies_itself() {
     assert!(
         verified > 0,
         "every example skipped, so this run verified nothing"
+    );
+}
+
+/// A script that never finishes must be killed and reported, not left to hang
+/// the whole suite until the CI job limit.
+///
+/// The proof is the clock: `sleep 30` under a 200ms cap returns immediately.
+/// If the timeout did not fire, this test would take thirty seconds.
+#[test]
+fn a_command_that_outstays_its_timeout_is_killed() {
+    let capture = tempfile::tempdir().unwrap();
+    let started = Instant::now();
+
+    let mut command = Command::new("sleep");
+    command.arg("30");
+    let capped = run_capped(&mut command, capture.path(), Duration::from_millis(200)).unwrap();
+
+    assert!(
+        capped.status.is_none(),
+        "a killed command must report no exit status"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the cap must end the wait, not the command: took {:?}",
+        started.elapsed()
     );
 }
