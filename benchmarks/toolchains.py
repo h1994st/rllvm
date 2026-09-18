@@ -19,6 +19,13 @@ class ToolchainError(RuntimeError):
     """A requested tool or native dependency cannot support this profile."""
 
 
+# Bitcode readers parse their own LLVM major and every older one, never a newer
+# one, so readers must be at least as new as whatever produced the module.
+# rustc trails the released LLVM by a major for much of the year.
+LLVM_PRODUCERS = ("rustc", "clang", "clang++")
+LLVM_READERS = ("llvm-dis", "llvm-link", "opt")
+
+
 def child_environment(
     parent: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
@@ -165,10 +172,10 @@ def version_arguments(name: str) -> tuple[str, ...]:
 
 
 def _compatible_llvm(tools: Mapping[str, Tool]) -> None:
-    if not any(name in tools for name in ("llvm-dis", "llvm-link", "opt")):
+    if not any(name in tools for name in LLVM_READERS):
         return
     versions: dict[str, int] = {}
-    for name in ("rustc", "clang", "clang++", "llvm-dis", "llvm-link", "opt"):
+    for name in LLVM_PRODUCERS + LLVM_READERS:
         if name not in tools:
             continue
         pattern = (
@@ -180,7 +187,9 @@ def _compatible_llvm(tools: Mapping[str, Tool]) -> None:
         if not match:
             raise ToolchainError(f"cannot identify LLVM version of {name}")
         versions[name] = int(match[1])
-    if len(set(versions.values())) > 1:
+    produced = [versions[name] for name in LLVM_PRODUCERS if name in versions]
+    read = [versions[name] for name in LLVM_READERS if name in versions]
+    if produced and read and min(read) < max(produced):
         raise ToolchainError(f"incompatible LLVM producer/readers: {versions}")
 
 
