@@ -8,11 +8,13 @@ require llvm:llvm-nm
 
 # Clang's response-file syntax: one argument per line, expanded before the
 # wrapper classifies anything. Written at run time because it names $OUT.
+# The output path is quoted: unquoted, a space in $OUT (reachable by hand,
+# e.g. `./check.sh "/my build"`) would tokenize as two arguments.
 cat >"$OUT/args.rsp" <<RSP
 -c
 demo.c
 -o
-$OUT/demo.o
+"$OUT/demo.o"
 RSP
 
 # Wrapper options come first and are long-only. Everything after them is the
