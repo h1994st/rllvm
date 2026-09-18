@@ -20,9 +20,19 @@ for mode in marker save-temps; do
 
     symbols=$("$BINDIR/llvm-nm" --defined-only "$OUT/$mode/app.bc")
     defines "$symbols" ' T _?main$' "$mode: app.bc does not define main"
-    # Upper or lower T: full LTO internalises helper, so save-temps reports it
-    # as a local symbol while marker reports it as external.
-    defines "$symbols" ' [Tt] _?helper$' "$mode: app.bc does not define helper"
+    # marker reports helper as external (T); full LTO internalises it, so
+    # save-temps reports it as a local symbol (t). Asserting the exact case
+    # keeps a save-temps regression to marker-shaped output from passing.
+    if [ "$mode" = marker ]; then
+        defines "$symbols" ' T _?helper$' "$mode: app.bc does not define helper as external"
+    else
+        defines "$symbols" ' t _?helper$' "$mode: app.bc does not define helper as local"
+    fi
 done
+
+[ -f "$OUT/marker/app.bc" ] && [ -f "$OUT/save-temps/app.bc" ] ||
+    fail "marker and save-temps did not each produce app.bc"
+cmp -s "$OUT/marker/app.bc" "$OUT/save-temps/app.bc" &&
+    fail "marker and save-temps produced identical bitcode"
 
 echo "ok: marker and save-temps both yield bitcode defining main and helper"
