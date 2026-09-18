@@ -7,10 +7,22 @@ require cargo rustc llvm:llvm-dis llvm:llvm-config
 
 # rustc bundles its own LLVM, and an older reader cannot parse a newer
 # producer's bitcode. Skip with the versions rather than fail with a parse
-# error that looks like an rllvm bug.
-rustc_llvm=$(rustc -vV | sed -n 's/^LLVM version: \([0-9][0-9]*\).*/\1/p')
-reader_llvm=$("$BINDIR/llvm-config" --version | cut -d. -f1)
-[ "${reader_llvm:-0}" -ge "${rustc_llvm:-0}" ] ||
+# error that looks like an rllvm bug. An unparseable version on either side
+# is not a missing prerequisite, so it fails loudly with what was read
+# instead of silently skipping blank or proceeding into that parse error.
+rustc_version=$(rustc -vV)
+rustc_llvm=$(sed -n 's/^LLVM version: \([0-9][0-9]*\).*/\1/p' <<<"$rustc_version")
+reader_version=$("$BINDIR/llvm-config" --version)
+reader_llvm=$(cut -d. -f1 <<<"$reader_version")
+
+case $rustc_llvm in
+'' | *[!0-9]*) fail "could not parse rustc's LLVM version from: $rustc_version" ;;
+esac
+case $reader_llvm in
+'' | *[!0-9]*) fail "could not parse the reader's LLVM version from: $reader_version" ;;
+esac
+
+[ "$reader_llvm" -ge "$rustc_llvm" ] ||
     skip "rustc's LLVM is $rustc_llvm but the reader is $reader_llvm"
 
 # --locked with a committed Cargo.lock is what keeps cargo from writing into
