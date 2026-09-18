@@ -20,8 +20,8 @@ JSON
 
 # `list` reports what would be selected, without compiling anything.
 rllvm-compdb list "$OUT/compile_commands.json" >"$OUT/entries.json"
-defines "$(cat "$OUT/entries.json")" 'demo\.c' \
-    "the listing does not mention demo.c"
+defines "$(cat "$OUT/entries.json")" '"selected_entries": 1' \
+    "the listing did not select the one entry"
 
 # `generate` compiles the selected entries and writes a catalog beside them.
 rllvm-compdb generate "$OUT/compile_commands.json" \
