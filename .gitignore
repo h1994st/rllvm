@@ -6,6 +6,7 @@
 !.gitignore
 config.toml
 lcov.info
+examples/*/build/
 
 ### Claude Code ###
 settings.local.json

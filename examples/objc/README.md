@@ -31,3 +31,9 @@ rllvm-get-bc build/hello -o build/hello.bc
 `-[Greeter greet:]` reached the bitcode — an Objective-C method rather than
 `main`, so a `.m` built by the system compiler cannot pass. `cargo test
 --test examples` runs it in CI.
+
+## Inspect the result
+
+```bash
+llvm-dis -o - build/hello.bc | grep '^define'
+```
