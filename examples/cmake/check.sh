@@ -2,14 +2,9 @@
 # Builds this example through the rllvm toolchain file and checks that the
 # extracted bitcode really came from the wrappers.
 set -euo pipefail
+source "$(dirname "$0")/../common.sh"
 
-OUT=${1:-build}
-BINDIR=${LLVM_BINDIR:-$(llvm-config --bindir 2>/dev/null || true)}
-
-command -v cmake >/dev/null \
-    || { echo "cmake is not installed"; exit 77; }
-[ -x "$BINDIR/llvm-nm" ] \
-    || { echo "llvm-nm not found; set LLVM_BINDIR"; exit 77; }
+require cmake llvm:llvm-nm
 
 # Absolute: a relative -DCMAKE_TOOLCHAIN_FILE only resolves against the
 # working directory on CMake >= 3.21, and this example requires only 3.10.
@@ -21,8 +16,7 @@ cmake --build "$OUT" >/dev/null
 rllvm-get-bc "$OUT/hello" -o "$OUT/hello.bc"
 
 # A leading underscore on Mach-O, none on ELF.
-symbols=$("$BINDIR/llvm-nm" --defined-only "$OUT/hello.bc")
-grep -qE ' T _?main$' <<<"$symbols" \
-    || { echo "hello.bc does not define main" >&2; exit 1; }
+defines "$("$BINDIR/llvm-nm" --defined-only "$OUT/hello.bc")" \
+    ' T _?main$' "hello.bc does not define main"
 
 echo "ok: $OUT/hello.bc defines main"
