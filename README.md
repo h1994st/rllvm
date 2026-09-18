@@ -319,7 +319,8 @@ rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an i
 Every answer is one JSON envelope carrying the results plus what the answer
 could *not* see: which modules failed to parse, which call sites are indirect,
 which symbols bind ambiguously, and whether each location's source has changed
-since it was compiled.
+since it was compiled. See the [queries example](examples/queries/) and the
+[staleness example](examples/staleness/).
 
 A symbol can be named three ways — the mangled symbol, its demangled reading, or
 a bare identifier that searches:
@@ -329,6 +330,8 @@ rllvm-query --catalog catalog.json defs _Z5twiceIiET_S0_
 rllvm-query --catalog catalog.json defs 'int twice<int>(int)'
 rllvm-query --catalog catalog.json defs twice
 ```
+
+See the [name resolution example](examples/name-resolution/).
 
 ### MCP server
 
@@ -352,6 +355,8 @@ Serves the same queries as JSON-RPC 2.0 tools over stdio. Point a client at it:
 The client chooses what to analyse with `load_catalog` (a catalog JSON) or
 `inventory` (a binary, archive or `.bc`), and can keep several loaded at once.
 Each is analysed once and answers from memory after that.
+
+See the [MCP example](examples/mcp/).
 
 ## Configuration
 
