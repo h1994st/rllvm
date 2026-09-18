@@ -34,7 +34,7 @@ rllvm follows the `CC`/`CXX` → build → extract workflow that
 `rllvm-cxx` stand in for `wllvm`/`gclang`, `rllvm-get-bc` for
 `extract-bc`/`get-bc`.
 
-| | rllvm | wllvm / gllvm |
+| | 🌟 rllvm | wllvm / gllvm |
 | --- | --- | --- |
 | 🦀 Languages | C, C++, Objective-C, **Rust** | C, C++; Fortran in gllvm |
 | 🎯 Targets | Native, **WebAssembly, eBPF** | Native |
