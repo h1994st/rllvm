@@ -2,19 +2,11 @@
 # Builds a WebAssembly module through rllvm, extracts whole-program bitcode,
 # and checks that both translation units survived the link.
 set -euo pipefail
+source "$(dirname "$0")/../common.sh"
 
-OUT=${1:-build}
+require wasm-ld llvm:llvm-dis llvm:clang target:wasm32
+
 TARGET=wasm32-unknown-unknown
-BINDIR=${LLVM_BINDIR:-$(llvm-config --bindir 2>/dev/null || true)}
-
-command -v wasm-ld >/dev/null \
-    || { echo "wasm-ld is not installed; it ships with LLD, not LLVM"; exit 77; }
-[ -x "$BINDIR/llvm-dis" ] \
-    || { echo "llvm-dis not found; set LLVM_BINDIR"; exit 77; }
-targets=$("$BINDIR/clang" --print-targets)
-grep -q wasm32 <<<"$targets" \
-    || { echo "clang has no wasm32 target"; exit 77; }
-
 mkdir -p "$OUT"
 
 # One object per translation unit. Each records the path of its own bitcode in
@@ -34,8 +26,7 @@ rllvm-get-bc "$OUT/app.wasm" -o "$OUT/app.bc"
 # survived the link rather than only the last object contributing.
 disassembly=$("$BINDIR/llvm-dis" -o - "$OUT/app.bc")
 for symbol in helper entry; do
-    grep -q "^define.* @$symbol(" <<<"$disassembly" \
-        || { echo "app.bc does not define $symbol" >&2; exit 1; }
+    defines "$disassembly" "^define.* @$symbol\(" "app.bc does not define $symbol"
 done
 
 echo "ok: $OUT/app.bc defines helper and entry, one from each translation unit"

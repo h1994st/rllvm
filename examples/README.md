@@ -15,6 +15,20 @@ result. Every example directory must ship a `check.sh`.
 - Exit 77 to skip a missing prerequisite, printing why on stdout.
 - Any other exit code is a failure.
 
+## `common.sh`
+
+Each script sources `examples/common.sh`, which sets `OUT` and `BINDIR` and
+provides:
+
+- `require <dep>...` — skips unless every dependency is present. A bare name
+  is looked up on `PATH`, `llvm:<tool>` in the configured LLVM's bindir,
+  `os:<name>` against `uname -s`, and `target:<arch>` against clang.
+- `defines <text> <extended regex> <message>` — fails unless the text matches.
+  It takes the text rather than a pipeline: `producer | grep -q` makes the
+  producer take SIGPIPE when grep exits early, which `set -o pipefail` then
+  reports as a failure.
+- `skip <reason>` and `fail <reason>` — exit 77 and 1.
+
 ## Running
 
 ```bash
