@@ -441,7 +441,7 @@ impl RLLVMConfig {
 
     /// Infers configuration by discovering LLVM tools on the system.
     ///
-    /// Uses [`find_llvm_config`](crate::utils::find_llvm_config) to locate
+    /// Uses [`find_llvm_config`] to locate
     /// `llvm-config`, then derives all other tool paths from `llvm-config --bindir`.
     pub fn try_default() -> Result<Self, Error> {
         tracing::info!("Infer rllvm configurations ...");

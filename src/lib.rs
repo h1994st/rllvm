@@ -1,8 +1,10 @@
 //! Whole-program LLVM bitcode generation in Rust.
 //!
-//! `rllvm` is a Rust port of [gllvm](https://github.com/SRI-CSL/gllvm) that provides
-//! compiler wrappers to transparently build whole-program LLVM bitcode files alongside
-//! normal compilation, and a tool to extract the embedded bitcode.
+//! `rllvm` provides compiler wrappers that build whole-program LLVM bitcode
+//! alongside a normal build, and tools to extract and analyze it. It follows
+//! the `CC`/`CXX` → build → extract workflow that
+//! [wllvm](https://github.com/travitch/whole-program-llvm) and
+//! [gllvm](https://github.com/SRI-CSL/gllvm) established.
 //!
 //! # Overview
 //!
@@ -49,13 +51,11 @@ pub mod bitcode_info;
 /// Versioned module catalogs shared by capture inventory and materialization.
 pub mod catalog;
 
-/// Error types used throughout the crate.
 pub mod error;
 
 /// Bitcode merge strategies (full link, partial link, archive).
 pub mod merge;
 
-/// Link-time optimization modes and bitcode-path markers.
 pub mod lto;
 
 /// Utility functions for command execution, file manipulation, and LLVM tools.
