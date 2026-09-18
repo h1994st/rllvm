@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 
@@ -11,6 +12,19 @@ from benchmarks.process import checked
 from benchmarks.recipes import get_recipe
 from benchmarks.tests.validation_support import llvm_tool_paths
 from benchmarks.toolchains import Toolchain, ToolchainError, child_environment
+
+
+def fake_version_tools(
+    directory: Path, versions: Mapping[str, str]
+) -> dict[str, Path]:
+    """Stand in for tools that only need to report a version string."""
+    paths = {}
+    for name, version in versions.items():
+        script = directory / name
+        script.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
+        script.chmod(0o755)
+        paths[name] = script
+    return paths
 
 
 class TestToolchain:
@@ -59,21 +73,31 @@ class TestToolchain:
         assert "LLVM version:" in tools.tools["rustc"].version
 
     def test_incompatible_llvm_reader_is_rejected(self, tmp_path: Path):
-        for name, version in (
-            ("rustc", "rustc 1.98\nhost: test\nLLVM version: 22.1.8"),
-            ("llvm-dis", "LLVM version 21.1.0"),
-        ):
-            script = tmp_path / name
-            script.write_text(f"#!/bin/sh\nprintf '%s\\n' '{version}'\n")
-            script.chmod(0o755)
+        paths = fake_version_tools(
+            tmp_path,
+            {
+                "rustc": "rustc 1.98\nhost: test\nLLVM version: 22.1.8",
+                "llvm-dis": "LLVM version 21.1.0",
+            },
+        )
         with pytest.raises(ToolchainError, match="LLVM.*22.*21"):
             Toolchain.discover(
-                ("rustc", "llvm-dis"),
-                tmp_path / "logs",
-                paths={
-                    name: tmp_path / name for name in ("rustc", "llvm-dis")
-                },
+                ("rustc", "llvm-dis"), tmp_path / "logs", paths=paths
             )
+
+    def test_newer_llvm_reader_is_accepted(self, tmp_path: Path):
+        paths = fake_version_tools(
+            tmp_path,
+            {
+                "rustc": "rustc 1.98\nhost: test\nLLVM version: 22.1.8",
+                "clang": "clang version 23.1.1",
+                "llvm-dis": "LLVM version 23.1.1",
+            },
+        )
+        tools = Toolchain.discover(
+            ("rustc", "clang", "llvm-dis"), tmp_path / "logs", paths=paths
+        )
+        assert set(tools.tools) == {"rustc", "clang", "llvm-dis"}
 
 
 @pytest.mark.full
