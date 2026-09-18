@@ -120,6 +120,8 @@ prebuilt dependencies — including the standard library — are not rebuilt. Yo
 LLVM readers must be compatible with the version `rustc -vV` reports. Use
 `RLLVM_LOG_LEVEL=3` for diagnostics under Cargo.
 
+See the [Rust example](examples/rust/).
+
 ### Wrapper options
 
 Every compiler flag reaches the real compiler, including `-c`, `-v`, `--help`
@@ -141,6 +143,8 @@ rllvm-cc @compile.rsp
 Response files follow Clang's GNU UTF-8 syntax, including quoting and nested
 references. Large generated commands use them automatically.
 
+See the [wrapper options example](examples/wrapper-options/).
+
 ### From a compilation database
 
 `rllvm-compdb` compiles selected entries from an existing
@@ -159,6 +163,8 @@ output directory must be new.
 
 These modules describe the **current source tree**, not membership in a real
 link. Use wrapper capture when participation in the actual build matters.
+
+See the [compilation database example](examples/compdb/).
 
 ### Caching
 
@@ -195,6 +201,8 @@ rllvm-get-bc hello -o hello.bc
 enough — and ThinLTO has no single merged module, so use `marker` for it.
 COFF and WebAssembly reject `marker` and direct you to `skip`.
 
+See the [LTO example](examples/lto/).
+
 #### WebAssembly and eBPF
 
 ```bash
@@ -209,7 +217,7 @@ rllvm-get-bc prog.o -o prog.bc
 WebAssembly linking needs a matching `wasm-ld` from LLD; see the
 [WebAssembly example](examples/wasm/). eBPF works without special handling:
 libbpf skips rllvm's section on load and preserves it through linking. That
-linker requires BTF, so compile with `-g`.
+linker requires BTF, so compile with `-g`; see the [eBPF example](examples/ebpf/).
 
 Universal (multiple `-arch`) builds are unsupported; build and extract one
 architecture at a time.
