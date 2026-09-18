@@ -11,7 +11,7 @@ use rllvm::{
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-pub fn main() -> Result<(), Error> {
+pub fn run() -> Result<(), Error> {
     let args = ExtractionArgs::parse();
 
     if args.output_dir.is_some()
@@ -46,13 +46,15 @@ pub fn main() -> Result<(), Error> {
 
     // Check if the input file exists
     let input = &args.input;
+    // The path goes into the error, not only into this log line: the message
+    // reaches the user, the log line may not.
     let input_filepath = input.canonicalize().map_err(|err| {
         tracing::error!(
             "Failed to obtain the absolute filepath of the input: input={:?}, err={}",
             input,
             err
         );
-        err
+        Error::file(input, err)
     })?;
     if !input_filepath.exists() {
         let error_message = format!("Input file does not exist: {:?}", input_filepath);
@@ -68,7 +70,7 @@ pub fn main() -> Result<(), Error> {
             input_filepath,
             err
         );
-        err
+        Error::file(&input_filepath, err)
     })?;
     let mut object_files = vec![];
     // Resolve merge strategy: --merge-strategy takes precedence, then -b flag, then default (Full).
@@ -318,4 +320,8 @@ fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
         fs::write(manifest, contents)?;
     }
     Ok(())
+}
+
+pub fn main() -> std::process::ExitCode {
+    rllvm::error::report(run())
 }

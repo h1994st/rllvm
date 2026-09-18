@@ -10,7 +10,7 @@ use rllvm::{
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
-fn main() -> Result<(), Error> {
+fn run() -> Result<(), Error> {
     // Parsed exactly as `rllvm-cc` parses its own: the wrapper's `--rllvm-`
     // options are named, and everything else -- cargo's `rustc` path included
     // -- lands in a trailing var-arg that allows hyphen values. That keeps the
@@ -66,4 +66,8 @@ fn main() -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+fn main() -> std::process::ExitCode {
+    rllvm::error::report(run())
 }

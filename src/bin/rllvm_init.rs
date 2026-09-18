@@ -174,7 +174,7 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
-fn main() -> Result<(), Error> {
+fn run() -> Result<(), Error> {
     let args = InitArgs::parse();
 
     let tools = detect_tools(args.llvm_prefix.as_deref())?;
@@ -233,6 +233,10 @@ fn main() -> Result<(), Error> {
     eprintln!("To customize, edit: {}", output_path.display());
 
     Ok(())
+}
+
+fn main() -> std::process::ExitCode {
+    rllvm::error::report(run())
 }
 
 #[cfg(test)]

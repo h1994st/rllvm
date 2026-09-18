@@ -55,7 +55,7 @@ impl CompilationDatabase {
             input.to_path_buf()
         };
         let path = resolve(&input, &std::env::current_dir()?);
-        let bytes = fs::read(&path)?;
+        let bytes = fs::read(&path).map_err(|error| Error::file(&path, error))?;
         let raw: Vec<serde_json::Value> = serde_json::from_slice(&bytes)
             .map_err(|error| invalid(format!("invalid compilation database: {error}")))?;
         let digest = hash_bytes(&bytes);

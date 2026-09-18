@@ -62,7 +62,9 @@ impl InputKind {
 
     /// Open a file once and classify its prefix without loading its contents.
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, Error> {
-        Self::from_reader(BufReader::new(File::open(path)?))
+        let path = path.as_ref();
+        let file = File::open(path).map_err(|error| Error::file(path, error))?;
+        Self::from_reader(BufReader::new(file))
     }
 }
 

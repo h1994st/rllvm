@@ -11,7 +11,7 @@ use rllvm::{
 
 /// Try to parse as an object file to check for embedded bitcode.
 fn try_extract_bitcode_from_object(path: &PathBuf) -> Result<Option<PathBuf>, Error> {
-    let data = fs::read(path)?;
+    let data = fs::read(path).map_err(|error| Error::file(path, error))?;
     if let Ok(object) = object::File::parse(&*data) {
         let bc_paths = extract_bitcode_filepaths_from_parsed_object(&object)?;
         if let Some(first) = bc_paths.into_iter().next()
@@ -51,7 +51,7 @@ fn print_info(info: &BitcodeInfo, show_functions: bool) {
     }
 }
 
-fn main() -> Result<(), Error> {
+fn run() -> Result<(), Error> {
     let args = InfoArgs::parse();
 
     if args.json {
@@ -86,9 +86,7 @@ fn main() -> Result<(), Error> {
     }
 
     let input = &args.input;
-    let input_path = input
-        .canonicalize()
-        .map_err(|e| Error::MissingFile(format!("Cannot resolve input path {:?}: {}", input, e)))?;
+    let input_path = input.canonicalize().map_err(|e| Error::file(input, e))?;
 
     // Determine the bitcode file to analyze
     let bc_path = if InputKind::from_path(&input_path)? == InputKind::Bitcode {
@@ -110,4 +108,8 @@ fn main() -> Result<(), Error> {
     print_info(&info, args.functions);
 
     Ok(())
+}
+
+fn main() -> std::process::ExitCode {
+    rllvm::error::report(run())
 }
