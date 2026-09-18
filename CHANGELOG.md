@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.5.1](https://github.com/h1994st/rllvm/compare/v0.5.0...v0.5.1) (2026-09-18)
+
+
+### Features
+
+* add a source-level program query interface ([#183](https://github.com/h1994st/rllvm/issues/183)) ([3122a87](https://github.com/h1994st/rllvm/commit/3122a873a64d6cefb1f5d1af85c832b8281af2c2))
+* demangle C++ symbol names in query answers ([#189](https://github.com/h1994st/rllvm/issues/189)) ([4f9b75b](https://github.com/h1994st/rllvm/commit/4f9b75bba2dc99d7dfc2eb4d7eadcd083ab7b5cb))
+* kill an example that outstays its timeout ([#200](https://github.com/h1994st/rllvm/issues/200)) ([b9e2012](https://github.com/h1994st/rllvm/commit/b9e20125f8dd47dc6d20e4a63cab23c238cd5ecd))
+* record source digests so staleness is decidable from any catalog ([#190](https://github.com/h1994st/rllvm/issues/190)) ([6c04618](https://github.com/h1994st/rllvm/commit/6c04618381f225c9e1daf637a299fc111db9b8cc))
+* record which examples ran, skipped, or failed ([#201](https://github.com/h1994st/rllvm/issues/201)) ([32bffef](https://github.com/h1994st/rllvm/commit/32bffef4dbd52f0337ed9fd4bc7bedb1e5bf0384))
+
+
+### Bug Fixes
+
+* collapse ODR duplicate definitions into one binding ([#192](https://github.com/h1994st/rllvm/issues/192)) ([83f6490](https://github.com/h1994st/rllvm/commit/83f64900cfb62ae6c0e12abd0bdc09953eeb6100))
+* infer macOS SDKs for compilation database imports ([#179](https://github.com/h1994st/rllvm/issues/179)) ([f6574b2](https://github.com/h1994st/rllvm/commit/f6574b2c3acbd115a0b88f971b72c04a2c4a7fed))
+* keep Mach-O objects to one segment so lld preserves the bitcode path ([#205](https://github.com/h1994st/rllvm/issues/205)) ([6233243](https://github.com/h1994st/rllvm/commit/6233243bfb9094d2e4d374d8b769a27e9bba48a2))
+* name the file in I/O errors and stop debug-printing them at users ([#204](https://github.com/h1994st/rllvm/issues/204)) ([c36e036](https://github.com/h1994st/rllvm/commit/c36e0367e658f3e9441a58c425f648b5736e1811))
+* point the CMake toolchain file at the Objective-C compilers ([#193](https://github.com/h1994st/rllvm/issues/193)) ([1c06d68](https://github.com/h1994st/rllvm/commit/1c06d68e0b0d8ce010132623f7503e91549e1954))
+* report an unusable bitcode_root where builds can see it ([#214](https://github.com/h1994st/rllvm/issues/214)) ([ff0abc9](https://github.com/h1994st/rllvm/commit/ff0abc9ad863eb9cafc512b942d8c46c9af7fe55))
+* resolve bitcode_root against real paths instead of matching text ([#209](https://github.com/h1994st/rllvm/issues/209)) ([54f2440](https://github.com/h1994st/rllvm/commit/54f2440196e3a2062a6cc5bac3bffd5f56076683))
+
 ## [0.5.0](https://github.com/h1994st/rllvm/compare/v0.4.8...v0.5.0) (2026-09-13)
 
 
