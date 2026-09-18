@@ -5908,7 +5908,9 @@ fn a_bitcode_root_given_through_a_symlink_still_records_relative_paths() {
 ///
 /// Even with both paths normalized, a path genuinely outside the root cannot
 /// be made relative. Falling back to an absolute path is the right answer;
-/// doing it silently is what made this class of bug invisible.
+/// doing it silently is what made this class of bug invisible. The report has
+/// to reach the default log level, or the build systems that most need it --
+/// which nobody runs with `RLLVM_LOG_LEVEL` set -- never see it.
 #[test]
 fn a_bitcode_root_that_does_not_contain_the_bitcode_warns() {
     let tmp = TempDir::new().unwrap();
@@ -5921,7 +5923,7 @@ fn a_bitcode_root_that_does_not_contain_the_bitcode_warns() {
 
     let output = rllvm("rllvm-cc")
         .env("RLLVM_BITCODE_ROOT", &elsewhere)
-        .env("RLLVM_LOG_LEVEL", "1")
+        .env_remove("RLLVM_LOG_LEVEL")
         .args(["--", "-c", "-o"])
         .arg(&object)
         .arg(&source)

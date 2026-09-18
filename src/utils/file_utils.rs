@@ -19,6 +19,7 @@ use crate::{
         COFF_SECTION_NAME, DARWIN_SECTION_NAME, DARWIN_SEGMENT_NAME, ELF_SECTION_NAME,
         FAT_LTO_SECTION_NAME, WASM_SECTION_NAME,
     },
+    diagnostics::print_warning,
     error::Error,
     utils::execute_command_for_status,
 };
@@ -134,13 +135,16 @@ pub(crate) fn recorded_bitcode_filepath(bitcode_filepath: &Path) -> Result<Strin
         // absolute entry is the only honest answer. Say so: recording it
         // silently is what made a root that matched nothing look like it had
         // been applied, until a moved tree failed to extract.
+        //
+        // Deliberately not a `tracing::warn!`: the default log level is ERROR,
+        // so a log record is invisible to exactly the non-interactive build
+        // runs that configured a root and would otherwise believe it applied.
         Err(_) => {
-            tracing::warn!(
-                "bitcode_root {:?} does not contain {:?}; recording an absolute path, \
-                 which will not survive moving the build tree",
-                root,
-                absolute_filepath
-            );
+            print_warning(&format!(
+                "bitcode_root {root:?} does not contain {absolute_filepath:?}; \
+                 recording an absolute path, which will not survive moving the \
+                 build tree"
+            ));
             Ok(absolute_filepath.to_string_lossy().into_owned())
         }
     }
