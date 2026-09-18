@@ -143,9 +143,13 @@ jobs:
       # platforms in this job's matrix. `--lib` as well as `--test query`:
       # most of the query design's commitments are pinned by unit tests in
       # `src/query/*`, and `--test query` alone runs none of them.
+      #
+      # `--test examples` too: `rllvm-query` is not built in the default lane,
+      # so the analysis examples skip there. This is the only lane that can
+      # run them, and without it they would never execute anywhere.
       - name: Run query tests
         if: needs.changes.outputs.code == 'true'
-        run: cargo test --features query --lib --test query
+        run: cargo test --features query --lib --test query --test examples
         env:
           LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 

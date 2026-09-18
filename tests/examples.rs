@@ -72,13 +72,18 @@ fn run_capped(command: &mut Command, capture: &Path, timeout: Duration) -> io::R
             break Some(status);
         }
         if Instant::now() >= deadline {
-            // Negative pid: the group, so the child's own children die too.
-            // std cannot signal a group without libc, and the alternative is
-            // orphaning the process that is actually stuck.
-            let _ = Command::new("kill")
-                .arg("-TERM")
-                .arg(format!("-{}", child.id()))
-                .status();
+            // The child's group, so whatever it started dies with it -- a
+            // watchdog that kills only the script leaves the hung build
+            // running underneath.
+            //
+            // `killpg` rather than shelling out to `kill` with a negative
+            // pid: BSD and procps disagree about parsing that, and on Linux
+            // it took down the test process's own tree.
+            //
+            // SAFETY: `process_group(0)` above made the child its own group
+            // leader, so its pid is the group id, and the group is the
+            // child's alone.
+            unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGTERM) };
             let _ = child.kill();
             let _ = child.wait();
             break None;
