@@ -5741,3 +5741,126 @@ fn a_missing_input_is_reported_with_its_path_and_no_debug_formatting() {
         );
     }
 }
+
+/// A Mach-O object rllvm writes must carry exactly one `LC_SEGMENT_64`.
+///
+/// `loader.h` defines the format: "The file type MH_OBJECT is a compact
+/// format ... All sections are in one unnamed segment with no segment
+/// padding." Segments describe how an image is mapped into an address space;
+/// a relocatable object is never mapped, so it keeps one degenerate unnamed
+/// segment as the container for its section table, and the final image's
+/// placement comes from each section record's own `segname`.
+///
+/// Asking `llvm-objcopy` for `__RLLVM,__rllvm_bc` made it build the *image*
+/// shape instead -- a second, named segment -- inside an object file. `ld64`
+/// walks whatever segment commands it finds, so nothing complained;
+/// `ld64.lld` reads the one segment the format defines and never saw the
+/// section, so the bitcode path vanished at link time with the link
+/// reporting success.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_macho_object_carries_exactly_one_segment_command() {
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("unit.c");
+    fs::write(&source, "int helper(void){return 7;}\n").unwrap();
+    let object = tmp.path().join("unit.o");
+
+    let status = rllvm("rllvm-cc")
+        .args(["--", "-c", "-o"])
+        .arg(&object)
+        .arg(&source)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc failed");
+
+    assert_eq!(
+        macho_segment_command_count(&object),
+        1,
+        "a relocatable Mach-O object must hold all sections in one unnamed segment"
+    );
+    assert!(
+        macho_has_rllvm_section(&object),
+        "the object should still record the bitcode path"
+    );
+}
+
+/// Counts `LC_SEGMENT_64` load commands, reading the header directly rather
+/// than shelling out to `otool`, which is not guaranteed present.
+#[cfg(target_os = "macos")]
+fn macho_segment_command_count(path: &Path) -> usize {
+    const LC_SEGMENT_64: u32 = 0x19;
+    let data = fs::read(path).unwrap();
+    let word = |at: usize| u32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+    assert_eq!(word(0), 0xfeed_facf, "expected a 64-bit Mach-O");
+
+    let ncmds = word(16) as usize;
+    let mut offset = 32;
+    let mut segments = 0;
+    for _ in 0..ncmds {
+        if word(offset) == LC_SEGMENT_64 {
+            segments += 1;
+        }
+        offset += word(offset + 4) as usize;
+    }
+    segments
+}
+
+/// True when some section record is named `__rllvm_bc`, whatever segment it
+/// claims.
+#[cfg(target_os = "macos")]
+fn macho_has_rllvm_section(path: &Path) -> bool {
+    fs::read(path)
+        .unwrap()
+        .windows(b"__rllvm_bc".len())
+        .any(|window| window == b"__rllvm_bc")
+}
+
+/// True when `-fuse-ld=lld` can link on this host.
+///
+/// `ld64.lld` on macOS, `ld.lld` on Linux; clang picks by platform.
+#[cfg(target_os = "macos")]
+fn lld_available() -> bool {
+    which("ld64.lld").is_ok()
+}
+
+/// Linking with lld must keep the recorded bitcode path.
+///
+/// Mach-O's lld port had no coverage at all -- the two existing lld tests are
+/// `#[cfg(target_os = "linux")]`, so `ld.lld` was exercised and `ld64.lld`
+/// never was. That is what let a malformed object ship: `ld64` tolerated the
+/// second segment command, and nothing else looked.
+#[test]
+#[cfg(target_os = "macos")]
+fn linking_with_lld_keeps_the_bitcode_path() {
+    if !lld_available() {
+        eprintln!("skipping: ld64.lld is not installed");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    let source = tmp.path().join("unit.c");
+    fs::write(&source, "int main(void){return 0;}\n").unwrap();
+    let program = tmp.path().join("unit");
+
+    let status = rllvm("rllvm-cc")
+        .args(["--", "-fuse-ld=lld", "-o"])
+        .arg(&program)
+        .arg(&source)
+        .status()
+        .expect("Failed to run rllvm-cc");
+    assert!(status.success(), "rllvm-cc failed to link with lld");
+
+    assert!(
+        macho_has_rllvm_section(&program),
+        "lld dropped the recorded bitcode path from the linked binary"
+    );
+
+    let bitcode = tmp.path().join("unit.bc");
+    let status = rllvm("rllvm-get-bc")
+        .arg(&program)
+        .args(["-o"])
+        .arg(&bitcode)
+        .status()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(status.success(), "extraction failed after an lld link");
+    assert_bitcode_magic(&bitcode);
+}

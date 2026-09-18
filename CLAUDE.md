@@ -146,7 +146,12 @@ and linkers concatenate these sections. Use `__RLLVM,__rllvm_bc` on Mach-O and
 `.rllvm_bc` elsewhere — never LLVM's `.llvmbc`/`.llvmcmd`, which wasm-ld
 discards. Keeping an unclaimed section is also what makes eBPF work unchanged.
 Every Mach-O writer sets `no_dead_strip`. Prefer `llvm-objcopy` for embedding;
-the `object`-crate rebuild can lose unmodelled load commands.
+the `object`-crate rebuild can lose unmodelled load commands and invalidate
+code signatures. A relocatable Mach-O object holds every section in one
+unnamed segment, so `--add-section` names an empty segment and the section's
+own `segname` is written afterwards: asking objcopy for a named segment makes
+it append a second `LC_SEGMENT_64`, which `ld64` tolerates and `ld64.lld`
+never reads.
 
 Artifact identity derives from source, requested output, compiler, and settings,
 so variants stay distinct in a shared `bitcode_store_path`. The public path hash
