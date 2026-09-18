@@ -92,6 +92,9 @@ required-features = ["query"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+# `killpg` for the example harness's timeout. Shelling out to `kill` with a
+# negative pid is not portable: BSD and procps parse it differently.
+libc = "0.2"
 
 [[bench]]
 name = "rllvm_benchmarks"

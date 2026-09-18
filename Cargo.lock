@@ -751,6 +751,7 @@ dependencies = [
  "clap_complete",
  "criterion",
  "glob",
+ "libc",
  "llvm-sys",
  "md-5",
  "object",
