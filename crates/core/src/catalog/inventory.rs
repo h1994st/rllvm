@@ -272,12 +272,12 @@ impl ArchiveData {
 
 /// Reuse one archive buffer and one member index per inventory/copy operation.
 #[derive(Default)]
-pub(crate) struct ArchiveCache {
+pub struct ArchiveCache {
     archives: BTreeMap<PathBuf, ArchiveData>,
 }
 
 impl ArchiveCache {
-    pub(crate) fn module(&mut self, path: &Path, member: &ArchiveMember) -> Result<&[u8], Error> {
+    pub fn module(&mut self, path: &Path, member: &ArchiveMember) -> Result<&[u8], Error> {
         let archive = match self.archives.entry(path.to_path_buf()) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => entry.insert(ArchiveData::read(path)?),

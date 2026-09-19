@@ -27,7 +27,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::{
+use rllvm_core::{
     catalog::{CatalogOrigin, CatalogScope, ModuleCatalog},
     error::Error,
 };
@@ -892,10 +892,11 @@ fn uncertainty_of(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        catalog::{ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes, write_catalog},
-        query::{load::load_catalog, testing::*},
+    use rllvm_core::catalog::{
+        ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes, write_catalog,
     };
+
+    use crate::query::{load::load_catalog, testing::*};
 
     #[test]
     fn a_module_is_analyzed_only_after_it_parses() {

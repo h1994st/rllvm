@@ -7,7 +7,9 @@
 
 use std::{fs, path::Path, process::Command};
 
-use crate::{config::try_rllvm_config, error::Error, utils::embed_bitcode_filepath_to_object_file};
+use rllvm_core::{
+    config::try_rllvm_config, error::Error, utils::embed_bitcode_filepath_to_object_file,
+};
 
 /// Embed the bitcode path into every object member of an archive.
 ///
@@ -72,7 +74,9 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::utils::extract_bitcode_filepaths_from_parsed_objects;
+    use rllvm_core::{
+        config::pin_inferred_config, utils::extract_bitcode_filepaths_from_parsed_objects,
+    };
 
     /// A placeholder bitcode file. Embedding canonicalizes the path, so the
     /// file has to exist, but nothing ever reads its contents.
@@ -85,7 +89,10 @@ mod tests {
     /// An archive shaped like an rlib: object members plus one that is not an
     /// object, which must be left alone.
     fn build_fixture_archive(dir: &Path, objects: usize) -> PathBuf {
-        let config = try_rllvm_config().expect("no usable LLVM configuration");
+        // Inferred from LLVM, never the user's config: `rllvm-core` resolves
+        // the configuration once per process, and this is the only test here
+        // that reads it.
+        let config = pin_inferred_config().expect("no usable LLVM configuration");
         let clang = config.clang_filepath().clone();
         let llvm_ar = config.llvm_ar_filepath().clone();
 

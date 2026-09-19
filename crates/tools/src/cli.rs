@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
 
-use crate::merge::MergeStrategy;
+use rllvm_core::merge::MergeStrategy;
 
 /// The log level `--rllvm-verbose` asks for.
 ///
@@ -230,8 +230,8 @@ impl CatalogSelectionArgs {
         self.modules.is_empty() && self.sources.is_empty() && self.configurations.is_empty()
     }
 
-    pub fn selection(&self) -> crate::catalog::ModuleSelection {
-        crate::catalog::ModuleSelection {
+    pub fn selection(&self) -> rllvm_core::catalog::ModuleSelection {
+        rllvm_core::catalog::ModuleSelection {
             module_ids: self.modules.clone(),
             sources: self.sources.clone(),
             configuration_ids: self.configurations.clone(),

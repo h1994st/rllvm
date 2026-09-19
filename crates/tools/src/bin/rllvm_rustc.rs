@@ -4,9 +4,8 @@ use clap::Parser;
 use rllvm::{
     cli::{RustcWrapperArgs, verbose_log_level},
     compiler_wrapper::llvm::RustcWrapper,
-    config::try_rllvm_config,
-    error::Error,
 };
+use rllvm_core::{config::try_rllvm_config, error::Error};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -69,5 +68,5 @@ fn run() -> Result<(), Error> {
 }
 
 fn main() -> std::process::ExitCode {
-    rllvm::error::report(run())
+    rllvm_core::error::report(run())
 }

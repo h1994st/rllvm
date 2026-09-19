@@ -4,8 +4,8 @@ use std::{
 };
 
 use clap::Parser;
-use rllvm::{
-    cli::InitArgs,
+use rllvm::cli::InitArgs;
+use rllvm_core::{
     config::config_filepath,
     error::Error,
     utils::{execute_llvm_config, find_llvm_config},
@@ -236,7 +236,7 @@ fn run() -> Result<(), Error> {
 }
 
 fn main() -> std::process::ExitCode {
-    rllvm::error::report(run())
+    rllvm_core::error::report(run())
 }
 
 #[cfg(test)]

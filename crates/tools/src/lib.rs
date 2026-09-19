@@ -13,56 +13,28 @@
 //! file path into a special section of the output object file. The extraction tool
 //! (`rllvm-get-bc`) later reads those paths and links the bitcode together.
 //!
+//! Argument classification, bitcode capture, catalogs and configuration live in
+//! [`rllvm_core`]; this crate holds the concrete clang and rustc drivers, the
+//! compilation database and the binaries.
+//!
 //! # Configuration
 //!
-//! See [`config`] for TOML-based configuration via `~/.rllvm/config.toml`.
+//! See [`rllvm_core::config`] for TOML-based configuration via
+//! `~/.rllvm/config.toml`.
 
 // Keeps the public surface deliberate: a `pub` item that no `pub use`
 // re-exports is a mistake, not API.
 #![warn(unreachable_pub)]
 
-/// Command-line argument parsing for compiler flag classification.
 /// Command-line definitions shared by the binaries and the completion
 /// generator. Not a supported interface.
 #[doc(hidden)]
 pub mod cli;
 
-pub mod arg_parser;
-
-mod materialize;
-
 pub mod compilation_database;
 
-/// Incremental bitcode cache for skipping recompilation of unchanged files.
-pub mod cache;
-
-/// Diagnostic utilities for version checking, install hints, and colored output.
-pub mod diagnostics;
-
-/// TOML-based configuration and LLVM tool path resolution.
-pub mod config;
-
-/// Compiler wrapper traits and LLVM/Clang implementation.
+/// Concrete clang and rustc compiler wrappers.
 pub mod compiler_wrapper;
-
-/// Bitcode file analysis via `llvm-dis`.
-pub mod bitcode_info;
-
-/// Versioned module catalogs shared by capture inventory and materialization.
-pub mod catalog;
-
-pub mod error;
-
-/// Bitcode merge strategies (full link, partial link, archive).
-pub mod merge;
-
-pub mod lto;
-
-/// Utility functions for command execution, file manipulation, and LLVM tools.
-pub mod utils;
-
-/// Internal constants for argument patterns, section names, and LLVM version ranges.
-pub(crate) mod constants;
 
 /// Source-level queries over captured bitcode, linking LLVM directly.
 #[cfg(feature = "query")]

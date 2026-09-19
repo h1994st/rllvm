@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeMap, path::Path, process::Command, sync::OnceLock};
 
-use crate::constants::{arg_exact_match_map, arg_patterns};
+use rllvm_core::constants::{arg_exact_match_map, arg_patterns};
 
 #[derive(Default)]
 pub(super) struct MacosSdk(OnceLock<Result<String, String>>);

@@ -40,7 +40,7 @@ use crate::{
 /// synthesised Mach-O drops the platform load command, which makes the linker
 /// warn about every object rllvm touches. ELF uses module assembly to retain
 /// its otherwise unreferenced metadata; other formats use ordinary embedding.
-pub(crate) fn build_marker_object(
+pub fn build_marker_object(
     bitcode: &Path,
     dir: &Path,
     compiler: &Path,

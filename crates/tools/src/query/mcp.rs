@@ -50,7 +50,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use crate::error::Error;
+use rllvm_core::error::Error;
 
 use super::{Direction, Query, Session, analysis_of, open, open_catalog, run};
 
@@ -94,7 +94,7 @@ impl Registry {
     /// about an artifact wants an answer, not a file it has to name.
     fn inventory(&mut self, artifact: &Path, bitcode_root: &Path) -> Result<Value, Error> {
         let key = artifact.canonicalize()?;
-        let catalog = crate::catalog::inventory(&key, bitcode_root, None)?;
+        let catalog = rllvm_core::catalog::inventory(&key, bitcode_root, None)?;
         let directory = key.parent().unwrap_or(Path::new(".")).to_path_buf();
         let session = open_catalog(catalog, &directory)?;
         Ok(self.insert(key, session))

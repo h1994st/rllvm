@@ -28,9 +28,12 @@ pub use llvm_utils::{
 
 /// GNU response-file classification and LLVM tool transport
 mod response_file;
-pub(crate) use response_file::{
-    execute_llvm_tool, execute_llvm_tool_in_for_output, expand_response_files_in,
-};
+/// Runs an LLVM tool in a working directory and captures its output, spilling
+/// to a response file when the command line would exceed the OS limit.
+/// Wrapper-side plumbing, not a supported interface.
+#[doc(hidden)]
+pub use response_file::execute_llvm_tool_in_for_output;
+pub(crate) use response_file::{execute_llvm_tool, expand_response_files_in};
 
 /// Filepath-related utility functions
 mod path_utils;

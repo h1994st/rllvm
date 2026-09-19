@@ -1,9 +1,10 @@
 use clap::{CommandFactory, FromArgMatches};
 use rllvm::{
     cli::{ClangWrapperArgs, verbose_log_level},
-    compiler_wrapper::{
-        CompilerKind, CompilerWrapper, CompilerWrapperBuilder, llvm::ClangWrapperBuilder,
-    },
+    compiler_wrapper::llvm::ClangWrapperBuilder,
+};
+use rllvm_core::{
+    compiler_wrapper::{CompilerKind, CompilerWrapper, CompilerWrapperBuilder},
     config::try_rllvm_config,
     error::Error,
 };
@@ -49,5 +50,5 @@ pub fn rllvm_main(name: &str, compiler_kind: CompilerKind) -> Result<(), Error> 
 }
 
 pub fn main() -> std::process::ExitCode {
-    rllvm::error::report(rllvm_main("rllvm", CompilerKind::Clang))
+    rllvm_core::error::report(rllvm_main("rllvm", CompilerKind::Clang))
 }

@@ -24,12 +24,11 @@ use llvm_sys::{
     },
 };
 
-use crate::{
-    error::Error,
-    query::{
-        facts::*,
-        load::{LoadedModule, SourceState},
-    },
+use rllvm_core::error::Error;
+
+use crate::query::{
+    facts::*,
+    load::{LoadedModule, SourceState},
 };
 
 unsafe extern "C" {

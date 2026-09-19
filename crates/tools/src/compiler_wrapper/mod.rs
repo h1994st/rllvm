@@ -1,8 +1,4 @@
-//! Compiler wrapper
+//! Concrete clang and rustc wrappers.
 
-/// General compiler wrapper trait
-mod wrapper;
-pub use wrapper::*;
-
-/// LLVM compiler wrapper (clang/clang++)
+/// LLVM compiler wrappers (clang/clang++/rustc)
 pub mod llvm;

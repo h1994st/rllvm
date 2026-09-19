@@ -199,9 +199,8 @@ fn assert_valid_bitcode(bitcode_path: &Path) {
 #[test]
 #[cfg(unix)]
 fn response_file_large_os_string_command_preserves_source_path() {
-    use rllvm::compiler_wrapper::{
-        CompilerWrapper, CompilerWrapperBuilder, llvm::ClangWrapperBuilder,
-    };
+    use rllvm::compiler_wrapper::llvm::ClangWrapperBuilder;
+    use rllvm_core::compiler_wrapper::{CompilerWrapper, CompilerWrapperBuilder};
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
 
@@ -227,7 +226,7 @@ fn response_file_large_os_string_command_preserves_source_path() {
     args.push(source.into_os_string());
     assert_eq!(
         wrapper
-            .execute_command(&args, rllvm::arg_parser::CompileMode::Compiling)
+            .execute_command(&args, rllvm_core::arg_parser::CompileMode::Compiling)
             .unwrap(),
         Some(0)
     );
@@ -497,7 +496,7 @@ fn response_file_lto_preserves_user_requested_linker_temporaries() {
             dir.join("args.rsp"),
             format!(
                 "-flto {} source.o -o prog",
-                rllvm::lto::save_temps_flag(cfg!(target_vendor = "apple"))
+                rllvm_core::lto::save_temps_flag(cfg!(target_vendor = "apple"))
             ),
         )
         .unwrap();
@@ -521,7 +520,9 @@ fn response_file_lto_preserves_user_requested_linker_temporaries() {
             saved_by_clang = fs::read_dir(&dir)
                 .unwrap()
                 .map(|entry| entry.unwrap().file_name())
-                .filter(|name| rllvm::lto::is_save_temps_artifact("prog", &name.to_string_lossy()))
+                .filter(|name| {
+                    rllvm_core::lto::is_save_temps_artifact("prog", &name.to_string_lossy())
+                })
                 .collect();
             assert!(
                 !saved_by_clang.is_empty(),
@@ -812,7 +813,9 @@ fn assert_compilation_variants_keep_bitcode(variant: CompilationVariant) {
     if output_only {
         let paths: Vec<_> = objects
             .iter()
-            .map(|object| rllvm::utils::extract_bitcode_filepaths_from_object_file(object).unwrap())
+            .map(|object| {
+                rllvm_core::utils::extract_bitcode_filepaths_from_object_file(object).unwrap()
+            })
             .collect();
         assert_ne!(
             paths[0], paths[1],
@@ -1921,7 +1924,7 @@ fn get_bc_archive_replaces_output_only_after_success() {
 
     let single_object = tmp.path().join("a/a.o");
     let bitcode_paths =
-        rllvm::utils::extract_bitcode_filepaths_from_object_file(&single_object).unwrap();
+        rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&single_object).unwrap();
     assert_eq!(bitcode_paths.len(), 1);
     let output = extract(&single_object);
     assert!(
@@ -2408,7 +2411,7 @@ fn embedding_rebuilds_elf_objects_without_objcopy() {
     );
 
     // The embedded path must survive the rebuild.
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&object_path)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&object_path)
         .expect("failed to read the embedded section back");
     assert_eq!(paths.len(), 1, "expected exactly one embedded bitcode path");
     assert!(
@@ -2621,7 +2624,7 @@ int use_everything(void) {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&object_path)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&object_path)
         .expect("failed to read the embedded section back");
     assert_eq!(paths.len(), 1);
 
@@ -2746,7 +2749,7 @@ fn dead_strip_is_passed_through_without_warning() {
     );
 
     // And the bitcode path is still recoverable from the stripped binary.
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&exe)
         .expect("no embedded section survived the dead-stripping link");
     assert_eq!(paths.len(), 1, "expected one embedded path, got {paths:?}");
 }
@@ -2824,7 +2827,7 @@ fn rustc_wrapper_emits_and_embeds_bitcode() {
     );
     assert!(obj.exists(), "no object produced");
 
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&obj)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&obj)
         .expect("failed to read the embedded section");
     assert_eq!(paths.len(), 1, "expected one embedded bitcode path");
     assert!(
@@ -2870,7 +2873,7 @@ fn rustc_wasm_object_carries_extractable_bitcode() {
         "Wasm object compilation failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&obj)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&obj)
         .expect("Wasm object must record its bitcode path");
     assert_eq!(paths, vec![obj.with_extension("bc")]);
     assert_bitcode_magic(&paths[0]);
@@ -3031,7 +3034,7 @@ fn wasm_object_carries_the_bitcode_path() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&obj)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&obj)
         .expect("failed to read the embedded section");
     assert_eq!(paths.len(), 1, "expected one embedded path");
     assert_bitcode_magic(&paths[0]);
@@ -3085,7 +3088,7 @@ fn wasm_linked_module_carries_every_translation_unit() {
     );
 
     // Both translation units must be listed in the linked module.
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&module)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&module)
         .expect("failed to read the embedded section from the linked module");
     assert_eq!(
         paths.len(),
@@ -3160,7 +3163,7 @@ fn rustc_marker_survives_gnu_linker_gc() {
     let native = Command::new(&program).output().unwrap();
     assert!(native.status.success());
     assert_eq!(native.stdout, b"marker survived\n");
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&program).unwrap();
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&program).unwrap();
     assert_eq!(
         paths.len(),
         1,
@@ -3275,7 +3278,7 @@ fn bitcode_survives_a_dead_stripping_link() {
     );
 
     // And the section has to outlive the stripping.
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&exe)
         .expect("no embedded section survived the dead-stripping link");
     assert_eq!(
         paths.len(),
@@ -3311,7 +3314,7 @@ fn rustc_wrapper_embeds_into_a_linked_binary() {
     );
     assert!(exe.exists(), "no executable produced");
 
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&exe)
         .expect("the linked binary carries no rllvm section");
     assert_eq!(paths.len(), 1, "expected one embedded path, got {paths:?}");
     assert!(
@@ -3454,7 +3457,7 @@ fn assert_rustc_relative_output(out_dir: bool, relative_record: bool) {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(Command::new(root.join(program)).status().unwrap().success());
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(root.join(program))
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(root.join(program))
         .expect("linked output must record its bitcode");
     let expected = if relative_record {
         PathBuf::from(bitcode)
@@ -3533,7 +3536,7 @@ fn cargo_build_embeds_bitcode_for_bin_and_lib() {
     let exe = root.join("target/debug/myapp");
     assert!(exe.exists(), "cargo did not produce the binary");
 
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(&exe)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&exe)
         .expect("the cargo-built binary carries no rllvm section");
     let names: Vec<String> = paths
         .iter()
@@ -5947,7 +5950,7 @@ fn a_bitcode_root_that_does_not_contain_the_bitcode_warns() {
 /// The path an object records for its bitcode, without the trailing newline
 /// the section stores.
 fn recorded_bitcode_path(object: &Path) -> String {
-    let paths = rllvm::utils::extract_bitcode_filepaths_from_object_file(object)
+    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(object)
         .expect("the object should record a bitcode path");
     assert_eq!(paths.len(), 1, "expected exactly one recorded path");
     paths[0].to_string_lossy().into_owned()

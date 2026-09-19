@@ -3,10 +3,9 @@ use std::process::ExitCode;
 use clap::Parser;
 use rllvm::{
     cli::{ClosureDirection, QueryArgs, QueryCommand},
-    config::try_rllvm_config,
-    error::Error,
     query::{self, Query, index::Direction, open, run},
 };
+use rllvm_core::{config::try_rllvm_config, error::Error};
 use tracing_subscriber::FmtSubscriber;
 
 /// Converts a parsed subcommand into the `query::Query` it names, or `None`

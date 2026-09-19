@@ -2,7 +2,7 @@
 
 mod sdk;
 
-use crate::{
+use rllvm_core::{
     arg_parser::CompilerArgsInfo,
     catalog::{
         CatalogOrigin, CompilationRecord, CompilerIdentity, DigestAlgorithm, DigestOrigin,
@@ -248,7 +248,7 @@ fn compiler_context(
     directory: &Path,
     environment: &BTreeMap<String, String>,
 ) -> Result<CompilerContext, Error> {
-    let output = crate::utils::execute_llvm_tool_in_for_output(
+    let output = rllvm_core::utils::execute_llvm_tool_in_for_output(
         path,
         &["--version", "--no-default-config"],
         directory,
@@ -270,8 +270,8 @@ fn compiler_context(
     let llvm_dis = if parent.join("llvm-dis").is_file() {
         parent.join("llvm-dis")
     } else {
-        let config = crate::utils::find_llvm_config()?;
-        let output = crate::utils::execute_llvm_tool_in_for_output(
+        let config = rllvm_core::utils::find_llvm_config()?;
+        let output = rllvm_core::utils::execute_llvm_tool_in_for_output(
             config,
             &["--bindir"],
             directory,
@@ -441,7 +441,7 @@ fn materialize_entry(
     let before = source_digest(&source.path);
     source.digest = before.clone();
     let temporary = tempfile::NamedTempFile::new_in(output)?;
-    let mut arguments = crate::materialize::bitcode_arguments(
+    let mut arguments = rllvm_core::materialize::bitcode_arguments(
         &compile_args,
         &[],
         Path::new(&parsed.input_files()[0]),
@@ -457,7 +457,7 @@ fn materialize_entry(
         std::iter::once(compiler.identity.path.to_string_lossy().into_owned())
             .chain(arguments.iter().cloned())
             .collect();
-    let result = crate::utils::execute_llvm_tool_in_for_output(
+    let result = rllvm_core::utils::execute_llvm_tool_in_for_output(
         &compiler.identity.path,
         &arguments,
         &compilation.directory,
@@ -476,8 +476,11 @@ fn materialize_entry(
             result.status
         )));
     }
-    let inspected =
-        crate::catalog::inspect_bitcode(temporary.path(), &compiler.llvm_dis, module.id.clone());
+    let inspected = rllvm_core::catalog::inspect_bitcode(
+        temporary.path(),
+        &compiler.llvm_dis,
+        module.id.clone(),
+    );
     module.target_triple = inspected.target_triple;
     module.data_layout = inspected.data_layout;
     module.debug_info = inspected.debug_info;
@@ -726,7 +729,7 @@ fn classify_arguments(args: &[String], directory: &Path) -> Result<CompilerArgsI
             parsed.forbidden_flags().join(" ")
         )));
     }
-    if crate::arg_parser::universal_build_architectures(parsed.compile_args()).len() > 1 {
+    if rllvm_core::arg_parser::universal_build_architectures(parsed.compile_args()).len() > 1 {
         return Err(invalid("universal builds are unsupported"));
     }
     validate_language(parsed.input_language(0), parsed.is_assembly())?;
@@ -941,7 +944,7 @@ mod tests {
         assert_ne!(a.id, b.id);
         assert_eq!(a.configuration_id, b.configuration_id);
         assert_ne!(a.configuration_id, c.configuration_id);
-        assert_eq!(a.status, crate::catalog::ModuleStatus::Planned);
+        assert_eq!(a.status, rllvm_core::catalog::ModuleStatus::Planned);
         assert_eq!(a.sources[0].path, scratch.path().join("src/a.c"));
         assert_eq!(
             a.compilation.as_ref().unwrap().recorded_arguments[0],
@@ -1012,7 +1015,7 @@ mod tests {
         ]"#,
         );
         assert!(database.list().modules.iter().all(|module| module.status
-            == crate::catalog::ModuleStatus::Unsupported
+            == rllvm_core::catalog::ModuleStatus::Unsupported
             && !module.diagnostics.is_empty()));
     }
 
@@ -1060,7 +1063,7 @@ mod tests {
         ]
         .map(String::from);
         let parsed = classify_arguments(&args, Path::new(".")).unwrap();
-        let generated = crate::materialize::bitcode_arguments(
+        let generated = rllvm_core::materialize::bitcode_arguments(
             parsed.compile_args(),
             &[],
             Path::new("source.c"),

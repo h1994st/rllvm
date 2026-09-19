@@ -174,7 +174,7 @@ where
 }
 
 /// Capture compiler diagnostics while honoring an explicit compilation directory.
-pub(crate) fn execute_llvm_tool_in_for_output<P, S>(
+pub fn execute_llvm_tool_in_for_output<P, S>(
     program_filepath: P,
     args: &[S],
     directory: &Path,

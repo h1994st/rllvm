@@ -11,7 +11,7 @@ use std::{
 
 /// A tool from the configured LLVM's bindir.
 pub fn llvm_bin(name: &str) -> PathBuf {
-    let config = rllvm::utils::find_llvm_config().unwrap();
+    let config = rllvm_core::utils::find_llvm_config().unwrap();
     let output = Command::new(config).arg("--bindir").output().unwrap();
     assert!(output.status.success());
     Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)

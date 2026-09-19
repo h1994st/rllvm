@@ -19,8 +19,10 @@ use std::{
 
 use object::{BinaryFormat, Object, ObjectKind};
 
-use super::{marker, rustc_args, rustc_marker};
-use crate::{
+use rllvm_core::compiler_wrapper::llvm::marker;
+
+use super::{rustc_args, rustc_marker};
+use rllvm_core::{
     compiler_wrapper::CompilerKind, config::try_rllvm_config, error::Error,
     utils::embed_bitcode_filepath_to_object_file,
 };

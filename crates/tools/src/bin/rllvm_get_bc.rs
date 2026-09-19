@@ -5,9 +5,8 @@ use std::{
 
 use clap::Parser;
 use object::Object;
-use rllvm::{
-    cli::ExtractionArgs, config::try_rllvm_config, error::Error, merge::MergeStrategy, utils::*,
-};
+use rllvm::cli::ExtractionArgs;
+use rllvm_core::{config::try_rllvm_config, error::Error, merge::MergeStrategy, utils::*};
 use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
@@ -191,18 +190,20 @@ pub fn run() -> Result<(), Error> {
     }
 
     // Merge bitcode files using the selected strategy
-    if let Some(code) =
-        rllvm::merge::merge_bitcode_files(strategy, &bitcode_filepaths, output_filepath.clone())
-            .map_err(|err| {
-                tracing::error!(
-                    "Failed to merge ({}) bitcode files: bitcode_filepaths={:?}, err={:?}",
-                    strategy,
-                    bitcode_filepaths,
-                    err
-                );
-                err
-            })?
-        && code != 0
+    if let Some(code) = rllvm_core::merge::merge_bitcode_files(
+        strategy,
+        &bitcode_filepaths,
+        output_filepath.clone(),
+    )
+    .map_err(|err| {
+        tracing::error!(
+            "Failed to merge ({}) bitcode files: bitcode_filepaths={:?}, err={:?}",
+            strategy,
+            bitcode_filepaths,
+            err
+        );
+        err
+    })? && code != 0
     {
         std::process::exit(code);
     }
@@ -212,7 +213,7 @@ pub fn run() -> Result<(), Error> {
 }
 
 fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
-    use rllvm::catalog::{copy_modules, inventory, select_modules};
+    use rllvm_core::catalog::{copy_modules, inventory, select_modules};
     let root = args.bitcode_root.as_deref().unwrap_or(Path::new("."));
     let catalog = inventory(&args.input, root, None)?;
     let selected = select_modules(
@@ -302,7 +303,7 @@ fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
         .iter()
         .map(|m| directory.join(m.path.as_ref().expect("copied module has a path")))
         .collect();
-    if rllvm::merge::merge_bitcode_files(strategy, &paths, output.clone())?
+    if rllvm_core::merge::merge_bitcode_files(strategy, &paths, output.clone())?
         .is_some_and(|code| code != 0)
     {
         return Err(Error::ExecutionFailure(
@@ -323,5 +324,5 @@ fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
 }
 
 pub fn main() -> std::process::ExitCode {
-    rllvm::error::report(run())
+    rllvm_core::error::report(run())
 }

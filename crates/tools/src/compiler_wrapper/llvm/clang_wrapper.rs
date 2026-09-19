@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{
+use rllvm_core::{
     arg_parser::CompilerArgsInfo, compiler_wrapper::*, config::try_rllvm_config, error::Error,
 };
 
@@ -175,9 +175,20 @@ impl CompilerWrapperBuilder for ClangWrapperBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler_wrapper::CompilerWrapperBuilder;
+    use rllvm_core::{
+        compiler_wrapper::CompilerWrapperBuilder,
+        config::{RLLVMConfig, pin_inferred_config},
+    };
+
+    /// The configuration every test here runs against: inferred from LLVM,
+    /// never the user's own. `rllvm-core` resolves it once per process, so a
+    /// test has to pin it before it builds anything that reads it.
+    fn test_config() -> &'static RLLVMConfig {
+        pin_inferred_config().expect("no usable LLVM configuration")
+    }
 
     fn build(kind: CompilerKind) -> ClangWrapper {
+        test_config();
         ClangWrapperBuilder::new()
             .name("rllvm")
             .compiler_kind(kind)
@@ -185,7 +196,6 @@ mod tests {
             .expect("failed to build the wrapper")
     }
 
-    // Unit-test configuration is inferred from LLVM, never the user's config.
     // Exercise only public wrapper APIs, as an external library caller would.
     fn assert_public_artifact_paths_match_generated_object(mut wrapper: ClangWrapper) {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -205,7 +215,8 @@ mod tests {
         assert_eq!(wrapper.run().unwrap(), Some(0));
         let artifacts = wrapper.args().artifact_filepaths().unwrap();
         assert_eq!(artifacts.len(), 1);
-        let embedded = crate::utils::extract_bitcode_filepaths_from_object_file(&object).unwrap();
+        let embedded =
+            rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&object).unwrap();
         assert_eq!(
             embedded,
             vec![artifacts[0].2.clone()],
@@ -216,6 +227,7 @@ mod tests {
 
     #[test]
     fn public_artifact_paths_match_new_wrapper_output() {
+        test_config();
         assert_public_artifact_paths_match_generated_object(
             ClangWrapper::new("rllvm", CompilerKind::Clang).unwrap(),
         );
@@ -230,7 +242,7 @@ mod tests {
     fn public_artifact_paths_match_overridden_compiler_output() {
         // Select clang++ through the override while keeping the builder's
         // compiler kind at its default, so deriving from kind would be wrong.
-        let compiler = try_rllvm_config().unwrap().clangxx_filepath();
+        let compiler = test_config().clangxx_filepath();
         assert_public_artifact_paths_match_generated_object(
             ClangWrapperBuilder::new()
                 .wrapped_compiler(compiler)

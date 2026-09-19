@@ -3,17 +3,19 @@ use std::path::{Path, PathBuf};
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use object::{BinaryFormat, SectionKind, write};
-use rllvm::arg_parser::CompilerArgsInfo;
-use rllvm::cache::{content_key, manifest_key};
-use rllvm::utils::{
+use rllvm_core::arg_parser::CompilerArgsInfo;
+use rllvm_core::cache::{content_key, manifest_key};
+use rllvm_core::utils::{
     calculate_filepath_hash, embed_bitcode_filepath_to_object_file,
     extract_bitcode_filepaths_from_object_file, extract_bitcode_filepaths_from_parsed_object,
 };
 
-/// Path to test data bundled with the project.
+/// Path to a prebuilt binary fixture. These live with the integration tests
+/// that also read them, in the `rllvm` crate; every caller here treats a
+/// missing file as "skip this measurement".
 fn test_data(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/data")
+        .join("../tools/tests/data")
         .join(name)
 }
 

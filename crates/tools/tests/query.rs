@@ -4,9 +4,9 @@ use std::{
     process::{Command, Stdio},
 };
 
-use rllvm::catalog::read_catalog;
 use rllvm::query::load::{for_each_module, load_catalog};
 use rllvm::query::{CallTarget, Linkage};
+use rllvm_core::catalog::read_catalog;
 use rllvm_testkit::{
     MODULE_ID, SourceFixture, compile_bitcode, compile_bitcode_file, llvm_bin,
     scratch_rllvm_config, source_and_header, write_catalog_json,
@@ -197,7 +197,7 @@ fn an_inventoried_source_is_current_until_it_is_edited_then_missing() {
     assert_eq!(state.status, rllvm::query::SourceStatus::Current);
     assert_eq!(
         state.basis,
-        Some(rllvm::catalog::DigestOrigin::Compiler),
+        Some(rllvm_core::catalog::DigestOrigin::Compiler),
         "clang records the digest in !DIFile, so this is a claim about the bitcode"
     );
 
@@ -337,7 +337,8 @@ fn a_deleted_archive_reports_its_members_missing_not_failed() {
 fn write_catalog_with_one_module(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     let module = compile_bitcode(scratch, "add.c", "int add(int a,int b){return a+b;}\n");
     let mut catalog =
-        rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+        rllvm_core::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            .unwrap();
     catalog.modules[0].id = "add".to_string();
     let catalog_path = scratch.path().join("catalog.json");
     write_catalog_json(&catalog_path, &catalog);
@@ -365,14 +366,14 @@ fn two_modules_one_source(scratch: &tempfile::TempDir) -> PathBuf {
     let module = compile_bitcode(scratch, "shared.c", "int shared(void){return 0;}\n");
     let source = scratch.path().join("shared.c");
 
-    let base =
-        rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+    let base = rllvm_core::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis")))
+        .unwrap();
     let template = base.modules[0].clone();
 
-    let digest = |bytes: &[u8]| rllvm::catalog::SourceDigest {
-        algorithm: rllvm::catalog::DigestAlgorithm::Sha256,
-        value: rllvm::catalog::hash_bytes(bytes),
-        origin: rllvm::catalog::DigestOrigin::Capture,
+    let digest = |bytes: &[u8]| rllvm_core::catalog::SourceDigest {
+        algorithm: rllvm_core::catalog::DigestAlgorithm::Sha256,
+        value: rllvm_core::catalog::hash_bytes(bytes),
+        origin: rllvm_core::catalog::DigestOrigin::Capture,
     };
     let current = digest(&std::fs::read(&source).unwrap());
     let stale_digest = digest(b"stale content, does not match shared.c");
@@ -389,8 +390,11 @@ fn two_modules_one_source(scratch: &tempfile::TempDir) -> PathBuf {
         association.digest = Some(stale_digest.clone());
     }
 
-    let catalog =
-        rllvm::catalog::ModuleCatalog::new(base.origin, "recorded_modules", vec![fresh, stale]);
+    let catalog = rllvm_core::catalog::ModuleCatalog::new(
+        base.origin,
+        "recorded_modules",
+        vec![fresh, stale],
+    );
     let path = scratch.path().join("shared-catalog.json");
     write_catalog_json(&path, &catalog);
     path
@@ -420,7 +424,8 @@ fn archive_catalog_of(
             .success()
     );
     let catalog =
-        rllvm::catalog::inventory(&archive, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+        rllvm_core::catalog::inventory(&archive, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            .unwrap();
     let path = scratch.path().join(format!("{stem}-catalog.json"));
     write_catalog_json(&path, &catalog);
     path
@@ -622,13 +627,13 @@ fn two_plain_module_catalog(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
     for (name, source) in ADD_AND_MAIN {
         let object = compile_bitcode(scratch, name, source);
         let catalog =
-            rllvm::catalog::inventory(&object, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            rllvm_core::catalog::inventory(&object, scratch.path(), Some(&llvm_bin("llvm-dis")))
                 .unwrap();
         origin.get_or_insert(catalog.origin.clone());
         first.get_or_insert(object);
         modules.extend(catalog.modules);
     }
-    let catalog = rllvm::catalog::ModuleCatalog::new(
+    let catalog = rllvm_core::catalog::ModuleCatalog::new(
         origin.expect("at least one module"),
         "recorded_modules",
         modules,
@@ -1241,9 +1246,9 @@ fn compile_and_extract(
 
 /// Stands in for a catalog whose capture recorded a compiler this LLVM is
 /// older than.
-fn record_with_compiler_version(version: &str) -> rllvm::catalog::ModuleRecord {
-    rllvm::catalog::ModuleRecord {
-        compiler: Some(rllvm::catalog::CompilerIdentity {
+fn record_with_compiler_version(version: &str) -> rllvm_core::catalog::ModuleRecord {
+    rllvm_core::catalog::ModuleRecord {
+        compiler: Some(rllvm_core::catalog::CompilerIdentity {
             path: PathBuf::from("clang"),
             realpath: None,
             version: version.to_string(),
@@ -1261,7 +1266,8 @@ const TWICE_CXX: &str = "template <typename T> T twice(T x) { return x + x; }\n\
 fn cxx_catalog(scratch: &tempfile::TempDir) -> PathBuf {
     let module = compile_bitcode(scratch, "twice.cpp", TWICE_CXX);
     let mut catalog =
-        rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+        rllvm_core::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            .unwrap();
     catalog.modules[0].id = "twice".to_string();
     let path = scratch.path().join("catalog.json");
     write_catalog_json(&path, &catalog);
@@ -1376,8 +1382,8 @@ mod mcp {
     /// MCP tests below only need a session to exist, not any particular
     /// program in it.
     fn empty_catalog(scratch: &tempfile::TempDir) -> PathBuf {
-        let catalog = rllvm::catalog::ModuleCatalog::new(
-            rllvm::catalog::CatalogOrigin {
+        let catalog = rllvm_core::catalog::ModuleCatalog::new(
+            rllvm_core::catalog::CatalogOrigin {
                 kind: "test".into(),
                 input: PathBuf::from("test"),
                 sha256: None,
@@ -1386,7 +1392,7 @@ mod mcp {
             vec![],
         );
         let catalog_path = scratch.path().join("catalog.json");
-        rllvm::catalog::write_catalog(&catalog_path, &catalog).unwrap();
+        rllvm_core::catalog::write_catalog(&catalog_path, &catalog).unwrap();
         catalog_path
     }
 

@@ -15,7 +15,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::catalog::{CatalogOrigin, CatalogScope};
+use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
 
 use super::{
     bind::{BindingStatus, SymbolBinding},

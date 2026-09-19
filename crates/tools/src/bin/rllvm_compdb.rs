@@ -1,10 +1,9 @@
 use clap::Parser;
 use rllvm::{
-    catalog::ModuleStatus,
     cli::{CompdbArgs, CompdbCommand},
     compilation_database::{CompilationDatabase, GenerateOptions},
-    error::Error,
 };
+use rllvm_core::{catalog::ModuleStatus, error::Error};
 
 fn run() -> Result<bool, Error> {
     match CompdbArgs::parse().command {

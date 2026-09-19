@@ -4,7 +4,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{CatalogOrigin, CatalogScope, DigestOrigin};
+use rllvm_core::catalog::{CatalogOrigin, CatalogScope, DigestOrigin};
 
 /// A function is identified by module and symbol, never by symbol alone: the
 /// catalog preserves separate compilations of one source on purpose.

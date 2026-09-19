@@ -33,6 +33,10 @@ use crate::{
 /// caller needs its own owned error.
 type ConfigResult = Result<RLLVMConfig, String>;
 
+/// The process-wide configuration, resolved once by whichever entry point
+/// reaches it first.
+static RLLVM_CONFIG: OnceLock<ConfigResult> = OnceLock::new();
+
 fn config_result_to_ref(result: &'static ConfigResult) -> Result<&'static RLLVMConfig, Error> {
     match result {
         Ok(config) => Ok(config),
@@ -40,17 +44,38 @@ fn config_result_to_ref(result: &'static ConfigResult) -> Result<&'static RLLVMC
     }
 }
 
+/// Pins the process-wide configuration to one inferred from the system.
+///
+/// [`try_rllvm_config`] otherwise reads -- and on a first run writes --
+/// `~/.rllvm/config.toml`, which a test must never depend on or modify. This
+/// crate's own unit tests get the inferred configuration from the `cfg(test)`
+/// variant below; a unit test in a crate that depends on this one compiles
+/// against the ordinary variant and has to ask for it here instead.
+///
+/// Both share one `OnceLock`, so this pins nothing once a configuration has
+/// been resolved: a test has to call it before anything builds a wrapper.
+#[doc(hidden)]
+pub fn pin_inferred_config() -> Result<&'static RLLVMConfig, Error> {
+    config_result_to_ref(RLLVM_CONFIG.get_or_init(|| {
+        RLLVMConfig::try_default()
+            .map_err(|err| format!("Failed to infer rllvm configuration: {err}"))
+    }))
+}
+
 #[cfg(not(test))]
 pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
-    static RLLVM_CONFIG: OnceLock<ConfigResult> = OnceLock::new();
     config_result_to_ref(RLLVM_CONFIG.get_or_init(|| {
         RLLVMConfig::new().map_err(|err| format!("Failed to load rllvm configuration: {err}"))
     }))
 }
 
-/// Returns the global [`RLLVMConfig`] singleton (test variant).
-///
-/// Uses [`RLLVMConfig::try_default`] to infer configuration from the system.
+/// Returns the global [`RLLVMConfig`] singleton (test variant), inferred from
+/// the system so this crate's own tests never read the user's configuration.
+#[cfg(test)]
+pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
+    pin_inferred_config()
+}
+
 /// Resolve a configured bitcode root to the form paths are compared against.
 ///
 /// The root is matched against each bitcode file's real path, so a root that
@@ -62,15 +87,6 @@ pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
 /// missing path, and a build may create the directory later.
 fn normalize_root(root: PathBuf) -> PathBuf {
     root.canonicalize().unwrap_or(root)
-}
-
-#[cfg(test)]
-pub fn try_rllvm_config() -> Result<&'static RLLVMConfig, Error> {
-    static RLLVM_CONFIG: OnceLock<ConfigResult> = OnceLock::new();
-    config_result_to_ref(RLLVM_CONFIG.get_or_init(|| {
-        RLLVMConfig::try_default()
-            .map_err(|err| format!("Failed to infer rllvm configuration: {err}"))
-    }))
 }
 
 /// Returns the path the configuration is read from, and written to.

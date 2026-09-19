@@ -6,17 +6,15 @@
 
 use std::path::PathBuf;
 
-use crate::{
-    catalog::{CatalogOrigin, CatalogScope},
-    query::{
-        bind::{BindingCandidate, BindingStatus, SymbolBinding},
-        facts::{
-            CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Linkage,
-            ModuleAnalysis, ModuleReport, ProgramFacts, SourceLocation, SourceStatus, UseFact,
-            UseKind,
-        },
-        index::Session,
+use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
+
+use crate::query::{
+    bind::{BindingCandidate, BindingStatus, SymbolBinding},
+    facts::{
+        CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Linkage, ModuleAnalysis,
+        ModuleReport, ProgramFacts, SourceLocation, SourceStatus, UseFact, UseKind,
     },
+    index::Session,
 };
 
 pub(crate) fn function(

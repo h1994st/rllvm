@@ -51,7 +51,7 @@ pub fn compile_bitcode_to(source: &Path, module: &Path, flags: &[&str]) {
 
 /// Writes a catalog straight to `path`. Not `catalog::write_catalog`, whose
 /// no-clobber publish these fixtures do not need.
-pub fn write_catalog_json(path: &Path, catalog: &rllvm::catalog::ModuleCatalog) {
+pub fn write_catalog_json(path: &Path, catalog: &rllvm_core::catalog::ModuleCatalog) {
     std::fs::write(path, serde_json::to_vec_pretty(catalog).unwrap()).unwrap();
 }
 
@@ -71,8 +71,8 @@ pub struct SourceFixture {
 impl SourceFixture {
     /// The digest recorded for one of the two files, from whichever
     /// association carries one -- the same rule the loader follows.
-    pub fn digest(&self, file: &Path) -> Option<rllvm::catalog::SourceDigest> {
-        let catalog = rllvm::catalog::read_catalog(&self.catalog).unwrap();
+    pub fn digest(&self, file: &Path) -> Option<rllvm_core::catalog::SourceDigest> {
+        let catalog = rllvm_core::catalog::read_catalog(&self.catalog).unwrap();
         let mut associated = catalog.modules[0]
             .sources
             .iter()
@@ -96,7 +96,8 @@ pub fn source_and_header(scratch: &TempDir) -> SourceFixture {
         "#include \"h.h\"\nint main(void){return helper(2);}\n",
     );
     let mut catalog =
-        rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+        rllvm_core::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            .unwrap();
     catalog.modules[0].id = MODULE_ID.to_string();
     let path = scratch.path().join("catalog.json");
     write_catalog_json(&path, &catalog);

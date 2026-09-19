@@ -164,13 +164,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        compiler_wrapper::{CompilerKind, CompilerWrapper, llvm::ClangWrapper},
-        constants::RESPONSE_FILE_ARGUMENT_THRESHOLD,
-    };
+    use crate::constants::RESPONSE_FILE_ARGUMENT_THRESHOLD;
     use std::{
         fs,
         path::{Path, PathBuf},
+        process::Command,
     };
 
     #[test]
@@ -209,26 +207,26 @@ mod tests {
     }
 
     /// Compile one source into a bitcode file beside it.
+    ///
+    /// Calls the configured clang directly rather than through a wrapper: the
+    /// tools these tests exercise only need bitcode on disk, and the concrete
+    /// wrappers live in a crate that depends on this one.
     fn build_bitcode_file(dir: &Path, name: &str, contents: &str) -> PathBuf {
         let source_path = dir.join(format!("{name}.c"));
         fs::write(&source_path, contents).expect("Failed to write the source file");
 
         let bitcode_path = dir.join(format!("{name}.bc"));
-        let args = [
-            "-c",
-            "-emit-llvm",
-            "-o",
-            bitcode_path.to_str().unwrap(),
-            source_path.to_str().unwrap(),
-        ];
-
-        let mut cc = ClangWrapper::new("rllvm", CompilerKind::Clang)
-            .expect("Failed to build the clang wrapper");
-        assert_eq!(
-            cc.parse_args(&args).unwrap().run().unwrap(),
-            Some(0),
-            "Failed to generate bitcode for {name}.c"
-        );
+        let status = Command::new(
+            try_rllvm_config()
+                .expect("Failed to infer the rllvm configuration")
+                .clang_filepath(),
+        )
+        .args(["-c", "-emit-llvm", "-o"])
+        .arg(&bitcode_path)
+        .arg(&source_path)
+        .status()
+        .expect("Failed to run clang");
+        assert!(status.success(), "Failed to generate bitcode for {name}.c");
 
         bitcode_path
     }

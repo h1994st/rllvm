@@ -8,14 +8,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{
+use rllvm_core::{
     catalog::{
         ArchiveCache, ArchiveMember, CatalogOrigin, CatalogScope, DigestOrigin, ModuleCatalog,
         ModuleRecord, ModuleStatus, hash_bytes, read_catalog,
     },
     error::Error,
-    query::facts::{ModuleAnalysis, ModuleReport, SourceStatus},
 };
+
+use crate::query::facts::{ModuleAnalysis, ModuleReport, SourceStatus};
 
 pub struct LoadedModule {
     pub id: String,

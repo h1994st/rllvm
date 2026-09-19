@@ -179,7 +179,7 @@ where
 impl CompilerArgsInfo {
     /// Bind artifact identity to the compiler selected by the wrapper. A
     /// standalone parser leaves this unspecified.
-    pub(crate) fn for_compiler(compiler: &Path) -> Self {
+    pub fn for_compiler(compiler: &Path) -> Self {
         Self {
             wrapped_compiler: Some(compiler.to_path_buf()),
             ..Self::default()
@@ -475,11 +475,7 @@ impl CompilerArgsInfo {
     }
 
     /// Classify an imported command relative to its entry directory.
-    pub(crate) fn parse_args_in<S>(
-        &mut self,
-        args: &[S],
-        directory: &Path,
-    ) -> Result<&'_ mut Self, Error>
+    pub fn parse_args_in<S>(&mut self, args: &[S], directory: &Path) -> Result<&'_ mut Self, Error>
     where
         S: AsRef<str>,
     {
@@ -545,8 +541,9 @@ impl CompilerArgsInfo {
         self.input_args.as_ref()
     }
 
-    /// Arguments after GNU response expansion, for internal consumers.
-    pub(crate) fn expanded_args(&self) -> &[String] {
+    /// Arguments after GNU response expansion. Classification reads these;
+    /// the real compiler still receives the original argv.
+    pub fn expanded_args(&self) -> &[String] {
         &self.expanded_args
     }
 
@@ -556,11 +553,12 @@ impl CompilerArgsInfo {
     }
 
     /// The positional language active when this source appeared in expanded argv.
-    pub(crate) fn input_language(&self, index: usize) -> Option<&str> {
+    pub fn input_language(&self, index: usize) -> Option<&str> {
         self.input_languages.get(index).and_then(Option::as_deref)
     }
 
-    pub(crate) fn final_language(&self) -> Option<&str> {
+    /// The language in force after the last `-x` in expanded argv.
+    pub fn final_language(&self) -> Option<&str> {
         self.current_language.as_deref()
     }
 
@@ -741,7 +739,7 @@ impl CompilerArgsInfo {
     }
 
     /// Whether this invocation has an LTO link phase, including source builds.
-    pub(crate) fn has_lto_link_phase(&self) -> bool {
+    pub fn has_lto_link_phase(&self) -> bool {
         self.is_lto()
             && !self.is_compile_only
             && !self.is_preprocess_only

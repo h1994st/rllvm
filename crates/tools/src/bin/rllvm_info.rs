@@ -2,9 +2,9 @@ use std::{fs, path::PathBuf};
 
 use clap::Parser;
 use owo_colors::OwoColorize;
-use rllvm::{
+use rllvm::cli::InfoArgs;
+use rllvm_core::{
     bitcode_info::{BitcodeInfo, analyze_bitcode},
-    cli::InfoArgs,
     error::Error,
     utils::{InputKind, extract_bitcode_filepaths_from_parsed_object},
 };
@@ -59,8 +59,8 @@ fn run() -> Result<(), Error> {
             .bitcode_root
             .as_deref()
             .unwrap_or(std::path::Path::new("."));
-        let catalog = rllvm::catalog::inventory(&args.input, root, None)?;
-        let selected = rllvm::catalog::select_modules(
+        let catalog = rllvm_core::catalog::inventory(&args.input, root, None)?;
+        let selected = rllvm_core::catalog::select_modules(
             &catalog,
             &args.selection.selection(),
             &std::env::current_dir()?,
@@ -71,7 +71,7 @@ fn run() -> Result<(), Error> {
         if selected
             .modules
             .iter()
-            .any(|module| module.status != rllvm::catalog::ModuleStatus::Available)
+            .any(|module| module.status != rllvm_core::catalog::ModuleStatus::Available)
         {
             return Err(Error::MissingFile(
                 "some selected modules are unavailable; see the JSON catalog".into(),
@@ -111,5 +111,5 @@ fn run() -> Result<(), Error> {
 }
 
 fn main() -> std::process::ExitCode {
-    rllvm::error::report(run())
+    rllvm_core::error::report(run())
 }

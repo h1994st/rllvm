@@ -5,14 +5,14 @@ use std::{collections::HashMap, sync::OnceLock};
 
 use crate::arg_parser::{ArgInfo, CallbackFn, CompilerArgsInfo};
 
-type CallbackMap = HashMap<&'static str, ArgInfo<String>>;
+pub type CallbackMap = HashMap<&'static str, ArgInfo<String>>;
 /// Ordered pattern table for arguments that no exact match handled.
 ///
 /// Matching is a single `RegexSet` pass rather than a test per pattern.
 /// Declaration order still decides the winner — `^-Wl,.+$` has to beat
 /// `^-W[^l].*$`, for instance — and `SetMatches::iter` yields indices in
 /// ascending order, so "first declared match wins" is preserved.
-pub(crate) struct ArgPatternTable {
+pub struct ArgPatternTable {
     set: RegexSet,
     arg_infos: Vec<ArgInfo<String>>,
 }
@@ -30,7 +30,7 @@ impl ArgPatternTable {
     }
 
     /// Returns the handler for the first declared pattern that matches.
-    pub(crate) fn first_match(&self, arg: &str) -> Option<&ArgInfo<String>> {
+    pub fn first_match(&self, arg: &str) -> Option<&ArgInfo<String>> {
         self.set
             .matches(arg)
             .iter()
@@ -98,7 +98,7 @@ pub(crate) const LLVM_VERSION_MAX: u32 = 33;
 #[cfg(not(target_vendor = "apple"))]
 pub(crate) const LLVM_VERSION_MIN: u32 = 6;
 
-pub(crate) fn arg_exact_match_map() -> &'static CallbackMap {
+pub fn arg_exact_match_map() -> &'static CallbackMap {
     static ARG_EXACT_MATCH_MAP: OnceLock<CallbackMap> = OnceLock::new();
 
     ARG_EXACT_MATCH_MAP.get_or_init(|| {
@@ -531,7 +531,7 @@ pub(crate) fn is_object_file_name(arg: &str) -> bool {
         .any(|pattern| pattern.is_match(arg))
 }
 
-pub(crate) fn arg_patterns() -> &'static ArgPatternTable {
+pub fn arg_patterns() -> &'static ArgPatternTable {
     static ARG_PATTERNS: OnceLock<ArgPatternTable> = OnceLock::new();
     ARG_PATTERNS.get_or_init(|| {
         ArgPatternTable::new(vec![

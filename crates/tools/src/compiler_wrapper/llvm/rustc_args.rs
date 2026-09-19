@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::Error;
+use rllvm_core::error::Error;
 
 /// What rllvm has to do for one rustc invocation.
 ///

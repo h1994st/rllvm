@@ -6,7 +6,7 @@ use crate::{
 };
 use std::path::Path;
 
-pub(crate) fn bitcode_arguments(
+pub fn bitcode_arguments(
     compile_args: &[String],
     extra_args: &[String],
     source: &Path,

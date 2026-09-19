@@ -4,7 +4,7 @@ use std::{
     process::{Command, Output},
 };
 
-use rllvm::catalog::{DigestOrigin, ModuleCatalog, ModuleStatus, write_catalog};
+use rllvm_core::catalog::{DigestOrigin, ModuleCatalog, ModuleStatus, write_catalog};
 use rllvm_testkit::{compile_bitcode_file, compile_bitcode_to, llvm_bin, source_and_header};
 use tempfile::TempDir;
 
@@ -161,7 +161,7 @@ fn selected_modules_relocate_without_merging_and_can_later_be_merged() {
     );
     let relocated = f.root.path().join("relocated");
     fs::rename(&destination, &relocated).unwrap();
-    let copied = rllvm::catalog::read_catalog(&relocated.join("catalog.json")).unwrap();
+    let copied = rllvm_core::catalog::read_catalog(&relocated.join("catalog.json")).unwrap();
     assert_eq!(copied.modules.len(), 1);
     assert_eq!(copied.modules[0].id, module.id);
     assert!(copied.modules[0].path.as_ref().unwrap().is_relative());
@@ -264,7 +264,7 @@ fn bitcode_archive_inventory_and_copy_preserve_member_modules() {
             .unwrap()
             .success()
     );
-    let copied = rllvm::catalog::read_catalog(&destination.join("catalog.json")).unwrap();
+    let copied = rllvm_core::catalog::read_catalog(&destination.join("catalog.json")).unwrap();
     assert!(copied.modules.iter().all(|m| m.archive_member.is_none()));
     for module in copied.modules {
         assert!(
@@ -399,7 +399,8 @@ fn a_module_without_compiler_checksums_falls_back_to_an_inventory_digest() {
     let module = compile_bitcode_file(&source, &["-gdwarf-4", "-g", "-O0"]);
 
     let catalog =
-        rllvm::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis"))).unwrap();
+        rllvm_core::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            .unwrap();
     let origins: Vec<_> = catalog.modules[0]
         .sources
         .iter()
@@ -424,7 +425,7 @@ fn a_module_without_compiler_checksums_falls_back_to_an_inventory_digest() {
 fn an_unresolvable_relative_source_gets_no_inventory_digest() {
     let scratch = tempfile::tempdir().unwrap();
     let fixture = source_and_header(&scratch);
-    let catalog = rllvm::catalog::read_catalog(&fixture.catalog).unwrap();
+    let catalog = rllvm_core::catalog::read_catalog(&fixture.catalog).unwrap();
 
     for association in &catalog.modules[0].sources {
         if association.resolved_path().is_relative() {
