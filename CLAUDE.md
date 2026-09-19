@@ -86,7 +86,7 @@ The optional `query` feature is not covered by those gates. CI runs both forms,
 so run both when touching it:
 
 ```bash
-cargo test --features query --lib --test query --test examples
+cargo test --features query --lib --test query --test examples  # no -p: also pulls in rllvm-core's lib tests
 cargo clippy -p rllvm --features query --all-targets -- -D warnings
 ```
 
@@ -191,8 +191,8 @@ through without capture.
 
 ### Queries
 
-`query/extract.rs` is the only module containing `unsafe`, and no LLVM handle
-leaves it.
+`query/extract.rs` is the only module with `unsafe` outside test code, and no
+LLVM handle leaves it.
 
 Answers never claim more than they know. `scope` is quoted from the catalog and
 never shrinks; what was actually read is reported under `analysis`. `!callees`
