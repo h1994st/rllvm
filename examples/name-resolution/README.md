@@ -15,7 +15,7 @@ before it resolves fuzzily.
 
 ## Requirements
 
-The `query` feature, which is not in a default build.
+`rllvm-query`, a separate crate that is not built by a default `cargo build`.
 
 ## Build and verify
 

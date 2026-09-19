@@ -4,11 +4,11 @@
 
 ## Requirements
 
-The `query` feature, which links LLVM statically and is not in a default
-build:
+`rllvm-query`, a separate crate that links LLVM statically and is not built by
+a default `cargo build`:
 
 ```bash
-cargo install rllvm --features query
+cargo install rllvm-query
 ```
 
 ## Build and verify

@@ -3,8 +3,8 @@
 set -euo pipefail
 source "$(dirname "$0")/../common.sh"
 
-# rllvm-query is built only with the `query` feature, so it is absent from an
-# ordinary build.
+# rllvm-query is its own crate, not in the workspace's default members, so it
+# is absent from an ordinary build.
 require rllvm-query python3
 
 mkdir -p "$OUT"
