@@ -24,6 +24,12 @@ env:
   # Pinned so both runners test the same toolchain. Unpinned, Linux got
   # Ubuntu's default and macOS got Homebrew's latest -- four majors apart.
   LLVM_VERSION: "23"
+  # The llvm-sys pin from crates/query/Cargo.toml, which is <major><minor> of
+  # the same release. Passed to the setup action, which derives the
+  # LLVM_SYS_<pin>_PREFIX variable the crate reads and fails if the toolchain
+  # it installed needs a different one -- so raising LLVM_VERSION without
+  # raising this stops CI here instead of testing against the wrong LLVM.
+  LLVM_SYS_VERSION: "231"
 
 jobs:
   changes:
@@ -116,11 +122,11 @@ jobs:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
-        id: setup-llvm
         if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
           version: ${{ env.LLVM_VERSION }}
+          llvm-sys: ${{ env.LLVM_SYS_VERSION }}
 
       - name: Build
         if: needs.changes.outputs.code == 'true'
@@ -145,8 +151,6 @@ jobs:
       - name: Build the query CLI for the example suite
         if: needs.changes.outputs.code == 'true'
         run: cargo build -p rllvm-query --verbose
-        env:
-          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 
       # No target filter: this runs the crate's lib unit tests, its bin smoke
       # tests, and the `tests/query.rs` integration suite together. Most of
@@ -156,8 +160,6 @@ jobs:
       - name: Run query tests
         if: needs.changes.outputs.code == 'true'
         run: cargo test -p rllvm-query --verbose
-        env:
-          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 
       # `rllvm-query` was not yet built during the `Run tests` step above, so
       # the analysis examples skipped there. Rerun the suite now that it
@@ -250,11 +252,11 @@ jobs:
           fetch-depth: 0
 
       - name: Install LLVM/Clang
-        id: setup-llvm
         if: needs.changes.outputs.code == 'true'
         uses: ./.github/actions/setup-llvm
         with:
           version: ${{ env.LLVM_VERSION }}
+          llvm-sys: ${{ env.LLVM_SYS_VERSION }}
 
       - name: Run clippy
         if: needs.changes.outputs.code == 'true'
@@ -266,8 +268,6 @@ jobs:
       - name: Run clippy (query crate)
         if: needs.changes.outputs.code == 'true'
         run: cargo clippy -p rllvm-query --all-targets -- -D warnings
-        env:
-          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 
   audit:
     name: Security Audit

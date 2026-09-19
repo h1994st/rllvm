@@ -25,8 +25,12 @@ jobs:
       #
       # which blocks all releases after the first. cargo-dist created the tag
       # instead, so reconcile the label here -- before release-please runs, so it
-      # sees a clean slate. Self-healing: a release that never tagged keeps its
-      # pending label and is retried rather than silently marked done.
+      # sees a clean slate.
+      #
+      # The label is no longer what retries a failed release: it is reconciled
+      # against rllvm's tag alone, so a release that tagged rllvm but not
+      # rllvm-query still clears. What retries is the dispatch step below, which
+      # re-dispatches any component whose tag is missing on every push to main.
       - uses: actions/checkout@v7
 
       - name: Reconcile labels on already-released PRs
@@ -52,9 +56,12 @@ jobs:
           # what was released. main's checked-out .release-please-manifest.json
           # can: a merged release PR is exactly what wrote that file, so its
           # "crates/tools" entry is the version the rllvm component last
-          # released at. dist only ever tags rllvm-v<version> (rllvm-core has
-          # no dist app and reaches crates.io through the publish job instead),
-          # so that is the one tag whose existence proves the release landed.
+          # released at. rllvm is the witness because it is the component
+          # almost every release bumps; rllvm-core has no dist app and reaches
+          # crates.io through the publish job instead. A release PR that bumps
+          # only rllvm-query is reconciled against rllvm's existing tag and so
+          # clears early, which is still the point of this step: unblocking the
+          # next run.
           VER="$(jq -er '.["crates/tools"]' .release-please-manifest.json)"
           TAG="rllvm-v${VER}"
 
@@ -105,6 +112,7 @@ jobs:
 
           PACKAGES=(
             "crates/tools:rllvm"
+            "crates/query:rllvm-query"
           )
 
           for entry in "${PACKAGES[@]}"; do

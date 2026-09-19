@@ -10,6 +10,15 @@ inputs:
   version:
     description: LLVM major version to install
     required: true
+  llvm-sys:
+    description: >
+      The llvm-sys major version this toolchain has to satisfy, as pinned in
+      crates/query/Cargo.toml (e.g. "231"). When set, the action exports the
+      LLVM_SYS_<version>_PREFIX variable llvm-sys reads, and fails if the
+      installed toolchain would need a different one. Leave unset to only put
+      the toolchain on PATH.
+    required: false
+    default: ""
 
 outputs:
   prefix:
@@ -65,3 +74,24 @@ runs:
       id: resolve-prefix
       shell: bash
       run: echo "prefix=$(llvm-config --prefix)" >> "$GITHUB_OUTPUT"
+
+    # llvm-sys reads LLVM_SYS_<major><minor>_PREFIX and silently builds nothing
+    # useful without it, so the release would fail at link time instead. Derive
+    # the minor from the toolchain rather than assuming 1, which is wrong for
+    # any LLVM x.0, and refuse to continue if that disagrees with the pin.
+    - name: Export the prefix variable llvm-sys reads
+      if: inputs.llvm-sys != ''
+      shell: bash
+      env:
+        PIN: ${{ inputs.llvm-sys }}
+        PREFIX: ${{ steps.resolve-prefix.outputs.prefix }}
+      run: |
+        set -euo pipefail
+        version="$(llvm-config --version)"
+        rest="${version#*.}"
+        needs="${version%%.*}${rest%%.*}"
+        if [ "$needs" != "$PIN" ]; then
+          echo "::error::LLVM ${version} is read through LLVM_SYS_${needs}_PREFIX, but llvm-sys ${PIN} reads LLVM_SYS_${PIN}_PREFIX"
+          exit 1
+        fi
+        echo "LLVM_SYS_${PIN}_PREFIX=${PREFIX}" >> "$GITHUB_ENV"

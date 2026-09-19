@@ -13,6 +13,12 @@ keywords = ["llvm", "clang", "bitcode", "IR"]
 readme = "README.md"
 exclude = ["tests/*"]
 
+# A library with no binaries. dist would otherwise announce it as an app and
+# publish an empty archive and installer alongside the two that ship binaries;
+# it reaches users through crates.io, from the release's publish job.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 clap.workspace = true
 object.workspace = true
