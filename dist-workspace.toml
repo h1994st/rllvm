@@ -40,3 +40,12 @@ github-attestations = true
 # image provides the release llvm-sys wants. Path is relative to
 # .github/workflows.
 github-build-setup = "../dist-build-setup.yml"
+
+# dist defaults aarch64-apple-darwin to macos-14 (Sonoma), and Homebrew has no
+# arm64_sonoma bottle for llvm 23 -- the tags are arm64_sequoia, arm64_tahoe and
+# arm64_golden_gate. `brew install llvm@23` there builds LLVM, zstd and z3 from
+# source on a 3-vCPU runner, which means the 6-hour job limit rather than a
+# failure. macos-15 is Sequoia, which is bottled and is also what the tap
+# bottles. ci.yml never saw this: it runs macos-latest.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"
