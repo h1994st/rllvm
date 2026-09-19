@@ -749,10 +749,29 @@ version = "0.5.1"
 dependencies = [
  "clap",
  "clap_complete",
- "criterion",
  "glob",
  "libc",
  "llvm-sys",
+ "object",
+ "owo-colors",
+ "rllvm-core",
+ "rllvm-testkit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "which",
+]
+
+[[package]]
+name = "rllvm-core"
+version = "0.5.1"
+dependencies = [
+ "clap",
+ "criterion",
+ "glob",
  "md-5",
  "object",
  "owo-colors",
@@ -765,8 +784,16 @@ dependencies = [
  "thiserror",
  "toml",
  "tracing",
- "tracing-subscriber",
  "which",
+]
+
+[[package]]
+name = "rllvm-testkit"
+version = "0.5.1"
+dependencies = [
+ "rllvm-core",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

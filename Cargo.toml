@@ -1,173 +1,40 @@
-[package]
-authors = ["Shengtuo Hu <h1994st@gmail.com>"]
-categories = ["command-line-utilities", "development-tools", "development-tools::build-utils"]
-description = "A tool to build whole-program LLVM bitcode files"
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/tools", "crates/testkit"]
+default-members = ["crates/core", "crates/tools", "crates/testkit"]
+# Nested packages that are fixtures or demos, not members. Without this, any
+# cargo command run inside them walks up, finds this workspace, and fails with
+# "current package believes it's in a workspace when it's not".
+exclude = [
+  "examples/rust",
+  "benchmarks/tests/fixtures/cargo",
+  "crates/tools/tests/data/cargo_fixture",
+]
+
+[workspace.package]
 edition = "2024"
 rust-version = "1.88"
-exclude = [
-  "tests/*",
-  ".github/*",
-  "benchmarks/*",
-  "examples/*",
-  ".python-version",
-  "pyproject.toml",
-  "uv.lock",
-]
-keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
-homepage = "https://shengtuo.me/rllvm"
 license = "Apache-2.0"
-name = "rllvm"
-readme = "README.md"
+authors = ["Shengtuo Hu <h1994st@gmail.com>"]
+homepage = "https://shengtuo.me/rllvm"
 repository = "https://github.com/h1994st/rllvm"
-version = "0.5.1"
 
-# dist enumerates every `[[bin]]`, including rllvm-query, which needs the
-# `query` feature and so does not exist in the default build dist performs --
-# the 0.5.1 release failed on `failed to find bin rllvm-query`. The override
-# is per target, and a target left out silently falls back to every binary,
-# so every entry in `targets` is listed here. tests/packaging.rs keeps the
-# two in step.
-[package.metadata.dist.binaries]
-aarch64-apple-darwin = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-x86_64-apple-darwin = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-aarch64-unknown-linux-gnu = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-x86_64-unknown-linux-gnu = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-x86_64-unknown-linux-musl = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-
-[features]
-# Links LLVM via llvm-sys for source-level queries over captured bitcode.
-# Kept as the crate's only feature: mutually exclusive LLVM features would
-# break `cargo llvm-cov --all-features` in CI.
-query = ["dep:llvm-sys", "llvm-sys/force-static"]
-
-[dependencies]
-clap = {version = "~4.5.48", features = ["derive"]}
-clap_complete = "~4.5"
-toml = "~0.8"
-object = {version = "~0.40.0", features = ["all"]}
-regex = "~1.11.3"
-serde = {version = "~1.0.227", features = ["derive"]}
-tracing = "~0.1"
-tracing-subscriber = {version = "~0.3", features = ["env-filter"]}
-owo-colors = "~4.1"
-thiserror = "~2.0"
-which = "~8.0.0"
-# Used by the rustc wrapper to stage marker objects and unpack archives;
-# RAII cleanup matters because those paths return early on error.
-tempfile = "~3"
-serde_json = "1.0"
-sha2 = "0.10"
-# Optional: only pulled in by the `query` feature. Needs LLVM_SYS_231_PREFIX
-# pointing at an LLVM 23 install when llvm-config is not on PATH.
-llvm-sys = { version = "231", optional = true }
-md-5 = "0.10"
-sha1 = "0.10"
-
-[target.'cfg(target_vendor = "apple")'.dependencies]
+# Versions shared by more than one member live here so the two cannot drift.
+# Single-member dependencies stay in that member's manifest.
+[workspace.dependencies]
+clap = { version = "~4.5.48", features = ["derive"] }
 glob = "~0.3.3"
-
-[[bin]]
-name = "rllvm-cc"
-path = "src/bin/rllvm_cc.rs"
-
-[[bin]]
-name = "rllvm-cxx"
-path = "src/bin/rllvm_cxx.rs"
-
-[[bin]]
-name = "rllvm-get-bc"
-path = "src/bin/rllvm_get_bc.rs"
-
-[[bin]]
-name = "rllvm-init"
-path = "src/bin/rllvm_init.rs"
-
-[[bin]]
-name = "rllvm-completions"
-path = "src/bin/rllvm_completions.rs"
-
-[[bin]]
-name = "rllvm-rustc"
-path = "src/bin/rllvm_rustc.rs"
-
-[[bin]]
-name = "rllvm-info"
-path = "src/bin/rllvm_info.rs"
-
-[[bin]]
-name = "rllvm-compdb"
-path = "src/bin/rllvm_compdb.rs"
-
-[[bin]]
-name = "rllvm-query"
-path = "src/bin/rllvm_query.rs"
-required-features = ["query"]
-
-[dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
-# `killpg` for the example harness's timeout. Shelling out to `kill` with a
-# negative pid is not portable: BSD and procps parse it differently.
-libc = "0.2"
-# Reading the manifests back in tests/packaging.rs; same version as the
-# dependency above.
+object = { version = "~0.40.0", features = ["all"] }
+owo-colors = "~4.1"
+serde = { version = "~1.0.227", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "~3"
 toml = "~0.8"
+tracing = "~0.1"
+which = "~8.0.0"
 
-[[bench]]
-name = "rllvm_benchmarks"
-harness = false
-
-# Without this the test target compiles by default, and its `rllvm::query`
-# imports break `cargo test` for anyone not building the `query` feature.
-[[test]]
-name = "query"
-path = "tests/query.rs"
-required-features = ["query"]
-
+# Profiles are only honoured at the workspace root; cargo warns and ignores them
+# in a member manifest.
 [profile.bench]
 debug = true
 

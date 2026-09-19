@@ -1,0 +1,152 @@
+[package]
+name = "rllvm"
+version = "0.5.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "A tool to build whole-program LLVM bitcode files"
+categories = ["command-line-utilities", "development-tools", "development-tools::build-utils"]
+keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
+readme = "README.md"
+exclude = ["tests/*"]
+
+# dist enumerates every `[[bin]]`, including rllvm-query, which needs the
+# `query` feature and so does not exist in the default build dist performs --
+# the 0.5.1 release failed on `failed to find bin rllvm-query`. The override
+# is per target, and a target left out silently falls back to every binary,
+# so every entry in `targets` is listed here. tests/packaging.rs keeps the
+# two in step.
+[package.metadata.dist.binaries]
+aarch64-apple-darwin = [
+  "rllvm-cc",
+  "rllvm-cxx",
+  "rllvm-get-bc",
+  "rllvm-init",
+  "rllvm-completions",
+  "rllvm-rustc",
+  "rllvm-info",
+  "rllvm-compdb",
+]
+x86_64-apple-darwin = [
+  "rllvm-cc",
+  "rllvm-cxx",
+  "rllvm-get-bc",
+  "rllvm-init",
+  "rllvm-completions",
+  "rllvm-rustc",
+  "rllvm-info",
+  "rllvm-compdb",
+]
+aarch64-unknown-linux-gnu = [
+  "rllvm-cc",
+  "rllvm-cxx",
+  "rllvm-get-bc",
+  "rllvm-init",
+  "rllvm-completions",
+  "rllvm-rustc",
+  "rllvm-info",
+  "rllvm-compdb",
+]
+x86_64-unknown-linux-gnu = [
+  "rllvm-cc",
+  "rllvm-cxx",
+  "rllvm-get-bc",
+  "rllvm-init",
+  "rllvm-completions",
+  "rllvm-rustc",
+  "rllvm-info",
+  "rllvm-compdb",
+]
+x86_64-unknown-linux-musl = [
+  "rllvm-cc",
+  "rllvm-cxx",
+  "rllvm-get-bc",
+  "rllvm-init",
+  "rllvm-completions",
+  "rllvm-rustc",
+  "rllvm-info",
+  "rllvm-compdb",
+]
+
+[features]
+# Links LLVM via llvm-sys for source-level queries over captured bitcode.
+# Kept as the crate's only feature: mutually exclusive LLVM features would
+# break `cargo llvm-cov --all-features` in CI.
+query = ["dep:llvm-sys", "llvm-sys/force-static"]
+
+[dependencies]
+rllvm-core = { path = "../core", version = "0.5.1" }
+clap.workspace = true
+clap_complete = "~4.5"
+object.workspace = true
+serde.workspace = true
+tracing.workspace = true
+tracing-subscriber = {version = "~0.3", features = ["env-filter"]}
+owo-colors.workspace = true
+which.workspace = true
+# Used by the rustc wrapper to stage marker objects and unpack archives;
+# RAII cleanup matters because those paths return early on error.
+tempfile.workspace = true
+serde_json.workspace = true
+# Optional: only pulled in by the `query` feature. Needs LLVM_SYS_231_PREFIX
+# pointing at an LLVM 23 install when llvm-config is not on PATH.
+llvm-sys = { version = "231", optional = true }
+
+[[bin]]
+name = "rllvm-cc"
+path = "src/bin/rllvm_cc.rs"
+
+[[bin]]
+name = "rllvm-cxx"
+path = "src/bin/rllvm_cxx.rs"
+
+[[bin]]
+name = "rllvm-get-bc"
+path = "src/bin/rllvm_get_bc.rs"
+
+[[bin]]
+name = "rllvm-init"
+path = "src/bin/rllvm_init.rs"
+
+[[bin]]
+name = "rllvm-completions"
+path = "src/bin/rllvm_completions.rs"
+
+[[bin]]
+name = "rllvm-rustc"
+path = "src/bin/rllvm_rustc.rs"
+
+[[bin]]
+name = "rllvm-info"
+path = "src/bin/rllvm_info.rs"
+
+[[bin]]
+name = "rllvm-compdb"
+path = "src/bin/rllvm_compdb.rs"
+
+[[bin]]
+name = "rllvm-query"
+path = "src/bin/rllvm_query.rs"
+required-features = ["query"]
+
+[dev-dependencies]
+# `killpg` for the example harness's timeout. Shelling out to `kill` with a
+# negative pid is not portable: BSD and procps parse it differently.
+libc = "0.2"
+# Reading the manifests back in tests/packaging.rs.
+toml.workspace = true
+rllvm-testkit = { path = "../testkit" }
+
+# Locating a Homebrew LLVM in the integration harness.
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+glob.workspace = true
+
+# Without this the test target compiles by default, and its `rllvm::query`
+# imports break `cargo test` for anyone not building the `query` feature.
+[[test]]
+name = "query"
+path = "tests/query.rs"
+required-features = ["query"]

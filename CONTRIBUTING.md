@@ -25,7 +25,7 @@ CI enforces both `rustfmt` and `clippy`. Please run these before submitting:
 ```bash
 cargo fmt --all                              # Auto-format
 cargo fmt --all --check                      # Check formatting (what CI runs)
-cargo clippy --all-targets -- -D warnings    # Lint
+cargo clippy -p rllvm-core -p rllvm --all-targets -- -D warnings    # Lint
 ```
 
 - Follow standard Rust naming conventions.
@@ -34,7 +34,7 @@ cargo clippy --all-targets -- -D warnings    # Lint
 ## Running Tests
 
 ```bash
-cargo test --all --verbose
+cargo test -p rllvm-core -p rllvm --verbose
 ```
 
 LLVM/Clang must be installed for the test suite to pass. Tests run on both Linux and macOS in CI.
