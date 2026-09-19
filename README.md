@@ -292,14 +292,18 @@ reported rather than silently ignored. See the
 
 ### Queries
 
-The optional `query` feature answers source-level questions about captured
-bitcode. It links LLVM statically:
+`rllvm-query` answers source-level questions about captured bitcode. It is its
+own crate, since it links LLVM statically:
 
 ```bash
-cargo install rllvm --features query
+cargo install rllvm-query
 # if llvm-config is not on PATH:
-LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install rllvm --features query
+LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install rllvm-query
 ```
+
+Upgrading from 0.5.x? A `rllvm-query` built from the old `--features query`
+still sits in `~/.cargo/bin` and keeps answering until you install the new
+crate.
 
 On Ubuntu/Debian, install `libpolly-N-dev` alongside `llvm-N-dev` and
 `libclang-N-dev`.
