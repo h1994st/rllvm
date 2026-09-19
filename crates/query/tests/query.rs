@@ -23,6 +23,25 @@ fn query_binary_reports_its_llvm_major() {
     assert!(text.starts_with("23."), "unexpected LLVM version: {text}");
 }
 
+/// Completions come from the binary that owns the CLI.
+///
+/// `rllvm-completions` lives in the wrapper crate and cannot see `QueryArgs`
+/// without dragging LLVM into every wrapper build, so each installable unit
+/// generates its own.
+#[test]
+fn completions_name_the_query_binary() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .args(["completions", "bash"])
+        .output()
+        .expect("failed to run rllvm-query");
+    assert!(output.status.success(), "completions failed");
+    let script = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        script.contains("rllvm-query"),
+        "completion script does not name the binary: {script:.200}"
+    );
+}
+
 #[test]
 fn the_binary_does_not_link_an_llvm_shared_library() {
     let binary = env!("CARGO_BIN_EXE_rllvm-query");

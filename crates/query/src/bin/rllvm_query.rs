@@ -1,6 +1,6 @@
 use std::process::ExitCode;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use rllvm_core::{config::try_rllvm_config, error::Error};
 use rllvm_query::{
     Query,
@@ -10,9 +10,11 @@ use rllvm_query::{
 };
 use tracing_subscriber::FmtSubscriber;
 
-/// Converts a parsed subcommand into the [`Query`] it names, or `None`
-/// for `Mcp`, which names a mode (serve over MCP stdio) rather than one of
-/// the nine queries.
+/// Converts a parsed subcommand into the [`Query`] it names, or `None` for
+/// the two variants that name a mode rather than one of the nine queries:
+/// `Mcp` (serve over MCP stdio) and `Completions` (print a completion
+/// script), both of which this binary has already handled by the time a
+/// query would run.
 ///
 /// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
 /// arm here fails to compile. That alone does not catch the opposite drift --
@@ -39,6 +41,9 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
         QueryCommand::Externals => Query::Externals,
         QueryCommand::IndirectTargets { at } => Query::IndirectTargets { at, heuristics },
         QueryCommand::Mcp => return None,
+        // `main` answers this one before `run_query` is ever called; the arm
+        // is here so adding a mode variant cannot compile without a decision.
+        QueryCommand::Completions { .. } => return None,
     })
 }
 
@@ -103,6 +108,15 @@ fn main() -> ExitCode {
         println!("{}", llvm_version());
         return ExitCode::SUCCESS;
     }
+    // Also before any configuration is read: generating a completion script
+    // is a property of the CLI definition alone, and must not fail on a
+    // machine that has no usable LLVM configuration yet.
+    if let Some(QueryCommand::Completions { shell }) = args.command {
+        let mut command = QueryArgs::command();
+        let name = command.get_name().to_string();
+        clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
+        return ExitCode::SUCCESS;
+    }
     match run_query(args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -153,6 +167,16 @@ mod tests {
     #[test]
     fn the_mcp_command_has_no_query() {
         assert!(to_query(QueryCommand::Mcp, false).is_none());
+    }
+
+    /// Same for `Completions`: the binary answers it before a query could
+    /// run, so reaching `to_query` with it must not name one.
+    #[test]
+    fn the_completions_command_has_no_query() {
+        let command = QueryCommand::Completions {
+            shell: clap_complete::Shell::Bash,
+        };
+        assert!(to_query(command, false).is_none());
     }
 
     /// Not just a compile-time fence: proves `to_query` and `cli_command_for`

@@ -60,8 +60,8 @@ pub enum ClosureDirection {
 /// The nine query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
 /// converts a parsed variant into a [`crate::Query`] before running it;
-/// `Mcp` has no counterpart there -- it names a mode, and `to_query`
-/// answers `None` for it.
+/// `Mcp` and `Completions` have no counterpart there -- they name a mode,
+/// and `to_query` answers `None` for both.
 ///
 /// This mirror can drift: `to_query` in `rllvm_query.rs` is exhaustive over
 /// this type, so a variant added here without an arm there fails to compile,
@@ -124,4 +124,14 @@ pub enum QueryCommand {
     },
     /// Serve the nine queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
     Mcp,
+    /// Print a shell completion script for `rllvm-query`
+    ///
+    /// `rllvm-completions` lives in the wrapper crate and cannot reach
+    /// [`QueryArgs`] without making every wrapper build link LLVM, so this
+    /// binary generates its own.
+    Completions {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
