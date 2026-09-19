@@ -63,9 +63,38 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         .with_writer(std::io::stderr)
         .init();
 
-    // `Mcp` names a mode, not a query: `to_query` returns `None` for it.
+    // The dispatch, named rather than inferred from `to_query`'s `None`.
+    // Two commands answer `None` now -- `Mcp` and `Completions` -- so `None`
+    // no longer identifies which mode was asked for, and reading it as "serve
+    // MCP" would make the next mode-shaped variant silently do that: the one
+    // outcome nobody would think to test for. Exhaustive and wildcard-free,
+    // so such a variant has to fail to compile here too, not only in
+    // `to_query`, where its `None` arm would otherwise be the whole story.
+    match &command {
+        QueryCommand::Mcp => return serve_mcp(args.catalog.as_deref()),
+        // `main` answers this one before `run_query` is reached, so arriving
+        // here means that early return was dropped --
+        // `completions_name_the_query_binary` fails when it is, because
+        // nothing reaches stdout.
+        QueryCommand::Completions { .. } => return Ok(()),
+        QueryCommand::Defs { .. }
+        | QueryCommand::At { .. }
+        | QueryCommand::Callers { .. }
+        | QueryCommand::Callees { .. }
+        | QueryCommand::Uses { .. }
+        | QueryCommand::Reach { .. }
+        | QueryCommand::Closure { .. }
+        | QueryCommand::Externals
+        | QueryCommand::IndirectTargets { .. } => {}
+    }
+
+    // Unreachable through the match above, which returns for every command
+    // `to_query` answers `None` for. An error rather than a panic: a binary
+    // that mis-dispatches should say so, not abort.
     let Some(query) = to_query(command, args.heuristics) else {
-        return serve_mcp(args.catalog.as_deref());
+        return Err(Error::InvalidArguments(
+            "this command names a mode, not a query".to_string(),
+        ));
     };
 
     // Before `open`, so a mistyped location costs a diagnostic rather than a
