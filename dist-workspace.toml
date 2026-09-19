@@ -24,6 +24,13 @@ post-announce-jobs = ["./tap-bump"]
 # `x86_64-apple-darwin` because the tap bottles only arm64_sequoia and
 # x86_64_linux. Both remain reachable through `cargo install`.
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+# Build each app with `cargo build -p <app>` instead of one `--workspace` build.
+# `--workspace` builds every member, so the rllvm announcement compiled
+# crates/query too, and llvm-sys failed on a runner that had installed no LLVM
+# -- the build setup installs it only for an rllvm-query announcement. dist then
+# reported the missing binary rather than the cause: `failed to find bin
+# rllvm-cc`. Each app now builds only what it needs.
+precise-builds = true
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
