@@ -7,11 +7,24 @@ on:
         required: true
         type: string
 
+# Each app announces on its own tag, so dist starts one release run per app and
+# the runs overlap. Every one of them reaches this job, and every one of them
+# publishes the same three crates, so without a gate two runs can both see a
+# 404 for rllvm-core, both start uploading, and the loser dies on `crate
+# version already uploaded` -- taking its announce job, and so that app's
+# GitHub Release, with it. `cancel-in-progress: false` because the run being
+# waited on may be mid-upload, and an upload cannot be taken back.
+concurrency:
+  group: publish-crates
+  cancel-in-progress: false
+
 jobs:
   # Publish whatever of the workspace crates.io does not have yet. dist runs
-  # this as a publish job, after the artifacts are built: nothing reaches
-  # crates.io -- where a version is permanent -- until the build has proven it
-  # compiles.
+  # this after the build jobs of the announcement it belongs to, so the app
+  # this run releases is known to build. The loop publishes all three crates
+  # though, and the other app builds in its own run: what stands behind that
+  # one is `cargo publish`'s own verification build, here, for this one target.
+  # Uploads are permanent either way.
   cargo-publish:
     runs-on: ubuntu-latest
     steps:
@@ -27,14 +40,14 @@ jobs:
           version: "23"
           llvm-sys: "231"
 
-      # Each app now releases on its own tag, so this job runs once per app and
-      # must be idempotent: the second run finds everything published and does
-      # nothing. Asking crates.io directly is what makes that safe. cargo's own
-      # duplicate handling is not specified -- `cargo publish --workspace
-      # --dry-run` warns `crate rllvm@0.5.1 already exists on crates.io index`
-      # and then still prints `Uploading` -- and a bare `cargo publish` resolves
-      # to default-members, which excludes crates/query, so rllvm-query would
-      # never be published at all.
+      # This job runs once per app, and the concurrency group above is what
+      # makes "second" mean anything: the second run finds everything published
+      # and does nothing. Asking crates.io directly is what makes that safe.
+      # cargo's own duplicate handling is not specified -- `cargo publish
+      # --workspace --dry-run` warns `crate rllvm@0.5.1 already exists on
+      # crates.io index` and then still prints `Uploading` -- and a bare `cargo
+      # publish` resolves to default-members, which excludes crates/query, so
+      # rllvm-query would never be published at all.
       - name: Publish the crates crates.io does not have yet
         env:
           CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
