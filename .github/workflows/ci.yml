@@ -262,7 +262,7 @@ jobs:
 
       # `crates/query` is not a default member, so the step above never lints
       # it -- without this, `crates/query/src/**`, every `unsafe` block in the
-      # crate among them, is cfg'd out of the lint gate entirely.
+      # crate among them, is simply never selected by `-p` and goes unlinted.
       - name: Run clippy (query crate)
         if: needs.changes.outputs.code == 'true'
         run: cargo clippy -p rllvm-query --all-targets -- -D warnings

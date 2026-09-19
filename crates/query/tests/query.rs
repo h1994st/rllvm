@@ -1416,8 +1416,8 @@ mod mcp {
     }
 
     /// An empty catalog: no modules to load or extract, just enough for
-    /// `query::open` to produce a `Session` the server can answer over. The
-    /// MCP tests below only need a session to exist, not any particular
+    /// `rllvm_query::open` to produce a `Session` the server can answer over.
+    /// The MCP tests below only need a session to exist, not any particular
     /// program in it.
     fn empty_catalog(scratch: &tempfile::TempDir) -> PathBuf {
         let catalog = rllvm_core::catalog::ModuleCatalog::new(
