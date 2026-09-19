@@ -4,7 +4,7 @@ Thanks for your interest in contributing! This guide covers the essentials.
 
 ## Development Setup
 
-1. **Install Rust** (stable, edition 2024, MSRV 1.85):
+1. **Install Rust** (stable, edition 2024, MSRV 1.88):
    ```bash
    rustup update stable
    ```
