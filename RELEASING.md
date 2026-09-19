@@ -122,7 +122,7 @@ the next patch instead.
 
 `release.yml` is **generated**. Do not edit it by hand; change
 `dist-workspace.toml` — or `.github/dist-build-setup.yml`, whose steps dist
-copies into every build job — and regenerate:
+copies into each artifact build job — and regenerate:
 
 ```bash
 cargo install cargo-dist --version <version> --locked

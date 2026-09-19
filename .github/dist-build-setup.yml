@@ -1,5 +1,6 @@
-# Steps dist prepends to every release build job, named by `github-build-setup`
-# in dist-workspace.toml. release.yml carries a generated copy, so run
+# Steps dist prepends to each build-local-artifacts job, named by
+# `github-build-setup` in dist-workspace.toml. build-global-artifacts gets
+# none, and needs none. release.yml carries a generated copy, so run
 # `dist generate` after editing this file.
 #
 # rllvm-query links LLVM through llvm-sys and no runner image ships the release

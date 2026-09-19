@@ -34,7 +34,9 @@ install-updater = false
 dispatch-releases = true
 # Whether to enable GitHub Attestations
 github-attestations = true
-# Steps prepended to every build job. rllvm-query links LLVM, which no runner
-# image provides at the version llvm-sys wants; path is relative to
+# Steps prepended to each build-local-artifacts job -- the ones that compile
+# binaries. build-global-artifacts gets none and needs none: the installers and
+# the source tarball link nothing. rllvm-query does link LLVM, and no runner
+# image provides the release llvm-sys wants. Path is relative to
 # .github/workflows.
 github-build-setup = "../dist-build-setup.yml"
