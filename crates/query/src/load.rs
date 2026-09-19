@@ -16,7 +16,7 @@ use rllvm_core::{
     error::Error,
 };
 
-use crate::query::facts::{ModuleAnalysis, ModuleReport, SourceStatus};
+use crate::facts::{ModuleAnalysis, ModuleReport, SourceStatus};
 
 pub struct LoadedModule {
     pub id: String,

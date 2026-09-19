@@ -4,7 +4,7 @@ Thanks for your interest in contributing! This guide covers the essentials.
 
 ## Development Setup
 
-1. **Install Rust** (stable, edition 2024, MSRV 1.85):
+1. **Install Rust** (stable, edition 2024, MSRV 1.88):
    ```bash
    rustup update stable
    ```
@@ -38,6 +38,15 @@ cargo test -p rllvm-core -p rllvm --verbose
 ```
 
 LLVM/Clang must be installed for the test suite to pass. Tests run on both Linux and macOS in CI.
+
+`rllvm-query` is a separate crate that links LLVM through `llvm-sys` and is not
+a default workspace member, so the commands above never touch it. Run it on
+its own when you change it, after `cargo build` has produced `rllvm-compdb` for its tests to find:
+
+```bash
+cargo test -p rllvm-query
+cargo clippy -p rllvm-query --all-targets -- -D warnings
+```
 
 ## Pull Request Process
 

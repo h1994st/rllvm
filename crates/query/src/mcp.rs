@@ -845,7 +845,7 @@ fn success_response(id: Value, result: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::testing::session_from;
+    use crate::testing::session_from;
 
     fn one_catalog() -> Registry {
         Registry::with_sessions(vec![("first", session_from(&[("a", "b")]))])

@@ -4,9 +4,9 @@ use std::{
     process::{Command, Stdio},
 };
 
-use rllvm::query::load::{for_each_module, load_catalog};
-use rllvm::query::{CallTarget, Linkage};
 use rllvm_core::catalog::read_catalog;
+use rllvm_query::load::{for_each_module, load_catalog};
+use rllvm_query::{CallTarget, Linkage};
 use rllvm_testkit::{
     MODULE_ID, SourceFixture, compile_bitcode, compile_bitcode_file, llvm_bin,
     scratch_rllvm_config, source_and_header, write_catalog_json,
@@ -21,6 +21,25 @@ fn query_binary_reports_its_llvm_major() {
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(text.starts_with("23."), "unexpected LLVM version: {text}");
+}
+
+/// Completions come from the binary that owns the CLI.
+///
+/// `rllvm-completions` lives in the wrapper crate and cannot see `QueryArgs`
+/// without dragging LLVM into every wrapper build, so each installable unit
+/// generates its own.
+#[test]
+fn completions_name_the_query_binary() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .args(["completions", "bash"])
+        .output()
+        .expect("failed to run rllvm-query");
+    assert!(output.status.success(), "completions failed");
+    let script = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        script.contains("rllvm-query"),
+        "completion script does not name the binary: {script:.200}"
+    );
 }
 
 #[test]
@@ -72,7 +91,7 @@ fn the_cli_prints_callers_as_json() {
         .unwrap();
     assert!(output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["results"][0]["function"]["symbol"], "main");
 }
 
@@ -99,7 +118,7 @@ fn a_module_whose_bytes_changed_is_excluded_without_shrinking_scope() {
     );
     assert_eq!(
         loaded.reports[0].status,
-        rllvm::query::ModuleAnalysis::Changed
+        rllvm_query::ModuleAnalysis::Changed
     );
     assert_eq!(
         loaded.scope.selected_entries,
@@ -109,9 +128,9 @@ fn a_module_whose_bytes_changed_is_excluded_without_shrinking_scope() {
 }
 
 /// The state the loader derives for one of the fixture's files. Stays here
-/// rather than in the shared fixture: `SourceStatus` only exists with the
-/// `query` feature, while the digests it reads do not.
-fn source_state(fixture: &SourceFixture, file: &Path) -> rllvm::query::load::SourceState {
+/// rather than in `rllvm-testkit`: `SourceStatus` belongs to this crate,
+/// while the digests it reads do not.
+fn source_state(fixture: &SourceFixture, file: &Path) -> rllvm_query::load::SourceState {
     load_catalog(&fixture.catalog)
         .unwrap()
         .source_status
@@ -120,7 +139,7 @@ fn source_state(fixture: &SourceFixture, file: &Path) -> rllvm::query::load::Sou
         .unwrap_or_else(|| panic!("no association recorded for {}", file.display()))
 }
 
-fn source_status(fixture: &SourceFixture, file: &Path) -> rllvm::query::SourceStatus {
+fn source_status(fixture: &SourceFixture, file: &Path) -> rllvm_query::SourceStatus {
     source_state(fixture, file).status
 }
 
@@ -134,23 +153,23 @@ fn editing_only_the_header_marks_the_header_modified_and_leaves_the_source_curre
 
     assert_eq!(
         source_status(&fixture, &fixture.source),
-        rllvm::query::SourceStatus::Current
+        rllvm_query::SourceStatus::Current
     );
     assert_eq!(
         source_status(&fixture, &fixture.header),
-        rllvm::query::SourceStatus::Current
+        rllvm_query::SourceStatus::Current
     );
 
     std::fs::write(&fixture.header, "int helper(int x){return x+2;}\n").unwrap();
 
     assert_eq!(
         source_status(&fixture, &fixture.header),
-        rllvm::query::SourceStatus::Modified,
+        rllvm_query::SourceStatus::Modified,
         "the edited header must be reported, not just the translation unit"
     );
     assert_eq!(
         source_status(&fixture, &fixture.source),
-        rllvm::query::SourceStatus::Current,
+        rllvm_query::SourceStatus::Current,
         "and the untouched source must not be dragged along with it"
     );
 }
@@ -194,7 +213,7 @@ fn an_inventoried_source_is_current_until_it_is_edited_then_missing() {
     let fixture = source_and_header(&scratch);
 
     let state = source_state(&fixture, &fixture.source);
-    assert_eq!(state.status, rllvm::query::SourceStatus::Current);
+    assert_eq!(state.status, rllvm_query::SourceStatus::Current);
     assert_eq!(
         state.basis,
         Some(rllvm_core::catalog::DigestOrigin::Compiler),
@@ -204,12 +223,12 @@ fn an_inventoried_source_is_current_until_it_is_edited_then_missing() {
     std::fs::write(&fixture.source, "int main(void){return 0;}\n").unwrap();
     assert_eq!(
         source_status(&fixture, &fixture.source),
-        rllvm::query::SourceStatus::Modified
+        rllvm_query::SourceStatus::Modified
     );
 
     std::fs::remove_file(&fixture.source).unwrap();
     let state = source_state(&fixture, &fixture.source);
-    assert_eq!(state.status, rllvm::query::SourceStatus::Missing);
+    assert_eq!(state.status, rllvm_query::SourceStatus::Missing);
     assert_eq!(state.basis, None, "nothing was compared");
 }
 
@@ -228,7 +247,7 @@ fn a_source_without_a_recorded_digest_is_unknown_not_modified() {
     std::fs::write(&fixture.header, "int helper(int x){return x+9;}\n").unwrap();
 
     let state = source_state(&fixture, &fixture.header);
-    assert_eq!(state.status, rllvm::query::SourceStatus::Unknown);
+    assert_eq!(state.status, rllvm_query::SourceStatus::Unknown);
     assert_eq!(state.basis, None);
 }
 
@@ -244,14 +263,14 @@ fn two_modules_recording_one_source_keep_separate_statuses() {
             .source_status
             .get(&("fresh".to_string(), source.clone()))
             .map(|state| state.status),
-        Some(rllvm::query::SourceStatus::Current)
+        Some(rllvm_query::SourceStatus::Current)
     );
     assert_eq!(
         loaded
             .source_status
             .get(&("stale".to_string(), source))
             .map(|state| state.status),
-        Some(rllvm::query::SourceStatus::Modified),
+        Some(rllvm_query::SourceStatus::Modified),
         "a path-only key would let one module overwrite the other"
     );
 }
@@ -322,7 +341,7 @@ fn a_deleted_archive_reports_its_members_missing_not_failed() {
         loaded
             .reports
             .iter()
-            .all(|report| report.status == rllvm::query::ModuleAnalysis::Missing),
+            .all(|report| report.status == rllvm_query::ModuleAnalysis::Missing),
         "{:?}",
         loaded.reports
     );
@@ -489,6 +508,25 @@ fn a_module_that_vanishes_after_loading_is_reported_not_fatal() {
     assert_eq!(unreadable[0].0, vanished);
 }
 
+/// `rllvm-compdb` belongs to the `rllvm` package, so cargo sets no
+/// `CARGO_BIN_EXE_rllvm-compdb` for this test binary -- that variable only
+/// ever names the current package's own binaries. Both packages share one
+/// target directory, so it sits beside this crate's binary once it is built.
+///
+/// Asserted rather than skipped: a test that quietly does nothing when a
+/// prerequisite is missing is indistinguishable from a passing one.
+fn compdb_binary() -> PathBuf {
+    let mut path = PathBuf::from(env!("CARGO_BIN_EXE_rllvm-query"));
+    path.set_file_name("rllvm-compdb");
+    assert!(
+        path.is_file(),
+        "{} is missing: this test drives the compilation-database tool from the \
+         sibling package, so build it first with `cargo build -p rllvm --bin rllvm-compdb`",
+        path.display()
+    );
+    path
+}
+
 #[test]
 fn a_compdb_catalog_carries_source_status_into_an_answer() {
     // `inventory()` records `content_sha256: None` for every source
@@ -515,7 +553,7 @@ fn a_compdb_catalog_carries_source_status_into_an_answer() {
     )
     .unwrap();
 
-    let generate = Command::new(env!("CARGO_BIN_EXE_rllvm-compdb"))
+    let generate = Command::new(compdb_binary())
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .current_dir(scratch.path())
         .args(["generate", ".", "--output-dir", "analysis"])
@@ -772,19 +810,19 @@ fn a_function_without_debug_info_has_no_location() {
 fn a_module_from_a_newer_llvm_names_both_versions() {
     // A bitcode wrapper claiming a future producer version. Parsing fails;
     // the message is what this test pins.
-    let loaded = rllvm::query::load::LoadedModule {
+    let loaded = rllvm_query::load::LoadedModule {
         id: "future".into(),
         bytes: b"BC\xc0\xde\xff\xff\xff\xff".to_vec(),
         record: record_with_compiler_version("clang 99.0.0"),
     };
-    let error = rllvm::query::extract::extract(&loaded, &Default::default()).unwrap_err();
+    let error = rllvm_query::extract::extract(&loaded, &Default::default()).unwrap_err();
     let message = error.to_string();
     assert!(
         message.contains("99.0.0"),
         "must name the producer: {message}"
     );
     assert!(
-        message.contains(&rllvm::query::llvm_version()),
+        message.contains(&rllvm_query::llvm_version()),
         "must name the reader: {message}"
     );
 }
@@ -831,12 +869,12 @@ fn a_parse_failure_carries_the_reason_llvm_gave() {
     // Without a diagnostic handler installed, LLVM's own report goes to
     // stderr instead of reaching the caller, and on the versions that call
     // `exit(1)` for an error it takes the process with it.
-    let loaded = rllvm::query::load::LoadedModule {
+    let loaded = rllvm_query::load::LoadedModule {
         id: "broken".into(),
         bytes: b"BC\xc0\xde\xff\xff\xff\xff".to_vec(),
         record: Default::default(),
     };
-    let message = rllvm::query::extract::extract(&loaded, &Default::default())
+    let message = rllvm_query::extract::extract(&loaded, &Default::default())
         .unwrap_err()
         .to_string();
     // The severity-tagged report LLVM produced, not the fixed template around
@@ -935,7 +973,7 @@ const STRUCT_FIELD: &str = "static int add(int a,int b){return a+b;}\n\
 
 /// The bound's symbols, sorted, so a test pins the set rather than whatever
 /// order CVP happened to list its metadata operands in.
-fn bound_symbols(facts: &rllvm::query::ModuleFacts, expectation: &str) -> Vec<String> {
+fn bound_symbols(facts: &rllvm_query::ModuleFacts, expectation: &str) -> Vec<String> {
     let mut names: Vec<String> = indirect_bound(facts)
         .unwrap_or_else(|| panic!("{expectation}"))
         .iter()
@@ -1081,7 +1119,7 @@ fn switch_dispatch_source(candidates: usize) -> String {
 /// Panics if none is found, so a fixture that stops producing an indirect
 /// call site fails loudly instead of letting every `None`-expecting
 /// assertion downstream pass vacuously.
-fn indirect_target(facts: &rllvm::query::ModuleFacts) -> &CallTarget {
+fn indirect_target(facts: &rllvm_query::ModuleFacts) -> &CallTarget {
     facts
         .call_sites
         .iter()
@@ -1090,7 +1128,7 @@ fn indirect_target(facts: &rllvm::query::ModuleFacts) -> &CallTarget {
         .expect("fixture must contain an indirect call site")
 }
 
-fn indirect_bound(facts: &rllvm::query::ModuleFacts) -> Option<Vec<rllvm::query::FunctionId>> {
+fn indirect_bound(facts: &rllvm_query::ModuleFacts) -> Option<Vec<rllvm_query::FunctionId>> {
     match indirect_target(facts) {
         CallTarget::Indirect {
             llvm_target_bound, ..
@@ -1103,7 +1141,7 @@ fn indirect_bound(facts: &rllvm::query::ModuleFacts) -> Option<Vec<rllvm::query:
 /// `llvm_target_bound`. Stronger than asserting `indirect_bound(facts).is_none()`
 /// alone: that alone would pass just as well if the fixture recorded no
 /// indirect call site at all.
-fn assert_unresolved_indirect_site(facts: &rllvm::query::ModuleFacts, message: &str) {
+fn assert_unresolved_indirect_site(facts: &rllvm_query::ModuleFacts, message: &str) {
     let target = indirect_target(facts);
     assert!(
         matches!(
@@ -1204,7 +1242,7 @@ fn every_linkage_kind_clang_emits_reaches_the_facts_as_its_own_category() {
     }
 }
 
-fn extract_source(scratch: &tempfile::TempDir, source: &str) -> rllvm::query::ModuleFacts {
+fn extract_source(scratch: &tempfile::TempDir, source: &str) -> rllvm_query::ModuleFacts {
     extract_source_with_flags(scratch, source, &["-g", "-O0"])
 }
 
@@ -1212,7 +1250,7 @@ fn extract_source_with_flags(
     scratch: &tempfile::TempDir,
     source: &str,
     flags: &[&str],
-) -> rllvm::query::ModuleFacts {
+) -> rllvm_query::ModuleFacts {
     extract_named(scratch, "t.c", source, flags)
 }
 
@@ -1223,7 +1261,7 @@ fn extract_named(
     name: &str,
     source: &str,
     flags: &[&str],
-) -> rllvm::query::ModuleFacts {
+) -> rllvm_query::ModuleFacts {
     std::fs::write(scratch.path().join(name), source).unwrap();
     compile_and_extract(scratch, name, flags)
 }
@@ -1234,14 +1272,14 @@ fn compile_and_extract(
     scratch: &tempfile::TempDir,
     name: &str,
     flags: &[&str],
-) -> rllvm::query::ModuleFacts {
+) -> rllvm_query::ModuleFacts {
     let module = compile_bitcode_file(&scratch.path().join(name), flags);
-    let loaded = rllvm::query::load::LoadedModule {
+    let loaded = rllvm_query::load::LoadedModule {
         id: "t".into(),
         bytes: std::fs::read(&module).unwrap(),
         record: Default::default(),
     };
-    rllvm::query::extract::extract(&loaded, &Default::default()).unwrap()
+    rllvm_query::extract::extract(&loaded, &Default::default()).unwrap()
 }
 
 /// Stands in for a catalog whose capture recorded a compiler this LLVM is
@@ -1345,7 +1383,7 @@ fn a_c_answer_carries_no_symbol_table() {
 
 // --- MCP stdio server -------------------------------------------------
 //
-// Nested in its own module so `cargo test --features query --test query mcp`
+// Nested in its own module so `cargo test -p rllvm-query --test query mcp`
 // selects exactly this group by path.
 //
 // Every modern message shape below is copied from the official schema
@@ -1378,8 +1416,8 @@ mod mcp {
     }
 
     /// An empty catalog: no modules to load or extract, just enough for
-    /// `query::open` to produce a `Session` the server can answer over. The
-    /// MCP tests below only need a session to exist, not any particular
+    /// `rllvm_query::open` to produce a `Session` the server can answer over.
+    /// The MCP tests below only need a session to exist, not any particular
     /// program in it.
     fn empty_catalog(scratch: &tempfile::TempDir) -> PathBuf {
         let catalog = rllvm_core::catalog::ModuleCatalog::new(

@@ -1,4 +1,9 @@
-//! Source-level queries over captured bitcode.
+//! Source-level queries over bitcode captured by
+//! [rllvm](https://crates.io/crates/rllvm).
+//!
+//! This is the only crate in the workspace that links LLVM, through
+//! `llvm-sys`. The wrappers that capture bitcode, and the library behind
+//! them, do not depend on it.
 //!
 //! Every answer is wrapped in [`QueryResult`], this project's honesty
 //! surface. Four rules hold for every query, not just the ones that
@@ -20,6 +25,10 @@
 //!    indirect sites and ambiguous bindings that could carry a path the walk
 //!    cannot see.
 
+// Keeps the public surface deliberate: a `pub` item that no `pub use`
+// re-exports is a mistake, not API.
+#![warn(unreachable_pub)]
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
@@ -31,6 +40,11 @@ use rllvm_core::{
     catalog::{CatalogOrigin, CatalogScope, ModuleCatalog},
     error::Error,
 };
+
+/// Command-line definitions for the `rllvm-query` binary. Not a supported
+/// interface.
+#[doc(hidden)]
+pub mod cli;
 
 pub mod extract;
 pub use extract::{ModuleFacts, llvm_version};
@@ -249,7 +263,9 @@ pub struct Provenance {
     /// Quoted from the catalog, not reconstructed.
     pub catalog_origin: CatalogOrigin,
     pub llvm_version: String,
-    pub rllvm_version: String,
+    /// The version of `rllvm-query` -- the crate and binary that answered --
+    /// not of the `rllvm` wrapper that captured the bitcode.
+    pub rllvm_query_version: String,
 }
 
 /// The envelope every query answer is wrapped in.
@@ -416,7 +432,7 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
     let symbols = symbols_in(session, &results, &frontier);
 
     Ok(QueryResult {
-        schema_version: 1,
+        schema_version: 2,
         query: query.clone(),
         resolution: query
             .names()
@@ -431,7 +447,7 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
         provenance: Provenance {
             catalog_origin: session.origin().clone(),
             llvm_version: llvm_version(),
-            rllvm_version: env!("CARGO_PKG_VERSION").to_string(),
+            rllvm_query_version: env!("CARGO_PKG_VERSION").to_string(),
         },
     })
 }
@@ -896,7 +912,7 @@ mod tests {
         ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes, write_catalog,
     };
 
-    use crate::query::{load::load_catalog, testing::*};
+    use crate::{load::load_catalog, testing::*};
 
     #[test]
     fn a_module_is_analyzed_only_after_it_parses() {

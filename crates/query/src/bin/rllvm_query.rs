@@ -1,21 +1,24 @@
 use std::process::ExitCode;
 
-use clap::Parser;
-use rllvm::{
-    cli::{ClosureDirection, QueryArgs, QueryCommand},
-    query::{self, Query, index::Direction, open, run},
-};
+use clap::{CommandFactory, Parser};
 use rllvm_core::{config::try_rllvm_config, error::Error};
+use rllvm_query::{
+    Query,
+    cli::{ClosureDirection, QueryArgs, QueryCommand},
+    index::Direction,
+    llvm_version, mcp, open, run,
+};
 use tracing_subscriber::FmtSubscriber;
 
-/// Converts a parsed subcommand into the `query::Query` it names, or `None`
-/// for `Mcp`, which names a mode (serve over MCP stdio) rather than one of
-/// the nine queries. Kept out of `cli.rs` because `Query` does not exist
-/// without the `query` feature.
+/// Converts a parsed subcommand into the [`Query`] it names, or `None` for
+/// the two variants that name a mode rather than one of the nine queries:
+/// `Mcp` (serve over MCP stdio) and `Completions` (print a completion
+/// script), both of which this binary has already handled by the time a
+/// query would run.
 ///
 /// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
 /// arm here fails to compile. That alone does not catch the opposite drift --
-/// a new `query::Query` variant added without a matching `QueryCommand` --
+/// a new [`Query`] variant added without a matching `QueryCommand` --
 /// which compiles cleanly on its own. `cli_command_for` in this file's tests
 /// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
 /// fails to compile there instead, until this file is updated to drive it
@@ -38,6 +41,9 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
         QueryCommand::Externals => Query::Externals,
         QueryCommand::IndirectTargets { at } => Query::IndirectTargets { at, heuristics },
         QueryCommand::Mcp => return None,
+        // `main` answers this one before `run_query` is ever called; the arm
+        // is here so adding a mode variant cannot compile without a decision.
+        QueryCommand::Completions { .. } => return None,
     })
 }
 
@@ -57,9 +63,38 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         .with_writer(std::io::stderr)
         .init();
 
-    // `Mcp` names a mode, not a query: `to_query` returns `None` for it.
+    // The dispatch, named rather than inferred from `to_query`'s `None`.
+    // Two commands answer `None` now -- `Mcp` and `Completions` -- so `None`
+    // no longer identifies which mode was asked for, and reading it as "serve
+    // MCP" would make the next mode-shaped variant silently do that: the one
+    // outcome nobody would think to test for. Exhaustive and wildcard-free,
+    // so such a variant has to fail to compile here too, not only in
+    // `to_query`, where its `None` arm would otherwise be the whole story.
+    match &command {
+        QueryCommand::Mcp => return serve_mcp(args.catalog.as_deref()),
+        // `main` answers this one before `run_query` is reached, so arriving
+        // here means that early return was dropped --
+        // `completions_name_the_query_binary` fails when it is, because
+        // nothing reaches stdout.
+        QueryCommand::Completions { .. } => return Ok(()),
+        QueryCommand::Defs { .. }
+        | QueryCommand::At { .. }
+        | QueryCommand::Callers { .. }
+        | QueryCommand::Callees { .. }
+        | QueryCommand::Uses { .. }
+        | QueryCommand::Reach { .. }
+        | QueryCommand::Closure { .. }
+        | QueryCommand::Externals
+        | QueryCommand::IndirectTargets { .. } => {}
+    }
+
+    // Unreachable through the match above, which returns for every command
+    // `to_query` answers `None` for. An error rather than a panic: a binary
+    // that mis-dispatches should say so, not abort.
     let Some(query) = to_query(command, args.heuristics) else {
-        return serve_mcp(args.catalog.as_deref());
+        return Err(Error::InvalidArguments(
+            "this command names a mode, not a query".to_string(),
+        ));
     };
 
     // Before `open`, so a mistyped location costs a diagnostic rather than a
@@ -83,13 +118,13 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
 /// the command line should hear that it could not be read, not discover it
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
-    let mut registry = query::mcp::Registry::new();
+    let mut registry = mcp::Registry::new();
     if let Some(catalog) = catalog {
         registry.load(catalog)?;
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    query::mcp::serve(&mut registry, stdin.lock(), stdout.lock())
+    mcp::serve(&mut registry, stdin.lock(), stdout.lock())
 }
 
 fn main() -> ExitCode {
@@ -99,7 +134,16 @@ fn main() -> ExitCode {
         // falling into `run_query`, or `--llvm-version --catalog c mcp`
         // would print a bare version line onto stdout ahead of the
         // JSON-RPC frames, corrupting the protocol stream.
-        println!("{}", query::llvm_version());
+        println!("{}", llvm_version());
+        return ExitCode::SUCCESS;
+    }
+    // Also before any configuration is read: generating a completion script
+    // is a property of the CLI definition alone, and must not fail on a
+    // machine that has no usable LLVM configuration yet.
+    if let Some(QueryCommand::Completions { shell }) = args.command {
+        let mut command = QueryArgs::command();
+        let name = command.get_name().to_string();
+        clap_complete::generate(shell, &mut command, name, &mut std::io::stdout());
         return ExitCode::SUCCESS;
     }
     match run_query(args) {
@@ -115,7 +159,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    /// The reverse of `to_query`'s exhaustiveness: every `query::Query`
+    /// The reverse of `to_query`'s exhaustiveness: every [`Query`]
     /// variant must appear here, with no wildcard arm. A `Query` variant
     /// added without a matching arm fails to compile, so a new query cannot
     /// ship without a `QueryCommand` (and a `to_query` arm) to drive it from
@@ -152,6 +196,16 @@ mod tests {
     #[test]
     fn the_mcp_command_has_no_query() {
         assert!(to_query(QueryCommand::Mcp, false).is_none());
+    }
+
+    /// Same for `Completions`: the binary answers it before a query could
+    /// run, so reaching `to_query` with it must not name one.
+    #[test]
+    fn the_completions_command_has_no_query() {
+        let command = QueryCommand::Completions {
+            shell: clap_complete::Shell::Bash,
+        };
+        assert!(to_query(command, false).is_none());
     }
 
     /// Not just a compile-time fence: proves `to_query` and `cli_command_for`

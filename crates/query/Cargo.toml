@@ -1,0 +1,37 @@
+[package]
+name = "rllvm-query"
+version = "0.5.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Source-level queries over LLVM bitcode captured by rllvm"
+categories = ["development-tools", "command-line-utilities"]
+keywords = ["llvm", "bitcode", "analysis", "mcp"]
+readme = "README.md"
+exclude = ["tests/*"]
+
+[dependencies]
+rllvm-core = { path = "../core", version = "0.5.1" }
+# The only crate in the workspace that links LLVM, which is why it is kept out
+# of `default-members`: `cargo test` never builds llvm-sys. Needs
+# LLVM_SYS_231_PREFIX pointing at an LLVM 23 install when llvm-config is not on
+# PATH. `force-static` because a dynamic libLLVM reference makes the released
+# binary unusable anywhere the matching shared library is missing.
+llvm-sys = { version = "231", features = ["force-static"] }
+clap.workspace = true
+clap_complete.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rllvm-testkit = { path = "../testkit" }
+tempfile.workspace = true
+
+[[bin]]
+name = "rllvm-query"
+path = "src/bin/rllvm_query.rs"

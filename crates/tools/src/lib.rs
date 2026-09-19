@@ -15,7 +15,8 @@
 //!
 //! Argument classification, bitcode capture, catalogs and configuration live in
 //! [`rllvm_core`]; this crate holds the concrete clang and rustc drivers, the
-//! compilation database and the binaries.
+//! compilation database and the binaries. Source-level queries over captured
+//! bitcode live in `rllvm-query`, the only crate that links LLVM.
 //!
 //! # Configuration
 //!
@@ -35,10 +36,6 @@ pub mod compilation_database;
 
 /// Concrete clang and rustc compiler wrappers.
 pub mod compiler_wrapper;
-
-/// Source-level queries over captured bitcode, linking LLVM directly.
-#[cfg(feature = "query")]
-pub mod query;
 
 #[cfg(test)]
 mod tests {

@@ -294,7 +294,7 @@ impl Session {
     }
 
     /// The C++ reading of one symbol, for the envelope's `symbols` table.
-    /// Not public API: internal plumbing for `query::run`.
+    /// Not public API: internal plumbing for `crate::run`.
     pub(crate) fn demangled(&self, symbol: &str) -> Option<&str> {
         self.demangled.get(symbol).map(String::as_str)
     }
@@ -320,7 +320,7 @@ impl Session {
 
     /// Functions whose recorded source mapping includes `file:line`. Not
     /// public API: internal plumbing for the `at` query, called by
-    /// `query::run`.
+    /// `crate::run`.
     pub(crate) fn functions_at(&self, file: &Path, line: u32) -> &[FunctionId] {
         self.by_file_line
             .get(&(file.to_path_buf(), line))
@@ -331,7 +331,7 @@ impl Session {
     /// The heuristic address-taken inventory, verbatim. Never consulted by
     /// `reach`/`closure`; exposed only so an opt-in `indirect-targets`
     /// answer can report it. Not public API: internal plumbing, called by
-    /// `query::run`.
+    /// `crate::run`.
     pub(crate) fn uses(&self) -> &[UseFact] {
         &self.facts.uses
     }
@@ -353,7 +353,7 @@ impl Session {
 
     /// Definitions of `name`. Declarations are excluded: a `defs` answer
     /// reports where the symbol is defined, not every place it is merely
-    /// declared. Not public API: internal plumbing for `query::run`.
+    /// declared. Not public API: internal plumbing for `crate::run`.
     pub(crate) fn definitions(&self, name: &str) -> Vec<&FunctionFact> {
         self.ids_by_name(name)
             .into_iter()
@@ -619,7 +619,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::{facts::Linkage, testing::*};
+    use crate::{facts::Linkage, testing::*};
 
     #[test]
     fn reach_follows_a_chain_of_direct_calls() {

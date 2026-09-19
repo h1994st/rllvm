@@ -1,4 +1,4 @@
-//! Shared `ProgramFacts`/`Session` builders for `query` submodule tests.
+//! Shared `ProgramFacts`/`Session` builders for this crate's module tests.
 //!
 //! Kept in one module, rather than duplicated per test module, because Rust
 //! test modules cannot import each other's `#[cfg(test)] mod tests` and more
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
 
-use crate::query::{
+use crate::{
     bind::{BindingCandidate, BindingStatus, SymbolBinding},
     facts::{
         CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Linkage, ModuleAnalysis,

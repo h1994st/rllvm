@@ -95,7 +95,7 @@ jobs:
       # actually builds an app for. rllvm-core is a library with no dist app;
       # it reaches crates.io through the publish job instead, so it is
       # deliberately never dispatched here. Add a "path:component" line as
-      # dist grows more apps (e.g. crates/query once it exists).
+      # dist grows more apps.
       - name: Dispatch the release build when a release is due
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

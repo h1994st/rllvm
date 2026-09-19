@@ -130,28 +130,50 @@ jobs:
         if: needs.changes.outputs.code == 'true'
         run: cargo test -p rllvm-core -p rllvm --verbose
 
+      # `crates/query` links LLVM through llvm-sys and is deliberately not a
+      # default member, so the `Build` and `Run tests` steps above never touch
+      # it. Build it explicitly here.
+      #
+      # Ordering is deliberate, not incidental: a test in
+      # `crates/query/tests/query.rs` drives `rllvm-compdb`, a binary owned by
+      # the `rllvm` package, expecting it beside `CARGO_BIN_EXE_rllvm-query` in
+      # the shared target directory. There is no manifest or compile
+      # dependency between the two crates -- the `Build` step above already
+      # produced `rllvm-compdb` as part of the default workspace build, and
+      # that has to keep happening before `cargo test -p rllvm-query` runs. If
+      # this job is ever reordered, keep a default-member build ahead of it.
+      - name: Build the query CLI for the example suite
+        if: needs.changes.outputs.code == 'true'
+        run: cargo build -p rllvm-query --verbose
+        env:
+          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
+
+      # No target filter: this runs the crate's lib unit tests, its bin smoke
+      # tests, and the `tests/query.rs` integration suite together. Most of
+      # the query design's commitments are pinned by the unit tests in
+      # `crates/query/src/*`, and the integration tests alone would not run
+      # them.
+      - name: Run query tests
+        if: needs.changes.outputs.code == 'true'
+        run: cargo test -p rllvm-query --verbose
+        env:
+          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
+
+      # `rllvm-query` was not yet built during the `Run tests` step above, so
+      # the analysis examples skipped there. Rerun the suite now that it
+      # exists in the shared target/debug, so every example actually verifies.
+      - name: Verify the analysis examples with rllvm-query built
+        if: needs.changes.outputs.code == 'true'
+        run: cargo test -p rllvm --test examples --verbose
+
       # libtest captures a passing test's output, so a run that quietly
       # degrades from every example verified to one looks exactly like a
       # healthy one. `always()` because a failing run is when this matters
-      # most.
+      # most. Placed after the rerun above so this reflects the final state,
+      # not the partial one from before `rllvm-query` was built.
       - name: Show which examples ran
         if: always() && needs.changes.outputs.code == 'true'
         run: cat target/tmp/examples-summary.txt
-
-      # The `query` feature is gated behind `required-features` so the default
-      # jobs above never build or run it; run it explicitly here, on both
-      # platforms in this job's matrix. `--lib` as well as `--test query`:
-      # most of the query design's commitments are pinned by unit tests in
-      # `crates/tools/src/query/*`, and `--test query` alone runs none of them.
-      #
-      # `--test examples` too: `rllvm-query` is not built in the default lane,
-      # so the analysis examples skip there. This is the only lane that can
-      # run them, and without it they would never execute anywhere.
-      - name: Run query tests
-        if: needs.changes.outputs.code == 'true'
-        run: cargo test --features query --lib --test query --test examples
-        env:
-          LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 
       - name: Install uv
         if: needs.changes.outputs.code == 'true'
@@ -234,19 +256,16 @@ jobs:
         with:
           version: ${{ env.LLVM_VERSION }}
 
-      # Default features, unchanged: this is the gate that caught an unused
-      # re-export the `--features query` build could not see, because the
-      # feature makes that import used.
       - name: Run clippy
         if: needs.changes.outputs.code == 'true'
         run: cargo clippy -p rllvm-core -p rllvm --all-targets -- -D warnings
 
-      # And again with the feature on: without this, `crates/tools/src/query/**`
-      # and `crates/tools/src/bin/rllvm_query.rs` -- every `unsafe` block in
-      # the crate among them -- are cfg'd out of the lint gate entirely.
-      - name: Run clippy (query feature)
+      # `crates/query` is not a default member, so the step above never lints
+      # it -- without this, `crates/query/src/**`, every `unsafe` block in the
+      # crate among them, is simply never selected by `-p` and goes unlinted.
+      - name: Run clippy (query crate)
         if: needs.changes.outputs.code == 'true'
-        run: cargo clippy -p rllvm --features query --all-targets -- -D warnings
+        run: cargo clippy -p rllvm-query --all-targets -- -D warnings
         env:
           LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 

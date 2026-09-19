@@ -26,7 +26,7 @@ use llvm_sys::{
 
 use rllvm_core::error::Error;
 
-use crate::query::{
+use crate::{
     facts::*,
     load::{LoadedModule, SourceState},
 };

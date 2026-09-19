@@ -136,7 +136,7 @@ pub fn bind(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::testing::function;
+    use crate::testing::function;
 
     /// A declaration of `symbol` in `module`, as the shared builder spells it.
     fn declaration(module: &str, symbol: &str) -> FunctionFact {

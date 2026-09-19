@@ -23,10 +23,11 @@ prefer what is already in `Cargo.toml`.
 Make the smallest coherent change that satisfies the request. Follow existing
 patterns. Keep unrelated refactoring separate.
 
-The workspace has two published crates. `rllvm-core` is the library; `rllvm`
-holds the wrapper binaries, including `rllvm-query` behind the `query`
-feature. Put a new module in the crate that owns its responsibility, and
-remember that anything the tools crate reaches becomes public API of core.
+The workspace has three published crates. `rllvm-core` is the library;
+`rllvm` holds the wrapper binaries; `rllvm-query` is the analysis library and
+CLI, and the only crate that links LLVM. Put a new module in the crate that
+owns its responsibility, and remember that anything `rllvm` or `rllvm-query`
+reaches becomes public API of `rllvm-core`.
 
 ### Code
 
@@ -92,12 +93,14 @@ cargo clippy -p rllvm-core -p rllvm --all-targets -- -D warnings  # CI gate
 cargo fmt --all --check  # CI gate
 ```
 
-The optional `query` feature is not covered by those gates. CI runs both forms,
-so run both when touching it:
+`rllvm-query` is its own crate and the only one that links LLVM. It is not in
+`default-members`, so `cargo test` never builds `llvm-sys`; CI runs it as
+`cargo test -p rllvm-query`. The gates above do not cover it, so run these when
+touching it, after `cargo build` has produced `rllvm-compdb` for its tests to find:
 
 ```bash
-cargo test --features query --lib --test query --test examples  # no -p: also pulls in rllvm-core's lib tests
-cargo clippy -p rllvm --features query --all-targets -- -D warnings
+cargo test -p rllvm-query
+cargo clippy -p rllvm-query --all-targets -- -D warnings
 ```
 
 Choose checks that validate the changed behavior; rerun affected checks after a
@@ -201,8 +204,8 @@ through without capture.
 
 ### Queries
 
-`query/extract.rs` is the only module with `unsafe` outside test code, and no
-LLVM handle leaves it.
+`extract.rs` is the only module with `unsafe` outside test code, and no LLVM
+handle leaves it.
 
 Answers never claim more than they know. `scope` is quoted from the catalog and
 never shrinks; what was actually read is reported under `analysis`. `!callees`
