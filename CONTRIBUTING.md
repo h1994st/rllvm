@@ -41,7 +41,7 @@ LLVM/Clang must be installed for the test suite to pass. Tests run on both Linux
 
 `rllvm-query` is a separate crate that links LLVM through `llvm-sys` and is not
 a default workspace member, so the commands above never touch it. Run it on
-its own when you change it:
+its own when you change it, after `cargo build` has produced `rllvm-compdb` for its tests to find:
 
 ```bash
 cargo test -p rllvm-query

@@ -96,7 +96,7 @@ cargo fmt --all --check  # CI gate
 `rllvm-query` is its own crate and the only one that links LLVM. It is not in
 `default-members`, so `cargo test` never builds `llvm-sys`; CI runs it as
 `cargo test -p rllvm-query`. The gates above do not cover it, so run these when
-touching it:
+touching it, after `cargo build` has produced `rllvm-compdb` for its tests to find:
 
 ```bash
 cargo test -p rllvm-query
