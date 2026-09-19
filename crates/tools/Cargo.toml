@@ -13,64 +13,6 @@ keywords = ["llvm", "clang", "bitcode", "IR", "gllvm"]
 readme = "README.md"
 exclude = ["tests/*"]
 
-# dist enumerates every `[[bin]]`, including rllvm-query, which needs the
-# `query` feature and so does not exist in the default build dist performs --
-# the 0.5.1 release failed on `failed to find bin rllvm-query`. The override
-# is per target, and a target left out silently falls back to every binary,
-# so every entry in `targets` is listed here. tests/packaging.rs keeps the
-# two in step.
-[package.metadata.dist.binaries]
-aarch64-apple-darwin = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-x86_64-apple-darwin = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-aarch64-unknown-linux-gnu = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-x86_64-unknown-linux-gnu = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-x86_64-unknown-linux-musl = [
-  "rllvm-cc",
-  "rllvm-cxx",
-  "rllvm-get-bc",
-  "rllvm-init",
-  "rllvm-completions",
-  "rllvm-rustc",
-  "rllvm-info",
-  "rllvm-compdb",
-]
-
 [dependencies]
 rllvm-core = { path = "../core", version = "0.5.1" }
 clap.workspace = true

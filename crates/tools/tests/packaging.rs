@@ -1,15 +1,15 @@
 //! The release archives must list exactly the binaries a default build makes.
 //!
-//! `dist` ships every `[[bin]]` it finds, which includes `rllvm-query` --
-//! gated behind `required-features = ["query"]` and therefore absent from the
-//! default build `dist` performs. The 0.5.1 release failed on `failed to find
-//! bin rllvm-query` after `rllvm-query` was added.
+//! `dist` ships every `[[bin]]` it finds in this package and builds it with
+//! default features, so a binary behind `required-features` is enumerated and
+//! then not found: the 0.5.1 release failed on `failed to find bin
+//! rllvm-query`. #215 papered over that with a per-target
+//! `[package.metadata.dist.binaries]` map; giving `rllvm-query` its own crate
+//! removed the cause, and the map with it.
 //!
-//! `[package.metadata.dist.binaries]` overrides that list, but only per
-//! target, and both ways of getting it wrong are quiet: a target missing from
-//! the map falls back to every binary, which breaks the release, and a binary
-//! missing from a list is simply never shipped. Neither shows up until a
-//! release runs, so they are checked here instead.
+//! Neither way of losing that shows up before a release runs -- a gated binary
+//! breaks the build, and an override that drifts from `targets` silently ships
+//! the wrong set for a target it omits -- so both are checked here.
 
 use std::{collections::BTreeSet, fs, path::Path};
 
@@ -26,53 +26,33 @@ fn manifest(name: &str) -> Value {
         .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
 }
 
-/// The binaries a build without extra features produces.
-fn default_binaries(cargo: &Value) -> BTreeSet<String> {
-    cargo["bin"]
+#[test]
+fn dist_can_build_every_binary_it_ships() {
+    let cargo = manifest("crates/tools/Cargo.toml");
+
+    let gated: BTreeSet<&str> = cargo["bin"]
         .as_array()
         .expect("[[bin]] entries")
         .iter()
-        .filter(|bin| bin.get("required-features").is_none())
-        .map(|bin| bin["name"].as_str().expect("bin name").to_owned())
-        .collect()
-}
-
-#[test]
-fn dist_ships_the_default_binaries_on_every_target() {
-    let cargo = manifest("crates/tools/Cargo.toml");
-    let workspace = manifest("dist-workspace.toml");
-
-    let expected = default_binaries(&cargo);
-    assert!(
-        !expected.contains("rllvm-query"),
-        "rllvm-query must stay feature-gated; dist cannot build it"
-    );
-
-    let targets: BTreeSet<String> = workspace["dist"]["targets"]
-        .as_array()
-        .expect("dist targets")
-        .iter()
-        .map(|target| target.as_str().expect("target triple").to_owned())
+        .filter(|bin| bin.get("required-features").is_some())
+        .map(|bin| bin["name"].as_str().expect("bin name"))
         .collect();
-
-    let binaries = cargo["package"]["metadata"]["dist"]["binaries"]
-        .as_table()
-        .expect("[package.metadata.dist.binaries]");
-
-    let listed: BTreeSet<String> = binaries.keys().cloned().collect();
-    assert_eq!(
-        listed, targets,
-        "every dist target needs its own binary list, and only real targets \
-         count: an unrecognised key is accepted and ignored"
+    assert!(
+        gated.is_empty(),
+        "dist builds this package with default features and cannot build {gated:?}; \
+         a binary that needs extra features belongs in its own crate"
     );
 
-    for (target, names) in binaries {
-        let shipped: BTreeSet<String> = names
-            .as_array()
-            .unwrap_or_else(|| panic!("{target} must list binaries"))
-            .iter()
-            .map(|name| name.as_str().expect("binary name").to_owned())
-            .collect();
-        assert_eq!(shipped, expected, "wrong binaries shipped for {target}");
-    }
+    // With no gated binary there is nothing to override, and no second list to
+    // drift from `targets`: dist's own enumeration is the default build's.
+    assert!(
+        cargo
+            .get("package")
+            .and_then(|package| package.get("metadata"))
+            .and_then(|metadata| metadata.get("dist"))
+            .and_then(|dist| dist.get("binaries"))
+            .is_none(),
+        "[package.metadata.dist.binaries] is per target and falls back to every \
+         binary for a target it omits; only a gated binary needs it"
+    );
 }
