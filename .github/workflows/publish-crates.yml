@@ -8,7 +8,10 @@ on:
         type: string
 
 jobs:
-  # publish the current repo state to crates.io
+  # Publish whatever of the workspace crates.io does not have yet. dist runs
+  # this as a publish job, after the artifacts are built: nothing reaches
+  # crates.io -- where a version is permanent -- until the build has proven it
+  # compiles.
   cargo-publish:
     runs-on: ubuntu-latest
     steps:
@@ -16,6 +19,47 @@ jobs:
         uses: actions/checkout@v7
         with:
           submodules: recursive
-      - run: cargo publish --token ${CRATES_TOKEN}
+
+      # rllvm-query links LLVM, and `cargo publish` builds what it uploads.
+      - name: Set up the LLVM rllvm-query links
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: "23"
+          llvm-sys: "231"
+
+      # Each app now releases on its own tag, so this job runs once per app and
+      # must be idempotent: the second run finds everything published and does
+      # nothing. Asking crates.io directly is what makes that safe. cargo's own
+      # duplicate handling is not specified -- `cargo publish --workspace
+      # --dry-run` warns `crate rllvm@0.5.1 already exists on crates.io index`
+      # and then still prints `Uploading` -- and a bare `cargo publish` resolves
+      # to default-members, which excludes crates/query, so rllvm-query would
+      # never be published at all.
+      - name: Publish the crates crates.io does not have yet
         env:
           CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Dependency order: rllvm-core has to exist on crates.io before the
+          # two crates that depend on it can resolve.
+          for name in rllvm-core rllvm rllvm-query; do
+            version="$(cargo metadata --no-deps --format-version 1 \
+              | jq -er --arg n "$name" '.packages[] | select(.name == $n) | .version')"
+
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "User-Agent: rllvm-release (h1994st@gmail.com)" \
+              "https://crates.io/api/v1/crates/${name}/${version}")"
+
+            if [ "$code" = "200" ]; then
+              echo "::notice::${name} ${version} is already on crates.io."
+              continue
+            fi
+            if [ "$code" != "404" ]; then
+              echo "::error::crates.io answered ${code} for ${name} ${version}; refusing to guess."
+              exit 1
+            fi
+
+            echo "::notice::publishing ${name} ${version}."
+            cargo publish -p "$name" --token "$CRATES_TOKEN"
+          done
