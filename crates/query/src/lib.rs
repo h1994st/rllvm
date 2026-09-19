@@ -1,4 +1,9 @@
-//! Source-level queries over captured bitcode.
+//! Source-level queries over bitcode captured by
+//! [rllvm](https://crates.io/crates/rllvm).
+//!
+//! This is the only crate in the workspace that links LLVM, through
+//! `llvm-sys`. The wrappers that capture bitcode, and the library behind
+//! them, do not depend on it.
 //!
 //! Every answer is wrapped in [`QueryResult`], this project's honesty
 //! surface. Four rules hold for every query, not just the ones that
@@ -31,6 +36,11 @@ use rllvm_core::{
     catalog::{CatalogOrigin, CatalogScope, ModuleCatalog},
     error::Error,
 };
+
+/// Command-line definitions for the `rllvm-query` binary. Not a supported
+/// interface.
+#[doc(hidden)]
+pub mod cli;
 
 pub mod extract;
 pub use extract::{ModuleFacts, llvm_version};
@@ -896,7 +906,7 @@ mod tests {
         ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes, write_catalog,
     };
 
-    use crate::query::{load::load_catalog, testing::*};
+    use crate::{load::load_catalog, testing::*};
 
     #[test]
     fn a_module_is_analyzed_only_after_it_parses() {

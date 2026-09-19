@@ -619,7 +619,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::{facts::Linkage, testing::*};
+    use crate::{facts::Linkage, testing::*};
 
     #[test]
     fn reach_follows_a_chain_of_direct_calls() {

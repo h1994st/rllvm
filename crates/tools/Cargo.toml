@@ -71,29 +71,20 @@ x86_64-unknown-linux-musl = [
   "rllvm-compdb",
 ]
 
-[features]
-# Links LLVM via llvm-sys for source-level queries over captured bitcode.
-# Kept as the crate's only feature: mutually exclusive LLVM features would
-# break `cargo llvm-cov --all-features` in CI.
-query = ["dep:llvm-sys", "llvm-sys/force-static"]
-
 [dependencies]
 rllvm-core = { path = "../core", version = "0.5.1" }
 clap.workspace = true
-clap_complete = "~4.5"
+clap_complete.workspace = true
 object.workspace = true
 serde.workspace = true
 tracing.workspace = true
-tracing-subscriber = {version = "~0.3", features = ["env-filter"]}
+tracing-subscriber.workspace = true
 owo-colors.workspace = true
 which.workspace = true
 # Used by the rustc wrapper to stage marker objects and unpack archives;
 # RAII cleanup matters because those paths return early on error.
 tempfile.workspace = true
 serde_json.workspace = true
-# Optional: only pulled in by the `query` feature. Needs LLVM_SYS_231_PREFIX
-# pointing at an LLVM 23 install when llvm-config is not on PATH.
-llvm-sys = { version = "231", optional = true }
 
 [[bin]]
 name = "rllvm-cc"
@@ -127,11 +118,6 @@ path = "src/bin/rllvm_info.rs"
 name = "rllvm-compdb"
 path = "src/bin/rllvm_compdb.rs"
 
-[[bin]]
-name = "rllvm-query"
-path = "src/bin/rllvm_query.rs"
-required-features = ["query"]
-
 [dev-dependencies]
 # `killpg` for the example harness's timeout. Shelling out to `kill` with a
 # negative pid is not portable: BSD and procps parse it differently.
@@ -143,10 +129,3 @@ rllvm-testkit = { path = "../testkit" }
 # Locating a Homebrew LLVM in the integration harness.
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
 glob.workspace = true
-
-# Without this the test target compiles by default, and its `rllvm::query`
-# imports break `cargo test` for anyone not building the `query` feature.
-[[test]]
-name = "query"
-path = "tests/query.rs"
-required-features = ["query"]

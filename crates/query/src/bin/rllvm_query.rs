@@ -1,21 +1,22 @@
 use std::process::ExitCode;
 
 use clap::Parser;
-use rllvm::{
-    cli::{ClosureDirection, QueryArgs, QueryCommand},
-    query::{self, Query, index::Direction, open, run},
-};
 use rllvm_core::{config::try_rllvm_config, error::Error};
+use rllvm_query::{
+    Query,
+    cli::{ClosureDirection, QueryArgs, QueryCommand},
+    index::Direction,
+    llvm_version, mcp, open, run,
+};
 use tracing_subscriber::FmtSubscriber;
 
-/// Converts a parsed subcommand into the `query::Query` it names, or `None`
+/// Converts a parsed subcommand into the [`Query`] it names, or `None`
 /// for `Mcp`, which names a mode (serve over MCP stdio) rather than one of
-/// the nine queries. Kept out of `cli.rs` because `Query` does not exist
-/// without the `query` feature.
+/// the nine queries.
 ///
 /// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
 /// arm here fails to compile. That alone does not catch the opposite drift --
-/// a new `query::Query` variant added without a matching `QueryCommand` --
+/// a new [`Query`] variant added without a matching `QueryCommand` --
 /// which compiles cleanly on its own. `cli_command_for` in this file's tests
 /// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
 /// fails to compile there instead, until this file is updated to drive it
@@ -83,13 +84,13 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
 /// the command line should hear that it could not be read, not discover it
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
-    let mut registry = query::mcp::Registry::new();
+    let mut registry = mcp::Registry::new();
     if let Some(catalog) = catalog {
         registry.load(catalog)?;
     }
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
-    query::mcp::serve(&mut registry, stdin.lock(), stdout.lock())
+    mcp::serve(&mut registry, stdin.lock(), stdout.lock())
 }
 
 fn main() -> ExitCode {
@@ -99,7 +100,7 @@ fn main() -> ExitCode {
         // falling into `run_query`, or `--llvm-version --catalog c mcp`
         // would print a bare version line onto stdout ahead of the
         // JSON-RPC frames, corrupting the protocol stream.
-        println!("{}", query::llvm_version());
+        println!("{}", llvm_version());
         return ExitCode::SUCCESS;
     }
     match run_query(args) {
@@ -115,7 +116,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
 
-    /// The reverse of `to_query`'s exhaustiveness: every `query::Query`
+    /// The reverse of `to_query`'s exhaustiveness: every [`Query`]
     /// variant must appear here, with no wildcard arm. A `Query` variant
     /// added without a matching arm fails to compile, so a new query cannot
     /// ship without a `QueryCommand` (and a `to_query` arm) to drive it from

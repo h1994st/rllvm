@@ -751,7 +751,6 @@ dependencies = [
  "clap_complete",
  "glob",
  "libc",
- "llvm-sys",
  "object",
  "owo-colors",
  "rllvm-core",
@@ -785,6 +784,22 @@ dependencies = [
  "toml",
  "tracing",
  "which",
+]
+
+[[package]]
+name = "rllvm-query"
+version = "0.5.1"
+dependencies = [
+ "clap",
+ "clap_complete",
+ "llvm-sys",
+ "rllvm-core",
+ "rllvm-testkit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
 
-use crate::query::{
+use crate::{
     bind::{BindingCandidate, BindingStatus, SymbolBinding},
     facts::{
         CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Linkage, ModuleAnalysis,
