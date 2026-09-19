@@ -39,3 +39,40 @@ pub mod compiler_wrapper;
 /// Source-level queries over captured bitcode, linking LLVM directly.
 #[cfg(feature = "query")]
 pub mod query;
+
+#[cfg(test)]
+mod tests {
+    use rllvm_core::config::{RLLVMConfig, pin_inferred_config};
+
+    /// Nothing in this binary may resolve the configuration from
+    /// `~/.rllvm/config.toml` or `$RLLVM_CONFIG`.
+    ///
+    /// `rllvm-core` resolves the configuration once per process. Its own unit
+    /// tests get an inferred one from a `cfg(test)` variant; this crate's do
+    /// not, so each test that builds a wrapper calls `pin_inferred_config`
+    /// first. Forgetting that is not a quiet read: outside a test,
+    /// `RLLVMConfig::new` *writes* an inferred configuration to
+    /// `~/.rllvm/config.toml` when none is there, so a test that forgets
+    /// creates the developer's -- or a CI machine's -- home configuration.
+    ///
+    /// A grep cannot check this. The call sites that resolve the
+    /// configuration are in `rllvm-core` and are reached transitively, so what
+    /// has to hold is "no test in this binary reaches any of them without
+    /// pinning first", which is a property of the call graph and of the order
+    /// the harness happens to run in. This asserts the outcome instead: pin
+    /// (a no-op once anything has resolved the configuration), then require
+    /// that what got resolved is the inferred configuration. A test that ever
+    /// wins the race against the user's own file fails here, loudly, rather
+    /// than leaving the suite reading someone's machine.
+    #[test]
+    fn the_resolved_configuration_is_inferred_and_never_the_users_own() {
+        let resolved = pin_inferred_config().expect("no usable LLVM configuration");
+        let inferred = RLLVMConfig::try_default().expect("no usable LLVM configuration");
+        assert_eq!(
+            serde_json::to_value(resolved).unwrap(),
+            serde_json::to_value(&inferred).unwrap(),
+            "the process-wide configuration did not come from RLLVMConfig::try_default: \
+             a test resolved it from ~/.rllvm/config.toml or $RLLVM_CONFIG before pinning"
+        );
+    }
+}

@@ -142,7 +142,7 @@ rllvm-testkit = { path = "../testkit" }
 
 # Locating a Homebrew LLVM in the integration harness.
 [target.'cfg(target_vendor = "apple")'.dev-dependencies]
-glob = "~0.3.3"
+glob.workspace = true
 
 # Without this the test target compiles by default, and its `rllvm::query`
 # imports break `cargo test` for anyone not building the `query` feature.
