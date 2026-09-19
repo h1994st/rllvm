@@ -10,7 +10,7 @@
     "crates/core": { "component": "rllvm-core", "include-component-in-tag": true },
     "crates/tools": { "component": "rllvm", "include-component-in-tag": true },
     "crates/query": { "component": "rllvm-query", "include-component-in-tag": true },
-    "crates/testkit": { "release": false }
+    "crates/testkit": { "release-as": "0.0.0", "skip-changelog": true }
   },
   "plugins": [{ "type": "cargo-workspace", "merge": false }]
 }
