@@ -37,27 +37,37 @@ jobs:
           set -euo pipefail
 
           # Read the label names from release-please's own config rather than
-          # hardcoding them, so the two cannot drift apart. They are pinned there
-          # for exactly this reason.
-          PENDING="$(jq -er '.packages["."].label' release-please-config.json)"
-          TAGGED="$(jq -er '.packages["."]["release-label"]' release-please-config.json)"
+          # hardcoding them, so the two cannot drift apart. They are top-level
+          # now (not per-package): a manifest release spanning multiple
+          # packages still has one release PR and one label pair for it.
+          PENDING="$(jq -er '.label' release-please-config.json)"
+          TAGGED="$(jq -er '.["release-label"]' release-please-config.json)"
 
           gh label create "$TAGGED" --repo "$REPO" \
             --color ededed --description 'Release PR whose version has been tagged' \
             2>/dev/null || true
 
-          gh pr list --repo "$REPO" --state merged --label "$PENDING" \
-            --json number,title --limit 20 | jq -c '.[]' | while read -r pr; do
-            NUM="$(jq -r '.number' <<<"$pr")"
-            VER="$(jq -r '.title' <<<"$pr" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-            [ -n "$VER" ] || continue
+          # With multiple packages the release PR title is generic ("chore:
+          # release main") and carries no version, so it can no longer tell us
+          # what was released. main's checked-out .release-please-manifest.json
+          # can: a merged release PR is exactly what wrote that file, so its
+          # "crates/tools" entry is the version the rllvm component last
+          # released at. dist only ever tags rllvm-v<version> (rllvm-core has
+          # no dist app and reaches crates.io through the publish job instead),
+          # so that is the one tag whose existence proves the release landed.
+          VER="$(jq -er '.["crates/tools"]' .release-please-manifest.json)"
+          TAG="rllvm-v${VER}"
 
-            if gh api "repos/${REPO}/git/ref/tags/v${VER}" >/dev/null 2>&1; then
-              echo "::notice::v${VER} is tagged; marking PR #${NUM} as released."
+          gh pr list --repo "$REPO" --state merged --label "$PENDING" \
+            --json number --limit 20 | jq -c '.[]' | while read -r pr; do
+            NUM="$(jq -r '.number' <<<"$pr")"
+
+            if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::notice::${TAG} is tagged; marking PR #${NUM} as released."
               gh pr edit "$NUM" --repo "$REPO" \
                 --add-label "$TAGGED" --remove-label "$PENDING"
             else
-              echo "::notice::PR #${NUM} claims v${VER}, which is not tagged yet; leaving it pending."
+              echo "::notice::${TAG} is not tagged yet; leaving PR #${NUM} pending."
             fi
           done
 
@@ -71,13 +81,21 @@ jobs:
           manifest-file: .release-please-manifest.json
 
       # Decide whether a release is due by comparing release-please's own record
-      # of the current version against the tags that exist. The action's
-      # release_created output is not usable here: it describes releases the
-      # action created, and skip-github-release means it creates none.
+      # of each package's current version against the tags that exist. The
+      # action's release_created output is not usable here: it describes
+      # releases the action created, and skip-github-release means it creates
+      # none.
       #
       # The failure this guards against is quiet: a merged version bump and
       # CHANGELOG with no release and nothing visibly broken. So anything other
       # than "tag exists" or "dispatch succeeded" fails the job.
+      #
+      # dist makes one singular announcement per component tag -- one tag
+      # releases exactly one package -- so this loops over the components dist
+      # actually builds an app for. rllvm-core is a library with no dist app;
+      # it reaches crates.io through the publish job instead, so it is
+      # deliberately never dispatched here. Add a "path:component" line as
+      # dist grows more apps (e.g. crates/query once it exists).
       - name: Dispatch the release build when a release is due
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -85,13 +103,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          VERSION="$(jq -er '."."' .release-please-manifest.json)"
-          TAG="v${VERSION}"
+          PACKAGES=(
+            "crates/tools:rllvm"
+          )
 
-          if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-            echo "::notice::${TAG} is already released; nothing to do."
-            exit 0
-          fi
+          for entry in "${PACKAGES[@]}"; do
+            PKG_PATH="${entry%%:*}"
+            COMPONENT="${entry##*:}"
 
-          echo "::notice::${TAG} has no tag yet - dispatching the release build."
-          gh workflow run release.yml --ref main -f tag="${TAG}"
+            VERSION="$(jq -er --arg pkg "$PKG_PATH" '.[$pkg]' .release-please-manifest.json)"
+            TAG="${COMPONENT}-v${VERSION}"
+
+            if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::notice::${TAG} is already released; nothing to do."
+              continue
+            fi
+
+            echo "::notice::${TAG} has no tag yet - dispatching the release build."
+            gh workflow run release.yml --ref main -f tag="${TAG}"
+          done

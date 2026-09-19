@@ -15,16 +15,20 @@ create a tag by hand.
 ## How a release happens
 
 1. **You merge normal PRs into `main`** with conventional-commit titles.
-2. **release-please opens a release PR** — "chore: release X.Y.Z" — and keeps it
-   updated as more commits land. It contains the version bump and the CHANGELOG
-   entry. Nothing is released while it sits open.
+2. **release-please opens a release PR** — "chore: release main" — and keeps it
+   updated as more commits land. Each crate versions and changelogs
+   independently, so the PR contains a version bump and `CHANGELOG.md` entry
+   per changed crate. Nothing is released while it sits open.
 3. **You approve workflows, review, and merge that PR.** Select **Approve
    workflows to run** when prompted, including after release-please updates the
    PR. CI requires this approval because release-please uses `GITHUB_TOKEN`.
    Wait for the checks to pass before merging; merging means "ship this".
-4. **cargo-dist takes over automatically.** It builds all five targets, creates
-   the tag, publishes the GitHub Release with the CHANGELOG entry plus install
-   instructions, and publishes to crates.io.
+4. **The workflow dispatches cargo-dist for the `rllvm` crate** (the only crate
+   with a dist app; `rllvm-core` ships to crates.io through the same run's
+   publish job instead). It builds all five targets, creates the
+   `rllvm-v<version>` tag, publishes the GitHub Release with the CHANGELOG
+   entry plus install instructions, and publishes the workspace's crates to
+   crates.io.
 
 Editing the CHANGELOG before merging the release PR is fine and expected — it is
 a normal PR.
@@ -45,8 +49,8 @@ recovered after the fact. v0.1.7 removed `-c` and `-v` from the wrapper CLI — 
 genuine break — but was committed as `feat:`, so it shipped as a patch. Under
 this policy that would happen again silently.
 
-If a breaking change has already been merged without the `!`, edit the version in
-the release PR before merging it.
+If a breaking change has already been merged without the `!`, edit that crate's
+version in the release PR before merging it.
 
 ## Things that are no longer true
 
@@ -84,12 +88,14 @@ gh pr edit <N> --add-label 'autorelease: tagged' --remove-label 'autorelease: pe
 
 **The release PR merged but no release happened.** This is the failure worth
 knowing about, because it is quiet. The workflow decides a release is due by
-comparing the version in `.release-please-manifest.json` against existing tags.
-Check the `release-please` workflow run for the dispatch step. To release by
-hand:
+comparing, for each crate with a dist app, its version in
+`.release-please-manifest.json` against its `<component>-v<version>` tag.
+Today that is only `rllvm`; `rllvm-core` has no dist app and ships through the
+publish job instead. Check the `release-please` workflow run for the dispatch
+step. To release by hand:
 
 ```bash
-gh workflow run release.yml -f tag=v0.1.8
+gh workflow run release.yml -f tag=rllvm-v0.6.0
 ```
 
 **A release job hangs with no runner assigned.** Almost certainly a retired

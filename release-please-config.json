@@ -1,16 +1,14 @@
 {
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "rust",
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "skip-github-release": true,
+  "label": "autorelease: pending",
+  "release-label": "autorelease: tagged",
   "packages": {
-    ".": {
-      "release-type": "rust",
-      "package-name": "rllvm",
-      "changelog-path": "CHANGELOG.md",
-      "include-component-in-tag": false,
-      "bump-minor-pre-major": true,
-      "bump-patch-for-minor-pre-major": true,
-      "skip-github-release": true,
-      "label": "autorelease: pending",
-      "release-label": "autorelease: tagged"
-    }
-  }
+    "crates/core": { "component": "rllvm-core", "include-component-in-tag": true },
+    "crates/tools": { "component": "rllvm", "include-component-in-tag": true }
+  },
+  "plugins": [{ "type": "cargo-workspace", "merge": false }]
 }
