@@ -293,12 +293,14 @@ reported rather than silently ignored. See the
 ### Queries
 
 `rllvm-query` answers source-level questions about captured bitcode. It is its
-own crate, since it links LLVM statically:
+own crate, since it links LLVM statically. It reaches crates.io with 0.6.0;
+until then, install it from a checkout:
 
 ```bash
-cargo install rllvm-query
+git clone https://github.com/h1994st/rllvm && cd rllvm
+cargo install --path crates/query
 # if llvm-config is not on PATH:
-LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install rllvm-query
+LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install --path crates/query
 ```
 
 Upgrading from 0.5.x? A `rllvm-query` built from the old `--features query`
