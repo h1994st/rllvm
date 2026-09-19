@@ -5,10 +5,8 @@ use std::{
 };
 
 use rllvm::catalog::{DigestOrigin, ModuleCatalog, ModuleStatus, write_catalog};
+use rllvm_testkit::{compile_bitcode_file, compile_bitcode_to, llvm_bin, source_and_header};
 use tempfile::TempDir;
-
-mod common;
-use common::{compile_bitcode_file, compile_bitcode_to, llvm_bin, source_and_header};
 
 struct Fixture {
     root: TempDir,
@@ -18,7 +16,7 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let config = common::scratch_rllvm_config(root.path());
+        let config = rllvm_testkit::scratch_rllvm_config(root.path());
         Self { root, config }
     }
 

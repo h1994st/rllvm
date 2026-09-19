@@ -7,9 +7,7 @@ use std::{
 use rllvm::catalog::read_catalog;
 use rllvm::query::load::{for_each_module, load_catalog};
 use rllvm::query::{CallTarget, Linkage};
-
-mod common;
-use common::{
+use rllvm_testkit::{
     MODULE_ID, SourceFixture, compile_bitcode, compile_bitcode_file, llvm_bin,
     scratch_rllvm_config, source_and_header, write_catalog_json,
 };

@@ -18,9 +18,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-#[path = "common/toolchain.rs"]
-mod toolchain;
-
 /// The exit code an example uses to report a missing prerequisite, following
 /// automake. Every other non-zero code is a failure.
 ///
@@ -227,8 +224,8 @@ fn changed_paths(
 #[test]
 fn every_example_verifies_itself() {
     let home = tempfile::tempdir().unwrap();
-    let config = toolchain::scratch_rllvm_config(home.path());
-    let llvm_config = toolchain::llvm_bin("llvm-config");
+    let config = rllvm_testkit::scratch_rllvm_config(home.path());
+    let llvm_config = rllvm_testkit::llvm_bin("llvm-config");
     let bindir = llvm_config.parent().expect("llvm-config sits in a bindir");
     let path = format!(
         "{}:{}",

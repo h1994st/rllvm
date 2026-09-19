@@ -757,6 +757,7 @@ dependencies = [
  "object",
  "owo-colors",
  "regex",
+ "rllvm-testkit",
  "serde",
  "serde_json",
  "sha1",
@@ -767,6 +768,19 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "which",
+]
+
+[[package]]
+name = "rllvm-core"
+version = "0.5.1"
+
+[[package]]
+name = "rllvm-testkit"
+version = "0.5.1"
+dependencies = [
+ "rllvm",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

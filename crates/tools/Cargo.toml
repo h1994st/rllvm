@@ -148,6 +148,7 @@ libc = "0.2"
 # Reading the manifests back in tests/packaging.rs; same version as the
 # dependency above.
 toml = "~0.8"
+rllvm-testkit = { path = "../testkit" }
 
 [[bench]]
 name = "rllvm_benchmarks"
