@@ -21,8 +21,8 @@ on:
       tag:
         description: >
           Release tag to bump the tap to. Only a tag naming an app the tap has
-          a formula for is acted on, so today that means rllvm-v<version>
-          (e.g. rllvm-v0.6.0); anything else is skipped with a notice.
+          a formula for is acted on, so today that means rllvm-v<version> or
+          rllvm-query-v<version>; anything else is skipped with a notice.
         required: true
         type: string
 
@@ -64,13 +64,14 @@ jobs:
           fi
 
           # dist announces one app per tag and runs this job for each, so the
-          # component the tag already names is also the formula to bump. Only
-          # rllvm has one in the tap today; an `rllvm-query-v*` announcement
-          # would otherwise bump the rllvm formula to the query release's
-          # tarball, twice per release, with a nondeterministic winner. Adding
-          # a formula to the tap is adding a case here.
+          # tag names both the formula to bump and the release carrying its
+          # tarball: rllvm-v* -> rllvm, rllvm-query-v* -> rllvm-query.
+          # Anything else (rllvm-core-v*, a unified v*) has no formula in the
+          # tap and is skipped. Adding a formula to the tap is adding a case
+          # here.
           case "$tag" in
-            rllvm-v*) formula=rllvm ;;
+            rllvm-query-v*) formula=rllvm-query ;;
+            rllvm-v*)       formula=rllvm ;;
             *)
               echo "::notice::$tag names no app the tap carries a formula for;" \
                    "not bumping."
