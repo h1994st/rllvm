@@ -10,6 +10,11 @@
 # crates/query/Cargo.toml, and the action refuses to continue if the toolchain
 # it installed disagrees.
 - name: Set up the LLVM rllvm-query links
+  # Only when this announcement actually releases rllvm-query. An rllvm-v*
+  # release links no LLVM, and installing one anyway would put Homebrew's
+  # unprefixed ar, nm, ranlib and dsymutil ahead of the system tools in a job
+  # that wants the system ones.
+  if: ${{ contains(fromJson(needs.plan.outputs.val).releases.*.app_name, 'rllvm-query') }}
   uses: ./.github/actions/setup-llvm
   with:
     version: "23"

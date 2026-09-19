@@ -137,6 +137,7 @@ jobs:
           fi
       - name: "Set up the LLVM rllvm-query links"
         uses: "./.github/actions/setup-llvm"
+        if: "${{ contains(fromJson(needs.plan.outputs.val).releases.*.app_name, 'rllvm-query') }}"
         with:
           "llvm-sys": "231"
           "version": "23"
