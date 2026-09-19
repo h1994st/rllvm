@@ -25,8 +25,12 @@ jobs:
       #
       # which blocks all releases after the first. cargo-dist created the tag
       # instead, so reconcile the label here -- before release-please runs, so it
-      # sees a clean slate. Self-healing: a release that never tagged keeps its
-      # pending label and is retried rather than silently marked done.
+      # sees a clean slate.
+      #
+      # The label is no longer what retries a failed release: it is reconciled
+      # against rllvm's tag alone, so a release that tagged rllvm but not
+      # rllvm-query still clears. What retries is the dispatch step below, which
+      # re-dispatches any component whose tag is missing on every push to main.
       - uses: actions/checkout@v7
 
       - name: Reconcile labels on already-released PRs
