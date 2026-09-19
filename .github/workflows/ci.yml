@@ -128,7 +128,7 @@ jobs:
 
       - name: Run tests
         if: needs.changes.outputs.code == 'true'
-        run: cargo test --all --verbose
+        run: cargo test -p rllvm-core -p rllvm --verbose
 
       # libtest captures a passing test's output, so a run that quietly
       # degrades from every example verified to one looks exactly like a
@@ -142,7 +142,7 @@ jobs:
       # jobs above never build or run it; run it explicitly here, on both
       # platforms in this job's matrix. `--lib` as well as `--test query`:
       # most of the query design's commitments are pinned by unit tests in
-      # `src/query/*`, and `--test query` alone runs none of them.
+      # `crates/tools/src/query/*`, and `--test query` alone runs none of them.
       #
       # `--test examples` too: `rllvm-query` is not built in the default lane,
       # so the analysis examples skip there. This is the only lane that can
@@ -239,14 +239,14 @@ jobs:
       # feature makes that import used.
       - name: Run clippy
         if: needs.changes.outputs.code == 'true'
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy -p rllvm-core -p rllvm --all-targets -- -D warnings
 
-      # And again with the feature on: without this, `src/query/**` and
-      # `src/bin/rllvm_query.rs` -- every `unsafe` block in the crate among
-      # them -- are cfg'd out of the lint gate entirely.
+      # And again with the feature on: without this, `crates/tools/src/query/**`
+      # and `crates/tools/src/bin/rllvm_query.rs` -- every `unsafe` block in
+      # the crate among them -- are cfg'd out of the lint gate entirely.
       - name: Run clippy (query feature)
         if: needs.changes.outputs.code == 'true'
-        run: cargo clippy --all-targets --features query -- -D warnings
+        run: cargo clippy -p rllvm --features query --all-targets -- -D warnings
         env:
           LLVM_SYS_231_PREFIX: ${{ steps.setup-llvm.outputs.prefix }}
 

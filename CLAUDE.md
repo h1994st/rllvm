@@ -23,6 +23,11 @@ prefer what is already in `Cargo.toml`.
 Make the smallest coherent change that satisfies the request. Follow existing
 patterns. Keep unrelated refactoring separate.
 
+The workspace has two published crates. `rllvm-core` is the library; `rllvm`
+holds the wrapper binaries, including `rllvm-query` behind the `query`
+feature. Put a new module in the crate that owns its responsibility, and
+remember that anything the tools crate reaches becomes public API of core.
+
 ### Code
 
 - Library code returns `Result` using the `thiserror` enum in `error.rs`; avoid
@@ -48,8 +53,8 @@ patterns. Keep unrelated refactoring separate.
   the minor. See [RELEASING.md](RELEASING.md).
 - A user-facing feature ships an example under `examples/<name>/`, and every
   example ships a `check.sh` that runs its documented flow and asserts the
-  outcome. `tests/examples.rs` runs them all; exit 77 means a prerequisite is
-  missing.
+  outcome. `crates/tools/tests/examples.rs` runs them all; exit 77 means a
+  prerequisite is missing.
 
 ### Writing
 
@@ -71,18 +76,18 @@ LLVM readers; `rustc -vV` reports its LLVM version.
 
 ```bash
 cargo build
-cargo test --all
-cargo test parsing_lto                     # one test by name
-cargo clippy --all-targets -- -D warnings  # CI gate
-cargo fmt --all --check                    # CI gate
+cargo test -p rllvm-core -p rllvm
+cargo test parsing_lto  # one test by name
+cargo clippy -p rllvm-core -p rllvm --all-targets -- -D warnings  # CI gate
+cargo fmt --all --check  # CI gate
 ```
 
 The optional `query` feature is not covered by those gates. CI runs both forms,
 so run both when touching it:
 
 ```bash
-cargo test --features query --lib --test query
-cargo clippy --all-targets --features query -- -D warnings
+cargo test --features query --lib --test query --test examples
+cargo clippy -p rllvm --features query --all-targets -- -D warnings
 ```
 
 Choose checks that validate the changed behavior; rerun affected checks after a
@@ -93,7 +98,8 @@ fix rather than broadening by default.
 - Name tests after the behavior, without a `test_` prefix. Confirm a regression
   test fails before its fix, at the layer that can actually break. Prefer
   behavioral assertions over file-existence checks.
-- Shared integration fixtures live in `tests/common/`.
+- Shared integration fixtures live in the `rllvm-testkit` crate
+  (`crates/testkit`).
 - Do not move a built target directory: integration binaries embed paths.
 - Benchmarks need idle, coordinated resources and recorded conditions. Parallel
   correctness runs are not benchmarks.
