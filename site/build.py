@@ -29,6 +29,10 @@ BRANCH = "main"
 ROOT = Path(__file__).resolve().parent.parent
 README = ROOT / "README.md"
 RELEASE_MANIFEST = ROOT / ".release-please-manifest.json"
+
+# The site documents the tools, so it carries the `rllvm` crate's version.
+# Each crate versions independently since the workspace split.
+PAGE_VERSION_PACKAGE = "crates/tools"
 OUTPUT = Path(__file__).resolve().parent / "index.md"
 
 # `[text](target)`, capturing the target. Bare enough to miss exotic markdown,
@@ -57,9 +61,11 @@ def crate_version() -> str:
     that had not changed.
     """
     released = json.loads(RELEASE_MANIFEST.read_text(encoding="utf-8"))
-    version = released.get(".")
+    version = released.get(PAGE_VERSION_PACKAGE)
     if not isinstance(version, str):
-        raise SystemExit(f'no "." version string in {RELEASE_MANIFEST.name}')
+        raise SystemExit(
+            f"no {PAGE_VERSION_PACKAGE!r} version string in {RELEASE_MANIFEST.name}"
+        )
     return version
 
 
