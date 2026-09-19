@@ -1,15 +1,16 @@
 //! The release archives must list exactly the binaries a default build makes.
 //!
-//! `dist` ships every `[[bin]]` it finds in this package and builds it with
-//! default features, so a binary behind `required-features` is enumerated and
-//! then not found: the 0.5.1 release failed on `failed to find bin
+//! `dist` ships every `[[bin]]` it finds in a distributed package and builds it
+//! with default features, so a binary behind `required-features` is enumerated
+//! and then not found: the 0.5.1 release failed on `failed to find bin
 //! rllvm-query`. #215 papered over that with a per-target
 //! `[package.metadata.dist.binaries]` map; giving `rllvm-query` its own crate
 //! removed the cause, and the map with it.
 //!
 //! Neither way of losing that shows up before a release runs -- a gated binary
 //! breaks the build, and an override that drifts from `targets` silently ships
-//! the wrong set for a target it omits -- so both are checked here.
+//! the wrong set for a target it omits -- so both are checked here, along with
+//! which crates dist announces at all and which targets it announces them for.
 
 use std::{collections::BTreeSet, fs, path::Path};
 
@@ -26,34 +27,107 @@ fn manifest(name: &str) -> Value {
         .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
 }
 
+/// Whether dist announces this package as an app.
+///
+/// The opt-out is `[package.metadata.dist] dist = false`; absent, dist decides
+/// for itself, which is what every app relies on.
+fn distributed(cargo: &Value) -> bool {
+    cargo
+        .get("package")
+        .and_then(|package| package.get("metadata"))
+        .and_then(|metadata| metadata.get("dist"))
+        .and_then(|dist| dist.get("dist"))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// The crates whose binaries dist ships, and so builds without features.
+const APP_MANIFESTS: [&str; 2] = ["crates/tools/Cargo.toml", "crates/query/Cargo.toml"];
+
 #[test]
 fn dist_can_build_every_binary_it_ships() {
-    let cargo = manifest("crates/tools/Cargo.toml");
+    for path in APP_MANIFESTS {
+        let cargo = manifest(path);
 
-    let gated: BTreeSet<&str> = cargo["bin"]
+        let gated: BTreeSet<&str> = cargo["bin"]
+            .as_array()
+            .expect("[[bin]] entries")
+            .iter()
+            .filter(|bin| bin.get("required-features").is_some())
+            .map(|bin| bin["name"].as_str().expect("bin name"))
+            .collect();
+        assert!(
+            gated.is_empty(),
+            "dist builds {path} with default features and cannot build {gated:?}; \
+             a binary that needs extra features belongs in its own crate"
+        );
+
+        // With no gated binary there is nothing to override, and no second list
+        // to drift from `targets`: dist's own enumeration is the default
+        // build's.
+        assert!(
+            cargo
+                .get("package")
+                .and_then(|package| package.get("metadata"))
+                .and_then(|metadata| metadata.get("dist"))
+                .and_then(|dist| dist.get("binaries"))
+                .is_none(),
+            "{path} sets [package.metadata.dist.binaries], which is per target and \
+             falls back to every binary for a target it omits; only a gated binary \
+             needs it"
+        );
+    }
+}
+
+/// dist announces a crate only when that crate has binaries to ship.
+///
+/// One announcement is one GitHub Release with its own archives, installer and
+/// `source.tar.gz`. `rllvm-core` is a library: announced, it would publish an
+/// archive holding no binary and an installer that installs nothing, beside the
+/// two releases that do ship something. It reaches users through crates.io, from
+/// the same release's publish job.
+///
+/// Nothing reports this either way. dist skips a package with no `[[bin]]`, so
+/// the opt-out looks redundant right up to the day `rllvm-core` grows a binary
+/// -- and then a library starts shipping one. The two apps are asserted from
+/// the same table because the failure is symmetric: an app that acquires
+/// `dist = false` stops being released, with no error anywhere.
+#[test]
+fn only_the_crates_with_binaries_are_dist_apps() {
+    for (path, expected) in [
+        ("crates/core/Cargo.toml", false),
+        ("crates/tools/Cargo.toml", true),
+        ("crates/query/Cargo.toml", true),
+    ] {
+        assert_eq!(
+            distributed(&manifest(path)),
+            expected,
+            "{path} is {} by dist, which is not what the release expects",
+            if expected { "skipped" } else { "announced" }
+        );
+    }
+}
+
+/// Every released target has to be one `rllvm-query` can link LLVM for.
+///
+/// `targets` is one list, shared by every app, so a triple added for `rllvm`
+/// is demanded of `rllvm-query` too -- and that crate links LLVM statically
+/// through llvm-sys. musl has no LLVM to link against, so the triple cannot
+/// build, and the failure lands in a release build job after the other targets
+/// have already been built and uploaded.
+#[test]
+fn released_targets_can_link_llvm() {
+    let workspace = manifest("dist-workspace.toml");
+    let targets: BTreeSet<&str> = workspace["dist"]["targets"]
         .as_array()
-        .expect("[[bin]] entries")
+        .expect("dist targets")
         .iter()
-        .filter(|bin| bin.get("required-features").is_some())
-        .map(|bin| bin["name"].as_str().expect("bin name"))
+        .map(|target| target.as_str().expect("target triple"))
         .collect();
-    assert!(
-        gated.is_empty(),
-        "dist builds this package with default features and cannot build {gated:?}; \
-         a binary that needs extra features belongs in its own crate"
-    );
 
-    // With no gated binary there is nothing to override, and no second list to
-    // drift from `targets`: dist's own enumeration is the default build's.
     assert!(
-        cargo
-            .get("package")
-            .and_then(|package| package.get("metadata"))
-            .and_then(|metadata| metadata.get("dist"))
-            .and_then(|dist| dist.get("binaries"))
-            .is_none(),
-        "[package.metadata.dist.binaries] is per target and falls back to every \
-         binary for a target it omits; only a gated binary needs it"
+        !targets.contains("x86_64-unknown-linux-musl"),
+        "musl cannot link LLVM, so rllvm-query cannot ship for it: {targets:?}"
     );
 }
 
