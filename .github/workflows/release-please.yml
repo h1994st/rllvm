@@ -52,9 +52,12 @@ jobs:
           # what was released. main's checked-out .release-please-manifest.json
           # can: a merged release PR is exactly what wrote that file, so its
           # "crates/tools" entry is the version the rllvm component last
-          # released at. dist only ever tags rllvm-v<version> (rllvm-core has
-          # no dist app and reaches crates.io through the publish job instead),
-          # so that is the one tag whose existence proves the release landed.
+          # released at. rllvm is the witness because it is the component
+          # almost every release bumps; rllvm-core has no dist app and reaches
+          # crates.io through the publish job instead. A release PR that bumps
+          # only rllvm-query is reconciled against rllvm's existing tag and so
+          # clears early, which is still the point of this step: unblocking the
+          # next run.
           VER="$(jq -er '.["crates/tools"]' .release-please-manifest.json)"
           TAG="rllvm-v${VER}"
 
@@ -105,6 +108,7 @@ jobs:
 
           PACKAGES=(
             "crates/tools:rllvm"
+            "crates/query:rllvm-query"
           )
 
           for entry in "${PACKAGES[@]}"; do
