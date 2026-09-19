@@ -8,8 +8,7 @@
   "release-label": "autorelease: tagged",
   "packages": {
     "crates/core": { "component": "rllvm-core", "include-component-in-tag": true },
-    "crates/tools": { "component": "rllvm", "include-component-in-tag": true },
-    "crates/query": { "component": "rllvm-query", "include-component-in-tag": true }
+    "crates/tools": { "component": "rllvm", "include-component-in-tag": true }
   },
   "plugins": [{ "type": "cargo-workspace", "merge": false }]
 }
