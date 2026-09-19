@@ -1,6 +1,6 @@
 [package]
 name = "rllvm-query"
-version = "0.5.1"
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,7 +14,7 @@ readme = "README.md"
 exclude = ["tests/*"]
 
 [dependencies]
-rllvm-core = { path = "../core", version = "0.5.1" }
+rllvm-core = { path = "../core", version = "0.6.0" }
 # The only crate in the workspace that links LLVM, which is why it is kept out
 # of `default-members`: `cargo test` never builds llvm-sys. Needs
 # LLVM_SYS_231_PREFIX pointing at an LLVM 23 install when llvm-config is not on
