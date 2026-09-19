@@ -56,3 +56,45 @@ fn dist_can_build_every_binary_it_ships() {
          binary for a target it omits; only a gated binary needs it"
     );
 }
+
+/// An unpublished crate stays out of the release-please workspace.
+///
+/// release-please's cargo-workspace plugin walks the dependency graph from the
+/// packages being released and version-bumps everything that depends on them.
+/// `rllvm-testkit` depends on `rllvm-core`, so it would be bumped on every
+/// release and drift away from the crates it is built alongside -- for a crate
+/// that is never published and whose version nothing resolves.
+///
+/// Nothing in release-please's configuration exempts a dependent. What keeps it
+/// out is this array: the plugin reads `workspace.members` textually over the
+/// GitHub API and never runs `cargo metadata`, while cargo itself still treats
+/// the crate as a member because it is a path dependency of members. Adding it
+/// back here would silently resume the bumping, so the omission is asserted
+/// rather than left to a comment.
+#[test]
+fn unpublished_crates_stay_out_of_the_release_workspace() {
+    let root = manifest("Cargo.toml");
+    let members: BTreeSet<&str> = root["workspace"]["members"]
+        .as_array()
+        .expect("workspace members")
+        .iter()
+        .map(|m| m.as_str().expect("member path"))
+        .collect();
+
+    let testkit = manifest("crates/testkit/Cargo.toml");
+    assert_eq!(
+        testkit["package"]["publish"].as_bool(),
+        Some(false),
+        "this test only reasons about crates that are never published"
+    );
+    assert_eq!(
+        testkit["package"]["version"].as_str(),
+        Some("0.0.0"),
+        "an unreleased crate carries the conventional placeholder version"
+    );
+    assert!(
+        !members.contains("crates/testkit"),
+        "crates/testkit is listed in workspace.members, so release-please will \
+         version-bump it on every release: {members:?}"
+    );
+}
