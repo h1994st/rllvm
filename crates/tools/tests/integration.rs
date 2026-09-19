@@ -1462,7 +1462,13 @@ fn objective_c_sources_are_captured_when_only_their_language_is_enabled() {
         wrappers.parent().unwrap().display(),
         std::env::var("PATH").unwrap_or_default()
     );
-    let toolchain = Path::new(env!("CARGO_MANIFEST_DIR")).join("cmake/rllvm-toolchain.cmake");
+    // `cmake/` lives at the repository root (README.md documents it as
+    // `path/to/rllvm/cmake/...`), not beside this crate.
+    let toolchain = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("cmake")
+        .join("rllvm-toolchain.cmake");
 
     for (language, file, contents, symbol) in OBJECTIVE_C_LANGUAGES {
         let tmp = TempDir::new().unwrap();

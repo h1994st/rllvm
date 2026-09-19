@@ -151,8 +151,15 @@ fn binary_directory() -> PathBuf {
 }
 
 /// `examples/`, the directory every example lives under.
+///
+/// At the repository root rather than beside this crate: the suite is shared by
+/// the whole workspace, and `examples/rust` is its own cargo package that must
+/// not be mistaken for a cargo example target.
 fn examples_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("examples")
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("examples")
 }
 
 /// Every directory directly under `examples/`, whether or not it ships a

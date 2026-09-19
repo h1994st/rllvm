@@ -16,7 +16,10 @@ use std::{collections::BTreeSet, fs, path::Path};
 use toml::Value;
 
 fn manifest(name: &str) -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(name);
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join(name);
     fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
         .parse::<Value>()
@@ -36,7 +39,7 @@ fn default_binaries(cargo: &Value) -> BTreeSet<String> {
 
 #[test]
 fn dist_ships_the_default_binaries_on_every_target() {
-    let cargo = manifest("Cargo.toml");
+    let cargo = manifest("crates/tools/Cargo.toml");
     let workspace = manifest("dist-workspace.toml");
 
     let expected = default_binaries(&cargo);
