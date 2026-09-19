@@ -1,0 +1,21 @@
+# Steps dist prepends to each build-local-artifacts job, named by
+# `github-build-setup` in dist-workspace.toml. build-global-artifacts gets
+# none, and needs none. release.yml carries a generated copy, so run
+# `dist generate` after editing this file.
+#
+# rllvm-query links LLVM through llvm-sys and no runner image ships the release
+# it wants. This is the same toolchain CI builds and tests the crate against,
+# installed the same way, so a release cannot link against something CI never
+# saw. `version` is the LLVM major; `llvm-sys` is that crate's pin from
+# crates/query/Cargo.toml, and the action refuses to continue if the toolchain
+# it installed disagrees.
+- name: Set up the LLVM rllvm-query links
+  # Only when this announcement actually releases rllvm-query. An rllvm-v*
+  # release links no LLVM, and installing one anyway would put Homebrew's
+  # unprefixed ar, nm, ranlib and dsymutil ahead of the system tools in a job
+  # that wants the system ones.
+  if: ${{ contains(fromJson(needs.plan.outputs.val).releases.*.app_name, 'rllvm-query') }}
+  uses: ./.github/actions/setup-llvm
+  with:
+    version: "23"
+    llvm-sys: "231"

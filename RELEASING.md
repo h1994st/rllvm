@@ -23,12 +23,12 @@ create a tag by hand.
    workflows to run** when prompted, including after release-please updates the
    PR. CI requires this approval because release-please uses `GITHUB_TOKEN`.
    Wait for the checks to pass before merging; merging means "ship this".
-4. **The workflow dispatches cargo-dist for the `rllvm` crate** (the only crate
-   with a dist app; `rllvm-core` ships to crates.io through the same run's
-   publish job instead). It builds all five targets, creates the
-   `rllvm-v<version>` tag, publishes the GitHub Release with the CHANGELOG
-   entry plus install instructions, and publishes the workspace's crates to
-   crates.io.
+4. **The workflow dispatches cargo-dist once per crate that has a dist app** —
+   `rllvm` and `rllvm-query`. Each dispatch builds three targets, creates its
+   own `<crate>-v<version>` tag, and publishes its own GitHub Release with that
+   crate's CHANGELOG entry plus install instructions. `rllvm-core` has no app;
+   it reaches crates.io through the publish job, which every dispatch runs and
+   which uploads only the versions crates.io does not already have.
 
 Editing the CHANGELOG before merging the release PR is fine and expected — it is
 a normal PR.
@@ -90,9 +90,9 @@ gh pr edit <N> --add-label 'autorelease: tagged' --remove-label 'autorelease: pe
 knowing about, because it is quiet. The workflow decides a release is due by
 comparing, for each crate with a dist app, its version in
 `.release-please-manifest.json` against its `<component>-v<version>` tag.
-Today that is only `rllvm`; `rllvm-core` has no dist app and ships through the
-publish job instead. Check the `release-please` workflow run for the dispatch
-step. To release by hand:
+Today those are `rllvm` and `rllvm-query`; `rllvm-core` has no dist app and
+ships through the publish job instead. Check the `release-please` workflow run
+for the dispatch step. To release by hand:
 
 ```bash
 gh workflow run release.yml -f tag=rllvm-v0.6.0
@@ -108,6 +108,11 @@ gh api "repos/h1994st/rllvm/actions/runs/<id>/jobs" \
   --jq '.jobs[] | "\(.status) \(.labels|join(",")) \(.name)"'
 ```
 
+**A release fails on `failed to find bin`.** dist builds every `[[bin]]` a
+distributed package declares, without features. A binary behind
+`required-features` therefore cannot ship: give it its own crate, as
+`rllvm-query` has. `crates/tools/tests/packaging.rs` enforces this.
+
 **A release needs to be redone.** Nothing consumed a release that was never
 published, so deleting the tag and release and re-dispatching is safe. If it was
 published and crates.io accepted it, the version is permanently taken — bump to
@@ -116,7 +121,8 @@ the next patch instead.
 ## Changing the release setup
 
 `release.yml` is **generated**. Do not edit it by hand; change
-`dist-workspace.toml` and regenerate:
+`dist-workspace.toml` — or `.github/dist-build-setup.yml`, whose steps dist
+copies into each artifact build job — and regenerate:
 
 ```bash
 cargo install cargo-dist --version <version> --locked

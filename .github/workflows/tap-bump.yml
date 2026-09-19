@@ -19,7 +19,10 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to bump the tap to (e.g. v0.4.5)
+        description: >
+          Release tag to bump the tap to. Only a tag naming an app the tap has
+          a formula for is acted on, so today that means rllvm-v<version>
+          (e.g. rllvm-v0.6.0); anything else is skipped with a notice.
         required: true
         type: string
 
@@ -60,14 +63,29 @@ jobs:
             fi
           fi
 
+          # dist announces one app per tag and runs this job for each, so the
+          # component the tag already names is also the formula to bump. Only
+          # rllvm has one in the tap today; an `rllvm-query-v*` announcement
+          # would otherwise bump the rllvm formula to the query release's
+          # tarball, twice per release, with a nondeterministic winner. Adding
+          # a formula to the tap is adding a case here.
+          case "$tag" in
+            rllvm-v*) formula=rllvm ;;
+            *)
+              echo "::notice::$tag names no app the tap carries a formula for;" \
+                   "not bumping."
+              exit 0
+              ;;
+          esac
+
           base="${{ github.server_url }}/$REPO/releases/download/$tag"
 
           GH_TOKEN="$TAP_TOKEN" gh api \
             "repos/${{ github.repository_owner }}/homebrew-tap/dispatches" \
             -f "event_type=upstream-released" \
-            -f "client_payload[formula]=rllvm" \
+            -f "client_payload[formula]=$formula" \
             -f "client_payload[tag]=$tag" \
             -f "client_payload[url]=$base/source.tar.gz" \
             -f "client_payload[sha256_url]=$base/source.tar.gz.sha256"
 
-          echo "::notice::Asked the tap to bump rllvm to $tag."
+          echo "::notice::Asked the tap to bump $formula to $tag."

@@ -1,5 +1,9 @@
+# One cargo workspace, so one member. Naming each crate path also works, but
+# every path resolves back to this same workspace, and dist then lists every
+# package once per path in its diagnostics. Which crates become apps is decided
+# per crate by `package.metadata.dist`.
 [workspace]
-members = ["cargo:crates/tools"]
+members = ["cargo:."]
 
 # Config for 'dist'
 [dist]
@@ -15,8 +19,11 @@ pr-run-mode = "plan"
 publish-jobs = ["./publish-crates"]
 # Run after the release is announced, so the assets the tap reads already exist.
 post-announce-jobs = ["./tap-bump"]
-# Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# `x86_64-unknown-linux-musl` is gone because musl cannot link LLVM, and
+# `x86_64-apple-darwin` because the tap bottles only arm64_sequoia and
+# x86_64_linux. Both remain reachable through `cargo install`.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
@@ -27,3 +34,18 @@ install-updater = false
 dispatch-releases = true
 # Whether to enable GitHub Attestations
 github-attestations = true
+# Steps prepended to each build-local-artifacts job -- the ones that compile
+# binaries. build-global-artifacts gets none and needs none: the installers and
+# the source tarball link nothing. rllvm-query does link LLVM, and no runner
+# image provides the release llvm-sys wants. Path is relative to
+# .github/workflows.
+github-build-setup = "../dist-build-setup.yml"
+
+# dist defaults aarch64-apple-darwin to macos-14 (Sonoma), and Homebrew has no
+# arm64_sonoma bottle for llvm 23 -- the tags are arm64_sequoia, arm64_tahoe and
+# arm64_golden_gate. `brew install llvm@23` there builds LLVM, zstd and z3 from
+# source on a 3-vCPU runner, which means the 6-hour job limit rather than a
+# failure. macos-15 is Sequoia, which is bottled and is also what the tap
+# bottles. ci.yml never saw this: it runs macos-latest.
+[dist.github-custom-runners]
+aarch64-apple-darwin = "macos-15"

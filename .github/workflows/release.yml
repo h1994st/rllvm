@@ -135,6 +135,12 @@ jobs:
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
             echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           fi
+      - name: "Set up the LLVM rllvm-query links"
+        uses: "./.github/actions/setup-llvm"
+        if: "${{ contains(fromJson(needs.plan.outputs.val).releases.*.app_name, 'rllvm-query') }}"
+        with:
+          "llvm-sys": "231"
+          "version": "23"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

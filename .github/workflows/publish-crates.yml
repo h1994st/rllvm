@@ -8,14 +8,86 @@ on:
         type: string
 
 jobs:
-  # publish the current repo state to crates.io
+  # Publish the crates this announcement is responsible for, if crates.io does
+  # not already have them. dist runs this after the build jobs of its own
+  # announcement, so the app named in the plan has been built for every target
+  # before its crate is uploaded -- and a crates.io version is permanent, so
+  # that ordering is the whole point. Publishing the *other* app's crate here
+  # would throw it away: `cargo publish` only verifies a build on this runner,
+  # for x86_64-linux, and says nothing about the two targets and the archives
+  # that app's own release still has to produce.
   cargo-publish:
     runs-on: ubuntu-latest
+    # Both runs publish rllvm-core, so without a gate they can both see a 404
+    # for it, both start uploading, and the loser dies on `crate version
+    # already uploaded` -- taking its announce job, and so that app's GitHub
+    # Release, with it. Serialised, whichever arrives first publishes it and the
+    # other finds it there. `cancel-in-progress: false` because the run being
+    # waited on may be mid-upload, and an upload cannot be taken back.
+    concurrency:
+      group: publish-crates
+      cancel-in-progress: false
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
         with:
           submodules: recursive
-      - run: cargo publish --token ${CRATES_TOKEN}
+
+      # `cargo publish` builds what it uploads, and rllvm-query links LLVM.
+      # Only that app's own run publishes it, so only that run needs this.
+      - name: Set up the LLVM rllvm-query links
+        if: contains(fromJson(inputs.plan).releases.*.app_name, 'rllvm-query')
+        uses: ./.github/actions/setup-llvm
+        with:
+          version: "23"
+          llvm-sys: "231"
+
+      # Asking crates.io directly is what makes the repeat run safe. cargo's
+      # own duplicate handling is not specified -- `cargo publish --workspace
+      # --dry-run` warns `crate rllvm@0.5.1 already exists on crates.io index`
+      # and then still prints `Uploading` -- and a bare `cargo publish` resolves
+      # to default-members, which excludes crates/query, so rllvm-query would
+      # never be published at all.
+      - name: Publish the crates crates.io does not have yet
         env:
           CRATES_TOKEN: ${{ secrets.CRATES_TOKEN }}
+          PLAN: ${{ inputs.plan }}
+        run: |
+          set -euo pipefail
+
+          # The app this announcement releases. Its crate is the only one whose
+          # own build jobs have run; rllvm-core is published alongside it
+          # because both apps depend on it, and the concurrency group makes
+          # that happen exactly once.
+          apps=()
+          while IFS= read -r app; do
+            apps+=("$app")
+          done < <(jq -er '.releases[].app_name' <<<"$PLAN")
+          # Process substitution hides jq's exit status, so check the result.
+          if [ "${#apps[@]}" -eq 0 ]; then
+            echo "::error::the release plan announces no app; refusing to publish."
+            exit 1
+          fi
+
+          # Dependency order: rllvm-core has to exist on crates.io before the
+          # crates that depend on it can resolve.
+          for name in rllvm-core "${apps[@]}"; do
+            version="$(cargo metadata --no-deps --format-version 1 \
+              | jq -er --arg n "$name" '.packages[] | select(.name == $n) | .version')"
+
+            code="$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "User-Agent: rllvm-release (h1994st@gmail.com)" \
+              "https://crates.io/api/v1/crates/${name}/${version}")"
+
+            if [ "$code" = "200" ]; then
+              echo "::notice::${name} ${version} is already on crates.io."
+              continue
+            fi
+            if [ "$code" != "404" ]; then
+              echo "::error::crates.io answered ${code} for ${name} ${version}; refusing to guess."
+              exit 1
+            fi
+
+            echo "::notice::publishing ${name} ${version}."
+            cargo publish -p "$name" --token "$CRATES_TOKEN"
+          done
