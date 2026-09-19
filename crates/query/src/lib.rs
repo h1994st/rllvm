@@ -263,7 +263,9 @@ pub struct Provenance {
     /// Quoted from the catalog, not reconstructed.
     pub catalog_origin: CatalogOrigin,
     pub llvm_version: String,
-    pub rllvm_version: String,
+    /// The version of `rllvm-query` -- the crate and binary that answered --
+    /// not of the `rllvm` wrapper that captured the bitcode.
+    pub rllvm_query_version: String,
 }
 
 /// The envelope every query answer is wrapped in.
@@ -430,7 +432,7 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
     let symbols = symbols_in(session, &results, &frontier);
 
     Ok(QueryResult {
-        schema_version: 1,
+        schema_version: 2,
         query: query.clone(),
         resolution: query
             .names()
@@ -445,7 +447,7 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
         provenance: Provenance {
             catalog_origin: session.origin().clone(),
             llvm_version: llvm_version(),
-            rllvm_version: env!("CARGO_PKG_VERSION").to_string(),
+            rllvm_query_version: env!("CARGO_PKG_VERSION").to_string(),
         },
     })
 }
