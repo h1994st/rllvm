@@ -42,7 +42,40 @@ pub mod query;
 
 #[cfg(test)]
 mod tests {
-    use rllvm_core::config::{RLLVMConfig, pin_inferred_config};
+    use std::{sync::LazyLock, time::SystemTime};
+
+    use rllvm_core::config::{RLLVMConfig, config_filepath, pin_inferred_config};
+
+    /// The home configuration file's existence and, if present, modification
+    /// time. `None` means the file does not exist.
+    fn config_file_fingerprint() -> Option<SystemTime> {
+        std::fs::metadata(config_filepath())
+            .and_then(|metadata| metadata.modified())
+            .ok()
+    }
+
+    /// The configuration file's fingerprint at the earliest point this test
+    /// can observe it -- before it calls `pin_inferred_config` below.
+    ///
+    /// This is a `LazyLock` rather than a plain call at the top of the test
+    /// body to make the intent explicit: it is a "first touch" baseline, not
+    /// a process-start one. It cannot be a process-start baseline, because
+    /// nothing short of a pre-`main` hook (e.g. the `ctor` crate, not a
+    /// dependency here) runs before `cargo test`'s harness starts dispatching
+    /// `#[test]` fns, and this binary runs all of this crate's unit tests --
+    /// including the ones in `compiler_wrapper` that also resolve the
+    /// configuration -- in one process, on multiple threads, in an
+    /// unspecified order. If a future test ever reached the unpinned
+    /// production path before this test's body started, the file would
+    /// already exist (or already be rewritten) by the time this baseline is
+    /// taken, and no observation made from inside a `#[test]` fn can tell
+    /// that apart from a file that predates the process. Closing that gap
+    /// is not worth a new dependency for one guard, so this catches the case
+    /// Finding 1 was written against -- this test's own call being the one
+    /// that resolves the configuration for the first time in the process --
+    /// and does not claim to catch a rogue test that wins that race first.
+    static CONFIG_FILE_BEFORE: LazyLock<Option<SystemTime>> =
+        LazyLock::new(config_file_fingerprint);
 
     /// Nothing in this binary may resolve the configuration from
     /// `~/.rllvm/config.toml` or `$RLLVM_CONFIG`.
@@ -64,8 +97,18 @@ mod tests {
     /// that what got resolved is the inferred configuration. A test that ever
     /// wins the race against the user's own file fails here, loudly, rather
     /// than leaving the suite reading someone's machine.
+    ///
+    /// The value comparison alone is blind on a machine with no pre-existing
+    /// `~/.rllvm/config.toml` -- every CI runner: an unpinned resolution
+    /// there still infers the same values it would have pinned, so the
+    /// comparison passes while the file is created as a side effect. The
+    /// fingerprint check below closes that: it fails loudly if resolving the
+    /// configuration created or modified the file, even when the resolved
+    /// values are correct.
     #[test]
     fn the_resolved_configuration_is_inferred_and_never_the_users_own() {
+        let before = *CONFIG_FILE_BEFORE;
+
         let resolved = pin_inferred_config().expect("no usable LLVM configuration");
         let inferred = RLLVMConfig::try_default().expect("no usable LLVM configuration");
         assert_eq!(
@@ -73,6 +116,14 @@ mod tests {
             serde_json::to_value(&inferred).unwrap(),
             "the process-wide configuration did not come from RLLVMConfig::try_default: \
              a test resolved it from ~/.rllvm/config.toml or $RLLVM_CONFIG before pinning"
+        );
+
+        assert_eq!(
+            before,
+            config_file_fingerprint(),
+            "{:?} was created or modified while resolving the configuration: \
+             a test reached RLLVMConfig::new (or ::load_path) instead of pin_inferred_config",
+            config_filepath()
         );
     }
 }
