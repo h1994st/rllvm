@@ -47,10 +47,13 @@ remember that anything the tools crate reaches becomes public API of core.
   dependent work and make stacked PR bases explicit.
 - After a parent is squash-merged, rebase the dependent commits onto current
   `main` and then retarget. Retargeting alone leaves the parent's diff.
-- Commits and PR titles use Conventional Commits; keep commit bodies short, and
-  empty in most cases. Do not bump `version` by hand — releases derive from
-  commit types, and below 1.0 `feat:`/`fix:` bump the patch while `feat!:` bumps
-  the minor. See [RELEASING.md](RELEASING.md).
+- Commits and PR titles use Conventional Commits. A subject is one idea under 60
+  characters; a subject joining two changes with a comma is two commits. Branch
+  commits carry **no body**: the squash body is built from subjects, so a body is
+  restatement someone deletes by hand at merge. A `BREAKING CHANGE:` footer is
+  machinery, not a body, and stays. Do not bump `version` by hand — releases
+  derive from commit types, and below 1.0 `feat:`/`fix:` bump the patch while
+  `feat!:` bumps the minor. See [RELEASING.md](RELEASING.md).
 - A user-facing feature ships an example under `examples/<name>/`, and every
   example ships a `check.sh` that runs its documented flow and asserts the
   outcome. `crates/tools/tests/examples.rs` runs them all; exit 77 means a
@@ -58,8 +61,15 @@ remember that anything the tools crate reaches becomes public API of core.
 
 ### Writing
 
-- Issues and PRs state problem, cause, fix, verification — briefly, in plain
-  language, without conversational framing. Follow the templates.
+- Issues and PRs state problem, cause, fix, verification, in plain language
+  without conversational framing. Follow the templates.
+- A PR body is 20 lines or fewer — count them before posting. One sentence each
+  for problem and cause; one bullet per change and per check. Do not restate the
+  fix under verification, and give a rejected option one clause rather than a
+  paragraph. An issue may run longer, but only to describe the problem.
+- Do not hard-wrap PR bodies, issue bodies or comments: one long line per
+  paragraph, and let the renderer wrap. Markdown in the repository keeps its
+  wrapping.
 - `README.md` is the user-facing source of truth: keep it short and practical,
   and put rationale in issues or the code, not there. `site/build.py` generates
   `site/index.md`, which is never committed. Validate links and site generation
