@@ -1,0 +1,15 @@
+# Steps dist prepends to every release build job, named by `github-build-setup`
+# in dist-workspace.toml. release.yml carries a generated copy, so run
+# `dist generate` after editing this file.
+#
+# rllvm-query links LLVM through llvm-sys and no runner image ships the release
+# it wants. This is the same toolchain CI builds and tests the crate against,
+# installed the same way, so a release cannot link against something CI never
+# saw. `version` is the LLVM major; `llvm-sys` is that crate's pin from
+# crates/query/Cargo.toml, and the action refuses to continue if the toolchain
+# it installed disagrees.
+- name: Set up the LLVM rllvm-query links
+  uses: ./.github/actions/setup-llvm
+  with:
+    version: "23"
+    llvm-sys: "231"

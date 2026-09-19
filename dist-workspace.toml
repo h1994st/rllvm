@@ -1,5 +1,9 @@
+# One cargo workspace, so one member. Naming each crate path also works, but
+# every path resolves back to this same workspace, and dist then lists every
+# package once per path in its diagnostics. Which crates become apps is decided
+# per crate by `package.metadata.dist`.
 [workspace]
-members = ["cargo:crates/tools"]
+members = ["cargo:."]
 
 # Config for 'dist'
 [dist]
@@ -15,8 +19,11 @@ pr-run-mode = "plan"
 publish-jobs = ["./publish-crates"]
 # Run after the release is announced, so the assets the tap reads already exist.
 post-announce-jobs = ["./tap-bump"]
-# Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"]
+# Target platforms to build apps for (Rust target-triple syntax).
+# `x86_64-unknown-linux-musl` is gone because musl cannot link LLVM, and
+# `x86_64-apple-darwin` because the tap bottles only arm64_sequoia and
+# x86_64_linux. Both remain reachable through `cargo install`.
+targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
@@ -27,3 +34,7 @@ install-updater = false
 dispatch-releases = true
 # Whether to enable GitHub Attestations
 github-attestations = true
+# Steps prepended to every build job. rllvm-query links LLVM, which no runner
+# image provides at the version llvm-sys wants; path is relative to
+# .github/workflows.
+github-build-setup = "../dist-build-setup.yml"
