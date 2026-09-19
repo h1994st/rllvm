@@ -25,6 +25,10 @@
 //!    indirect sites and ambiguous bindings that could carry a path the walk
 //!    cannot see.
 
+// Keeps the public surface deliberate: a `pub` item that no `pub use`
+// re-exports is a mistake, not API.
+#![warn(unreachable_pub)]
+
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
