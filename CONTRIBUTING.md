@@ -39,6 +39,15 @@ cargo test -p rllvm-core -p rllvm --verbose
 
 LLVM/Clang must be installed for the test suite to pass. Tests run on both Linux and macOS in CI.
 
+`rllvm-query` is a separate crate that links LLVM through `llvm-sys` and is not
+a default workspace member, so the commands above never touch it. Run it on
+its own when you change it:
+
+```bash
+cargo test -p rllvm-query
+cargo clippy -p rllvm-query --all-targets -- -D warnings
+```
+
 ## Pull Request Process
 
 1. **Fork and branch** — create a feature branch from `main`.
