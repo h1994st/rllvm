@@ -38,6 +38,11 @@ rllvm-query --catalog build/catalog.json callers c_double  # main::main, main.rs
 rllvm-query --catalog build/catalog.json callers rust_add  # c_double,  c_side.c:3
 ```
 
+The program prints `doubled=42 tripled=126`: 21 doubled through C, which
+reaches the doubling by calling back into Rust, then tripled through C++.
+`check.sh` asserts that line, so a boundary that stopped working would fail
+before any query runs.
+
 ## Why `-g` on every side
 
 Without debug info the calls still resolve — the call graph comes from the IR,

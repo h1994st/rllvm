@@ -17,9 +17,12 @@ rllvm-cxx -g -c cxx_side.cc -o "$OUT/cxx_side.o"
 "$BINDIR/llvm-ar" rcs "$OUT/libffidemo.a" "$OUT/c_side.o" "$OUT/cxx_side.o"
 rllvm-rustc -g main.rs -o "$OUT/app" -L "$OUT" -l static=ffidemo
 
-# Capture must not change what the program does.
+# Capture must not change what the program does. 21 doubled through C (which
+# calls back into Rust) is 42; tripled through C++ is 126, so this one line
+# says every hop ran in order.
 printed=$("$OUT/app")
-[ "$printed" = "42 126" ] || fail "app printed '$printed', expected '42 126'"
+[ "$printed" = "doubled=42 tripled=126" ] ||
+    fail "app printed '$printed', so a hop across the boundary did not run"
 
 rllvm-get-bc "$OUT/app" -o "$OUT/app.bc"
 rllvm-info "$OUT/app" --json >"$OUT/catalog.json"
