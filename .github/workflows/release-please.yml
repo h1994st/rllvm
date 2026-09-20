@@ -15,6 +15,15 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    # The packages dist builds an app for, by their release-please path. A
+    # release build creates their tags; the tagging step creates every other
+    # package's. Together the two must cover `packages` in
+    # release-please-config.json, because a package in neither is never tagged
+    # at all -- see that step for what that costs. One list rather than two:
+    # adding a package to the config tags it by default, and only promoting it
+    # to a dist app edits this line.
+    env:
+      DIST_APPS: "crates/tools crates/query"
     steps:
       # release-please labels its release PR `autorelease: pending` and flips it
       # to `autorelease: tagged` once it creates the release. With
@@ -98,11 +107,10 @@ jobs:
       # than "tag exists" or "dispatch succeeded" fails the job.
       #
       # dist makes one singular announcement per component tag -- one tag
-      # releases exactly one package -- so this loops over the components dist
-      # actually builds an app for. rllvm-core is a library with no dist app;
-      # it reaches crates.io through the publish job instead, so it is
-      # deliberately never dispatched here. Add a "path:component" line as
-      # dist grows more apps.
+      # releases exactly one package -- so this loops over DIST_APPS, the
+      # packages dist builds an app for. rllvm-core is a library with no dist
+      # app; it reaches crates.io through the publish job instead, so it is
+      # deliberately never dispatched here and is tagged by the step below.
       - name: Dispatch the release build when a release is due
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -110,15 +118,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          PACKAGES=(
-            "crates/tools:rllvm"
-            "crates/query:rllvm-query"
-          )
-
-          for entry in "${PACKAGES[@]}"; do
-            PKG_PATH="${entry%%:*}"
-            COMPONENT="${entry##*:}"
-
+          for PKG_PATH in $DIST_APPS; do
+            COMPONENT="$(jq -er --arg pkg "$PKG_PATH" \
+              '.packages[$pkg].component' release-please-config.json)"
             VERSION="$(jq -er --arg pkg "$PKG_PATH" '.[$pkg]' .release-please-manifest.json)"
             TAG="${COMPONENT}-v${VERSION}"
 
@@ -129,4 +131,47 @@ jobs:
 
             echo "::notice::${TAG} has no tag yet - dispatching the release build."
             gh workflow run release.yml --ref main -f tag="${TAG}"
+          done
+
+      # Tag every other package. Only a release build tags the ones above, and
+      # release-please tags nothing at all (skip-github-release), so a package
+      # dist has no app for was never tagged at any version it released.
+      #
+      # release-please finds a package's last release by its tag. Without one it
+      # walks back to whatever older tag it can find and re-proposes changes it
+      # already shipped: after 0.6.0 it reread #217's breaking change from the
+      # 0.5.1 anchor and proposed rllvm-core 0.7.0, dragging both dependents to
+      # 0.6.1 through the cargo-workspace plugin. Every cycle would have
+      # escalated again, and nothing about it looked wrong -- the release PR
+      # just kept claiming a bump nobody asked for.
+      #
+      # A plain tag, not a GitHub Release: a tag is all release-please reads,
+      # and a library that ships no artifacts has nothing to put in a release.
+      - name: Tag the packages no release build tags
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          for PKG_PATH in $(jq -er '.packages | keys[]' release-please-config.json); do
+            # Word-boundary match, so "crates/core" cannot match "crates/core2".
+            case " $DIST_APPS " in
+              *" $PKG_PATH "*) continue ;;
+            esac
+
+            COMPONENT="$(jq -er --arg pkg "$PKG_PATH" \
+              '.packages[$pkg].component' release-please-config.json)"
+            VERSION="$(jq -er --arg pkg "$PKG_PATH" '.[$pkg]' .release-please-manifest.json)"
+            TAG="${COMPONENT}-v${VERSION}"
+
+            if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              echo "::notice::${TAG} is already tagged; nothing to do."
+              continue
+            fi
+
+            echo "::notice::tagging ${TAG} at ${SHA}."
+            gh api --method POST "repos/${REPO}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="$SHA" >/dev/null
           done

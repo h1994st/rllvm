@@ -12,19 +12,31 @@
 //! the wrong set for a target it omits -- so both are checked here, along with
 //! which crates dist announces at all and which targets it announces them for.
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use toml::Value;
 
-fn manifest(name: &str) -> Value {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+fn repo_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join(name);
+        .join(name)
+}
+
+fn read(name: &str) -> String {
+    let path = repo_path(name);
     fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
+fn manifest(name: &str) -> Value {
+    read(name)
         .parse::<Value>()
-        .unwrap_or_else(|error| panic!("cannot parse {}: {error}", path.display()))
+        .unwrap_or_else(|error| panic!("cannot parse {name}: {error}"))
 }
 
 /// Whether dist announces this package as an app.
@@ -199,5 +211,50 @@ fn each_app_builds_only_its_own_package() {
         Some(true),
         "without precise-builds dist builds the whole workspace for every \
          announcement, so an rllvm release compiles rllvm-query and links LLVM"
+    );
+}
+
+/// `DIST_APPS` names exactly the packages dist releases.
+///
+/// Two steps in `release-please.yml` divide the packages between them: a
+/// release build tags what dist announces, and the tagging step tags the rest.
+/// Nothing reports a wrong division.
+///
+/// Leaving a dist app out is the expensive direction. The tagging step creates
+/// its tag, the dispatch step then finds that tag and concludes the release
+/// already happened, and the version bump merges with no release built and no
+/// error raised. The other direction dispatches a release for a package dist
+/// has no app for, which at least fails loudly.
+///
+/// This is rllvm-core's bug from the other side. It had no tag at any version
+/// it released, so release-please kept walking back to the 0.5.1 anchor and
+/// re-proposing breaking changes it had already shipped.
+#[test]
+fn the_release_workflow_lists_exactly_the_packages_dist_releases() {
+    let workflow = read(".github/workflows/release-please.yml");
+    let listed: BTreeSet<&str> = workflow
+        .lines()
+        .find(|line| line.trim_start().starts_with("DIST_APPS:"))
+        .expect("release-please.yml sets DIST_APPS")
+        .split('"')
+        .nth(1)
+        .expect("DIST_APPS holds a quoted, space-separated list of package paths")
+        .split_whitespace()
+        .collect();
+
+    let root = manifest("Cargo.toml");
+    let announced: BTreeSet<&str> = root["workspace"]["members"]
+        .as_array()
+        .expect("workspace members")
+        .iter()
+        .map(|member| member.as_str().expect("member path"))
+        .filter(|member| distributed(&manifest(&format!("{member}/Cargo.toml"))))
+        .collect();
+
+    assert_eq!(
+        listed, announced,
+        "release-please.yml splits the packages between a release build and a \
+         plain tag; a package on the wrong side either never gets released or \
+         never gets tagged"
     );
 }
