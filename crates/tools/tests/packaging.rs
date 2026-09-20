@@ -172,3 +172,32 @@ fn unpublished_crates_stay_out_of_the_release_workspace() {
          version-bump it on every release: {members:?}"
     );
 }
+
+/// Each announcement builds only the package it ships.
+///
+/// dist's default is one `cargo build --workspace` per announcement, which
+/// compiles every member whatever the tag selected. The `rllvm-v0.6.0` release
+/// therefore built `crates/query`, and llvm-sys found no LLVM: the build setup
+/// installs one only for an `rllvm-query` announcement, because Homebrew's
+/// unprefixed `ar`, `nm` and `ranlib` would otherwise shadow the system tools
+/// in a job that wants them. dist reported the consequence rather than the
+/// cause -- `failed to find bin rllvm-cc` -- after all three targets had failed.
+///
+/// `precise-builds` turns that into `cargo build --package=rllvm`, so the two
+/// apps stop sharing a build and the LLVM setup can stay conditional. Only a
+/// release exercises this, and dist force-enables the same flag when packages
+/// disagree about features, so the day someone adds a feature this passes for a
+/// reason that has nothing to do with the setting being written down here.
+#[test]
+fn each_app_builds_only_its_own_package() {
+    let workspace = manifest("dist-workspace.toml");
+
+    assert_eq!(
+        workspace["dist"]
+            .get("precise-builds")
+            .and_then(Value::as_bool),
+        Some(true),
+        "without precise-builds dist builds the whole workspace for every \
+         announcement, so an rllvm release compiles rllvm-query and links LLVM"
+    );
+}
