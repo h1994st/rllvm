@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.1](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.6.0...rllvm-query-v0.6.1) (2026-09-20)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * rllvm-core bumped from 0.6.0 to 0.6.1
+
 ## [0.6.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.5.1...rllvm-query-v0.6.0) (2026-09-19)
 
 
