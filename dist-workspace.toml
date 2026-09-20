@@ -17,8 +17,9 @@ installers = ["shell"]
 pr-run-mode = "plan"
 # Publish jobs to run in CI
 publish-jobs = ["./publish-crates"]
-# Run after the release is announced, so the assets the tap reads already exist.
-post-announce-jobs = ["./tap-bump"]
+# Run after the release is announced: the tap reads assets that have to exist by
+# then, and the title can only be corrected once the release is there.
+post-announce-jobs = ["./retitle-release", "./tap-bump"]
 # Target platforms to build apps for (Rust target-triple syntax).
 # `x86_64-unknown-linux-musl` is gone because musl cannot link LLVM, and
 # `x86_64-apple-darwin` because the tap bottles only arm64_sequoia and

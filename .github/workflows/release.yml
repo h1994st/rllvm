@@ -328,6 +328,15 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+  custom-retitle-release:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/retitle-release.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+
   custom-tap-bump:
     needs:
       - plan
