@@ -1,0 +1,53 @@
+name: Retitle the release
+
+# Names the GitHub Release after the app it releases.
+#
+# dist titles a release with the heading of the changelog entry it found, and
+# release-please writes every crate the same heading -- `## [0.6.0](compare)
+# (2026-09-19)`. One release per version made that unambiguous; one release per
+# crate makes two releases called `0.6.0 (2026-09-19)`, distinguished only by
+# their tags. Neither tool can fix it at the source: dist has no title setting
+# (`display-name` renames the app, not the announcement) and release-please
+# templates the changelog body but not the version heading.
+#
+# So the title is corrected after the fact. Renaming a release changes nothing
+# else about it -- not the tag, the assets, or the notes.
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  retitle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Name the release after its app
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PLAN: ${{ inputs.plan }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          tag="$(jq -er '.announcement_tag' <<<"$PLAN")"
+
+          # A component tag announces exactly one app, which is the case this
+          # job exists for. A unified `v*` tag announces every app at that
+          # version, and dist's own title already describes the set better than
+          # any one app's name would.
+          count="$(jq -er '.releases | length' <<<"$PLAN")"
+          if [ "$count" -ne 1 ]; then
+            echo "::notice::$tag announces $count apps; keeping dist's title."
+            exit 0
+          fi
+
+          name="$(jq -er '.releases[0].app_name' <<<"$PLAN")"
+          version="$(jq -er '.releases[0].app_version' <<<"$PLAN")"
+
+          gh release edit "$tag" --repo "$REPO" --title "$name $version"
+          echo "::notice::Retitled $tag to '$name $version'."
