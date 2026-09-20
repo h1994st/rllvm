@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.2](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.1...rllvm-v0.6.2) (2026-09-20)
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * rllvm-core bumped from 0.6.0 to 0.6.1
+
 ## [0.6.1](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.0...rllvm-v0.6.1) (2026-09-20)
 
 

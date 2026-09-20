@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.0...rllvm-core-v0.6.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* carry --target into the relink ([#233](https://github.com/h1994st/rllvm/issues/233)) ([dca92b7](https://github.com/h1994st/rllvm/commit/dca92b76c66ddf5efbc5a5c015738358127912e6))
+
 ## [0.6.0](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.5.1...rllvm-core-v0.6.0) (2026-09-19)
 
 
