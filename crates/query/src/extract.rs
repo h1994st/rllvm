@@ -60,11 +60,23 @@ unsafe extern "C" {
 /// merely looks mangled produces `None` rather than a garbled guess, so an
 /// absent reading is never mistaken for a real one.
 ///
-/// Rust's legacy scheme is Itanium-shaped and demangles (hash suffix and
-/// all); its `v0` scheme is not, and answers `None`.
+/// Rust's legacy scheme is Itanium-shaped and demangles through the same C++
+/// path, hash suffix and all. Its `v0` scheme is not, and is read by
+/// `rustc-demangle` below -- without which a Rust frame in a cross-language
+/// answer stays mangled while the C++ frames beside it read cleanly.
 pub fn demangle(symbol: &str) -> Option<String> {
+    // `_R` is the `v0` marker. The C++ demangler refuses these, so they are
+    // read here instead; `try_demangle` rejects a name that only looks the
+    // part, keeping the "no garbled guess" rule below.
+    if let Some(rust) = symbol
+        .starts_with("_R")
+        .then(|| rustc_demangle::try_demangle(symbol).ok())
+        .flatten()
+    {
+        return Some(format!("{rust:#}"));
+    }
     // `_Z` is the Itanium ABI's marker for a mangled name, so a C program
-    // never reaches the FFI call at all, and neither does Rust `v0`.
+    // never reaches the FFI call at all.
     if !symbol.starts_with("_Z") {
         return None;
     }
@@ -843,7 +855,28 @@ mod tests {
         assert_eq!(
             demangle("_RNvC6foo3bar"),
             None,
-            "Rust's v0 scheme is not Itanium"
+            "malformed v0: a crate root carries a disambiguator"
+        );
+    }
+
+    /// Rust `v0` symbols read through `rustc-demangle`, not the C++ path.
+    ///
+    /// A cross-language answer puts Rust and C++ frames in one list, and the
+    /// C++ ones have always demangled. Leaving the Rust frames mangled made
+    /// the boundary look like a defect in the answer rather than a property
+    /// of the program -- this is the symbol quiche calls BoringSSL from.
+    #[test]
+    fn demangling_reads_rust_v0_names() {
+        assert_eq!(
+            demangle("_RNvMs2_NtCs8f0ESrtUyjS_6quiche3tlsNtB5_9Handshake12do_handshake").as_deref(),
+            Some("<quiche::tls::Handshake>::do_handshake"),
+        );
+
+        // The legacy scheme keeps going through the C++ demangler, hash and
+        // all, so that path is unchanged.
+        assert!(
+            demangle("_ZN4core3fmt5Debug3fmt17h0123456789abcdefE")
+                .is_some_and(|name| name.contains("core::fmt")),
         );
     }
 
