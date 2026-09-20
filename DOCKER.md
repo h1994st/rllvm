@@ -10,15 +10,14 @@ docker build -t rllvm .
 ```
 
 The toolchain comes from apt.llvm.org, not the distro, and defaults to the LLVM
-major CI pins. Override it for a consumer that caps out lower — PhASAR, for
-instance, supports 16 to 22:
+major CI pins. Override it to match whatever will read the bitcode:
 
 ```bash
 docker build --build-arg LLVM_VERSION=22 -t rllvm:llvm22 .
 ```
 
-A bitcode reader understands its own major and older, never newer, so match
-this to whatever produced the bitcode you intend to read.
+A reader understands its own major and older, never newer, so an analyser
+pinned to an older LLVM needs an image pinned to match.
 
 ## Usage
 

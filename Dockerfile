@@ -27,10 +27,10 @@ RUN cargo build --release \
 # ==============================================================================
 FROM ubuntu:24.04
 
-# The LLVM the wrappers drive. Bitcode readers only understand their own major
-# and older, so this wants to match whatever produces the bitcode you analyse;
-# it is what CI pins. Override for a consumer that caps out lower, for example
-# PhASAR, which supports 16 to 22:
+# The LLVM the wrappers drive, defaulting to what CI pins. A bitcode reader
+# understands its own major and older, never newer, so match this to whatever
+# will read the bitcode -- an analyser pinned to an older LLVM cannot read what
+# a newer one emits:
 #
 #   docker build --build-arg LLVM_VERSION=22 -t rllvm .
 ARG LLVM_VERSION=23
