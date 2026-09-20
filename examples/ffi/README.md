@@ -35,8 +35,13 @@ One module holds all three languages, and the queries report each crossing at
 the line that makes the call:
 
 ```bash
-rllvm-query --catalog build/catalog.json callers c_double  # main::main, main.rs:12
-rllvm-query --catalog build/catalog.json callers rust_add  # c_double,  c_side.c:3
+# Ask by the readable name; the mangled symbol works too
+rllvm-query --catalog build/catalog.json callees 'main::main'
+#   -> c_double    at main.rs:12
+#   -> cxx_triple  at main.rs:13
+
+rllvm-query --catalog build/catalog.json callers rust_add
+#   -> c_double    at c_side.c:3
 ```
 
 The C-led program inverts it: `rllvm-rustc` builds a staticlib and `rllvm-cc`
