@@ -292,20 +292,14 @@ reported rather than silently ignored. See the
 
 ### Queries
 
-`rllvm-query` answers source-level questions about captured bitcode. It is its
-own crate, since it links LLVM statically. It reaches crates.io with 0.6.0;
-until then, install it from a checkout:
+`rllvm-query` answers source-level questions about captured bitcode. It links
+LLVM statically, so it ships as its own crate and formula:
 
 ```bash
-git clone https://github.com/h1994st/rllvm && cd rllvm
-cargo install --path crates/query
-# if llvm-config is not on PATH:
-LLVM_SYS_231_PREFIX=/opt/homebrew/opt/llvm cargo install --path crates/query
+brew install h1994st/tap/rllvm-query   # brings its own llvm
+# Or: cargo install rllvm-query
+# If llvm-config is not on PATH: LLVM_SYS_231_PREFIX="$(brew --prefix llvm)"
 ```
-
-Upgrading from 0.5.x? A `rllvm-query` built from the old `--features query`
-still sits in `~/.cargo/bin` and keeps answering until you install the new
-crate.
 
 On Ubuntu/Debian, install `libpolly-N-dev` alongside `llvm-N-dev` and
 `libclang-N-dev`.
