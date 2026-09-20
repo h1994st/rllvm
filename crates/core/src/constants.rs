@@ -294,6 +294,16 @@ pub fn arg_exact_match_map() -> &'static CallbackMap {
             ArgInfo::new(1, CompilerArgsInfo::compile_link_binary),
         );
 
+        // Cross-compilation picks the linker as well as the code generator, so
+        // the triple has to reach the relink: a host-target relink hands
+        // cross-built objects to the host linker. clang takes `-target <triple>`
+        // and `--target=<triple>`, and rejects `--target <triple>`, so only
+        // those two are described -- the joined form as a pattern below.
+        m.insert(
+            "-target",
+            ArgInfo::new(1, CompilerArgsInfo::compile_link_binary),
+        );
+
         m.insert("-P", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
         m.insert("-C", ArgInfo::new(0, CompilerArgsInfo::compile_unary));
 
@@ -566,6 +576,7 @@ pub fn arg_patterns() -> &'static ArgPatternTable {
             (r"^-stdlib=.+$", 0, CompilerArgsInfo::compile_link_unary),
             (r"^-mtune=.+$", 0, CompilerArgsInfo::compile_unary),
             (r"^--sysroot=.+$", 0, CompilerArgsInfo::compile_link_unary),
+            (r"^--target=.+$", 0, CompilerArgsInfo::compile_link_unary),
             (r"^-print-.*$", 0, CompilerArgsInfo::compile_unary),
             (
                 r"^-mmacosx-version-min=.+$",

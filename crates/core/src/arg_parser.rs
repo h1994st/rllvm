@@ -1275,6 +1275,25 @@ mod tests {
     }
 
     #[test]
+    fn parsing_target_reaches_both_phases() {
+        // --target selects the linker as much as the code generator. Reaching
+        // only the compile phase leaves the relink on the host target, which
+        // hands cross-built objects to the host's linker: ld64.lld rejected
+        // ELF inputs with "unhandled file type".
+        //
+        // clang spells this two ways and rejects a third: `--target <triple>`
+        // is "unknown argument; did you mean '-target'?", so it is not here.
+        parse_and_assert("--target=x86_64-unknown-linux-gnu -o prog main.c", |a| {
+            a.compile_args() == &["--target=x86_64-unknown-linux-gnu"]
+                && a.link_args() == &["--target=x86_64-unknown-linux-gnu"]
+        });
+        parse_and_assert("-target x86_64-unknown-linux-gnu -o prog main.c", |a| {
+            a.compile_args() == &["-target", "x86_64-unknown-linux-gnu"]
+                && a.link_args() == &["-target", "x86_64-unknown-linux-gnu"]
+        });
+    }
+
+    #[test]
     fn parsing_empty_argument_list() {
         parse_and_assert("", |a| {
             a.input_files().is_empty() && a.object_files().is_empty() && !a.is_compile_only()
