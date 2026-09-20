@@ -1,40 +1,51 @@
 #!/usr/bin/env bash
-# Cross-compiles to a machine this host is not, and checks the whole-program
-# bitcode comes back carrying the cross target rather than the host's.
+# Cross-compiles to machines this host is not, and checks each extracted
+# module carries the cross target rather than the host's.
 set -euo pipefail
 source "$(dirname "$0")/../common.sh"
 
 # LLD links ELF wherever it runs; the host linker on macOS does not.
-require lld llvm:llvm-nm target:aarch64
+require lld llvm:llvm-nm target:aarch64 target:riscv64
 mkdir -p "$OUT"
 
-TRIPLE=aarch64-unknown-linux-gnu
-
 # aarch64 Linux is cross from an x86_64 Linux host by architecture, and from an
-# Apple silicon host by operating system and object format. It is neither on an
-# aarch64 Linux host, where this would quietly become a native build that
-# proves nothing, so skip instead of pretending.
+# Apple silicon host by operating system and object format. On an aarch64 Linux
+# host it is neither, and the run would prove nothing.
 case "$("$BINDIR/clang" -print-target-triple)" in
 *aarch64*linux* | *arm64*linux*)
-    skip "$TRIPLE is this host's own target; nothing would be cross"
+    skip "this host is aarch64 Linux; nothing here would be cross"
     ;;
 esac
 
-# One invocation that compiles and links. That is the case that used to fail:
-# rllvm relinks the objects it compiled, and a relink without --target runs on
-# the host target, handing ELF objects to the host's linker.
-rllvm-cc --target="$TRIPLE" -fuse-ld=lld -nostdlib lib.c app.c -o "$OUT/app"
-rllvm-get-bc "$OUT/app" -o "$OUT/app.bc"
+targets=(aarch64-unknown-linux-gnu)
 
-# The triple is what separates a real cross build from a host fallback that
-# merely succeeded.
-defines "$(rllvm-info "$OUT/app.bc")" "Target triple: +$TRIPLE\$" \
-    "app.bc is not built for $TRIPLE"
+# The embedding fallback does not model RISC-V relocations, so that target
+# needs llvm-objcopy. `rllvm-init` records it whenever the tool exists.
+if grep -q '^llvm_objcopy_filepath' "${RLLVM_CONFIG:-$HOME/.rllvm/config.toml}" 2>/dev/null; then
+    targets+=(riscv64-unknown-linux-gnu)
+else
+    echo "note: llvm_objcopy_filepath is unset, skipping the RISC-V target"
+fi
 
-# Both translation units, as in any capture: a link that dropped the recorded
-# section would leave one or both out.
-symbols=$("$BINDIR/llvm-nm" --defined-only "$OUT/app.bc")
-defines "$symbols" ' T _?_start$' "app.bc does not define _start"
-defines "$symbols" ' [Tt] _?twice$' "app.bc does not define twice"
+for triple in "${targets[@]}"; do
+    app=$OUT/app-$triple
 
-echo "ok: $OUT/app.bc is a whole-program module for $TRIPLE"
+    # One invocation that compiles and links. That is the case that used to
+    # fail: a relink without --target runs on the host target, handing
+    # cross-built objects to the host's linker.
+    rllvm-cc --target="$triple" -fuse-ld=lld -nostdlib lib.c app.c -o "$app"
+    rllvm-get-bc "$app" -o "$app.bc"
+
+    # The triple separates a real cross build from a host fallback that merely
+    # succeeded.
+    defines "$(rllvm-info "$app.bc")" "Target triple: +$triple\$" \
+        "$app.bc is not built for $triple"
+
+    # Both translation units: a link that dropped the recorded section would
+    # leave one or both out.
+    symbols=$("$BINDIR/llvm-nm" --defined-only "$app.bc")
+    defines "$symbols" ' T _?_start$' "$app.bc does not define _start"
+    defines "$symbols" ' [Tt] _?twice$' "$app.bc does not define twice"
+
+    echo "ok: $app.bc is a whole-program module for $triple"
+done

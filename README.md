@@ -227,14 +227,16 @@ rllvm-get-bc app -o app.bc     # app.bc carries the cross triple
 ```
 
 The recorded section follows the object's format, not the host's, so a Linux
-ELF built on macOS is embedded and extracted like any other. Linking ELF off a
-non-ELF host needs LLD; supply a sysroot as usual when libc is involved. Set
-`llvm_objcopy_filepath` for targets the internal fallback does not model, such
-as RISC-V.
+ELF built on macOS extracts like any other. Linking ELF off a non-ELF host
+needs LLD, and libc needs a sysroot as usual. Set `llvm_objcopy_filepath` for
+targets the internal fallback does not model, such as RISC-V.
+
+Universal (multiple `-arch`) builds are unsupported; build and extract one
+architecture at a time.
 
 See the [cross-compilation example](examples/cross-compile/).
 
-#### WebAssembly and eBPF
+##### WebAssembly and eBPF
 
 ```bash
 rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry \
@@ -249,9 +251,6 @@ WebAssembly linking needs a matching `wasm-ld` from LLD; see the
 [WebAssembly example](examples/wasm/). eBPF works without special handling:
 libbpf skips rllvm's section on load and preserves it through linking. That
 linker requires BTF, so compile with `-g`; see the [eBPF example](examples/ebpf/).
-
-Universal (multiple `-arch`) builds are unsupported; build and extract one
-architecture at a time.
 
 ## Extracting bitcode
 
