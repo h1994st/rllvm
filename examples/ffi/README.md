@@ -1,12 +1,13 @@
 # FFI + rllvm Example
 
-A program whose call graph crosses the FFI boundary in both directions, so the
-queries have something to answer on each side:
+Two small programs whose call graphs cross the FFI boundary, one led from each
+language, so the queries have something to answer on both sides:
 
 ```text
-main.rs        main::main  ──calls──▶  c_double      c_side.c
-c_side.c       c_double    ──calls──▶  rust_add      main.rs
-cxx_side.cc    cxx_triple  ◀──called── main::main
+Rust-led    main::main ─▶ c_double ─▶ rust_add        main.rs, c_side.c
+            main::main ─▶ cxx_triple                  cxx_side.cc
+
+C-led       main ─▶ rust_scale ─▶ c_offset            c_main.c, rust_side.rs
 ```
 
 ## Build and verify
@@ -37,6 +38,20 @@ the line that makes the call:
 rllvm-query --catalog build/catalog.json callers c_double  # main::main, main.rs:12
 rllvm-query --catalog build/catalog.json callers rust_add  # c_double,  c_side.c:3
 ```
+
+The C-led program inverts it: `rllvm-rustc` builds a staticlib and `rllvm-cc`
+links the `main` that calls into it.
+
+```bash
+rllvm-rustc -g --crate-type staticlib rust_side.rs -o build/librustside.a
+rllvm-cc -g c_main.c build/librustside.a -o build/app_c
+
+rllvm-query --catalog build/catalog_c.json callers rust_scale # main,       c_main.c:8
+rllvm-query --catalog build/catalog_c.json callers c_offset   # rust_scale, rust_side.rs:7
+```
+
+Its module holds three functions, not the whole Rust runtime: the staticlib
+pulls in a prebuilt std that was never built through the wrapper.
 
 The program prints `doubled=42 tripled=126`: 21 doubled through C, which
 reaches the doubling by calling back into Rust, then tripled through C++.

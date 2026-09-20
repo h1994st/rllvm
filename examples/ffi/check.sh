@@ -42,4 +42,24 @@ defines "$rust_to_c" 'main::main' "the Rust caller of c_double is not demangled"
 c_to_rust=$(rllvm-query --catalog "$OUT/catalog.json" callers rust_add)
 defines "$c_to_rust" '"file": *"c_side\.c"' "no C call site recorded for rust_add"
 
-echo "ok: $OUT/app.bc crosses FFI both ways, with source on each side"
+# The other lead direction: a C `main` against a Rust staticlib, so the entry
+# point is C rather than Rust. Only three functions land in the module --
+# Rust's prebuilt std is not built through the wrapper and contributes none.
+rllvm-rustc -g --crate-type staticlib rust_side.rs -o "$OUT/librustside.a"
+rllvm-cc -g c_main.c "$OUT/librustside.a" -o "$OUT/app_c"
+
+printed=$("$OUT/app_c")
+[ "$printed" = "scaled=41" ] ||
+    fail "app_c printed '$printed', so a hop across the boundary did not run"
+
+rllvm-get-bc "$OUT/app_c" -o "$OUT/app_c.bc"
+rllvm-info "$OUT/app_c" --json >"$OUT/catalog_c.json"
+
+# C calling Rust, then that Rust function calling back into C.
+c_lead=$(rllvm-query --catalog "$OUT/catalog_c.json" callers rust_scale)
+defines "$c_lead" '"file": *"c_main\.c"' "no C call site recorded for rust_scale"
+
+rust_back=$(rllvm-query --catalog "$OUT/catalog_c.json" callers c_offset)
+defines "$rust_back" '"file": *"rust_side\.rs"' "no Rust call site recorded for c_offset"
+
+echo "ok: both lead directions cross FFI, with source on each side"
