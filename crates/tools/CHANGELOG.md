@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.0...rllvm-v0.6.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* tag every package release-please releases ([#231](https://github.com/h1994st/rllvm/issues/231)) ([10e47bd](https://github.com/h1994st/rllvm/commit/10e47bd6e80afaf03d8bac87bfc56498835af031))
+
 ## [0.6.0](https://github.com/h1994st/rllvm/compare/rllvm-v0.5.1...rllvm-v0.6.0) (2026-09-19)
 
 
