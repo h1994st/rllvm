@@ -42,7 +42,7 @@ with it afterwards, does.
 | 🦀 Languages | [C, C++, Objective-C, **Rust**](#languages) | C, C++; Fortran in gllvm |
 | 🔍 Analysis | [Source-level queries, MCP server](#analyzing-bitcode) | ❌ |
 | 📋 No wrapper build | [Import `compile_commands.json`](#from-a-compilation-database) | ❌ |
-| 🎯 Targets | [Native, **WebAssembly, eBPF**](#webassembly-and-ebpf) | Native |
+| 🎯 Targets | [Native, **cross**, **WebAssembly, eBPF**](#cross-compilation) | Native |
 | 🔗 LTO | [Three modes, dispatched on object content](#lto) | `-flto` unlikely to survive extraction |
 | ♻️ Rebuilds | [Cache validated against inputs](#caching) | No bitcode cache |
 | 📦 Moving a build tree | [Paths relative to a root](#moving-a-build-tree) | Absolute bitcode paths |
@@ -215,7 +215,28 @@ COFF and WebAssembly reject `marker` and direct you to `skip`.
 
 See the [LTO example](examples/lto/).
 
-#### WebAssembly and eBPF
+#### Cross-compilation
+
+Pass `--target=<triple>` as you would to Clang. The triple reaches the link as
+well as the compile, so a one-shot build works:
+
+```bash
+rllvm-cc --target=aarch64-unknown-linux-gnu -fuse-ld=lld -nostdlib \
+  lib.c app.c -o app
+rllvm-get-bc app -o app.bc     # app.bc carries the cross triple
+```
+
+The recorded section follows the object's format, not the host's, so a Linux
+ELF built on macOS extracts like any other. Linking ELF off a non-ELF host
+needs LLD, and libc needs a sysroot as usual. Set `llvm_objcopy_filepath` for
+targets the internal fallback does not model, such as RISC-V.
+
+Universal (multiple `-arch`) builds are unsupported; build and extract one
+architecture at a time.
+
+See the [cross-compilation example](examples/cross-compile/).
+
+##### WebAssembly and eBPF
 
 ```bash
 rllvm-cc --target=wasm32-unknown-unknown -nostdlib -Wl,--no-entry \
@@ -230,9 +251,6 @@ WebAssembly linking needs a matching `wasm-ld` from LLD; see the
 [WebAssembly example](examples/wasm/). eBPF works without special handling:
 libbpf skips rllvm's section on load and preserves it through linking. That
 linker requires BTF, so compile with `-g`; see the [eBPF example](examples/ebpf/).
-
-Universal (multiple `-arch`) builds are unsupported; build and extract one
-architecture at a time.
 
 ## Extracting bitcode
 
