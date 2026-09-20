@@ -5955,3 +5955,93 @@ fn recorded_bitcode_path(object: &Path) -> String {
     assert_eq!(paths.len(), 1, "expected exactly one recorded path");
     paths[0].to_string_lossy().into_owned()
 }
+
+/// A positional static archive links after the objects that need it.
+///
+/// GNU ld resolves an archive only against objects listed ahead of it, so
+/// `rllvm-cc main.c libfoo.a -o app` has to relink as `main.o libfoo.a`. The
+/// wrapper used to emit every link argument first, which left `main`'s
+/// references undefined and broke the C-led half of `examples/ffi` on Linux.
+/// ld64 binds regardless of order, so a macOS-only run never saw it.
+///
+/// The order is asserted from the logged command rather than from a link that
+/// succeeds, because on this developer's machine it succeeds either way.
+#[test]
+fn a_positional_archive_is_linked_after_the_objects() {
+    let tmp = TempDir::new().unwrap();
+    let archive = tmp.path().join("libfoo.a");
+    let member = tmp.path().join("foo.c");
+    let main = tmp.path().join("main.c");
+
+    fs::write(&member, "int foo(void) { return 7; }\n").unwrap();
+    fs::write(
+        &main,
+        "int foo(void);\nint main(void) { return foo() - 7; }\n",
+    )
+    .unwrap();
+
+    let object = tmp.path().join("foo.o");
+    assert!(
+        rllvm("rllvm-cc")
+            .args(["-c"])
+            .arg(&member)
+            .arg("-o")
+            .arg(&object)
+            .status()
+            .expect("compile the archive member")
+            .success()
+    );
+    assert!(
+        Command::new(
+            find_llvm_config()
+                .map(|c| {
+                    let out = Command::new(&c).arg("--bindir").output().unwrap();
+                    PathBuf::from(String::from_utf8(out.stdout).unwrap().trim()).join("llvm-ar")
+                })
+                .expect("llvm-ar")
+        )
+        .arg("rcs")
+        .arg(&archive)
+        .arg(&object)
+        .status()
+        .expect("archive the member")
+        .success()
+    );
+
+    let output = rllvm("rllvm-cc")
+        .arg("--rllvm-verbose=3")
+        .args(["--"])
+        .arg(&main)
+        .arg(&archive)
+        .arg("-o")
+        .arg(tmp.path().join("app"))
+        .output()
+        .expect("Failed to run rllvm-cc");
+    assert!(
+        output.status.success(),
+        "linking against a positional archive failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let log = String::from_utf8_lossy(&output.stderr);
+    // The reconstructed link, not the pass-through of the original argv --
+    // that one already has the source ahead of the archive and would pass
+    // whatever order the wrapper rebuilds.
+    let link = log
+        .lines()
+        .find(|line| line.contains("[Linking]") && line.contains("libfoo.a"))
+        .unwrap_or_else(|| panic!("no link command logged:\n{log}"));
+    // Explicit positions: comparing the `Option`s directly would let a
+    // missing object read as "earlier" and pass.
+    let object_at = link
+        .find("main_")
+        .unwrap_or_else(|| panic!("no compiled object in the link: {link}"));
+    let archive_at = link
+        .find("libfoo.a")
+        .unwrap_or_else(|| panic!("no archive in the link: {link}"));
+    assert!(
+        object_at < archive_at,
+        "the archive precedes the object it resolves, which GNU ld cannot \
+         link: {link}"
+    );
+}
