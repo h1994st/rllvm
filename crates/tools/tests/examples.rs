@@ -159,6 +159,15 @@ fn examples_root() -> PathBuf {
         .join("examples")
 }
 
+/// Examples whose subject is a third-party project, which this harness cannot
+/// build and so does not run.
+///
+/// One directory rather than a list of example names: a flow that needs
+/// someone else's build system is documentation, and naming each such example
+/// here would mean editing this file to add one. `examples/external/*` is
+/// exempt from the `check.sh` requirement by where it sits.
+const EXTERNAL: &str = "external";
+
 /// Every directory directly under `examples/`, whether or not it ships a
 /// `check.sh`.
 fn example_directories() -> Vec<PathBuf> {
@@ -167,6 +176,7 @@ fn example_directories() -> Vec<PathBuf> {
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", root.display()))
         .map(|entry| entry.unwrap().path())
         .filter(|path| path.is_dir())
+        .filter(|path| path.file_name().is_none_or(|name| name != EXTERNAL))
         .collect();
     found.sort();
     found
