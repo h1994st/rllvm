@@ -4,6 +4,9 @@ Each subdirectory is a self-contained tutorial: sources, a `README.md`
 walking through the flow, and a `check.sh` that runs it and verifies the
 result. Every example directory must ship a `check.sh`.
 
+The exception is [`external/`](external/), whose subject is a third-party
+project this harness cannot build; those ship a `README.md` alone.
+
 ## `check.sh` contract
 
 - `$1` is an absolute output directory, opaque to the script. Write build
