@@ -626,6 +626,17 @@ pub trait CompilerWrapper {
                 args.extend(lto_ldflags.iter().cloned());
             }
         }
+        // Input object files, before the link arguments. GNU ld resolves a
+        // static archive only against the objects listed ahead of it, so
+        // `rllvm-cc main.c libfoo.a -o app` has to relink as `main.o
+        // libfoo.a`; emitting the archive first left `main`'s references
+        // undefined. ld64 binds regardless of order, so this failed only on
+        // Linux, and only for a library the command named positionally.
+        args.extend(
+            object_filepaths
+                .iter()
+                .map(|x| x.as_ref().to_string_lossy().into_owned()),
+        );
         // Link arguments
         args.extend(self.args().link_args().iter().cloned());
         // Output
@@ -633,12 +644,6 @@ pub trait CompilerWrapper {
             "-o".to_string(),
             output_filepath.to_string_lossy().into_owned(),
         ]);
-        // Input object files
-        args.extend(
-            object_filepaths
-                .iter()
-                .map(|x| x.as_ref().to_string_lossy().into_owned()),
-        );
 
         // Mode
         let mode = CompileMode::Linking;
