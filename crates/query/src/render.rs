@@ -1218,6 +1218,26 @@ mod tests {
     }
 
     #[test]
+    fn a_loosely_matched_name_says_how_many_symbols_it_gathered() {
+        // A fuzzy hit can gather unrelated functions that merely share an
+        // identifier, so an answer built from one must not read like an
+        // exact hit. `twice` finds both instantiations and `ns::twice`.
+        let session = session_with_cxx_symbols();
+        let result = run(
+            &session,
+            &Query::Defs {
+                name: "twice".into(),
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(
+            text.contains("'twice' matched loosely, gathering 3 symbol(s)"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
     fn an_empty_callers_answer_says_no_call_was_found() {
         // `a` calls `b`, so `a` itself has no callers in this fixture.
         let session = session_from(&[("a", "b")]);
