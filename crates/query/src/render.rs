@@ -310,7 +310,12 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
     if notes.is_empty() {
         return;
     }
-    out.push('\n');
+    // Separates the notes from the results above -- when there are results.
+    // An answer whose entire output is its footer must not open with a blank
+    // line.
+    if !out.is_empty() {
+        out.push('\n');
+    }
     let prefix = paint(NOTE, color, Paint::Note);
     for note in notes {
         out.push_str(&format!("{prefix} {note}\n"));
@@ -614,10 +619,11 @@ mod tests {
         let result = run(&session, &Query::Externals).unwrap();
         // This fixture binds no symbols at all, so no row prints: the
         // footer, not a row, says so.
-        assert!(
-            render(&result, TextMode::Adaptive, Color::Never)
-                .contains("every symbol in scope bound to a definition")
-        );
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("every symbol in scope bound to a definition"));
+        // And it says so on the first line: the blank line that separates
+        // notes from results has no results to separate them from here.
+        assert!(text.starts_with(NOTE), "leading blank line: {text:?}");
     }
 
     #[test]
