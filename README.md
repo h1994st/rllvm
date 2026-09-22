@@ -334,11 +334,14 @@ rllvm-query --catalog catalog.json externals                   # unbound symbols
 rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an indirect call
 ```
 
-Every answer is one JSON envelope carrying the results plus what the answer
-could *not* see: which modules failed to parse, which call sites are indirect,
-which symbols bind ambiguously, and whether each location's source has changed
-since it was compiled. See the [queries example](examples/queries/) and the
-[staleness example](examples/staleness/).
+Answers print as text. Add `--json` for the full machine-readable envelope, or
+`--full` for the same envelope as text. The MCP server always speaks JSON.
+
+Every answer carries the results plus what it could *not* see: which modules
+failed to parse, which call sites are indirect, which symbols bind
+ambiguously, and whether each location's source has changed since it was
+compiled. See the [queries example](examples/queries/) and the [staleness
+example](examples/staleness/).
 
 A symbol can be named three ways — the mangled symbol, its demangled reading, or
 a bare identifier that searches:
