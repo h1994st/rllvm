@@ -85,6 +85,13 @@ const NOTE: &str = "note:";
 /// emits nothing and reads as "unreachable", the opposite of what it found.
 const ZERO_STEP_REACH: &str = "the origin is already the destination, reached in zero steps";
 
+/// What an empty answer means for the queries that take a name or a location
+/// and can simply fail to find it. Named rather than inlined in
+/// [`empty_meaning`] because the footer has to recognise it: rule 2 says the
+/// same thing in the requester's own words, and printing both is one caveat
+/// twice.
+const MATCHED_NOTHING: &str = "the name or location matched nothing in the selected scope";
+
 fn paint(text: &str, color: Color, style: Paint) -> String {
     if color == Color::Never {
         return text.to_string();
@@ -288,8 +295,12 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         }
         // Accurate for `Defs`, `At` and `IndirectTargets`: each takes a name
         // or a location and an empty result there really does mean nothing
-        // matched.
-        _ => "the name or location matched nothing in the selected scope",
+        // matched. Spelled out rather than left to a wildcard, so a new
+        // `QueryResults` variant has to choose its own reading instead of
+        // silently inheriting this one.
+        QueryResults::Defs(_) | QueryResults::At(_) | QueryResults::IndirectTargets(_) => {
+            MATCHED_NOTHING
+        }
     }
 }
 
