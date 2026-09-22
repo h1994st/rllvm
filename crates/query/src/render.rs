@@ -46,9 +46,7 @@ enum Paint {
     /// section renderer.
     #[allow(dead_code, reason = "constructed once the --full sections land")]
     Heading,
-    /// The `note:` prefix on footer lines. Constructed starting with the
-    /// footer renderer.
-    #[allow(dead_code, reason = "constructed once the footer lands")]
+    /// The `note:` prefix on footer lines.
     Note,
     /// `file:line`.
     Location,
@@ -77,6 +75,10 @@ struct Ctx {
 /// Printed where a fact has no source location, rather than an empty column
 /// that would silently align the next field into the location's place.
 const NO_LOCATION: &str = "<no location>";
+
+/// Prefix for every footer line, so a reader can tell a caveat from a fact
+/// and `grep -v 'note:'` leaves only results.
+const NOTE: &str = "note:";
 
 fn paint(text: &str, color: Color, style: Paint) -> String {
     if color == Color::Never {
@@ -184,12 +186,125 @@ fn call_sites(
     }
 }
 
+/// One sentence per query naming what an empty result means. Separate
+/// strings rather than one generic line because the readings genuinely
+/// differ: an empty `reach` is not the same claim as an empty `defs`.
+fn empty_meaning(results: &QueryResults) -> &'static str {
+    match results {
+        QueryResults::Reach(_) => "no path over resolved edges; not proof of unreachability",
+        QueryResults::Callees(_) => "the target defined no outgoing call sites",
+        QueryResults::Externals(_) => "every symbol in scope bound to a definition",
+        _ => "the name or location matched nothing in the selected scope",
+    }
+}
+
+/// Appends the caveats a JSON reader gets from `resolution`, `analysis` and
+/// `uncertainty` but a text reader would otherwise never see. Prints nothing
+/// when every count is zero and every result matched exactly: a clean answer
+/// gets no footer at all, so the presence of `note:` is itself a signal.
+fn footer(result: &QueryResult, color: Color, out: &mut String) {
+    let mut notes: Vec<String> = Vec::new();
+
+    // Rule 1: empty results always say what empty means.
+    if result.results.is_empty() {
+        notes.push(empty_meaning(&result.results).to_string());
+    }
+
+    // Rule 2: how each name resolved, when it was not an exact hit.
+    for resolution in &result.resolution {
+        match resolution.matched {
+            None => notes.push(format!("'{}' matched nothing", resolution.requested)),
+            Some(crate::NameMatch::Fuzzy) => notes.push(format!(
+                "'{}' matched loosely, gathering {} symbol(s)",
+                resolution.requested,
+                resolution.symbols.len()
+            )),
+            Some(_) => {}
+        }
+    }
+
+    // Rule 3: modules that narrowed what was read without narrowing scope.
+    let analysis = &result.analysis;
+    let module_counts = [
+        ("failed", analysis.failed),
+        ("missing", analysis.missing),
+        ("changed", analysis.changed),
+        ("unsupported", analysis.unsupported),
+        ("not built", analysis.not_built),
+    ];
+    let unread: Vec<String> = module_counts
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(label, count)| format!("{count} {label}"))
+        .collect();
+    if !unread.is_empty() {
+        notes.push(format!(
+            "{} of {} modules were not analysed: {}",
+            unread.len(),
+            analysis.modules.len(),
+            unread.join(", ")
+        ));
+    }
+
+    // Rule 4: every non-zero uncertainty count.
+    let uncertainty = &result.uncertainty;
+    if uncertainty.indirect_call_sites > 0 {
+        notes.push(format!(
+            "{} indirect call site(s), {} with an LLVM target bound",
+            uncertainty.indirect_call_sites, uncertainty.sites_with_llvm_target_bound
+        ));
+    }
+    if uncertainty.ambiguous_bindings > 0 {
+        notes.push(format!(
+            "{} ambiguous binding(s)",
+            uncertainty.ambiguous_bindings
+        ));
+    }
+    if uncertainty.functions_without_location > 0 {
+        notes.push(format!(
+            "{} function(s) without a source location",
+            uncertainty.functions_without_location
+        ));
+    }
+    if uncertainty.locations_from_modified_sources > 0 {
+        notes.push(format!(
+            "{} location(s) from modified sources",
+            uncertainty.locations_from_modified_sources
+        ));
+    }
+    if uncertainty.conditional_path_steps > 0 {
+        notes.push(format!(
+            "{} step(s) hold only if the call takes the member the path chose",
+            uncertainty.conditional_path_steps
+        ));
+    }
+
+    // Rule 5: the address-taken inventory is a heuristic, never an edge.
+    if let QueryResults::IndirectTargets(results) = &result.results
+        && results
+            .iter()
+            .any(|entry| entry.address_taken_inventory.is_some())
+    {
+        notes.push("address-taken candidates are signature-matched, never call edges".to_string());
+    }
+
+    if notes.is_empty() {
+        return;
+    }
+    out.push('\n');
+    let prefix = paint(NOTE, color, Paint::Note);
+    for note in notes {
+        out.push_str(&format!("{prefix} {note}\n"));
+    }
+}
+
 /// Renders one answer. Infallible: every field it reads is already owned by
 /// the result.
 pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
     let ctx = Ctx { mode, color };
     let mut out = String::new();
     render_results(result, ctx, &mut out);
+    footer(result, color, &mut out);
     out
 }
 
@@ -329,7 +444,13 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Query, run, testing::*};
+    use crate::{
+        Query,
+        facts::{FunctionFact, Linkage, SourceStatus},
+        index::Session,
+        run,
+        testing::*,
+    };
 
     #[test]
     fn defs_prints_one_line_per_definition() {
@@ -341,10 +462,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(
-            render(&result, TextMode::Adaptive, Color::Never).trim(),
-            "<no location>  main"
-        );
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        // Not an exact match on the whole output: `session_with_cxx_symbols`
+        // gives none of its functions a location, so the footer reports that
+        // program-wide, after the one line this test is actually about.
+        assert!(text.starts_with("<no location>  main\n"), "got: {text}");
     }
 
     #[test]
@@ -378,12 +500,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "footer arrives in Task 4"]
     fn externals_prints_each_symbol_with_its_binding_status() {
         let session = session_from(&[("a", "b")]);
         let result = run(&session, &Query::Externals).unwrap();
         // No unbound symbols in this fixture: the footer, not a row, says so.
-        assert!(render(&result, TextMode::Adaptive, Color::Never).contains("matched nothing"));
+        assert!(
+            render(&result, TextMode::Adaptive, Color::Never)
+                .contains("every symbol in scope bound to a definition")
+        );
     }
 
     #[test]
@@ -511,5 +635,73 @@ mod tests {
         .unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
         assert!(text.contains("unresolved"), "got: {text}");
+    }
+
+    #[test]
+    fn an_absent_path_says_what_absence_means() {
+        let session = session_with_indirect_gap();
+        let result = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "c".into(),
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("no path over resolved edges"), "got: {text}");
+        assert!(text.contains("not proof of unreachability"), "got: {text}");
+    }
+
+    #[test]
+    fn a_nonzero_uncertainty_count_reaches_the_reader() {
+        let session = session_with_ambiguous_bindings();
+        let result = run(&session, &Query::Externals).unwrap();
+        assert!(result.uncertainty.ambiguous_bindings > 0, "fixture changed");
+        assert!(
+            render(&result, TextMode::Adaptive, Color::Never).contains("ambiguous binding"),
+            "a non-zero ambiguity must not be silent"
+        );
+    }
+
+    #[test]
+    fn a_clean_answer_prints_no_footer() {
+        // `session_from` leaves every function's `location` unset, which
+        // would itself trip the footer's "functions without a location"
+        // count; a genuinely clean answer needs functions that have one.
+        let source_location = |line: u32| {
+            Some(SourceLocation {
+                file: "a.c".into(),
+                directory: None,
+                line,
+                column: 1,
+                source_status: SourceStatus::Current,
+                status_basis: None,
+                inlined_at: Vec::new(),
+            })
+        };
+        let caller = FunctionFact {
+            location: source_location(1),
+            ..function("m", "a", true, Linkage::Internal)
+        };
+        let callee = FunctionFact {
+            location: source_location(2),
+            ..function("m", "b", true, Linkage::Internal)
+        };
+        let site = direct_call(&caller, &callee, 0);
+        let session = Session::new(facts(vec![caller, callee], vec![site]), Vec::new());
+        let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(
+            !text.contains("note:"),
+            "clean answer gained a footer: {text}"
+        );
+    }
+
+    #[test]
+    fn a_failed_module_is_reported_even_when_results_are_present() {
+        let facts = facts_with_one_failed_module();
+        let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
+        assert!(render(&result, TextMode::Adaptive, Color::Never).contains("failed"));
     }
 }
