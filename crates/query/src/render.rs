@@ -366,6 +366,28 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
         "  ambiguous_bindings: {}\n  conditional_path_steps: {}\n",
         uncertainty.ambiguous_bindings, uncertainty.conditional_path_steps
     ));
+    // Every ambiguous binding `ambiguous_bindings` only counts: for `reach`
+    // the ones that walk actually reached, for every other query the full
+    // program-wide set. `ambiguous_bindings` says how many; this says which,
+    // with the same three facts `PathStep::Binding` shows in the results
+    // above, so the two read consistently.
+    let full = Ctx {
+        mode: TextMode::Full,
+        color,
+    };
+    for binding in &uncertainty.frontier {
+        let tint = match binding.status {
+            BindingStatus::Unique => Paint::Resolved,
+            BindingStatus::Ambiguous => Paint::Uncertain,
+            BindingStatus::Unbound => Paint::Absent,
+        };
+        out.push_str(&format!(
+            "  frontier: {}  ({}, {} candidate(s))\n",
+            name(&result.symbols, &binding.symbol, full),
+            paint(&format!("{:?}", binding.status), color, tint),
+            binding.candidates.len()
+        ));
+    }
 
     let provenance = &result.provenance;
     out.push_str(&format!(
@@ -878,6 +900,20 @@ mod tests {
         let session = session_from(&[("a", "b")]);
         let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
         assert!(render(&result, TextMode::Full, Color::Never).contains("ambiguous_bindings: 0"));
+    }
+
+    #[test]
+    fn full_mode_prints_the_frontier_of_ambiguous_bindings() {
+        let session = session_with_ambiguous_bindings();
+        let result = run(&session, &Query::Externals).unwrap();
+        assert!(
+            !result.uncertainty.frontier.is_empty(),
+            "fixture changed: expected a non-empty frontier"
+        );
+        let text = render(&result, TextMode::Full, Color::Never);
+        assert!(text.contains("frontier: target"), "got: {text}");
+        assert!(text.contains("Ambiguous"), "got: {text}");
+        assert!(text.contains("2 candidate(s))"), "got: {text}");
     }
 
     #[test]
