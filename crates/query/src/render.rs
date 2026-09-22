@@ -1,0 +1,289 @@
+//! Human-readable rendering of a [`QueryResult`].
+//!
+//! Returns a `String` rather than writing to stdout so the renderers are
+//! ordinary unit tests rather than capture harnesses. The JSON envelope is
+//! untouched: `--json` still serializes [`QueryResult`] directly, and MCP
+//! never reaches this module at all.
+
+use std::collections::BTreeMap;
+
+use owo_colors::OwoColorize;
+
+use crate::{QueryResult, QueryResults, bind::BindingStatus, facts::SourceLocation};
+
+/// How much of the envelope to print.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextMode {
+    /// Results, plus only the footer lines that carry information.
+    Adaptive,
+    /// Results, plus every envelope field including zeroes.
+    Full,
+}
+
+/// Whether to emit ANSI styling. Injected rather than sensed inside this
+/// module: `supports_color::on` reads the real environment, which would make
+/// every assertion below depend on how the suite was invoked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    Always,
+    Never,
+}
+
+/// The palette. Semantic rather than decorative: the same meaning gets the
+/// same colour in every query, so `green` always reads as "resolved" and
+/// `yellow` as "the tool is not certain".
+///
+/// Colour is always redundant with the text. `indirect`, `unresolved` and
+/// `Ambiguous` are spelled out as words too, so a piped answer, a monochrome
+/// terminal and a colour-blind reader lose nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Paint {
+    /// `--full` section headings. Constructed starting with the `--full`
+    /// section renderer.
+    #[allow(dead_code, reason = "constructed once the --full sections land")]
+    Heading,
+    /// The `note:` prefix on footer lines. Constructed starting with the
+    /// footer renderer.
+    #[allow(dead_code, reason = "constructed once the footer lands")]
+    Note,
+    /// `file:line`.
+    Location,
+    /// The symbol an answer is about.
+    Symbol,
+    /// Resolved and certain: a direct call, a unique binding, a known bound.
+    Resolved,
+    /// Known to be incomplete: an indirect call, an ambiguous binding, a
+    /// conditional path step.
+    Uncertain,
+    /// Absent or unbound: an unresolved site, an unbound symbol.
+    Absent,
+    /// Present but not the point: intrinsics, inline asm, a missing location.
+    Muted,
+}
+
+/// Mode and colour travel together through every renderer. A copy struct
+/// rather than two parameters threaded side by side, which reached five
+/// arguments on the call-site helpers.
+#[derive(Clone, Copy)]
+struct Ctx {
+    mode: TextMode,
+    color: Color,
+}
+
+/// Printed where a fact has no source location, rather than an empty column
+/// that would silently align the next field into the location's place.
+const NO_LOCATION: &str = "<no location>";
+
+fn paint(text: &str, color: Color, style: Paint) -> String {
+    if color == Color::Never {
+        return text.to_string();
+    }
+    match style {
+        Paint::Heading => format!("{}", text.bold()),
+        Paint::Note => format!("{}", text.yellow()),
+        Paint::Location => format!("{}", text.cyan()),
+        Paint::Symbol => format!("{}", text.bright_white()),
+        Paint::Resolved => format!("{}", text.green()),
+        Paint::Uncertain => format!("{}", text.yellow()),
+        Paint::Absent => format!("{}", text.red()),
+        Paint::Muted => format!("{}", text.dimmed()),
+    }
+}
+
+/// The readable form of one symbol. Demangled when the envelope's `symbols`
+/// table has a reading for it, and in [`TextMode::Full`] the mangled symbol
+/// follows in brackets, because the mangled name is the identity.
+fn name(symbols: &BTreeMap<String, String>, symbol: &str, ctx: Ctx) -> String {
+    let readable = match (symbols.get(symbol), ctx.mode) {
+        (Some(demangled), TextMode::Adaptive) => demangled.clone(),
+        (Some(demangled), TextMode::Full) => {
+            return format!(
+                "{}  {}",
+                paint(demangled, ctx.color, Paint::Symbol),
+                paint(&format!("[{symbol}]"), ctx.color, Paint::Muted)
+            );
+        }
+        (None, _) => symbol.to_string(),
+    };
+    paint(&readable, ctx.color, Paint::Symbol)
+}
+
+fn location(location: Option<&SourceLocation>, ctx: Ctx) -> String {
+    match location {
+        Some(location) => paint(
+            &format!("{}:{}", location.file.display(), location.line),
+            ctx.color,
+            Paint::Location,
+        ),
+        None => paint(NO_LOCATION, ctx.color, Paint::Muted),
+    }
+}
+
+/// Renders one answer. Infallible: every field it reads is already owned by
+/// the result.
+pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
+    let ctx = Ctx { mode, color };
+    let mut out = String::new();
+    render_results(result, ctx, &mut out);
+    out
+}
+
+fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
+    let symbols = &result.symbols;
+    match &result.results {
+        QueryResults::Defs(entries) => {
+            for entry in entries {
+                out.push_str(&format!(
+                    "{}  {}\n",
+                    location(entry.location.as_ref(), ctx),
+                    name(symbols, &entry.function.symbol, ctx)
+                ));
+            }
+        }
+        QueryResults::Closure(functions) => {
+            for function in functions {
+                out.push_str(&format!("{}\n", name(symbols, &function.symbol, ctx)));
+            }
+        }
+        QueryResults::Externals(bindings) => {
+            for binding in bindings {
+                let tint = match binding.status {
+                    BindingStatus::Unique => Paint::Resolved,
+                    BindingStatus::Ambiguous => Paint::Uncertain,
+                    BindingStatus::Unbound => Paint::Absent,
+                };
+                out.push_str(&format!(
+                    "{}  {}\n",
+                    name(symbols, &binding.symbol, ctx),
+                    paint(&format!("{:?}", binding.status), ctx.color, tint)
+                ));
+            }
+        }
+        // Filled in by Tasks 2 and 3. Exhaustive rather than a wildcard so a
+        // new `QueryResults` variant fails to compile here.
+        QueryResults::At(_)
+        | QueryResults::Callers(_)
+        | QueryResults::Callees(_)
+        | QueryResults::Uses(_)
+        | QueryResults::Reach(_)
+        | QueryResults::IndirectTargets(_) => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Query, run, testing::*};
+
+    #[test]
+    fn defs_prints_one_line_per_definition() {
+        let session = session_with_cxx_symbols();
+        let result = run(
+            &session,
+            &Query::Defs {
+                name: "main".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            render(&result, TextMode::Adaptive, Color::Never).trim(),
+            "<no location>  main"
+        );
+    }
+
+    #[test]
+    fn a_mangled_symbol_prints_its_demangled_reading() {
+        let session = session_with_cxx_symbols();
+        let result = run(
+            &session,
+            &Query::Defs {
+                name: "_Z5twiceIiET_S0_".into(),
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("int twice<int>(int)"), "got: {text}");
+        assert!(!text.contains("_Z5twiceIiET_S0_"), "mangled leaked: {text}");
+    }
+
+    #[test]
+    fn full_mode_keeps_the_mangled_symbol_beside_the_reading() {
+        let session = session_with_cxx_symbols();
+        let result = run(
+            &session,
+            &Query::Defs {
+                name: "_Z5twiceIiET_S0_".into(),
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Full, Color::Never);
+        assert!(text.contains("int twice<int>(int)"), "got: {text}");
+        assert!(text.contains("[_Z5twiceIiET_S0_]"), "got: {text}");
+    }
+
+    #[test]
+    #[ignore = "footer arrives in Task 4"]
+    fn externals_prints_each_symbol_with_its_binding_status() {
+        let session = session_from(&[("a", "b")]);
+        let result = run(&session, &Query::Externals).unwrap();
+        // No unbound symbols in this fixture: the footer, not a row, says so.
+        assert!(render(&result, TextMode::Adaptive, Color::Never).contains("matched nothing"));
+    }
+
+    #[test]
+    fn color_never_emits_no_escape_codes() {
+        for style in [
+            Paint::Heading,
+            Paint::Note,
+            Paint::Location,
+            Paint::Symbol,
+            Paint::Resolved,
+            Paint::Uncertain,
+            Paint::Absent,
+            Paint::Muted,
+        ] {
+            assert_eq!(paint("x", Color::Never, style), "x");
+            assert!(
+                paint("x", Color::Always, style).contains('\u{1b}'),
+                "{style:?} produced no escape code"
+            );
+        }
+    }
+
+    #[test]
+    fn a_coloured_answer_carries_the_same_words_as_a_plain_one() {
+        // Colour is redundant with the text: stripping the escape codes from
+        // a coloured answer must give back the plain one, so a pipe, a
+        // monochrome terminal and a colour-blind reader lose nothing.
+        // `Defs` rather than `Callees`: call-site rendering arrives in Task
+        // 2, and this property must hold for what Task 1 actually renders.
+        let session = session_with_cxx_symbols();
+        let result = run(
+            &session,
+            &Query::Defs {
+                name: "main".into(),
+            },
+        )
+        .unwrap();
+        let plain = render(&result, TextMode::Adaptive, Color::Never);
+        let coloured = render(&result, TextMode::Adaptive, Color::Always);
+        assert!(coloured.contains('\u{1b}'), "nothing was coloured");
+        let stripped: String = {
+            let mut out = String::new();
+            let mut chars = coloured.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        assert_eq!(stripped, plain);
+    }
+}
