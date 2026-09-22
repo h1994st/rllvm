@@ -37,9 +37,10 @@ The other six are `at`, `uses`, `reach`, `closure`, `externals` and
 Every answer carries the results **and** what it could not see: which modules
 failed to parse, which call sites are indirect, which symbols bind
 ambiguously, and whether each location's source has changed since it was
-compiled. Answers print as text by default; add `--json` for the full
-envelope. `analysis` reports what was actually read; `scope` is quoted from
-the catalog and never shrinks.
+compiled. Answers print as text by default, with anything that bears on the
+answer under `note:`; add `--json` for the full envelope, or `--full` for the
+same context as text. Either shows `analysis`, what was actually read, beside
+`scope`, which is quoted from the catalog and never shrinks.
 
 An empty `reach` is not a proof of unreachability, and `callees` is an upper
 bound rather than a reachable set.
