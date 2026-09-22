@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use owo_colors::OwoColorize;
 
 use crate::{
-    QueryResult, QueryResults,
+    PathStep, QueryResult, QueryResults,
     bind::BindingStatus,
     facts::{CallSiteFact, CallTarget, FunctionId, SourceLocation},
 };
@@ -251,9 +251,78 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                 ));
             }
         }
-        // Filled in by Task 3. Exhaustive rather than a wildcard so a new
-        // `QueryResults` variant fails to compile here.
-        QueryResults::Reach(_) | QueryResults::IndirectTargets(_) => {}
+        QueryResults::Reach(path) => {
+            // `None` is no path; `Some(vec![])` is a trivial found path. The
+            // footer distinguishes them, so an empty `Some` prints nothing
+            // here rather than a misleading blank.
+            for step in path.iter().flatten() {
+                match step {
+                    PathStep::Call(site) => out.push_str(&format!(
+                        "{}              {}\n",
+                        paint("call", ctx.color, Paint::Resolved),
+                        name(symbols, &site.function.symbol, ctx)
+                    )),
+                    PathStep::BoundedIndirect {
+                        site,
+                        chosen,
+                        bound,
+                    } => {
+                        out.push_str(&format!(
+                            "{}  {}  chose {}  of {}\n",
+                            paint("bounded-indirect", ctx.color, Paint::Uncertain),
+                            name(symbols, &site.function.symbol, ctx),
+                            name(symbols, &chosen.symbol, ctx),
+                            symbol_list(symbols, bound, ctx)
+                        ));
+                    }
+                    PathStep::Binding(binding) => {
+                        let tint = match binding.status {
+                            BindingStatus::Unique => Paint::Resolved,
+                            BindingStatus::Ambiguous => Paint::Uncertain,
+                            BindingStatus::Unbound => Paint::Absent,
+                        };
+                        out.push_str(&format!(
+                            "{}           {}  ({}, {} candidate(s))\n",
+                            paint("binding", ctx.color, Paint::Location),
+                            name(symbols, &binding.symbol, ctx),
+                            paint(&format!("{:?}", binding.status), ctx.color, tint),
+                            binding.candidates.len()
+                        ));
+                    }
+                }
+            }
+        }
+        QueryResults::IndirectTargets(results) => {
+            for entry in results {
+                out.push_str(&format!(
+                    "{}  {}\n",
+                    location(entry.location.as_ref(), ctx),
+                    paint(&entry.signature, ctx.color, Paint::Muted)
+                ));
+                match (&entry.llvm_target_bound, entry.unresolved) {
+                    (Some(bound), _) => out.push_str(&format!(
+                        "    {} {}\n",
+                        paint("bound:", ctx.color, Paint::Resolved),
+                        symbol_list(symbols, bound, ctx)
+                    )),
+                    (None, true) => out.push_str(&format!(
+                        "    {}\n",
+                        paint("unresolved", ctx.color, Paint::Absent)
+                    )),
+                    (None, false) => {}
+                }
+                if let Some(inventory) = &entry.address_taken_inventory {
+                    out.push_str(&format!(
+                        "    {}\n",
+                        paint(
+                            &format!("address-taken candidates: {}", inventory.len()),
+                            ctx.color,
+                            Paint::Uncertain
+                        )
+                    ));
+                }
+            }
+        }
     }
 }
 
@@ -394,5 +463,53 @@ mod tests {
         )
         .unwrap();
         assert!(render(&result, TextMode::Adaptive, Color::Never).contains("only"));
+    }
+
+    #[test]
+    fn a_found_path_prints_its_steps_in_order() {
+        let session = session_from(&[("a", "b")]);
+        let result = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "b".into(),
+            },
+        )
+        .unwrap();
+        assert!(render(&result, TextMode::Adaptive, Color::Never).contains("call"));
+    }
+
+    #[test]
+    fn a_conditional_step_says_it_is_conditional() {
+        let session = session_with_bounded_indirect();
+        let result = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "target".into(),
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("bounded-indirect"), "got: {text}");
+    }
+
+    #[test]
+    fn indirect_targets_prints_the_signature_and_says_unresolved() {
+        // `session_with_indirect_gap` records no location on its indirect
+        // call (see `testing.rs`), so `at` could never address it. Its
+        // unresolved indirect site sits in `session_with_address_taken_function`
+        // at `t.c:4` instead.
+        let session = session_with_address_taken_function();
+        let result = run(
+            &session,
+            &Query::IndirectTargets {
+                at: "t.c:4".into(),
+                heuristics: false,
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("unresolved"), "got: {text}");
     }
 }
