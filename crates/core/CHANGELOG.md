@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.1...rllvm-core-v0.6.2) (2026-09-22)
+
+
+### Bug Fixes
+
+* link a positional archive after the objects ([#241](https://github.com/h1994st/rllvm/issues/241)) ([dd39459](https://github.com/h1994st/rllvm/commit/dd39459bd2623a318fee5a914b5da05acdaf77e5))
+
 ## [0.6.1](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.0...rllvm-core-v0.6.1) (2026-09-20)
 
 

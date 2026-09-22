@@ -1,6 +1,6 @@
 [package]
 name = "rllvm"
-version = "0.6.2"
+version = "0.6.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -14,7 +14,7 @@ readme = "README.md"
 exclude = ["tests/*"]
 
 [dependencies]
-rllvm-core = { path = "../core", version = "0.6.1" }
+rllvm-core = { path = "../core", version = "0.6.2" }
 clap.workspace = true
 clap_complete.workspace = true
 object.workspace = true
