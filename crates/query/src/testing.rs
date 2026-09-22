@@ -36,6 +36,20 @@ pub(crate) fn function(
     }
 }
 
+/// A current, uninlined `file:line`. Only the two fields a fixture ever
+/// varies are parameters; the rest are the defaults every caller wanted.
+pub(crate) fn source_location(file: &str, line: u32) -> SourceLocation {
+    SourceLocation {
+        file: file.into(),
+        directory: None,
+        line,
+        column: 1,
+        source_status: SourceStatus::Current,
+        status_basis: None,
+        inlined_at: Vec::new(),
+    }
+}
+
 pub(crate) fn direct_call(
     caller: &FunctionFact,
     callee: &FunctionFact,

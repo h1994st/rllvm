@@ -191,6 +191,77 @@ fn call_sites(
     }
 }
 
+/// What this one answer actually shows, for the two footer rules whose
+/// counts are program-wide rather than per-answer.
+///
+/// `uncertainty.functions_without_location` and
+/// `uncertainty.indirect_call_sites` are computed over the whole session.
+/// Every `extern` declaration is a function without a location, so on any
+/// multi-translation-unit program both counts are non-zero and both notes
+/// print under every answer -- a constant that buries the load-bearing
+/// notes and trains a reader to skip the footer. Gated on what the answer
+/// in front of the reader actually shows, they carry information again; the
+/// program-wide totals stay in `--full` and in the JSON envelope.
+#[derive(Clone, Copy, Default)]
+struct Shown {
+    /// At least one [`NO_LOCATION`] was printed.
+    missing_location: bool,
+    /// At least one indirect call site was printed.
+    indirect_call_site: bool,
+}
+
+fn shown_in_sites(sites: &[CallSiteFact], shown: &mut Shown) {
+    for site in sites {
+        shown.missing_location |= site.location.is_none();
+        shown.indirect_call_site |= matches!(site.target, CallTarget::Indirect { .. });
+    }
+}
+
+/// Mirrors [`render_results`] arm for arm, and is wildcard-free for the
+/// same reason [`empty_meaning`] is: a new [`QueryResults`] variant has to
+/// state what it shows rather than inherit "neither".
+fn shown_in(results: &QueryResults) -> Shown {
+    let mut shown = Shown::default();
+    match results {
+        QueryResults::Defs(entries) => {
+            shown.missing_location = entries.iter().any(|entry| entry.location.is_none());
+        }
+        QueryResults::At(entries) => {
+            for entry in entries {
+                shown_in_sites(&entry.call_sites, &mut shown);
+            }
+        }
+        QueryResults::Callers(entries) => {
+            for entry in entries {
+                shown_in_sites(&entry.call_sites, &mut shown);
+            }
+        }
+        QueryResults::Callees(sites) => shown_in_sites(sites, &mut shown),
+        QueryResults::Uses(uses) => {
+            shown.missing_location = uses.iter().any(|use_fact| use_fact.location.is_none());
+        }
+        QueryResults::Reach(path) => {
+            // A path prints no locations, and its only indirect step is the
+            // one CVP bounded.
+            shown.indirect_call_site = path
+                .iter()
+                .flatten()
+                .any(|step| matches!(step, PathStep::BoundedIndirect { .. }));
+        }
+        QueryResults::IndirectTargets(entries) => {
+            shown.missing_location = entries.iter().any(|entry| entry.location.is_none());
+            // Every row of this answer is an indirect call site by
+            // construction; the word itself is in the query's name rather
+            // than the row.
+            shown.indirect_call_site = !entries.is_empty();
+        }
+        // Neither prints a location nor a call site: `closure` prints bare
+        // names, `externals` a symbol and its binding status.
+        QueryResults::Closure(_) | QueryResults::Externals(_) => {}
+    }
+    shown
+}
+
 /// One sentence per query naming what an empty result means. Separate
 /// strings rather than one generic line because the readings genuinely
 /// differ: an empty `reach` is not the same claim as an empty `defs`.
@@ -279,9 +350,13 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
         ));
     }
 
-    // Rule 4: every non-zero uncertainty count.
+    // Rule 4: every non-zero uncertainty count. The two counts that are
+    // program-wide rather than per-answer print only when this answer shows
+    // the thing they count -- see [`Shown`]. The count itself stays
+    // program-wide: having seen one, the reader is told how many there are.
+    let shown = shown_in(&result.results);
     let uncertainty = &result.uncertainty;
-    if uncertainty.indirect_call_sites > 0 {
+    if uncertainty.indirect_call_sites > 0 && shown.indirect_call_site {
         notes.push(format!(
             "{} indirect call site(s), {} with an LLVM target bound",
             uncertainty.indirect_call_sites, uncertainty.sites_with_llvm_target_bound
@@ -293,7 +368,7 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
             uncertainty.ambiguous_bindings
         ));
     }
-    if uncertainty.functions_without_location > 0 {
+    if uncertainty.functions_without_location > 0 && shown.missing_location {
         notes.push(format!(
             "{} function(s) without a source location",
             uncertainty.functions_without_location
@@ -572,7 +647,7 @@ mod tests {
     use super::*;
     use crate::{
         Query,
-        facts::{FunctionFact, Linkage, ModuleAnalysis, SourceStatus},
+        facts::{FunctionFact, Linkage, ModuleAnalysis},
         index::{Direction, Session},
         run,
         testing::*,
@@ -700,15 +775,7 @@ mod tests {
         let caller = function("m", "a", true, Linkage::Internal);
         let callee = function("m", "b", true, Linkage::Internal);
         let mut site = direct_call(&caller, &callee, 0);
-        site.location = Some(SourceLocation {
-            file: "caller.c".into(),
-            directory: None,
-            line: 7,
-            column: 1,
-            source_status: SourceStatus::Current,
-            status_basis: None,
-            inlined_at: Vec::new(),
-        });
+        site.location = Some(source_location("caller.c", 7));
         let session = Session::new(facts(vec![caller, callee], vec![site]), Vec::new());
         let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
@@ -840,27 +907,69 @@ mod tests {
     }
 
     #[test]
+    fn the_missing_location_note_follows_the_answer_not_the_program() {
+        // `functions_without_location` counts the whole session, and every
+        // `extern` declaration lands in it, so on a real multi-file program
+        // it is non-zero for every query. Printing it unconditionally makes
+        // it a constant the reader skips past -- together with the notes
+        // that do bear on the answer.
+        let located = FunctionFact {
+            location: Some(source_location("a.c", 1)),
+            ..function("m", "located", true, Linkage::Internal)
+        };
+        let unlocated = function("m", "unlocated", true, Linkage::Internal);
+        let session = Session::new(facts(vec![located, unlocated], vec![]), Vec::new());
+        let defs_of = |name: &str| {
+            let result = run(&session, &Query::Defs { name: name.into() }).unwrap();
+            assert!(result.uncertainty.functions_without_location > 0, "fixture");
+            render(&result, TextMode::Adaptive, Color::Never)
+        };
+
+        let quiet = defs_of("located");
+        assert!(
+            !quiet.contains("without a source location"),
+            "an answer that shows no missing location must not carry the note: {quiet:?}"
+        );
+
+        let loud = defs_of("unlocated");
+        assert!(loud.contains(NO_LOCATION), "got: {loud:?}");
+        assert!(loud.contains("without a source location"), "got: {loud:?}");
+    }
+
+    #[test]
+    fn the_indirect_call_note_follows_the_answer_not_the_program() {
+        // Same rule for `indirect_call_sites`: one indirect call anywhere in
+        // the program must not annotate every `defs` answer.
+        let session = session_with_bounded_indirect();
+        let text_of = |query| {
+            let result = run(&session, &query).unwrap();
+            assert!(result.uncertainty.indirect_call_sites > 0, "fixture");
+            render(&result, TextMode::Adaptive, Color::Never)
+        };
+
+        let callees = text_of(Query::Callees { name: "a".into() });
+        assert!(callees.contains("indirect call site"), "got: {callees:?}");
+
+        let defs = text_of(Query::Defs {
+            name: "target".into(),
+        });
+        assert!(
+            !defs.contains("indirect call site"),
+            "an answer with no indirect site must not carry the note: {defs:?}"
+        );
+    }
+
+    #[test]
     fn a_clean_answer_prints_no_footer() {
         // `session_from` leaves every function's `location` unset, which
         // would itself trip the footer's "functions without a location"
         // count; a genuinely clean answer needs functions that have one.
-        let source_location = |line: u32| {
-            Some(SourceLocation {
-                file: "a.c".into(),
-                directory: None,
-                line,
-                column: 1,
-                source_status: SourceStatus::Current,
-                status_basis: None,
-                inlined_at: Vec::new(),
-            })
-        };
         let caller = FunctionFact {
-            location: source_location(1),
+            location: Some(source_location("a.c", 1)),
             ..function("m", "a", true, Linkage::Internal)
         };
         let callee = FunctionFact {
-            location: source_location(2),
+            location: Some(source_location("a.c", 2)),
             ..function("m", "b", true, Linkage::Internal)
         };
         let site = direct_call(&caller, &callee, 0);
