@@ -176,15 +176,22 @@ fn call_target(symbols: &BTreeMap<String, String>, target: &CallTarget, ctx: Ctx
     }
 }
 
+/// One level of nesting, for call sites printed under the function that owns
+/// them. `callees` prints no parent line, so its rows take [`NO_INDENT`] and
+/// start at column 0 like every other query's results.
+const CALL_SITE_INDENT: &str = "    ";
+const NO_INDENT: &str = "";
+
 fn call_sites(
     symbols: &BTreeMap<String, String>,
     sites: &[CallSiteFact],
+    indent: &str,
     ctx: Ctx,
     out: &mut String,
 ) {
     for site in sites {
         out.push_str(&format!(
-            "    {}  {}\n",
+            "{indent}{}  {}\n",
             location(site.location.as_ref(), ctx),
             call_target(symbols, &site.target, ctx)
         ));
@@ -559,16 +566,16 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
         QueryResults::At(entries) => {
             for entry in entries {
                 out.push_str(&format!("{}\n", name(symbols, &entry.function.symbol, ctx)));
-                call_sites(symbols, &entry.call_sites, ctx, out);
+                call_sites(symbols, &entry.call_sites, CALL_SITE_INDENT, ctx, out);
             }
         }
         QueryResults::Callers(entries) => {
             for entry in entries {
                 out.push_str(&format!("{}\n", name(symbols, &entry.function.symbol, ctx)));
-                call_sites(symbols, &entry.call_sites, ctx, out);
+                call_sites(symbols, &entry.call_sites, CALL_SITE_INDENT, ctx, out);
             }
         }
-        QueryResults::Callees(sites) => call_sites(symbols, sites, ctx, out),
+        QueryResults::Callees(sites) => call_sites(symbols, sites, NO_INDENT, ctx, out),
         QueryResults::Uses(uses) => {
             for use_fact in uses {
                 let in_function = match &use_fact.in_function {
@@ -814,6 +821,39 @@ mod tests {
             text.lines()
                 .any(|line| line.contains("indirect") && line.contains("i32 (i32, i32)")),
             "no rendered call-site row: {text}"
+        );
+    }
+
+    #[test]
+    fn callees_rows_start_at_column_zero_and_callers_rows_nest() {
+        // `call_sites` nests a row under the parent line naming the function
+        // that owns it. `callees` prints no parent line, so an indented row
+        // there hangs under nothing while every other query's results start
+        // at column 0.
+        let session = session_with_bounded_indirect();
+        let text_of = |query| {
+            render(
+                &run(&session, &query).unwrap(),
+                TextMode::Adaptive,
+                Color::Never,
+            )
+        };
+
+        let callees = text_of(Query::Callees { name: "a".into() });
+        let row = callees.lines().next().unwrap_or_default();
+        assert!(row.contains("indirect"), "no row rendered: {callees}");
+        assert!(!row.starts_with(' '), "callees row is indented: {row:?}");
+
+        // The nesting is still right where there is a parent to nest under.
+        let callers = text_of(Query::Callers {
+            name: "target".into(),
+        });
+        let mut lines = callers.lines();
+        assert_eq!(lines.next(), Some("a"), "got: {callers}");
+        let nested = lines.next().unwrap_or_default();
+        assert!(
+            nested.starts_with("    ") && nested.contains("indirect"),
+            "caller call site must stay nested: {callers}"
         );
     }
 
