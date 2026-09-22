@@ -322,9 +322,9 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         QueryResults::Callees(_) => "the target defined no outgoing call sites",
         QueryResults::Externals(_) => "every symbol in scope bound to a definition",
         // `Callers`, `Uses` and `Closure` all take a name that can resolve
-        // perfectly well and still return no results, so the catch-all
-        // below ("matched nothing") would be false: rule 2 stays silent in
-        // that case because the name genuinely did match.
+        // perfectly well and still return no results, so the
+        // `MATCHED_NOTHING` reading below would be false: rule 2 stays
+        // silent in that case because the name genuinely did match.
         QueryResults::Callers(_) => "no call to the target was found in the selected scope",
         QueryResults::Uses(_) => "no non-call use of the target was found in the selected scope",
         QueryResults::Closure(_) => {
