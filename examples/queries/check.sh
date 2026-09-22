@@ -46,4 +46,12 @@ analyzed=$(ask defs helper | field 'a["analysis"]["analyzed"]')
 [ "$analyzed" = 2 ] ||
     fail "the answer reports $analyzed modules analyzed, expected 2"
 
-echo "ok: defs, callers and callees agree, over 2 analyzed modules"
+# The documented default has no --json: it renders text, not the envelope.
+text=$(rllvm-query --catalog "$OUT/catalog.json" defs helper)
+defines "$text" '^lib\.c:1  helper$' \
+    "default output did not look like rendered text: $text"
+case $text in
+'{'*) fail "default output looks like JSON, expected text: $text" ;;
+esac
+
+echo "ok: defs, callers and callees agree, over 2 analyzed modules, default output is text"
