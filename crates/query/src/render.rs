@@ -221,6 +221,11 @@ fn call_sites(
 /// notes and trains a reader to skip the footer. Gated on what the answer
 /// in front of the reader actually shows, they carry information again; the
 /// program-wide totals stay in `--full` and in the JSON envelope.
+///
+/// This decides `functions_without_location` alone. It is only half of what
+/// decides `indirect_call_sites`, because an answer can be incomplete
+/// *because of* an indirect site it never displays -- see
+/// [`walks_call_edges`].
 #[derive(Clone, Copy, Default)]
 struct Shown {
     /// At least one [`NO_LOCATION`] was printed.
@@ -279,6 +284,33 @@ fn shown_in(results: &QueryResults) -> Shown {
         QueryResults::Closure(_) | QueryResults::Externals(_) => {}
     }
     shown
+}
+
+/// Whether an unresolved indirect call site can hide an edge this answer
+/// depended on, whichever rows it happens to display.
+///
+/// `Session::callers` resolves a direct call and a CVP-bounded one and
+/// nothing else, so an unbounded indirect site is precisely the edge a
+/// walk over call edges is missing: `callers` whose displayed rows are all
+/// direct, and `closure`, which prints bare names and shows no site at all,
+/// are exactly the answers [`Shown`] would silence while the count bears on
+/// them hardest. `defs`, `externals` and `uses` are not walks over call
+/// edges, so the count cannot change what they mean and stays gated. `at`,
+/// `callees` and `indirect-targets` display their own call sites, so
+/// [`Shown`] already answers for them.
+///
+/// Wildcard-free like [`empty_meaning`]: a new [`QueryResults`] variant has
+/// to state whether it walks edges rather than inherit "no".
+fn walks_call_edges(results: &QueryResults) -> bool {
+    match results {
+        QueryResults::Callers(_) | QueryResults::Closure(_) | QueryResults::Reach(_) => true,
+        QueryResults::Defs(_)
+        | QueryResults::At(_)
+        | QueryResults::Callees(_)
+        | QueryResults::Uses(_)
+        | QueryResults::Externals(_)
+        | QueryResults::IndirectTargets(_) => false,
+    }
 }
 
 /// One sentence per query naming what an empty result means. Separate
@@ -385,12 +417,16 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
     }
 
     // Rule 4: every non-zero uncertainty count. The two counts that are
-    // program-wide rather than per-answer print only when this answer shows
-    // the thing they count -- see [`Shown`]. The count itself stays
-    // program-wide: having seen one, the reader is told how many there are.
+    // program-wide rather than per-answer print only when they can bear on
+    // this answer: because it shows the thing they count (see [`Shown`]),
+    // or, for indirect sites, because it walked the edges one of them could
+    // hide (see [`walks_call_edges`]). The count itself stays program-wide:
+    // having seen one, the reader is told how many there are.
     let shown = shown_in(&result.results);
     let uncertainty = &result.uncertainty;
-    if uncertainty.indirect_call_sites > 0 && shown.indirect_call_site {
+    if uncertainty.indirect_call_sites > 0
+        && (shown.indirect_call_site || walks_call_edges(&result.results))
+    {
         notes.push(format!(
             "{} indirect call site(s), {} with an LLVM target bound",
             uncertainty.indirect_call_sites, uncertainty.sites_with_llvm_target_bound
@@ -1117,6 +1153,64 @@ mod tests {
         assert!(
             !defs.contains("indirect call site"),
             "an answer with no indirect site must not carry the note: {defs:?}"
+        );
+    }
+
+    #[test]
+    fn a_walk_over_call_edges_carries_the_indirect_note_it_shows_no_row_for() {
+        // `Session::callers` resolves a direct call and a CVP-bounded one and
+        // nothing else, so an unbounded indirect site is precisely the edge a
+        // `callers` or `closure` answer is missing. Gating the note on
+        // whether the answer *displays* an indirect row silences it exactly
+        // there: `callers` here shows one direct row, and `closure` prints
+        // bare names and can never show a call site at all.
+        let session = session_with_indirect_gap();
+        let text_of = |query| {
+            let result = run(&session, &query).unwrap();
+            assert!(
+                result.uncertainty.indirect_call_sites > 0
+                    && result.uncertainty.sites_with_llvm_target_bound == 0,
+                "fixture changed: expected an unbounded indirect site"
+            );
+            assert!(!result.results.is_empty(), "fixture changed: empty answer");
+            render(&result, TextMode::Adaptive, Color::Never)
+        };
+
+        let callers = text_of(Query::Callers { name: "b".into() });
+        assert!(
+            !callers
+                .lines()
+                .any(|line| !line.starts_with(NOTE) && line.contains("indirect")),
+            "fixture changed: expected only direct rows: {callers:?}"
+        );
+        assert!(callers.contains("indirect call site"), "got: {callers:?}");
+
+        let closure = text_of(Query::Closure {
+            name: "a".into(),
+            direction: Direction::Out,
+        });
+        assert!(closure.contains("indirect call site"), "got: {closure:?}");
+    }
+
+    #[test]
+    fn an_answer_that_walks_no_call_edges_still_omits_the_indirect_note() {
+        // The other half: `defs` and `externals` are not walks over call
+        // edges, so a program-wide indirect count cannot change what they
+        // mean and must not annotate every answer of a program that has one.
+        let session = session_with_indirect_gap();
+        let text_of = |query| {
+            let result = run(&session, &query).unwrap();
+            assert!(result.uncertainty.indirect_call_sites > 0, "fixture");
+            render(&result, TextMode::Adaptive, Color::Never)
+        };
+
+        let defs = text_of(Query::Defs { name: "a".into() });
+        assert!(!defs.contains("indirect call site"), "got: {defs:?}");
+
+        let externals = text_of(Query::Externals);
+        assert!(
+            !externals.contains("indirect call site"),
+            "got: {externals:?}"
         );
     }
 
