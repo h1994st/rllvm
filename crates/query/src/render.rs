@@ -311,9 +311,20 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
 fn footer(result: &QueryResult, color: Color, out: &mut String) {
     let mut notes: Vec<String> = Vec::new();
 
+    // Rule 2 names an unresolved request in the requester's own words, and
+    // `MATCHED_NOTHING` says the same thing generically: one caveat, printed
+    // once.
+    let unresolved_name = result
+        .resolution
+        .iter()
+        .any(|resolution| resolution.matched.is_none());
+
     // Rule 1: empty results always say what empty means.
     if result.results.is_empty() {
-        notes.push(empty_meaning(&result.results).to_string());
+        let meaning = empty_meaning(&result.results);
+        if !(unresolved_name && meaning == MATCHED_NOTHING) {
+            notes.push(meaning.to_string());
+        }
     }
 
     // Rule 1's sibling: a found path that prints no steps. Not an empty
@@ -1182,6 +1193,28 @@ mod tests {
         assert!(text.contains("frontier: target"), "got: {text}");
         assert!(text.contains("Ambiguous"), "got: {text}");
         assert!(text.contains("2 candidate(s))"), "got: {text}");
+    }
+
+    #[test]
+    fn a_name_that_matched_nothing_says_so_once() {
+        // Rule 1's catch-all reading of an empty `defs` and rule 2's
+        // "'absent' matched nothing" are the same caveat; the second names
+        // the request, so it is the one that survives.
+        let session = session_from(&[("a", "b")]);
+        let result = run(
+            &session,
+            &Query::Defs {
+                name: "absent".into(),
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("'absent' matched nothing"), "got: {text}");
+        assert_eq!(
+            text.lines().filter(|line| line.starts_with(NOTE)).count(),
+            1,
+            "one caveat, stated once: {text}"
+        );
     }
 
     #[test]
