@@ -72,9 +72,11 @@ quiche's C API is behind the `ffi` feature, off by default. CVE-2026-11941
 functions, and the advisory limits it to applications that call them. That is a
 whole-program question spanning both languages.
 
-Build the vulnerable version with the feature on, link a C program that walks
-a connection's source IDs through `quiche_conn_source_ids` and
-`quiche_connection_id_iter_next`, and catalog the result:
+quiche's own C examples never call the iterator, so this directory ships
+[`cid_logger.c`](cid_logger.c), which walks a connection's source IDs through
+`quiche_conn_source_ids` and `quiche_connection_id_iter_next`. Build the
+vulnerable version with the feature on, link against it, and catalog the
+result:
 
 ```bash
 git checkout 0.29.1
