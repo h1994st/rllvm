@@ -79,6 +79,12 @@ const NO_LOCATION: &str = "<no location>";
 /// and `grep -v 'note:'` leaves only results.
 const NOTE: &str = "note:";
 
+/// `reach x x` answers `Some(vec![])`: a found path with no steps to print.
+/// Rule 1 cannot cover it -- [`QueryResults::is_empty`] is correctly false
+/// for a found answer -- so without a line of its own the whole command
+/// emits nothing and reads as "unreachable", the opposite of what it found.
+const ZERO_STEP_REACH: &str = "the origin is already the destination, reached in zero steps";
+
 fn paint(text: &str, color: Color, style: Paint) -> String {
     if color == Color::Never {
         return text.to_string();
@@ -219,6 +225,14 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
     // Rule 1: empty results always say what empty means.
     if result.results.is_empty() {
         notes.push(empty_meaning(&result.results).to_string());
+    }
+
+    // Rule 1's sibling: a found path that prints no steps. Not an empty
+    // answer, so rule 1 leaves it alone, and not a silent one either.
+    if let QueryResults::Reach(Some(steps)) = &result.results
+        && steps.is_empty()
+    {
+        notes.push(ZERO_STEP_REACH.to_string());
     }
 
     // Rule 2: how each name resolved, when it was not an exact hit.
@@ -478,9 +492,10 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
             }
         }
         QueryResults::Reach(path) => {
-            // `None` is no path; `Some(vec![])` is a trivial found path. The
-            // footer distinguishes them, so an empty `Some` prints nothing
-            // here rather than a misleading blank.
+            // `None` is no path; `Some(vec![])` is a trivial found path with
+            // no steps to print. Both print nothing here, and the footer
+            // tells them apart: rule 1 for the absence, `ZERO_STEP_REACH`
+            // for the trivial find.
             for step in path.iter().flatten() {
                 match step {
                     PathStep::Call(site) => out.push_str(&format!(
@@ -734,6 +749,33 @@ mod tests {
         )
         .unwrap();
         assert!(render(&result, TextMode::Adaptive, Color::Never).contains("call"));
+    }
+
+    #[test]
+    fn a_zero_step_path_says_the_origin_is_already_the_destination() {
+        // `reach a a` finds `a` immediately: a found path with no steps to
+        // print. With nothing in the footer for it the command emits zero
+        // bytes, which a reader can only read as "unreachable" -- the
+        // opposite of the answer.
+        let session = session_from(&[("a", "b")]);
+        let result = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "a".into(),
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(&result.results, QueryResults::Reach(Some(steps)) if steps.is_empty()),
+            "fixture changed: expected a found path with no steps"
+        );
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("reached in zero steps"), "got: {text:?}");
+        assert!(
+            !text.contains("not proof of unreachability"),
+            "a found path must not read as an absent one: {text:?}"
+        );
     }
 
     #[test]
