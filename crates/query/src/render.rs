@@ -801,10 +801,20 @@ mod tests {
 
     #[test]
     fn callees_names_the_target_kind() {
+        // `text.contains("indirect")` used to pass on the footer's own
+        // "N indirect call site(s)" line alone, with the whole `Callees` arm
+        // of `render_results` deleted -- the same defect
+        // `callers_reports_each_call_site_with_its_location` above fixed.
+        // Only a rendered row carries the kind and the signature on one
+        // line, so only a rendered row can satisfy this.
         let session = session_with_bounded_indirect();
         let result = run(&session, &Query::Callees { name: "a".into() }).unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
-        assert!(text.contains("indirect"), "got: {text}");
+        assert!(
+            text.lines()
+                .any(|line| line.contains("indirect") && line.contains("i32 (i32, i32)")),
+            "no rendered call-site row: {text}"
+        );
     }
 
     #[test]
