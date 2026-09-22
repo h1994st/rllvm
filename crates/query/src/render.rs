@@ -646,9 +646,15 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                             BindingStatus::Ambiguous => Paint::Uncertain,
                             BindingStatus::Unbound => Paint::Absent,
                         };
+                        // The step kind takes the step's own certainty, as
+                        // `call` (always resolved) and `bounded-indirect`
+                        // (always conditional) do. A binding step has no
+                        // fixed certainty, so it borrows its status's:
+                        // `Paint::Location` here meant "a file:line" in
+                        // every other row and nothing at all in this one.
                         out.push_str(&format!(
                             "{}           {}  ({}, {} candidate(s))\n",
-                            paint("binding", ctx.color, Paint::Location),
+                            paint("binding", ctx.color, tint),
                             name(symbols, &binding.symbol, ctx),
                             paint(&format!("{:?}", binding.status), ctx.color, tint),
                             binding.candidates.len()
