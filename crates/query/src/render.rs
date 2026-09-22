@@ -396,6 +396,23 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
         notes.push("address-taken candidates are signature-matched, never call edges".to_string());
     }
 
+    // Rule 6: an LLVM target bound is sound only inside what was captured.
+    // A JSON reader is told so by `IndirectTargetsResult::assumptions`;
+    // without this the text reader is handed the bound as if it were
+    // absolute. Quoted from the answer rather than restated here, so an
+    // assumption added to that field cannot go silently missing from text.
+    if let QueryResults::IndirectTargets(results) = &result.results {
+        for assumption in results
+            .iter()
+            .filter(|entry| entry.llvm_target_bound.is_some())
+            .flat_map(|entry| &entry.assumptions)
+        {
+            if !notes.iter().any(|note| note == assumption) {
+                notes.push(assumption.clone());
+            }
+        }
+    }
+
     if notes.is_empty() {
         return;
     }
@@ -877,6 +894,39 @@ mod tests {
         .unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
         assert!(text.contains("unresolved"), "got: {text}");
+        // Nothing was bounded here, so there is no bound to qualify.
+        assert!(
+            !text.contains("only within the captured scope"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn an_indirect_bound_says_it_holds_only_in_the_captured_scope() {
+        // `IndirectTargetsResult::assumptions` tells a JSON reader that the
+        // bound is scope-local -- `dlopen` and a callback registered outside
+        // the capture both escape it. Text printed the bound with no such
+        // qualification, claiming more than the answer knows.
+        let session = session_with_bounded_indirect();
+        let result = run(
+            &session,
+            &Query::IndirectTargets {
+                at: "t.c:9".into(),
+                heuristics: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            matches!(&result.results, QueryResults::IndirectTargets(entries)
+                if entries.iter().any(|entry| entry.llvm_target_bound.is_some())),
+            "fixture changed: expected a bounded site at t.c:9"
+        );
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("bound:"), "got: {text}");
+        assert!(
+            text.contains("only within the captured scope"),
+            "a text reader must be told the bound is scope-local: {text}"
+        );
     }
 
     #[test]

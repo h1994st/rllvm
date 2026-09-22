@@ -175,14 +175,22 @@ pub(crate) fn session_from(edges: &[(&str, &str)]) -> Session {
 }
 
 /// `a` reaches `target` only through an indirect site CVP bounded to
-/// `{target, other}`. A second bound member matters: it lets a test tell a
-/// correct bounded-indirect edge apart from one that collapsed the bound to
-/// just the target taken.
+/// `{target, other}`, recorded at `t.c:9`. A second bound member matters: it
+/// lets a test tell a correct bounded-indirect edge apart from one that
+/// collapsed the bound to just the target taken. The location makes the site
+/// addressable by `at` and `indirect-targets`, which
+/// `session_with_address_taken_function` can only answer for an *unbounded*
+/// site.
 pub(crate) fn session_with_bounded_indirect() -> Session {
     let a = function("m", "a", true, Linkage::Internal);
     let target = function("m", "target", true, Linkage::Internal);
     let other = function("m", "other", true, Linkage::Internal);
-    let site = indirect_call(&a, 0, None, Some(vec![target.id.clone(), other.id.clone()]));
+    let site = indirect_call(
+        &a,
+        0,
+        Some(source_location("t.c", 9)),
+        Some(vec![target.id.clone(), other.id.clone()]),
+    );
     Session::new(facts(vec![a, target, other], vec![site]), Vec::new())
 }
 
