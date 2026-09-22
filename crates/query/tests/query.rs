@@ -86,13 +86,51 @@ fn the_cli_prints_callers_as_json() {
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
         .arg(&catalog)
-        .args(["callers", "add"])
+        .args(["--json", "callers", "add"])
         .output()
         .unwrap();
     assert!(output.status.success());
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["schema_version"], 2);
     assert_eq!(value["results"][0]["function"]["symbol"], "main");
+}
+
+/// Text is the default now: `--json` is required to get the envelope, not
+/// implied by running the binary at all.
+#[test]
+fn the_cli_prints_text_by_default() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["callers", "add"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(!text.trim_start().starts_with('{'), "got JSON: {text}");
+    assert!(text.contains("main"), "got: {text}");
+}
+
+/// `--full` only makes sense for the text renderer; combined with `--json`
+/// neither flag would silently win, so clap rejects the combination outright.
+#[test]
+fn json_and_full_cannot_be_combined() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["--json", "--full", "callers", "add"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "clap should reject the combination"
+    );
 }
 
 const ADD_AND_MAIN: &[(&str, &str)] = &[
@@ -638,12 +676,14 @@ fn the_heuristics_flag_may_follow_its_subcommand() {
     );
 }
 
-/// Runs `rllvm-query --catalog <catalog> <args...>` and parses its stdout.
+/// Runs `rllvm-query --catalog <catalog> --json <args...>` and parses its
+/// stdout. `--json` is explicit here, not the default: text is.
 fn query_json(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
         .arg(catalog)
+        .arg("--json")
         .args(args)
         .output()
         .unwrap();
@@ -1582,7 +1622,7 @@ mod mcp {
                 .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
                 .arg("--catalog")
                 .arg(&catalog)
-                .args(["callers", "add"])
+                .args(["--json", "callers", "add"])
                 .output()
                 .unwrap()
                 .stdout,

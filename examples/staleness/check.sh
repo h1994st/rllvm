@@ -12,7 +12,7 @@ rllvm-cc -g -O0 -c "$OUT/src/lib.c" -o "$OUT/lib.o"
 rllvm-info "$OUT/lib.o" --json >"$OUT/catalog.json"
 
 status() {
-    rllvm-query --catalog "$OUT/catalog.json" defs helper |
+    rllvm-query --catalog "$OUT/catalog.json" --json defs helper |
         python3 -c 'import json, sys; print(json.load(sys.stdin)["results"][0]["location"]["source_status"])'
 }
 

@@ -3,7 +3,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser};
 use rllvm_core::{config::try_rllvm_config, error::Error};
 use rllvm_query::{
-    Query,
+    Color, Query, TextMode,
     cli::{ClosureDirection, QueryArgs, QueryCommand},
     index::Direction,
     llvm_version, mcp, open, run,
@@ -105,10 +105,34 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     })?;
     let result = run(&open(&catalog)?, &query)?;
 
-    let json = serde_json::to_string_pretty(&result)
-        .map_err(|error| Error::InvalidArguments(error.to_string()))?;
-    println!("{json}");
+    if args.json {
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|error| Error::InvalidArguments(error.to_string()))?;
+        println!("{json}");
+    } else {
+        let mode = if args.full {
+            TextMode::Full
+        } else {
+            TextMode::Adaptive
+        };
+        print!("{}", rllvm_query::render(&result, mode, stdout_color()));
+    }
     Ok(())
+}
+
+/// Whether stdout should be coloured. `supports_color::on` honours
+/// `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TERM=dumb` and
+/// `COLORTERM`, and detects CI, which a bare `is_terminal()` check does not.
+///
+/// Sensed here and passed to `render` rather than called inside it: `on`
+/// reads the real environment, so an inline `if_supports_color` would make
+/// the renderer's unit tests depend on whether the suite ran under
+/// `--nocapture` on a terminal.
+fn stdout_color() -> Color {
+    match supports_color::on(supports_color::Stream::Stdout) {
+        Some(_) => Color::Always,
+        None => Color::Never,
+    }
 }
 
 /// Serves MCP over stdio. `--catalog` is optional here and only preloads:

@@ -14,7 +14,7 @@ rllvm-cc "$OUT/lib.o" "$OUT/app.o" -o "$OUT/app"
 rllvm-info "$OUT/app" --json >"$OUT/catalog.json"
 
 ask() {
-    rllvm-query --catalog "$OUT/catalog.json" "$@"
+    rllvm-query --catalog "$OUT/catalog.json" --json "$@"
 }
 
 # One field per question, so a wrong answer names the question that gave it.
