@@ -49,7 +49,10 @@ enum Paint {
     Note,
     /// `file:line`.
     Location,
-    /// The symbol an answer is about.
+    /// The symbol an answer is about. Weight rather than a hue: it is the
+    /// content of the answer, not one of the certainty tiers, and
+    /// `bright_white` was near-invisible on a light background.
+    /// `rllvm-info`'s diagnostics emphasize the same way.
     Symbol,
     /// Resolved and certain: a direct call, a unique binding, a known bound.
     Resolved,
@@ -100,7 +103,7 @@ fn paint(text: &str, color: Color, style: Paint) -> String {
         Paint::Heading => format!("{}", text.bold()),
         Paint::Note => format!("{}", text.yellow()),
         Paint::Location => format!("{}", text.cyan()),
-        Paint::Symbol => format!("{}", text.bright_white()),
+        Paint::Symbol => format!("{}", text.bold()),
         Paint::Resolved => format!("{}", text.green()),
         Paint::Uncertain => format!("{}", text.yellow()),
         Paint::Absent => format!("{}", text.red()),
