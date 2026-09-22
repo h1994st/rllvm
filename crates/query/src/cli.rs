@@ -35,6 +35,16 @@ pub struct QueryArgs {
     #[arg(long, global = true)]
     pub heuristics: bool,
 
+    /// Print the raw JSON answer envelope instead of text
+    ///
+    /// Global, like `--heuristics`, so it may trail the subcommand.
+    #[arg(long, global = true, conflicts_with = "full")]
+    pub json: bool,
+
+    /// Also print scope, analysis, uncertainty and provenance, still as text
+    #[arg(long, global = true)]
+    pub full: bool,
+
     #[command(subcommand)]
     pub command: Option<QueryCommand>,
 }

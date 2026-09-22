@@ -13,7 +13,7 @@ rllvm-info "$OUT/twice" --json >"$OUT/catalog.json"
 # Each spelling must find the definition AND be reported as its own kind.
 # Checking only that it was found would not show the tiers exist at all.
 resolve() {
-    rllvm-query --catalog "$OUT/catalog.json" defs "$1" |
+    rllvm-query --catalog "$OUT/catalog.json" --json defs "$1" |
         python3 -c '
 import json, sys
 answer = json.load(sys.stdin)

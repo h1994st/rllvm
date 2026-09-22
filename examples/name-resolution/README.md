@@ -37,7 +37,7 @@ rllvm-query --catalog build/catalog.json defs twice
 ## Inspect the result
 
 ```bash
-rllvm-query --catalog build/catalog.json defs twice | python3 -m json.tool
+rllvm-query --catalog build/catalog.json --json defs twice | python3 -m json.tool
 ```
 
 `resolution` names what was asked for and what it matched; `symbols` carries

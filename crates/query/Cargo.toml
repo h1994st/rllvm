@@ -28,6 +28,12 @@ serde_json.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rustc-demangle = "0.1.28"
+owo-colors.workspace = true
+# Decides whether stdout should be coloured. A direct dependency rather than
+# owo-colors' `supports-colors` feature: that feature declares both
+# supports-color 3.0 and 2.0 (aliased) for API compatibility, so it locks
+# three crates where this locks two -- `supports-color` and `is_ci`.
+supports-color = "3.0"
 
 [dev-dependencies]
 rllvm-testkit = { path = "../testkit" }

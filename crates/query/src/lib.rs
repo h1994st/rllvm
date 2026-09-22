@@ -62,6 +62,9 @@ pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Ses
 
 pub mod mcp;
 
+pub mod render;
+pub use render::{Color, TextMode, render};
+
 #[cfg(test)]
 pub(crate) mod testing;
 

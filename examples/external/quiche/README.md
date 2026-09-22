@@ -44,8 +44,10 @@ rllvm-query --catalog cat/catalog.json callers SSL_do_handshake
 ```
 
 ```text
-quiche::tls::Handshake::do_handshake   at quiche/src/tls/mod.rs:556
-SSL_accept                             at boringssl/ssl/ssl_lib.cc:770
+quiche::tls::Handshake::do_handshake
+    quiche/src/tls/mod.rs:556  direct    SSL_do_handshake
+SSL_accept
+    boringssl/ssl/ssl_lib.cc:770  direct    SSL_do_handshake
 ```
 
 The Rust call site and the C++ definition are both reported from source.
@@ -93,12 +95,12 @@ The deployment target keeps the link quiet: the build script compiles
 BoringSSL against the host SDK, so without it the link reports a few hundred
 "built for newer macOS version" warnings. Plain `clang` does the same.
 
-Answers are JSON, so `jq` does the formatting. `callees` on the entry point
-shows the defect: the value is cloned, a pointer into it is taken, and it is
-dropped before returning to C.
+Answers print as text; `--json` gives the envelope, so `jq` can do the
+formatting. `callees` on the entry point shows the defect: the value is
+cloned, a pointer into it is taken, and it is dropped before returning to C.
 
 ```bash
-rllvm-query --catalog cat/catalog.json callees \
+rllvm-query --catalog cat/catalog.json --json callees \
     quiche_connection_id_iter_next | jq -r '
   .symbols as $s | .results[]
   | select(.target.kind == "direct")
@@ -141,7 +143,7 @@ llvm-nm target/debug/libquiche.a 2>/dev/null \
   | sort -u > surface.txt          # 169 names, without the Mach-O underscore
 
 for fn in $(cat surface.txt); do
-  rllvm-query --catalog cat/catalog.json callees "$fn" \
+  rllvm-query --catalog cat/catalog.json --json callees "$fn" \
     | jq -r --arg fn "$fn" '
       .symbols as $s
       | [ .results[] | (.target.callee.symbol // "") as $y

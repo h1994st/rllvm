@@ -27,9 +27,9 @@ changes from `current` to `modified`.
 ## What it does
 
 ```bash
-rllvm-query --catalog build/catalog.json defs helper   # location.source_status
+rllvm-query --catalog build/catalog.json defs helper   # no note: current
 # edit the source
-rllvm-query --catalog build/catalog.json defs helper   # now modified
+rllvm-query --catalog build/catalog.json defs helper   # note: modified sources
 ```
 
 ## Why the digest's origin matters
