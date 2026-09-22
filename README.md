@@ -335,7 +335,8 @@ rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an i
 ```
 
 Answers print as text. Add `--json` for the full machine-readable envelope, or
-`--full` for the same envelope as text. The MCP server always speaks JSON.
+`--full` to print the scope, analysis, uncertainty and provenance blocks as
+text too. The MCP server always speaks JSON.
 
 Every answer carries the results plus what it could *not* see: which modules
 failed to parse, which call sites are indirect, which symbols bind

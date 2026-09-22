@@ -20,7 +20,9 @@ use crate::{
 pub enum TextMode {
     /// Results, plus only the footer lines that carry information.
     Adaptive,
-    /// Results, plus every envelope field including zeroes.
+    /// Results, plus the envelope's `scope`, `analysis`, `uncertainty` and
+    /// `provenance` blocks, zero counts included. Not the whole envelope:
+    /// `--json` is what reads that.
     Full,
 }
 
@@ -460,16 +462,30 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
     }
 }
 
-/// Every envelope field the adaptive footer omits when it is zero:
-/// `scope`, the full `analysis` breakdown with per-module detail,
-/// every `uncertainty` scalar, and `provenance`. Printed only in
-/// [`TextMode::Full`], after the footer.
+/// The envelope's four context blocks, including the counts the adaptive
+/// footer omits when they are zero: `scope` with the catalog it was quoted
+/// from, the `analysis` breakdown with per-module detail, every
+/// `uncertainty` scalar with the binding frontier, and `provenance`.
+/// Printed only in [`TextMode::Full`], after the footer.
+///
+/// Not every field of each block: the selection filters, per-module hashes,
+/// triples and compilers, and the identity of each call site stay in
+/// `--json`, which is the interface for reading the whole envelope.
 fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
     let scope = &result.scope;
     out.push_str(&format!("\n{}\n", paint("scope", color, Paint::Heading)));
     out.push_str(&format!(
         "  entries: {} selected of {}\n",
         scope.selected_entries, scope.total_entries
+    ));
+    // What a scope claim is worth: `None` is "the catalog did not say", which
+    // is not the same as "no".
+    out.push_str(&format!(
+        "  whole_program_complete: {}\n",
+        match scope.whole_program_complete {
+            Some(complete) => complete.to_string(),
+            None => "unstated".to_string(),
+        }
     ));
     for limitation in &scope.limitations {
         out.push_str(&format!("  limitation: {limitation}\n"));
@@ -485,10 +501,13 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
         "  failed: {}  unsupported: {}  not_built: {}\n",
         analysis.failed, analysis.unsupported, analysis.not_built
     ));
+    // `ir_stage` beside `debug_info`, never aggregated: `Analysis::modules`
+    // carries both per module because one summary flag would misrepresent a
+    // mixed catalog, and printing only one half does the same.
     for module in &analysis.modules {
         out.push_str(&format!(
-            "  {} {:?} debug_info: {:?}\n",
-            module.id, module.status, module.debug_info
+            "  {} {:?} ir_stage: {:?} debug_info: {:?}\n",
+            module.id, module.status, module.ir_stage, module.debug_info
         ));
     }
 
@@ -537,6 +556,17 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
         "\n{}\n",
         paint("provenance", color, Paint::Heading)
     ));
+    // The catalog the answer came from, quoted rather than reconstructed.
+    // `scope` is only meaningful next to what it was quoted from.
+    let origin = &provenance.catalog_origin;
+    out.push_str(&format!(
+        "  catalog: {} {}\n",
+        origin.kind,
+        origin.input.display()
+    ));
+    if let Some(sha256) = &origin.sha256 {
+        out.push_str(&format!("  catalog_sha256: {sha256}\n"));
+    }
     out.push_str(&format!("  llvm: {}\n", provenance.llvm_version));
     out.push_str(&format!(
         "  rllvm-query: {}\n",
@@ -702,7 +732,7 @@ mod tests {
     use super::*;
     use crate::{
         Query,
-        facts::{FunctionFact, Linkage, ModuleAnalysis},
+        facts::{FunctionFact, Linkage, ModuleAnalysis, ModuleReport},
         index::{Direction, Session},
         run,
         testing::*,
@@ -1181,6 +1211,30 @@ mod tests {
         for heading in ["scope", "analysis", "uncertainty", "provenance"] {
             assert!(text.contains(heading), "missing {heading}: {text}");
         }
+    }
+
+    #[test]
+    fn full_mode_prints_the_catalog_origin_scope_completeness_and_ir_stage() {
+        // Three fields a text reader had no way to see. `scope` means
+        // little without the catalog it was quoted from;
+        // `whole_program_complete` is what decides whether a scope claim is
+        // worth anything; and `Analysis::modules` carries `ir_stage` beside
+        // `debug_info` exactly because one aggregate would misrepresent a
+        // mixed catalog -- printing one half repeats that mistake.
+        let mut facts = facts(vec![], vec![]);
+        facts.scope.whole_program_complete = Some(false);
+        facts.modules = vec![ModuleReport {
+            ir_stage: Some("linked".into()),
+            ..report("m", ModuleAnalysis::Analyzed)
+        }];
+        let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
+        let text = render(&result, TextMode::Full, Color::Never);
+        assert!(
+            text.contains("whole_program_complete: false"),
+            "got: {text}"
+        );
+        assert!(text.contains(r#"ir_stage: Some("linked")"#), "got: {text}");
+        assert!(text.contains("catalog: test"), "got: {text}");
     }
 
     #[test]

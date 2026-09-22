@@ -41,7 +41,7 @@ pub struct QueryArgs {
     #[arg(long, global = true, conflicts_with = "full")]
     pub json: bool,
 
-    /// Print every envelope field, still as text
+    /// Also print scope, analysis, uncertainty and provenance, still as text
     #[arg(long, global = true)]
     pub full: bool,
 
