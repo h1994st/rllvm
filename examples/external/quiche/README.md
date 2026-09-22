@@ -82,22 +82,36 @@ result:
 git checkout 0.29.1
 RUSTC_WRAPPER=rllvm-rustc CC=rllvm-cc cargo build -p quiche --features ffi
 
-rllvm-cc -g -Iquiche/include cid_logger.c \
-    target/debug/libquiche.a -o cid_logger
+MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion) \
+  rllvm-cc -g -Iquiche/include cid_logger.c \
+           target/debug/libquiche.a -o cid_logger
+
 rllvm-get-bc cid_logger --output-dir cat
 ```
 
-`callees` on the entry point shows the defect. The value is cloned, a pointer
-into it is taken, and it is dropped before returning to C:
+The deployment target keeps the link quiet: the build script compiles
+BoringSSL against the host SDK, so without it the link reports a few hundred
+"built for newer macOS version" warnings. Plain `clang` does the same.
+
+Answers are JSON, so `jq` does the formatting. `callees` on the entry point
+shows the defect: the value is cloned, a pointer into it is taken, and it is
+dropped before returning to C.
 
 ```bash
-rllvm-query --catalog cat/catalog.json callees quiche_connection_id_iter_next
+rllvm-query --catalog cat/catalog.json callees \
+    quiche_connection_id_iter_next | jq -r '
+  .symbols as $s | .results[]
+  | select(.target.kind == "direct")
+  | ($s[.target.callee.symbol] // .target.callee.symbol) as $n
+  | select($n | test("panic") | not)
+  | .location as $l
+  | "\($l.file|split("/")|last):\($l.line)  \($n)"'
 ```
 
 ```text
-ffi.rs:1157  <ConnectionIdIter as Iterator>::next
-ffi.rs:1158  <ConnectionId as AsRef<[u8]>>::as_ref
-ffi.rs:1162  core::ptr::drop_glue::<ConnectionId>
+ffi.rs:1157  <quiche::ffi::ConnectionIdIter as ...Iterator>::next
+ffi.rs:1158  <quiche::packet::ConnectionId as ...AsRef<[u8]>>::as_ref
+ffi.rs:1162  core::ptr::drop_glue::<quiche::packet::ConnectionId>
 ```
 
 The same query on 0.29.2 has no `drop_glue` line, because the fix indexes the
@@ -122,18 +136,32 @@ value and drops that value before returning. Both halves appear in `callees`,
 so the surface can be swept.
 
 ```bash
-nm target/debug/libquiche.a \
-  | awk '$2=="T" && $3 ~ /^_quiche_/' | sort -u > surface.txt   # 169, Mach-O
+llvm-nm target/debug/libquiche.a 2>/dev/null \
+  | awk '$2=="T" && $3 ~ /^_quiche_/ { print substr($3, 2) }' \
+  | sort -u > surface.txt          # 169 names, without the Mach-O underscore
+
 for fn in $(cat surface.txt); do
-  rllvm-query --catalog cat/catalog.json callees "$fn"
+  rllvm-query --catalog cat/catalog.json callees "$fn" \
+    | jq -r --arg fn "$fn" '
+      .symbols as $s
+      | [ .results[] | (.target.callee.symbol // "") as $y
+                     | ($s[$y] // $y) ] as $n
+      | select(($n | any(test("drop_glue")))
+           and ($n | any(test("::(as_ref|as_ptr|as_slice)$"))))
+      | $fn'
 done
 ```
 
 Keeping the entry points whose callees hold both `drop_glue::<T>` and something
 taking a pointer into `T` leaves 7 of 169, including both functions the
-advisory names. The leading underscore is Mach-O's C symbol prefix; ELF wants
-`/^quiche_/`. Issue #243 tracks reporting this surface from the catalog
-instead of shelling out to `nm`.
+advisory names.
+
+Use LLVM's `llvm-nm`, not the system one: rustc ships `std` and `core` into the
+archive with embedded bitcode, and a reader built on an older LLVM fails with
+`Unknown attribute kind`. Its stderr carries harmless "no symbols" notes for
+empty members. The `substr` drops Mach-O's leading underscore, which the queries
+do not want; an ELF build matches `/^quiche_/` and keeps the whole name. Issue #243 tracks reporting this surface from the catalog instead of
+shelling out at all.
 
 The other five are safe, and show where call-graph answers stop.
 `quiche_conn_source_id` drops a `ConnectionId`, but `ConnectionId` is Cow-like
