@@ -131,6 +131,26 @@ fn serde_name<T: serde::Serialize>(value: &T) -> String {
     }
 }
 
+/// Printed for an absent value in [`option_or_unknown`], following the same
+/// bracket convention as [`NO_LOCATION`] so every "we don't know" in this
+/// output reads the same way.
+const UNKNOWN: &str = "<unknown>";
+
+/// The contained value of an `Option`, not the `Option` wrapper. `{:?}` on an
+/// `Option<T>` prints Rust's own debug syntax -- the `Some(...)` wrapper and,
+/// for a string, its quotes -- which is an implementation detail of how the
+/// fact is stored, not a fact about the program, and it diverges from what
+/// `--json` reports for the same field: text would read `Some("O2")` next to
+/// the envelope's plain `"O2"`. Prints the bare value when present and
+/// [`UNKNOWN`] when absent, never `None` or an empty string, either of which
+/// would read as a missing field rather than one the catalog never recorded.
+fn option_or_unknown<T: std::fmt::Display>(value: &Option<T>) -> String {
+    match value {
+        Some(value) => value.to_string(),
+        None => UNKNOWN.to_string(),
+    }
+}
+
 /// The readable form of one symbol. Demangled when the envelope's `symbols`
 /// table has a reading for it, and in [`TextMode::Full`] the mangled symbol
 /// follows in brackets, because the mangled name is the identity.
@@ -560,11 +580,11 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
     // mixed catalog, and printing only one half does the same.
     for module in &analysis.modules {
         out.push_str(&format!(
-            "  {} {} ir_stage: {:?} debug_info: {:?}\n",
+            "  {} {} ir_stage: {} debug_info: {}\n",
             module.id,
             serde_name(&module.status),
-            module.ir_stage,
-            module.debug_info
+            option_or_unknown(&module.ir_stage),
+            option_or_unknown(&module.debug_info)
         ));
     }
 
@@ -1340,6 +1360,7 @@ mod tests {
         facts.scope.whole_program_complete = Some(false);
         facts.modules = vec![ModuleReport {
             ir_stage: Some("linked".into()),
+            debug_info: Some(true),
             ..report("m", ModuleAnalysis::Analyzed)
         }];
         let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
@@ -1348,8 +1369,29 @@ mod tests {
             text.contains("whole_program_complete: false"),
             "got: {text}"
         );
-        assert!(text.contains(r#"ir_stage: Some("linked")"#), "got: {text}");
+        // Bare values, not `{:?}`'s `Some("linked")`/`Some(true)`: the
+        // `Option` wrapper is how the fact is stored, not part of it.
+        assert!(
+            text.contains("ir_stage: linked debug_info: true"),
+            "got: {text}"
+        );
         assert!(text.contains("catalog: test"), "got: {text}");
+    }
+
+    #[test]
+    fn full_mode_prints_unknown_for_absent_ir_stage_and_debug_info() {
+        // `report` leaves both fields unset. `{:?}` used to print `None`,
+        // which reads as a real value rather than as something the catalog
+        // never recorded.
+        let mut facts = facts(vec![], vec![]);
+        facts.modules = vec![report("m", ModuleAnalysis::Analyzed)];
+        let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
+        let text = render(&result, TextMode::Full, Color::Never);
+        assert!(
+            text.contains("ir_stage: <unknown> debug_info: <unknown>"),
+            "got: {text}"
+        );
+        assert!(!text.contains("None"), "got: {text}");
     }
 
     #[test]
