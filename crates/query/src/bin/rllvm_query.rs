@@ -121,8 +121,11 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
 }
 
 /// Whether stdout should be coloured. `supports_color::on` honours
-/// `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TERM=dumb` and
-/// `COLORTERM`, and detects CI, which a bare `is_terminal()` check does not.
+/// `NO_COLOR`, `FORCE_COLOR`, `CLICOLOR`, `CLICOLOR_FORCE`, `TERM=dumb`,
+/// `COLORTERM` and `TERM_PROGRAM`, none of which a bare `is_terminal()`
+/// check reads. Its CI detection cannot change a piped run's answer: the
+/// terminal test short-circuits to "no colour" before `is_ci` is reached,
+/// so CI only raises the level of a stream that is already a terminal.
 ///
 /// Sensed here and passed to `render` rather than called inside it: `on`
 /// reads the real environment, so an inline `if_supports_color` would make
