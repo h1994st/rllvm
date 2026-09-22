@@ -194,6 +194,18 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         QueryResults::Reach(_) => "no path over resolved edges; not proof of unreachability",
         QueryResults::Callees(_) => "the target defined no outgoing call sites",
         QueryResults::Externals(_) => "every symbol in scope bound to a definition",
+        // `Callers`, `Uses` and `Closure` all take a name that can resolve
+        // perfectly well and still return no results, so the catch-all
+        // below ("matched nothing") would be false: rule 2 stays silent in
+        // that case because the name genuinely did match.
+        QueryResults::Callers(_) => "no call to the target was found in the selected scope",
+        QueryResults::Uses(_) => "no non-call use of the target was found in the selected scope",
+        QueryResults::Closure(_) => {
+            "no functions were found in the selected scope for that direction"
+        }
+        // Accurate for `Defs`, `At` and `IndirectTargets`: each takes a name
+        // or a location and an empty result there really does mean nothing
+        // matched.
         _ => "the name or location matched nothing in the selected scope",
     }
 }
@@ -224,8 +236,12 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
     }
 
     // Rule 3: modules that narrowed what was read without narrowing scope.
+    // `verified` counts too: only `analyzed` means a module's facts were
+    // actually extracted, and `Analysis::verified`'s own doc warns that
+    // leaving it uncounted would let a module disappear from the summary.
     let analysis = &result.analysis;
     let module_counts = [
+        ("verified", analysis.verified),
         ("failed", analysis.failed),
         ("missing", analysis.missing),
         ("changed", analysis.changed),
@@ -238,9 +254,13 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
         .map(|(label, count)| format!("{count} {label}"))
         .collect();
     if !unread.is_empty() {
+        // The count of modules not analysed, not the count of non-zero
+        // categories: 3 failed + 2 missing is 5 unread modules, and
+        // `unread.len()` (2, one per category) would understate that.
+        let unread_modules: usize = module_counts.iter().map(|(_, count)| count).sum();
         notes.push(format!(
             "{} of {} modules were not analysed: {}",
-            unread.len(),
+            unread_modules,
             analysis.modules.len(),
             unread.join(", ")
         ));
@@ -446,7 +466,7 @@ mod tests {
     use super::*;
     use crate::{
         Query,
-        facts::{FunctionFact, Linkage, SourceStatus},
+        facts::{FunctionFact, Linkage, ModuleAnalysis, SourceStatus},
         index::Session,
         run,
         testing::*,
@@ -465,8 +485,11 @@ mod tests {
         let text = render(&result, TextMode::Adaptive, Color::Never);
         // Not an exact match on the whole output: `session_with_cxx_symbols`
         // gives none of its functions a location, so the footer reports that
-        // program-wide, after the one line this test is actually about.
-        assert!(text.starts_with("<no location>  main\n"), "got: {text}");
+        // program-wide, separated from the results by a blank line. Splitting
+        // on that blank line, rather than `starts_with`, keeps the "one
+        // line" guarantee: a duplicated or extra definition would still pass
+        // `starts_with` but fails this.
+        assert_eq!(text.split("\n\n").next().unwrap(), "<no location>  main");
     }
 
     #[test]
@@ -500,10 +523,11 @@ mod tests {
     }
 
     #[test]
-    fn externals_prints_each_symbol_with_its_binding_status() {
+    fn an_externals_answer_with_no_unbound_symbols_explains_itself_in_the_footer() {
         let session = session_from(&[("a", "b")]);
         let result = run(&session, &Query::Externals).unwrap();
-        // No unbound symbols in this fixture: the footer, not a row, says so.
+        // This fixture binds no symbols at all, so no row prints: the
+        // footer, not a row, says so.
         assert!(
             render(&result, TextMode::Adaptive, Color::Never)
                 .contains("every symbol in scope bound to a definition")
@@ -561,10 +585,27 @@ mod tests {
 
     #[test]
     fn callers_reports_each_call_site_with_its_location() {
-        let session = session_from(&[("a", "b")]);
+        // `session_from` gives every call site `location: None`, so
+        // `text.contains("a")` used to pass on the footer's own
+        // "2 function(s) without a source location" alone, with no call-site
+        // row at all. Give the site a real location, so only an actual
+        // rendered caller row -- not the footer -- can satisfy this.
+        let caller = function("m", "a", true, Linkage::Internal);
+        let callee = function("m", "b", true, Linkage::Internal);
+        let mut site = direct_call(&caller, &callee, 0);
+        site.location = Some(SourceLocation {
+            file: "caller.c".into(),
+            directory: None,
+            line: 7,
+            column: 1,
+            source_status: SourceStatus::Current,
+            status_basis: None,
+            inlined_at: Vec::new(),
+        });
+        let session = Session::new(facts(vec![caller, callee], vec![site]), Vec::new());
         let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
-        assert!(text.contains("a"), "got: {text}");
+        assert!(text.contains("caller.c:7"), "got: {text}");
     }
 
     #[test]
@@ -700,8 +741,61 @@ mod tests {
 
     #[test]
     fn a_failed_module_is_reported_even_when_results_are_present() {
-        let facts = facts_with_one_failed_module();
+        // `facts_with_one_failed_module` alone has no functions, so
+        // `Externals` used to return empty and rule 1 fired instead of rule
+        // 3 -- the "results are present" half of this test's name was never
+        // exercised. Add a function under the module that did parse, and
+        // query it directly, so a result row and the failed-module note both
+        // appear in the same answer.
+        let mut facts = facts_with_one_failed_module();
+        facts
+            .functions
+            .push(function("a", "present", true, Linkage::Internal));
+        let result = run(
+            &Session::new(facts, vec![]),
+            &Query::Defs {
+                name: "present".into(),
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("<no location>  present"), "got: {text}");
+        assert!(text.contains("failed"), "got: {text}");
+    }
+
+    #[test]
+    fn several_unread_categories_sum_to_the_total_modules_not_read() {
+        // 3 failed + 2 missing must read "5 of N", not "2 of N": `unread`
+        // has one entry per non-zero *category*, and summing the counts
+        // catches a regression to `unread.len()` that this crate's earlier
+        // one-category, one-module fixtures could not.
+        let mut facts = facts(vec![], vec![]);
+        facts.scope.total_entries = 5;
+        facts.scope.selected_entries = 5;
+        facts.modules = vec![
+            report("f1", ModuleAnalysis::Failed),
+            report("f2", ModuleAnalysis::Failed),
+            report("f3", ModuleAnalysis::Failed),
+            report("m1", ModuleAnalysis::Missing),
+            report("m2", ModuleAnalysis::Missing),
+        ];
         let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
-        assert!(render(&result, TextMode::Adaptive, Color::Never).contains("failed"));
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(
+            text.contains("5 of 5 modules were not analysed: 3 failed, 2 missing"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_verified_but_unextracted_module_is_reported() {
+        // `Analysis::verified` is non-zero only for a module the loader read
+        // and hashed but extraction never touched; its own doc warns that a
+        // status with no count would let it disappear from the summary. The
+        // footer must not reintroduce that.
+        let facts = facts_with_one_verified_module();
+        let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("1 verified"), "got: {text}");
     }
 }
