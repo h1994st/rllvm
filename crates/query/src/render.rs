@@ -9,7 +9,11 @@ use std::collections::BTreeMap;
 
 use owo_colors::OwoColorize;
 
-use crate::{QueryResult, QueryResults, bind::BindingStatus, facts::SourceLocation};
+use crate::{
+    QueryResult, QueryResults,
+    bind::BindingStatus,
+    facts::{CallSiteFact, CallTarget, FunctionId, SourceLocation},
+};
 
 /// How much of the envelope to print.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +123,67 @@ fn location(location: Option<&SourceLocation>, ctx: Ctx) -> String {
     }
 }
 
+/// Comma-joined readable names, for a bound of resolved indirect-call
+/// targets.
+fn symbol_list(symbols: &BTreeMap<String, String>, ids: &[FunctionId], ctx: Ctx) -> String {
+    ids.iter()
+        .map(|id| name(symbols, &id.symbol, ctx))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One call target, named by kind so an indirect or intrinsic site never
+/// reads like a resolved call. The kind word is coloured by how certain it
+/// is, and still printed, so the colour is never the only signal.
+fn call_target(symbols: &BTreeMap<String, String>, target: &CallTarget, ctx: Ctx) -> String {
+    match target {
+        CallTarget::Direct { callee } => format!(
+            "{}    {}",
+            paint("direct", ctx.color, Paint::Resolved),
+            name(symbols, &callee.symbol, ctx)
+        ),
+        CallTarget::Indirect {
+            signature,
+            llvm_target_bound,
+        } => {
+            let kind = paint("indirect", ctx.color, Paint::Uncertain);
+            let signature = paint(signature, ctx.color, Paint::Muted);
+            match llvm_target_bound {
+                Some(bound) => format!(
+                    "{kind}  {signature}  {} {}",
+                    paint("bound:", ctx.color, Paint::Resolved),
+                    symbol_list(symbols, bound, ctx)
+                ),
+                None => format!(
+                    "{kind}  {signature}  {}",
+                    paint("unresolved", ctx.color, Paint::Absent)
+                ),
+            }
+        }
+        CallTarget::Intrinsic { name: intrinsic } => format!(
+            "{} {}",
+            paint("intrinsic", ctx.color, Paint::Muted),
+            paint(intrinsic, ctx.color, Paint::Muted)
+        ),
+        CallTarget::InlineAsm => paint("inline-asm", ctx.color, Paint::Muted),
+    }
+}
+
+fn call_sites(
+    symbols: &BTreeMap<String, String>,
+    sites: &[CallSiteFact],
+    ctx: Ctx,
+    out: &mut String,
+) {
+    for site in sites {
+        out.push_str(&format!(
+            "    {}  {}\n",
+            location(site.location.as_ref(), ctx),
+            call_target(symbols, &site.target, ctx)
+        ));
+    }
+}
+
 /// Renders one answer. Infallible: every field it reads is already owned by
 /// the result.
 pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
@@ -159,14 +224,36 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                 ));
             }
         }
-        // Filled in by Tasks 2 and 3. Exhaustive rather than a wildcard so a
-        // new `QueryResults` variant fails to compile here.
-        QueryResults::At(_)
-        | QueryResults::Callers(_)
-        | QueryResults::Callees(_)
-        | QueryResults::Uses(_)
-        | QueryResults::Reach(_)
-        | QueryResults::IndirectTargets(_) => {}
+        QueryResults::At(entries) => {
+            for entry in entries {
+                out.push_str(&format!("{}\n", name(symbols, &entry.function.symbol, ctx)));
+                call_sites(symbols, &entry.call_sites, ctx, out);
+            }
+        }
+        QueryResults::Callers(entries) => {
+            for entry in entries {
+                out.push_str(&format!("{}\n", name(symbols, &entry.function.symbol, ctx)));
+                call_sites(symbols, &entry.call_sites, ctx, out);
+            }
+        }
+        QueryResults::Callees(sites) => call_sites(symbols, sites, ctx, out),
+        QueryResults::Uses(uses) => {
+            for use_fact in uses {
+                let in_function = match &use_fact.in_function {
+                    Some(id) => name(symbols, &id.symbol, ctx),
+                    None => paint("<no function>", ctx.color, Paint::Muted),
+                };
+                out.push_str(&format!(
+                    "{}  in {}  at {}\n",
+                    paint(&format!("{:?}", use_fact.kind), ctx.color, Paint::Uncertain),
+                    in_function,
+                    location(use_fact.location.as_ref(), ctx)
+                ));
+            }
+        }
+        // Filled in by Task 3. Exhaustive rather than a wildcard so a new
+        // `QueryResults` variant fails to compile here.
+        QueryResults::Reach(_) | QueryResults::IndirectTargets(_) => {}
     }
 }
 
@@ -255,16 +342,8 @@ mod tests {
         // Colour is redundant with the text: stripping the escape codes from
         // a coloured answer must give back the plain one, so a pipe, a
         // monochrome terminal and a colour-blind reader lose nothing.
-        // `Defs` rather than `Callees`: call-site rendering arrives in Task
-        // 2, and this property must hold for what Task 1 actually renders.
-        let session = session_with_cxx_symbols();
-        let result = run(
-            &session,
-            &Query::Defs {
-                name: "main".into(),
-            },
-        )
-        .unwrap();
+        let session = session_with_bounded_indirect();
+        let result = run(&session, &Query::Callees { name: "a".into() }).unwrap();
         let plain = render(&result, TextMode::Adaptive, Color::Never);
         let coloured = render(&result, TextMode::Adaptive, Color::Always);
         assert!(coloured.contains('\u{1b}'), "nothing was coloured");
@@ -285,5 +364,35 @@ mod tests {
             out
         };
         assert_eq!(stripped, plain);
+    }
+
+    #[test]
+    fn callers_reports_each_call_site_with_its_location() {
+        let session = session_from(&[("a", "b")]);
+        let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("a"), "got: {text}");
+    }
+
+    #[test]
+    fn callees_names_the_target_kind() {
+        let session = session_with_bounded_indirect();
+        let result = run(&session, &Query::Callees { name: "a".into() }).unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("indirect"), "got: {text}");
+    }
+
+    #[test]
+    fn at_lists_the_functions_mapped_to_a_line() {
+        let session = session_from_source_lines(&[("parser.c", 4)]);
+        let result = run(
+            &session,
+            &Query::At {
+                file: "parser.c".into(),
+                line: 4,
+            },
+        )
+        .unwrap();
+        assert!(render(&result, TextMode::Adaptive, Color::Never).contains("only"));
     }
 }
