@@ -113,6 +113,24 @@ fn paint(text: &str, color: Color, style: Paint) -> String {
     }
 }
 
+/// The name a unit-variant enum carries into the JSON envelope, not the
+/// [`std::fmt::Debug`] one. `{:?}` prints the Rust variant identifier, but
+/// `UseKind`, `BindingStatus` and `ModuleAnalysis` all serialize under
+/// `#[serde(rename_all = "snake_case")]` for `--json`; formatting them with
+/// `{:?}` in text gave the same fact two spellings depending on which output
+/// was asked for, and let renaming a Rust variant change the CLI's text
+/// silently, with nothing pinning it to the envelope. A unit variant cannot
+/// realistically fail to serialize to a string, but this still returns a
+/// visibly-wrong marker rather than an empty string if it somehow does, so a
+/// reader sees a bug rather than a blank field.
+fn serde_name<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(spelling)) => spelling,
+        Ok(other) => format!("<unrenderable:{other}>"),
+        Err(err) => format!("<unrenderable:{err}>"),
+    }
+}
+
 /// The readable form of one symbol. Demangled when the envelope's `symbols`
 /// table has a reading for it, and in [`TextMode::Full`] the mangled symbol
 /// follows in brackets, because the mangled name is the identity.
@@ -542,8 +560,11 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
     // mixed catalog, and printing only one half does the same.
     for module in &analysis.modules {
         out.push_str(&format!(
-            "  {} {:?} ir_stage: {:?} debug_info: {:?}\n",
-            module.id, module.status, module.ir_stage, module.debug_info
+            "  {} {} ir_stage: {:?} debug_info: {:?}\n",
+            module.id,
+            serde_name(&module.status),
+            module.ir_stage,
+            module.debug_info
         ));
     }
 
@@ -582,7 +603,7 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
         out.push_str(&format!(
             "  frontier: {}  ({}, {} candidate(s))\n",
             name(&result.symbols, &binding.symbol, full),
-            paint(&format!("{:?}", binding.status), color, tint),
+            paint(&serde_name(&binding.status), color, tint),
             binding.candidates.len()
         ));
     }
@@ -650,7 +671,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                 out.push_str(&format!(
                     "{}  {}\n",
                     name(symbols, &binding.symbol, ctx),
-                    paint(&format!("{:?}", binding.status), ctx.color, tint)
+                    paint(&serde_name(&binding.status), ctx.color, tint)
                 ));
             }
         }
@@ -675,7 +696,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                 };
                 out.push_str(&format!(
                     "{}  in {}  at {}\n",
-                    paint(&format!("{:?}", use_fact.kind), ctx.color, Paint::Uncertain),
+                    paint(&serde_name(&use_fact.kind), ctx.color, Paint::Uncertain),
                     in_function,
                     location(use_fact.location.as_ref(), ctx)
                 ));
@@ -722,7 +743,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                             "{}           {}  ({}, {} candidate(s))\n",
                             paint("binding", ctx.color, tint),
                             name(symbols, &binding.symbol, ctx),
-                            paint(&format!("{:?}", binding.status), ctx.color, tint),
+                            paint(&serde_name(&binding.status), ctx.color, tint),
                             binding.candidates.len()
                         ));
                     }
@@ -1348,8 +1369,38 @@ mod tests {
         );
         let text = render(&result, TextMode::Full, Color::Never);
         assert!(text.contains("frontier: target"), "got: {text}");
-        assert!(text.contains("Ambiguous"), "got: {text}");
+        assert!(text.contains("ambiguous"), "got: {text}");
         assert!(text.contains("2 candidate(s))"), "got: {text}");
+    }
+
+    #[test]
+    fn a_binding_status_reads_the_same_word_in_text_as_in_json() {
+        // Pins the `{:?}`-vs-serde divergence shut: the expected word comes
+        // from `serde_json`'s own serialization of the value, not a
+        // hardcoded lowercase literal, so a `BindingStatus` variant rename
+        // fails this test instead of silently changing only one of the two
+        // outputs.
+        let session = session_with_ambiguous_bindings();
+        let result = run(&session, &Query::Externals).unwrap();
+        let binding = result
+            .uncertainty
+            .frontier
+            .iter()
+            .find(|binding| binding.symbol == "target")
+            .expect("fixture changed: expected a frontier entry for `target`");
+        let envelope_spelling = match serde_json::to_value(binding.status) {
+            Ok(serde_json::Value::String(spelling)) => spelling,
+            other => panic!("BindingStatus did not serialize to a JSON string: {other:?}"),
+        };
+        let text = render(&result, TextMode::Full, Color::Never);
+        let frontier_line = text
+            .lines()
+            .find(|line| line.trim_start().starts_with("frontier: target"))
+            .expect("fixture changed: expected a frontier line for `target`");
+        assert!(
+            frontier_line.contains(&envelope_spelling),
+            "text `{frontier_line}` does not carry the envelope's `{envelope_spelling}`"
+        );
     }
 
     #[test]
