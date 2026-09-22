@@ -44,7 +44,6 @@ pub enum Color {
 enum Paint {
     /// `--full` section headings. Constructed starting with the `--full`
     /// section renderer.
-    #[allow(dead_code, reason = "constructed once the --full sections land")]
     Heading,
     /// The `note:` prefix on footer lines.
     Note,
@@ -318,6 +317,68 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
     }
 }
 
+/// Every envelope field the adaptive footer omits when it is zero:
+/// `scope`, the full `analysis` breakdown with per-module detail,
+/// every `uncertainty` scalar, and `provenance`. Printed only in
+/// [`TextMode::Full`], after the footer.
+fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
+    let scope = &result.scope;
+    out.push_str(&format!("\n{}\n", paint("scope", color, Paint::Heading)));
+    out.push_str(&format!(
+        "  entries: {} selected of {}\n",
+        scope.selected_entries, scope.total_entries
+    ));
+    for limitation in &scope.limitations {
+        out.push_str(&format!("  limitation: {limitation}\n"));
+    }
+
+    let analysis = &result.analysis;
+    out.push_str(&format!("\n{}\n", paint("analysis", color, Paint::Heading)));
+    out.push_str(&format!(
+        "  verified: {}  analyzed: {}  changed: {}  missing: {}\n",
+        analysis.verified, analysis.analyzed, analysis.changed, analysis.missing
+    ));
+    out.push_str(&format!(
+        "  failed: {}  unsupported: {}  not_built: {}\n",
+        analysis.failed, analysis.unsupported, analysis.not_built
+    ));
+    for module in &analysis.modules {
+        out.push_str(&format!(
+            "  {} {:?} debug_info: {:?}\n",
+            module.id, module.status, module.debug_info
+        ));
+    }
+
+    let uncertainty = &result.uncertainty;
+    out.push_str(&format!(
+        "\n{}\n",
+        paint("uncertainty", color, Paint::Heading)
+    ));
+    out.push_str(&format!(
+        "  indirect_call_sites: {}\n  sites_with_llvm_target_bound: {}\n",
+        uncertainty.indirect_call_sites, uncertainty.sites_with_llvm_target_bound
+    ));
+    out.push_str(&format!(
+        "  functions_without_location: {}\n  locations_from_modified_sources: {}\n",
+        uncertainty.functions_without_location, uncertainty.locations_from_modified_sources
+    ));
+    out.push_str(&format!(
+        "  ambiguous_bindings: {}\n  conditional_path_steps: {}\n",
+        uncertainty.ambiguous_bindings, uncertainty.conditional_path_steps
+    ));
+
+    let provenance = &result.provenance;
+    out.push_str(&format!(
+        "\n{}\n",
+        paint("provenance", color, Paint::Heading)
+    ));
+    out.push_str(&format!("  llvm: {}\n", provenance.llvm_version));
+    out.push_str(&format!(
+        "  rllvm-query: {}\n",
+        provenance.rllvm_query_version
+    ));
+}
+
 /// Renders one answer. Infallible: every field it reads is already owned by
 /// the result.
 pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
@@ -325,6 +386,9 @@ pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
     let mut out = String::new();
     render_results(result, ctx, &mut out);
     footer(result, color, &mut out);
+    if mode == TextMode::Full {
+        full_sections(result, color, &mut out);
+    }
     out
 }
 
@@ -467,7 +531,7 @@ mod tests {
     use crate::{
         Query,
         facts::{FunctionFact, Linkage, ModuleAnalysis, SourceStatus},
-        index::Session,
+        index::{Direction, Session},
         run,
         testing::*,
     };
@@ -797,5 +861,67 @@ mod tests {
         let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
         assert!(text.contains("1 verified"), "got: {text}");
+    }
+
+    #[test]
+    fn full_mode_prints_scope_analysis_and_provenance() {
+        let session = session_from(&[("a", "b")]);
+        let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
+        let text = render(&result, TextMode::Full, Color::Never);
+        for heading in ["scope", "analysis", "uncertainty", "provenance"] {
+            assert!(text.contains(heading), "missing {heading}: {text}");
+        }
+    }
+
+    #[test]
+    fn full_mode_prints_zero_counts_the_footer_omits() {
+        let session = session_from(&[("a", "b")]);
+        let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
+        assert!(render(&result, TextMode::Full, Color::Never).contains("ambiguous_bindings: 0"));
+    }
+
+    #[test]
+    fn an_empty_callers_answer_says_no_call_was_found() {
+        // `a` calls `b`, so `a` itself has no callers in this fixture.
+        let session = session_from(&[("a", "b")]);
+        let result = run(&session, &Query::Callers { name: "a".into() }).unwrap();
+        assert!(result.results.is_empty(), "fixture changed");
+        assert!(
+            render(&result, TextMode::Adaptive, Color::Never)
+                .contains("no call to the target was found in the selected scope")
+        );
+    }
+
+    #[test]
+    fn an_empty_uses_answer_says_no_non_call_use_was_found() {
+        // `session_from` records no `UseFact`s at all, so any resolved name
+        // answers empty here.
+        let session = session_from(&[("a", "b")]);
+        let result = run(&session, &Query::Uses { name: "a".into() }).unwrap();
+        assert!(result.results.is_empty(), "fixture changed");
+        assert!(
+            render(&result, TextMode::Adaptive, Color::Never)
+                .contains("no non-call use of the target was found in the selected scope")
+        );
+    }
+
+    #[test]
+    fn an_empty_closure_answer_says_no_functions_were_found() {
+        // `b` is only ever called, never a caller itself, so its outward
+        // closure is empty.
+        let session = session_from(&[("a", "b")]);
+        let result = run(
+            &session,
+            &Query::Closure {
+                name: "b".into(),
+                direction: Direction::Out,
+            },
+        )
+        .unwrap();
+        assert!(result.results.is_empty(), "fixture changed");
+        assert!(
+            render(&result, TextMode::Adaptive, Color::Never)
+                .contains("no functions were found in the selected scope for that direction")
+        );
     }
 }
