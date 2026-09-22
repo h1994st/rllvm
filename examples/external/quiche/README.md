@@ -44,8 +44,10 @@ rllvm-query --catalog cat/catalog.json callers SSL_do_handshake
 ```
 
 ```text
-quiche::tls::Handshake::do_handshake   at quiche/src/tls/mod.rs:556
-SSL_accept                             at boringssl/ssl/ssl_lib.cc:770
+quiche::tls::Handshake::do_handshake
+    quiche/src/tls/mod.rs:556  direct    SSL_do_handshake
+SSL_accept
+    boringssl/ssl/ssl_lib.cc:770  direct    SSL_do_handshake
 ```
 
 The Rust call site and the C++ definition are both reported from source.
