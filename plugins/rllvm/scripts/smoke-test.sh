@@ -42,8 +42,10 @@ fi
 
 if command -v rllvm-query >/dev/null; then
     request='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"inventory","arguments":{"artifact":"'$work'/hello"}}}'
-    step "rllvm-query inventories the program over MCP" \
-        sh -c 'printf "%s\n" "$1" | rllvm-query mcp | grep -q "\"isError\":false"' _ "$request"
+    inventory_hello() {
+        printf '%s\n' "$request" | rllvm-query mcp | grep -q '"isError":false'
+    }
+    step "rllvm-query inventories the program over MCP" inventory_hello
 else
     echo "skip: rllvm-query is not installed"
 fi
