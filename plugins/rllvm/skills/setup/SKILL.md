@@ -5,15 +5,15 @@ description: Install and configure rllvm, or diagnose it when capture or a query
 
 # Setting up rllvm
 
-The scripts live beside this skill's directory: `../../scripts/doctor.sh` and
-`../../scripts/smoke-test.sh`, relative to its base directory. Both are
-read-only; neither writes a config or runs the user's build.
+The scripts live at `${CLAUDE_SKILL_DIR}/../../scripts/doctor.sh` and
+`${CLAUDE_SKILL_DIR}/../../scripts/smoke-test.sh`. Both are read-only; neither
+writes a config or runs the user's build.
 
 ## 1. Diagnose
 
-Run `../../scripts/doctor.sh`. It prints facts, `note:` lines for optional
-pieces, `problem:` lines, and `problems: N`. Work from its report, not from
-guesses.
+Run `${CLAUDE_SKILL_DIR}/../../scripts/doctor.sh`. It prints facts, `note:`
+lines for optional pieces, `problem:` lines, and `problems: N`. Work from its
+report, not from guesses.
 
 ## 2. Install what is missing
 
@@ -53,9 +53,9 @@ the first build.
 
 ## 5. Verify
 
-Run `../../scripts/smoke-test.sh`: one `ok:` line per step, `skip:` for
-optional pieces, and on failure `fail:` with the step's output. Then run
-`doctor.sh` again and expect `problems: 0`.
+Run `${CLAUDE_SKILL_DIR}/../../scripts/smoke-test.sh`: one `ok:` line per
+step, `skip:` for optional pieces, and on failure `fail:` with the step's
+output. Then run `doctor.sh` again and expect `problems: 0`.
 
 ## Troubleshooting
 

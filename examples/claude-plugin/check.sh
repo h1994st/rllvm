@@ -104,7 +104,7 @@ RLLVM_CONFIG=$OUT/absent.toml TMPDIR=$OUT/tmp "$PLUGIN/scripts/smoke-test.sh" \
 echo "ok: smoke-test.sh runs the pipeline and cleans up"
 
 # Every skill: a header naming its directory with a description, and every
-# script it points at exists.
+# script it points at is resolved through ${CLAUDE_SKILL_DIR} and exists.
 python3 - "$PLUGIN" <<'PY'
 import pathlib, re, sys
 
@@ -127,7 +127,11 @@ for skill in skills:
         sys.exit(f"{skill}: name is {fields.get('name')!r}, not {skill.parent.name!r}")
     if not fields.get("description", "").strip():
         sys.exit(f"{skill}: no description")
-    for script in re.findall(r"\.\./\.\./scripts/[\w.-]+", text):
+    bare = re.findall(r"scripts/[\w.-]+", text)
+    resolved = re.findall(r"\$\{CLAUDE_SKILL_DIR\}/(\.\./\.\./scripts/[\w.-]+)", text)
+    if len(bare) != len(resolved):
+        sys.exit(f"{skill}: scripts/ mentioned without the ${{CLAUDE_SKILL_DIR}} prefix")
+    for script in resolved:
         if not (skill.parent / script).resolve().is_file():
             sys.exit(f"{skill}: {script} does not exist")
 PY
