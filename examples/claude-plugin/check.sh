@@ -103,6 +103,36 @@ RLLVM_CONFIG=$OUT/absent.toml TMPDIR=$OUT/tmp "$PLUGIN/scripts/smoke-test.sh" \
 [ ! -e "$OUT/absent.toml" ] || fail "smoke-test.sh let a wrapper write a config"
 echo "ok: smoke-test.sh runs the pipeline and cleans up"
 
+# Every skill: a header naming its directory with a description, and every
+# script it points at exists.
+python3 - "$PLUGIN" <<'PY'
+import pathlib, re, sys
+
+plugin = pathlib.Path(sys.argv[1])
+skills = sorted((plugin / "skills").glob("*/SKILL.md"))
+expected = {"setup", "capture", "query"}
+found = {skill.parent.name for skill in skills}
+if found != expected:
+    sys.exit(f"skills: expected {sorted(expected)}, found {sorted(found)}")
+
+for skill in skills:
+    text = skill.read_text()
+    header = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    if not header:
+        sys.exit(f"{skill}: no frontmatter")
+    fields = dict(
+        line.split(":", 1) for line in header.group(1).splitlines() if ":" in line
+    )
+    if fields.get("name", "").strip() != skill.parent.name:
+        sys.exit(f"{skill}: name is {fields.get('name')!r}, not {skill.parent.name!r}")
+    if not fields.get("description", "").strip():
+        sys.exit(f"{skill}: no description")
+    for script in re.findall(r"\.\./\.\./scripts/[\w.-]+", text):
+        if not (skill.parent / script).resolve().is_file():
+            sys.exit(f"{skill}: {script} does not exist")
+PY
+echo "ok: every skill is named, described, and points at scripts that exist"
+
 # CI does not install Claude Code, so strict validation runs where it is.
 if command -v claude >/dev/null; then
     # --json instead of --strict: the plugin ships without a version by
