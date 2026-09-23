@@ -17,7 +17,11 @@ use clap::{Parser, ValueEnum};
 /// The subcommand is optional so `rllvm-query --llvm-version` keeps working
 /// with no query requested.
 #[derive(Debug, Parser)]
-#[command(name = "rllvm-query", about = "Query captured bitcode at source level")]
+#[command(
+    name = "rllvm-query",
+    about = "Query captured bitcode at source level",
+    version
+)]
 pub struct QueryArgs {
     /// Print the LLVM version this binary links and exit
     #[arg(long = "llvm-version")]

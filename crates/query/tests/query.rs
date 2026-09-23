@@ -23,6 +23,19 @@ fn query_binary_reports_its_llvm_major() {
     assert!(text.starts_with("23."), "unexpected LLVM version: {text}");
 }
 
+#[test]
+fn query_binary_reports_its_own_version() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "--version failed: {output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("rllvm-query {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
 /// Completions come from the binary that owns the CLI.
 ///
 /// `rllvm-completions` lives in the wrapper crate and cannot see `QueryArgs`
