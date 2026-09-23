@@ -81,8 +81,9 @@ fi
 
 query_llvm=
 if command -v rllvm-query >/dev/null; then
-    query_version=$(rllvm-query --version 2>/dev/null | sed 's/^rllvm-query //')
-    echo "rllvm-query version: ${query_version:-unknown}"
+    if query_version=$(rllvm-query --version 2>/dev/null); then
+        echo "rllvm-query version: $(printf '%s\n' "$query_version" | sed 's/^rllvm-query //')"
+    fi
     query_llvm=$(rllvm-query --llvm-version)
     echo "rllvm-query llvm: $query_llvm"
     llvm_version_ok "rllvm-query" "$query_llvm" || query_llvm=
