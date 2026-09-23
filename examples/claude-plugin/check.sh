@@ -12,7 +12,7 @@ mkdir -p "$OUT"
 
 # The server entry is read from the plugin's own .mcp.json, so this proves
 # what ships rather than a hand-written copy of it.
-python3 - "$PLUGIN/.mcp.json" "$OUT" <<'PY'
+python3 - "$PLUGIN/.mcp.json" <<'PY'
 import json, subprocess, sys
 
 server = json.load(open(sys.argv[1]))["mcpServers"]["rllvm-query"]
@@ -145,35 +145,24 @@ if command -v claude >/dev/null; then
     # This also covers the skills: --json lists only files with problems
     # under "contents", so a skill's warnings and errors appear there too.
     claude plugin validate --json "$PLUGIN" >"$OUT/validate-plugin.json" || true
-    python3 - "$OUT/validate-plugin.json" <<'PY'
-import json, sys
-
-report = json.load(open(sys.argv[1]))
-sections = [report["manifest"], *report.get("contents", [])]
-errors = [e for s in sections for e in s.get("errors", [])]
-warnings = [
-    w for s in sections for w in s.get("warnings", []) if w.get("path") != "version"
-]
-if errors or warnings:
-    sys.exit(f"plugin manifest: errors={errors} warnings={warnings}")
-PY
-    # --json here too: --strict alone would fail on the same tolerated
-    # missing-version warning, propagated through the plugin it lists.
     claude plugin validate --json "$REPO" >"$OUT/validate-marketplace.json" || true
-    python3 - "$OUT/validate-marketplace.json" <<'PY'
+    python3 - "$OUT/validate-plugin.json" "$OUT/validate-marketplace.json" <<'PY'
 import json, sys
 
-report = json.load(open(sys.argv[1]))
-sections = [report["manifest"], *report.get("contents", [])]
-errors = [e for s in sections for e in s.get("errors", [])]
-warnings = [
-    w
-    for s in sections
-    for w in s.get("warnings", [])
-    if not w.get("path", "").endswith("version")
-]
-if errors or warnings:
-    sys.exit(f"marketplace manifest: errors={errors} warnings={warnings}")
+# The only two shapes the missing-version warning takes: the plugin's own
+# manifest, and the same warning surfaced through the marketplace listing.
+TOLERATED = {"version", "plugins[0] plugin.json → version"}
+
+for report_path in sys.argv[1:]:
+    report = json.load(open(report_path))
+    sections = [report["manifest"], *report.get("contents", [])]
+    errors = [e for s in sections for e in s.get("errors", [])]
+    warnings = [
+        w for s in sections for w in s.get("warnings", [])
+        if w.get("path") not in TOLERATED
+    ]
+    if errors or warnings:
+        sys.exit(f"{report_path}: errors={errors} warnings={warnings}")
 PY
     echo "ok: claude plugin validate passes"
 else
