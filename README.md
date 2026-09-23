@@ -380,6 +380,19 @@ Each is analysed once and answers from memory after that.
 
 See the [MCP example](examples/mcp/).
 
+#### Claude Code plugin
+
+The plugin bundles this server with skills to set rllvm up, capture bitcode
+from any supported build, and choose and read queries:
+
+```text
+/plugin marketplace add h1994st/rllvm
+/plugin install rllvm@rllvm
+```
+
+It uses the `rllvm` and `rllvm-query` installed above. See the
+[plugin example](examples/claude-plugin/).
+
 ## Configuration
 
 The TOML file lives at `$RLLVM_CONFIG` or `~/.rllvm/config.toml`.
