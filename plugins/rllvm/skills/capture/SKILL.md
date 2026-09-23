@@ -18,8 +18,8 @@ starting. If rllvm is not set up, use the `setup` skill first.
 | Objective-C / Objective-C++ | also `OBJC=rllvm-cc OBJCXX=rllvm-cxx` |
 | Cargo | `RUSTC_WRAPPER=rllvm-rustc cargo build` |
 | One Rust file | `rllvm-rustc main.rs -o app` |
-| Mixed C/C++ and Rust | C/C++ through `rllvm-cc`/`rllvm-cxx`, Rust through `rllvm-rustc`, linked as usual |
-| Only `compile_commands.json`, no rebuild wanted | `rllvm-compdb generate build/ --output-dir DIR` (narrow with `--source` or `--entry`) |
+| Mixed C/C++ and Rust | `CC=rllvm-cc CXX=rllvm-cxx RUSTC_WRAPPER=rllvm-rustc cargo build` ([ffi example](https://github.com/h1994st/rllvm/tree/main/examples/ffi)) |
+| Only `compile_commands.json`, no rebuild wanted | `rllvm-compdb generate build/ --output-dir DIR` (narrow with `--source` or `--entry`; only direct `clang`/`clang++` drivers are supported) |
 | A hand-written command or `@response` file | the wrappers take the same arguments |
 
 A fresh build directory avoids reusing objects compiled without the wrappers.

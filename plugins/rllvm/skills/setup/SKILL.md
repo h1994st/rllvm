@@ -25,8 +25,8 @@ brew install h1994st/tap/rllvm-query       # or: cargo install rllvm-query
 ```
 
 `cargo install rllvm-query` needs `LLVM_SYS_231_PREFIX` when `llvm-config` is
-not on `PATH`. On Debian/Ubuntu, LLVM comes from
-`sudo apt install llvm llvm-dev clang libclang-dev`.
+not on `PATH`. On Ubuntu/Debian, install `libpolly-N-dev` alongside
+`llvm-N-dev` and `libclang-N-dev`, with a matching major `N`.
 
 ## 3. Choose the LLVM by what will read the bitcode
 
