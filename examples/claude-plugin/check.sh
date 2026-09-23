@@ -86,6 +86,23 @@ defines "$(cat "$OUT/doctor-rust-unreadable.txt")" \
 
 echo "ok: doctor.sh reports tools, config and LLVM versions"
 
+# The pipeline end to end, in a temporary directory it must remove.
+mkdir -p "$OUT/tmp"
+TMPDIR=$OUT/tmp "$PLUGIN/scripts/smoke-test.sh" >"$OUT/smoke.txt" 2>&1 ||
+    fail "smoke-test.sh failed: $(cat "$OUT/smoke.txt")"
+smoke=$(cat "$OUT/smoke.txt")
+defines "$smoke" '^ok: rllvm-get-bc extracts' "smoke-test.sh skipped extraction"
+defines "$smoke" '^ok: rllvm-query inventories' "smoke-test.sh skipped the query"
+[ -z "$(ls -A "$OUT/tmp")" ] || fail "smoke-test.sh left $(ls "$OUT/tmp") behind"
+
+# With no config it refuses rather than letting a wrapper write one.
+status=0
+RLLVM_CONFIG=$OUT/absent.toml TMPDIR=$OUT/tmp "$PLUGIN/scripts/smoke-test.sh" \
+    >"$OUT/smoke-none.txt" 2>&1 || status=$?
+[ "$status" = 1 ] || fail "smoke-test.sh exited $status with no config"
+[ ! -e "$OUT/absent.toml" ] || fail "smoke-test.sh let a wrapper write a config"
+echo "ok: smoke-test.sh runs the pipeline and cleans up"
+
 # CI does not install Claude Code, so strict validation runs where it is.
 if command -v claude >/dev/null; then
     # --json instead of --strict: the plugin ships without a version by
