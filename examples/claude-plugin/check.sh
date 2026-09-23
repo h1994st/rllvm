@@ -169,7 +169,14 @@ warnings = [
 if errors or warnings:
     sys.exit(f"marketplace manifest: errors={errors} warnings={warnings}")
 PY
-    echo "ok: claude plugin validate passes"
+    # claude plugin validate --json on the plugin or marketplace root reports
+    # skills, agents and commands under "contents" -- and that list comes back
+    # empty even though the skills above exist. --strict on the skills
+    # directory itself is what actually checks them (frontmatter, description,
+    # ...), so it runs as a separate step.
+    claude plugin validate --strict "$PLUGIN/skills" >"$OUT/validate-skills.txt" 2>&1 ||
+        fail "claude plugin validate --strict on skills: $(cat "$OUT/validate-skills.txt")"
+    echo "ok: claude plugin validate passes, including the skills"
 else
     echo "note: claude not installed; manifests not validated"
 fi
