@@ -1,5 +1,6 @@
 {
   "name": "rllvm",
+  "version": "0.1.0",
   "description": "Capture LLVM bitcode from any build and query it through rllvm-query's MCP server.",
   "author": {
     "name": "Shengtuo Hu",

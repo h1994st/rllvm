@@ -138,33 +138,13 @@ PY
 echo "ok: every skill is named, described, and points at scripts that exist"
 
 # CI does not install Claude Code, so strict validation runs where it is.
+# Validating the plugin also covers its skills.
 if command -v claude >/dev/null; then
-    # --json instead of --strict: the plugin ships without a version by
-    # design (Claude Code tracks the git commit), so the missing-version
-    # warning is the only one tolerated here; anything else still fails.
-    # This also covers the skills: --json lists only files with problems
-    # under "contents", so a skill's warnings and errors appear there too.
-    claude plugin validate --json "$PLUGIN" >"$OUT/validate-plugin.json" || true
-    claude plugin validate --json "$REPO" >"$OUT/validate-marketplace.json" || true
-    python3 - "$OUT/validate-plugin.json" "$OUT/validate-marketplace.json" <<'PY'
-import json, sys
-
-# The only two shapes the missing-version warning takes: the plugin's own
-# manifest, and the same warning surfaced through the marketplace listing.
-TOLERATED = {"version", "plugins[0] plugin.json → version"}
-
-for report_path in sys.argv[1:]:
-    report = json.load(open(report_path))
-    sections = [report["manifest"], *report.get("contents", [])]
-    errors = [e for s in sections for e in s.get("errors", [])]
-    warnings = [
-        w for s in sections for w in s.get("warnings", [])
-        if w.get("path") not in TOLERATED
-    ]
-    if errors or warnings:
-        sys.exit(f"{report_path}: errors={errors} warnings={warnings}")
-PY
-    echo "ok: claude plugin validate passes"
+    claude plugin validate --strict "$PLUGIN" >"$OUT/validate-plugin.txt" 2>&1 ||
+        fail "plugin manifest: $(cat "$OUT/validate-plugin.txt")"
+    claude plugin validate --strict "$REPO" >"$OUT/validate-marketplace.txt" 2>&1 ||
+        fail "marketplace manifest: $(cat "$OUT/validate-marketplace.txt")"
+    echo "ok: claude plugin validate --strict passes"
 else
     echo "note: claude not installed; manifests not validated"
 fi
