@@ -60,6 +60,30 @@ status=0
 RLLVM_CONFIG=$OUT/absent.toml "$PLUGIN/scripts/doctor.sh" >"$OUT/doctor-none.txt" || status=$?
 [ "$status" = 1 ] || fail "doctor.sh exited $status with no config"
 [ ! -e "$OUT/absent.toml" ] || fail "doctor.sh wrote a config"
+
+# A config whose clang_filepath is a directory, not a file, is a problem too.
+mkdir -p "$OUT/dirbin"
+sed "s|^clang_filepath = .*|clang_filepath = \"$OUT/dirbin\"|" \
+    "$RLLVM_CONFIG" >"$OUT/broken-dir.toml"
+status=0
+RLLVM_CONFIG=$OUT/broken-dir.toml "$PLUGIN/scripts/doctor.sh" >"$OUT/doctor-broken-dir.txt" || status=$?
+[ "$status" = 1 ] || fail "doctor.sh exited $status on a directory clang_filepath"
+defines "$(cat "$OUT/doctor-broken-dir.txt")" '^problem: clang_filepath' \
+    "doctor.sh accepted a directory as clang_filepath"
+
+# A rustc reporting a non-numeric LLVM version cannot be compared, and
+# doctor.sh must say so without ever reaching a shell arithmetic comparison.
+mkdir -p "$OUT/fakebin-unreadable"
+printf '#!/bin/sh\necho "LLVM version: git-abcdef"\n' >"$OUT/fakebin-unreadable/rustc"
+chmod +x "$OUT/fakebin-unreadable/rustc"
+PATH=$OUT/fakebin-unreadable:$PATH "$PLUGIN/scripts/doctor.sh" \
+    >"$OUT/doctor-rust-unreadable.txt" 2>"$OUT/doctor-rust-unreadable.stderr" || true
+defines "$(cat "$OUT/doctor-rust-unreadable.txt")" \
+    '^problem: cannot read an LLVM version from rustc' \
+    "doctor.sh did not flag an unreadable rustc LLVM version"
+[ ! -s "$OUT/doctor-rust-unreadable.stderr" ] ||
+    fail "doctor.sh wrote to stderr: $(cat "$OUT/doctor-rust-unreadable.stderr")"
+
 echo "ok: doctor.sh reports tools, config and LLVM versions"
 
 # CI does not install Claude Code, so strict validation runs where it is.

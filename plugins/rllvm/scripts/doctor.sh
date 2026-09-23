@@ -21,6 +21,18 @@ major() {
     printf '%s\n' "$1" | sed -n 's/^\([0-9][0-9]*\).*/\1/p'
 }
 
+# llvm_version_ok <tool> <version>: true when <version> starts with a digit.
+# Otherwise reports the problem naming <tool> and returns false, so the
+# caller can clear its variable and newer_than_reader's empty-guard skips
+# comparisons that would otherwise hand `-gt` something non-numeric.
+llvm_version_ok() {
+    case $2 in
+    [0-9]*) return 0 ;;
+    esac
+    problem "cannot read an LLVM version from $1 (got '$2')"
+    return 1
+}
+
 # newer_than_reader <writer> <writer LLVM> <reader> <reader LLVM>
 # A reader understands bitcode from its own LLVM major and older, never newer.
 newer_than_reader() {
@@ -51,16 +63,17 @@ if [ -s "$config" ]; then
         if [ -z "$value" ]; then
             [ "$key" = llvm_objcopy_filepath ] ||
                 problem "$key is missing from $config"
-        elif [ -x "$value" ]; then
+        elif [ -f "$value" ] && [ -x "$value" ]; then
             echo "$key: $value"
         else
-            problem "$key: $value does not exist"
+            problem "$key: $value is not an executable file"
         fi
     done
     llvm_config=$(config_value llvm_config_filepath)
-    if [ -x "$llvm_config" ]; then
+    if [ -f "$llvm_config" ] && [ -x "$llvm_config" ]; then
         capture_llvm=$("$llvm_config" --version)
         echo "capture llvm: $capture_llvm"
+        llvm_version_ok "llvm-config" "$capture_llvm" || capture_llvm=
     fi
 else
     problem "no config at $config (the first wrapper run would write one; see the setup skill)"
@@ -72,6 +85,7 @@ if command -v rllvm-query >/dev/null; then
     echo "rllvm-query version: ${query_version:-unknown}"
     query_llvm=$(rllvm-query --llvm-version)
     echo "rllvm-query llvm: $query_llvm"
+    llvm_version_ok "rllvm-query" "$query_llvm" || query_llvm=
 else
     echo "note: rllvm-query is not installed (needed for queries and the MCP server)"
 fi
@@ -80,6 +94,7 @@ rust_llvm=
 if command -v rustc >/dev/null; then
     rust_llvm=$(rustc -vV | sed -n 's/^LLVM version: //p')
     echo "rustc llvm: $rust_llvm"
+    llvm_version_ok "rustc" "$rust_llvm" || rust_llvm=
 else
     echo "note: rustc is not installed (needed only for Rust capture)"
 fi
