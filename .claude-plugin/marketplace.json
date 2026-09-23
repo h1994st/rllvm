@@ -1,0 +1,15 @@
+{
+  "name": "rllvm",
+  "description": "Claude Code plugin for capturing and querying LLVM bitcode with rllvm.",
+  "owner": {
+    "name": "Shengtuo Hu",
+    "url": "https://github.com/h1994st"
+  },
+  "plugins": [
+    {
+      "name": "rllvm",
+      "source": "./plugins/rllvm",
+      "description": "Capture LLVM bitcode from any build and query it through rllvm-query's MCP server."
+    }
+  ]
+}
