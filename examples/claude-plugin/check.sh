@@ -138,6 +138,8 @@ if command -v claude >/dev/null; then
     # --json instead of --strict: the plugin ships without a version by
     # design (Claude Code tracks the git commit), so the missing-version
     # warning is the only one tolerated here; anything else still fails.
+    # This also covers the skills: --json lists only files with problems
+    # under "contents", so a skill's warnings and errors appear there too.
     claude plugin validate --json "$PLUGIN" >"$OUT/validate-plugin.json" || true
     python3 - "$OUT/validate-plugin.json" <<'PY'
 import json, sys
@@ -169,14 +171,7 @@ warnings = [
 if errors or warnings:
     sys.exit(f"marketplace manifest: errors={errors} warnings={warnings}")
 PY
-    # claude plugin validate --json on the plugin or marketplace root reports
-    # skills, agents and commands under "contents" -- and that list comes back
-    # empty even though the skills above exist. --strict on the skills
-    # directory itself is what actually checks them (frontmatter, description,
-    # ...), so it runs as a separate step.
-    claude plugin validate --strict "$PLUGIN/skills" >"$OUT/validate-skills.txt" 2>&1 ||
-        fail "claude plugin validate --strict on skills: $(cat "$OUT/validate-skills.txt")"
-    echo "ok: claude plugin validate passes, including the skills"
+    echo "ok: claude plugin validate passes"
 else
     echo "note: claude not installed; manifests not validated"
 fi
