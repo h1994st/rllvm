@@ -7,15 +7,26 @@ No `check.sh` — see [external/](../README.md).
 
 ## Setup
 
-PhASAR supports LLVM 16 through 22. Install its dependencies, and point rllvm
-at the same toolchain so the bitcode it captures is a version PhASAR can read:
+PhASAR supports LLVM 22 from commit `0f4c0bf` on `development`; release
+`v2604` and earlier accept only 16 and 17. Check out a later commit:
+
+```bash
+git clone https://github.com/secure-software-engineering/phasar
+cd phasar
+git checkout 3a5af4011
+git submodule update --init
+```
+
+Install its dependencies, and point rllvm at the same toolchain so the bitcode
+it captures is a version PhASAR can read:
 
 ```bash
 ./utils/InstallAptDependencies.sh --noninteractive --llvm-version=22
 rllvm-init --llvm-prefix /usr/lib/llvm-22
 ```
 
-The [container](../../../DOCKER.md) pins both:
+The [container](../../../DOCKER.md) pins both; PhASAR's dependencies still
+need the script above inside it:
 
 ```bash
 docker build --build-arg LLVM_VERSION=22 -t rllvm:llvm22 .
@@ -30,7 +41,7 @@ cmake -S . -B build -G Ninja \
 cmake --build build
 
 rllvm-get-bc build/tools/phasar-cli/phasar-cli -o phasar-cli.bc
-phasar-cli -m phasar-cli.bc -D ifds-solvertest \
+build/tools/phasar-cli/phasar-cli -m phasar-cli.bc -D ifds-solvertest \
   --auto-globals=false --emit-raw-results --entry-points=__ALL__
 ```
 
@@ -53,7 +64,7 @@ cmake -S . -B build-nolto -G Ninja \
 cmake --build build-nolto
 
 rllvm-get-bc build-nolto/lib/Utils/libphasar_utils.a -o phasar-utils.bc
-phasar-cli -m phasar-utils.bc -D ifds-solvertest \
+build-nolto/tools/phasar-cli/phasar-cli -m phasar-utils.bc -D ifds-solvertest \
   --auto-globals=false --emit-raw-results --entry-points=__ALL__
 ```
 
@@ -61,5 +72,6 @@ Not `-b`: that writes a bitcode archive, and `--module` wants a module.
 
 ## Validated against
 
-PhASAR v2604 with LLVM 22.1.8. `phasar-cli.bc` is 12.8 MB and 8584 functions;
-`phasar-utils.bc` is 334.
+PhASAR `3a5af4011` with LLVM 22.1.8 in the container on aarch64 Linux.
+`phasar-cli.bc` is 12.8 MB and 8584 functions, and its analysis prints
+4,920,885 lines; `phasar-utils.bc` is 361 functions and 268,142 lines.
