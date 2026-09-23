@@ -66,7 +66,9 @@ Start from `doctor.sh` every time.
 | `rllvm-get-bc` finds no modules | the build used the wrappers: rerun one compile with `--rllvm-verbose=3`, or `RLLVM_LOG_LEVEL=3` under Cargo |
 | An archive yields nothing under LTO | an archive of `-flto` objects, full or thin, holds bitcode, not objects; rebuild with LTO off to extract a library — a linked executable still extracts |
 | A tool rejects the module | the capture LLVM is newer than that tool's; see step 3 |
-| Modules reported missing | the build tree moved (`--bitcode-root`, README "Moving a build tree") or the bitcode was deleted |
+| Modules reported missing | the build tree moved (`--bitcode-root`, [Moving a build tree](https://github.com/h1994st/rllvm#moving-a-build-tree)) or the bitcode was deleted |
 | Stale results after a rebuild | `RLLVM_CACHE` is on and a side input preprocessing cannot see changed; rebuild with it off |
 
-Details: the rllvm README, sections "Configuration" and "Capturing bitcode".
+Details: [Configuration](https://github.com/h1994st/rllvm#configuration) and
+[Capturing bitcode](https://github.com/h1994st/rllvm#capturing-bitcode) in the
+rllvm README.

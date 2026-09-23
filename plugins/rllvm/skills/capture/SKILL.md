@@ -63,7 +63,8 @@ Compiler flags reach the real compiler unchanged. These need a decision:
 
 **Handing a module to another tool** (PhASAR, SVF, KLEE, `opt`): extract one
 module with `-o x.bc`, never an archive (`-b`); capture with an LLVM no newer
-than the tool's; turn LTO off to extract a single library.
+than the tool's; turn LTO off to extract a single library. Worked hand-offs:
+[examples/external](https://github.com/h1994st/rllvm/tree/main/examples/external).
 
 ## 4. Query it
 
@@ -77,4 +78,6 @@ Rerun one compile with `--rllvm-verbose=3` (under Cargo,
 `RLLVM_LOG_LEVEL=3`) and read what the wrapper did before changing anything.
 The `setup` skill's troubleshooting table covers the common causes.
 
-Details: the rllvm README, "Capturing bitcode" and "Extracting bitcode".
+Details: [Capturing bitcode](https://github.com/h1994st/rllvm#capturing-bitcode)
+and [Extracting bitcode](https://github.com/h1994st/rllvm#extracting-bitcode)
+in the rllvm README.
