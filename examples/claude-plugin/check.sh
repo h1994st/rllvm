@@ -28,6 +28,40 @@ for expected in ("load_catalog", "inventory"):
 PY
 echo "ok: the plugin's MCP entry starts rllvm-query and lists its tools"
 
+# doctor.sh on the harness's working configuration: no problem with the tools
+# or the config. A version mismatch on this machine would be a real one, so
+# only the tool and config lines are asserted.
+"$PLUGIN/scripts/doctor.sh" >"$OUT/doctor-good.txt" || true
+doctor=$(cat "$OUT/doctor-good.txt")
+defines "$doctor" '^problems: [0-9]+$' "doctor.sh printed no problem count"
+if grep -qE '^problem: (rllvm-[a-z-]+ is not on PATH|[a-z_]+_filepath|no config)' <<<"$doctor"; then
+    fail "doctor.sh flagged a working setup: $doctor"
+fi
+
+# A config naming a clang that does not exist is a problem, named by key.
+sed 's|^clang_filepath = .*|clang_filepath = "/nonexistent/clang"|' \
+    "$RLLVM_CONFIG" >"$OUT/broken.toml"
+status=0
+RLLVM_CONFIG=$OUT/broken.toml "$PLUGIN/scripts/doctor.sh" >"$OUT/doctor-broken.txt" || status=$?
+[ "$status" = 1 ] || fail "doctor.sh exited $status on a broken config"
+defines "$(cat "$OUT/doctor-broken.txt")" '^problem: clang_filepath' \
+    "doctor.sh did not name clang_filepath"
+
+# A rustc whose LLVM is newer than the capture LLVM cannot be merged.
+mkdir -p "$OUT/fakebin"
+printf '#!/bin/sh\necho "LLVM version: 999.0.0"\n' >"$OUT/fakebin/rustc"
+chmod +x "$OUT/fakebin/rustc"
+PATH=$OUT/fakebin:$PATH "$PLUGIN/scripts/doctor.sh" >"$OUT/doctor-rust.txt" || true
+defines "$(cat "$OUT/doctor-rust.txt")" '^problem: rustc .*999' \
+    "doctor.sh missed a rustc LLVM newer than its readers"
+
+# No config at all is reported, and doctor.sh does not create one.
+status=0
+RLLVM_CONFIG=$OUT/absent.toml "$PLUGIN/scripts/doctor.sh" >"$OUT/doctor-none.txt" || status=$?
+[ "$status" = 1 ] || fail "doctor.sh exited $status with no config"
+[ ! -e "$OUT/absent.toml" ] || fail "doctor.sh wrote a config"
+echo "ok: doctor.sh reports tools, config and LLVM versions"
+
 # CI does not install Claude Code, so strict validation runs where it is.
 if command -v claude >/dev/null; then
     # --json instead of --strict: the plugin ships without a version by
