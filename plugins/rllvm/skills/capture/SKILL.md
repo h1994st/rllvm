@@ -33,9 +33,10 @@ rebuilt.
 Compiler flags reach the real compiler unchanged. These need a decision:
 
 - **LTO.** `RLLVM_LTO_MODE`: `marker` (default), `save-temps` (full LTO's
-  merged module), or `skip`; use the same mode for compile and link. A ThinLTO
-  archive holds raw bitcode and cannot be extracted — turn LTO off to extract a
-  library.
+  merged module), or `skip`; use the same mode for compile and link. An
+  archive of `-flto` objects, full or thin, holds bitcode, not objects, and
+  cannot be extracted — turn LTO off to extract a library. A linked
+  executable still extracts either way.
 - **Cross-compilation.** `--target=<triple>` as for Clang. Linking ELF from a
   non-ELF host needs LLD (`-fuse-ld=lld`). RISC-V and other targets the
   internal fallback does not model need `llvm_objcopy_filepath` in the config.
@@ -62,7 +63,7 @@ Compiler flags reach the real compiler unchanged. These need a decision:
 
 **Handing a module to another tool** (PhASAR, SVF, KLEE, `opt`): extract one
 module with `-o x.bc`, never an archive (`-b`); capture with an LLVM no newer
-than the tool's; turn ThinLTO off to extract a single library.
+than the tool's; turn LTO off to extract a single library.
 
 ## 4. Query it
 
