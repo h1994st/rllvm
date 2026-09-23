@@ -9,7 +9,7 @@ create a tag by hand.
 
 | tool | owns |
 |---|---|
-| [release-please](https://github.com/googleapis/release-please) | version bump (`Cargo.toml`, `Cargo.lock`), `CHANGELOG.md`, the release PR |
+| [release-please](https://github.com/googleapis/release-please) | version bump (`Cargo.toml`, `Cargo.lock`, the Claude Code plugin's `plugin.json`), `CHANGELOG.md`, the release PR |
 | [cargo-dist](https://axodotdev.github.io/cargo-dist) | the git tag, the GitHub Release and its notes, the binaries, the crates.io publish |
 
 ## How a release happens
@@ -29,6 +29,9 @@ create a tag by hand.
    crate's CHANGELOG entry plus install instructions. `rllvm-core` has no app;
    it reaches crates.io through the publish job, which every dispatch runs and
    which uploads only the versions crates.io does not already have.
+   The Claude Code plugin in `plugins/rllvm` has no app either; the workflow
+   tags it `rllvm-plugin-v<version>`, and users receive the new version from
+   the marketplace.
 
 Editing the CHANGELOG before merging the release PR is fine and expected — it is
 a normal PR.
@@ -59,7 +62,7 @@ on tag push, because whoever creates the GitHub Release owns its notes — and w
 want dist's notes, which include install instructions. `git tag v0.1.8 && git
 push` now produces a tag and nothing else.
 
-**Do not bump `version` in `Cargo.toml` by hand.** release-please owns it, and a
+**Do not bump `version` in `Cargo.toml` or `plugin.json` by hand.** release-please owns it, and a
 manual edit will conflict with the release PR.
 
 ## If something goes wrong
