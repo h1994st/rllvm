@@ -75,6 +75,11 @@ reaches becomes public API of `rllvm-core`.
   and put rationale in issues or the code, not there. `site/build.py` generates
   `site/index.md`, which is never committed. Validate links and site generation
   when changing the README.
+- The skills in `plugins/rllvm` condense the README for agents and stand alone,
+  with no links into the repository. A change to a documented command, flag,
+  environment variable, config key or behaviour updates the matching skill in
+  the same PR. `examples/claude-plugin/check.sh` catches renamed names, not
+  changed meaning.
 - `docs/` is gitignored except `docs/CATALOG.md`.
 - Use repository-relative paths. Keep committed benchmark evidence to compact
   summaries; raw logs stay out of Git.
