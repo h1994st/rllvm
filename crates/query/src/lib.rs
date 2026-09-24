@@ -654,11 +654,7 @@ fn defs(session: &Session, name: &str) -> Vec<DefEntry> {
     session
         .definitions(name)
         .into_iter()
-        .map(|function| DefEntry {
-            function: function.id.clone(),
-            configuration_id: configuration_of(session, &function.id.module_id),
-            location: function.location.clone(),
-        })
+        .map(|function| def_entry(session, function))
         .collect()
 }
 
@@ -668,6 +664,17 @@ fn configuration_of(session: &Session, module_id: &str) -> Option<String> {
         .iter()
         .find(|module| module.id == module_id)
         .and_then(|module| module.configuration_id.clone())
+}
+
+/// One `DefEntry` for a function, shared by every query that reports
+/// definitions: the configuration and location come from the same two
+/// lookups either way.
+fn def_entry(session: &Session, function: &FunctionFact) -> DefEntry {
+    DefEntry {
+        function: function.id.clone(),
+        configuration_id: configuration_of(session, &function.id.module_id),
+        location: function.location.clone(),
+    }
 }
 
 fn at_entries(session: &Session, file: &Path, line: u32) -> Vec<AtEntry> {
@@ -741,11 +748,7 @@ fn ffi_exports(session: &Session) -> (Vec<DefEntry>, usize) {
             && is_fully_unmangled(&function.id.symbol)
     }) {
         match function.language.map(|language| language.name) {
-            Some(Language::Rust) => exports.push(DefEntry {
-                function: function.id.clone(),
-                configuration_id: configuration_of(session, &function.id.module_id),
-                location: function.location.clone(),
-            }),
+            Some(Language::Rust) => exports.push(def_entry(session, function)),
             Some(Language::Other) => {}
             None => unknown += 1,
         }
