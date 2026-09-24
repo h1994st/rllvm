@@ -68,11 +68,11 @@ pub enum ClosureDirection {
     Out,
 }
 
-/// The nine source-level queries `rllvm-query` answers, plus `Mcp` to serve
+/// The ten source-level queries `rllvm-query` answers, plus `Mcp` to serve
 /// them over MCP stdio instead of running one and exiting, and `Completions`
-/// to print a shell completion script -- eleven variants in all.
+/// to print a shell completion script -- twelve variants in all.
 ///
-/// The nine query variants mirror [`crate::Query`] field-for-field, for the
+/// The ten query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
 /// converts a parsed variant into a [`crate::Query`] before running it;
 /// `Mcp` and `Completions` have no counterpart there -- they name a mode,
@@ -132,12 +132,14 @@ pub enum QueryCommand {
     },
     /// Unbound symbols: the captured program's boundary.
     Externals,
+    /// Rust definitions exported under an unmangled name, callable from C.
+    FfiExports,
     /// `!callees` at a call site, when CVP produced it; otherwise unresolved.
     IndirectTargets {
         /// `file:line` location, e.g. `t.c:4`
         at: String,
     },
-    /// Serve the nine queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
+    /// Serve the ten queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
     Mcp,
     /// Print a shell completion script for `rllvm-query`
     ///

@@ -712,26 +712,34 @@ fn query_json(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> ser
 /// them can be removed from under a load that already verified it. Returns
 /// the catalog and the path of the first module.
 fn two_plain_module_catalog(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
-    let mut modules = Vec::new();
+    let modules: Vec<PathBuf> = ADD_AND_MAIN
+        .iter()
+        .map(|(name, source)| compile_bitcode(scratch, name, source))
+        .collect();
+    let first = modules[0].clone();
+    let catalog = plain_module_catalog(scratch, &modules);
+    (catalog, first)
+}
+
+/// Inventories each module file and writes one catalog holding them all.
+fn plain_module_catalog(scratch: &tempfile::TempDir, modules: &[PathBuf]) -> PathBuf {
+    let mut collected = Vec::new();
     let mut origin = None;
-    let mut first = None;
-    for (name, source) in ADD_AND_MAIN {
-        let object = compile_bitcode(scratch, name, source);
+    for object in modules {
         let catalog =
-            rllvm_core::catalog::inventory(&object, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            rllvm_core::catalog::inventory(object, scratch.path(), Some(&llvm_bin("llvm-dis")))
                 .unwrap();
         origin.get_or_insert(catalog.origin.clone());
-        first.get_or_insert(object);
-        modules.extend(catalog.modules);
+        collected.extend(catalog.modules);
     }
     let catalog = rllvm_core::catalog::ModuleCatalog::new(
         origin.expect("at least one module"),
         "recorded_modules",
-        modules,
+        collected,
     );
     let path = scratch.path().join("plain-catalog.json");
     write_catalog_json(&path, &catalog);
-    (path, first.expect("at least one module"))
+    path
 }
 
 /// The shape every C++ program that uses templates or `inline` has: a
@@ -1607,6 +1615,53 @@ fn a_c_answer_carries_no_symbol_table() {
     );
 }
 
+const RUST_EXPORTS: &str = r#"#[unsafe(no_mangle)]
+pub extern "C" fn lib_add(a: i32, b: i32) -> i32 { helper(a) + b }
+
+#[unsafe(export_name = "renamed")]
+pub extern "C" fn lib_renamed() {}
+
+pub extern "C" fn stays_mangled() {}
+
+#[inline(never)]
+fn helper(a: i32) -> i32 { a * 2 }
+"#;
+
+/// Real rustc output rather than a hand-written `llvm.ident`, without `-g`,
+/// beside a C module: the attribution rests on what rustc actually writes.
+#[test]
+fn ffi_exports_lists_what_no_mangle_and_export_name_make_c_callable() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("lib.rs");
+    let rust = scratch.path().join("lib.bc");
+    std::fs::write(&source, RUST_EXPORTS).unwrap();
+    let status = Command::new("rustc")
+        .args([
+            "--crate-type=staticlib",
+            "--emit=llvm-bc",
+            "-C",
+            "codegen-units=1",
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(&rust)
+        .status()
+        .unwrap();
+    assert!(status.success(), "rustc failed");
+    let c = compile_bitcode(&scratch, "c.c", "int c_fn(void) { return 1; }\n");
+
+    let catalog = plain_module_catalog(&scratch, &[rust, c]);
+    let answer = query_json(&scratch, &catalog, &["ffi-exports"]);
+    let symbols: Vec<&str> = answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["function"]["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(symbols, ["lib_add", "renamed"]);
+    assert_eq!(answer["uncertainty"]["functions_of_unknown_language"], 0);
+}
+
 // --- MCP stdio server -------------------------------------------------
 //
 // Nested in its own module so `cargo test -p rllvm-query --test query mcp`
@@ -1855,11 +1910,11 @@ mod mcp {
         );
     }
 
-    /// One tool over the wire. That every one of the nine is listed under a
+    /// One tool over the wire. That every one of the ten is listed under a
     /// name `query_from_call` resolves is `mcp.rs`'s own
     /// `every_query_variant_is_listed_and_resolves_through_a_call`, which
     /// checks it against a match the compiler forces to stay exhaustive --
-    /// driving the same nine through a subprocess here proves nothing extra
+    /// driving the same ten through a subprocess here proves nothing extra
     /// about the transport this test already covers.
     #[test]
     fn a_modern_tool_call_returns_a_call_tool_result() {

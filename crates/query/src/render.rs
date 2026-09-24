@@ -285,7 +285,7 @@ fn shown_in_sites(sites: &[CallSiteFact], shown: &mut Shown) {
 fn shown_in(results: &QueryResults) -> Shown {
     let mut shown = Shown::default();
     match results {
-        QueryResults::Defs(entries) => {
+        QueryResults::Defs(entries) | QueryResults::FfiExports(entries) => {
             shown.missing_location = entries.iter().any(|entry| entry.location.is_none());
         }
         QueryResults::At(entries) => {
@@ -347,6 +347,7 @@ fn walks_call_edges(results: &QueryResults) -> bool {
         | QueryResults::Callees(_)
         | QueryResults::Uses(_)
         | QueryResults::Externals(_)
+        | QueryResults::FfiExports(_)
         | QueryResults::IndirectTargets(_) => false,
     }
 }
@@ -359,6 +360,7 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         QueryResults::Reach(_) => "no path over resolved edges; not proof of unreachability",
         QueryResults::Callees(_) => "the target defined no outgoing call sites",
         QueryResults::Externals(_) => "every symbol in scope bound to a definition",
+        QueryResults::FfiExports(_) => "no function attributed to Rust exports an unmangled symbol",
         // `Callers`, `Uses` and `Closure` all take a name that can resolve
         // perfectly well and still return no results, so the
         // `MATCHED_NOTHING` reading below would be false: rule 2 stays
@@ -494,6 +496,13 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
             uncertainty.conditional_path_steps
         ));
     }
+    if let Some(unknown) = uncertainty.functions_of_unknown_language
+        && unknown > 0
+    {
+        notes.push(format!(
+            "{unknown} unmangled definition(s) could not be attributed to a language and were not searched; catalog per object or build with -g"
+        ));
+    }
 
     // Rule 5: the address-taken inventory is a heuristic, never an edge.
     if let QueryResults::IndirectTargets(results) = &result.results
@@ -605,6 +614,9 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
         "  ambiguous_bindings: {}\n  conditional_path_steps: {}\n",
         uncertainty.ambiguous_bindings, uncertainty.conditional_path_steps
     ));
+    if let Some(unknown) = uncertainty.functions_of_unknown_language {
+        out.push_str(&format!("  functions_of_unknown_language: {unknown}\n"));
+    }
     // Every ambiguous binding `ambiguous_bindings` only counts: for `reach`
     // the ones that walk actually reached, for every other query the full
     // program-wide set. `ambiguous_bindings` says how many; this says which,
@@ -667,7 +679,7 @@ pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
 fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
     let symbols = &result.symbols;
     match &result.results {
-        QueryResults::Defs(entries) => {
+        QueryResults::Defs(entries) | QueryResults::FfiExports(entries) => {
             for entry in entries {
                 out.push_str(&format!(
                     "{}  {}\n",
@@ -809,7 +821,7 @@ mod tests {
     use super::*;
     use crate::{
         Query,
-        facts::{FunctionFact, Linkage, ModuleAnalysis, ModuleReport},
+        facts::{FunctionFact, Language, Linkage, ModuleAnalysis, ModuleReport},
         index::{Direction, Session},
         run,
         testing::*,
@@ -1509,6 +1521,37 @@ mod tests {
         assert!(
             render(&result, TextMode::Adaptive, Color::Never)
                 .contains("no non-call use of the target was found in the selected scope")
+        );
+    }
+
+    fn ffi_exports_text(functions: Vec<FunctionFact>) -> String {
+        let session = Session::new(facts(functions, vec![]), vec![]);
+        let result = run(&session, &Query::FfiExports).unwrap();
+        render(&result, TextMode::Adaptive, Color::Never)
+    }
+
+    #[test]
+    fn an_ffi_exports_answer_names_what_it_could_not_attribute() {
+        let text = ffi_exports_text(vec![attributed("mystery", Linkage::External, None)]);
+        assert!(
+            text.contains("1 unmangled definition(s) could not be attributed to a language"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("no function attributed to Rust exports an unmangled symbol"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn an_ffi_exports_row_prints_like_a_definition() {
+        let mut export = attributed("lib_add", Linkage::External, Some(Language::Rust));
+        export.location = Some(source_location("lib.rs", 3));
+        let text = ffi_exports_text(vec![export]);
+        assert_eq!(
+            text.lines().next().unwrap(),
+            "lib.rs:3  lib_add",
+            "got: {text}"
         );
     }
 

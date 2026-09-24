@@ -68,7 +68,7 @@ pub use render::{Color, TextMode, render};
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// One of the nine source-level queries. Serializes with a `kind` tag, e.g.
+/// One of the ten source-level queries. Serializes with a `kind` tag, e.g.
 /// `{"kind": "callers", "name": "parse_frame"}`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -95,6 +95,10 @@ pub enum Query {
     Closure { name: String, direction: Direction },
     /// Unbound symbols: the captured program's boundary.
     Externals,
+    /// Definitions a Rust module makes C-callable: external, attributed to
+    /// Rust, and exported under a name that is not mangled, which is what
+    /// `#[no_mangle]` and `#[export_name]` produce.
+    FfiExports,
     /// `!callees` at a call site, when CVP produced it; otherwise
     /// unresolved. `at` is a `file:line` location, e.g. `"t.c:4"`.
     IndirectTargets { at: String, heuristics: bool },
@@ -171,6 +175,7 @@ pub enum QueryResults {
     Reach(Option<Vec<PathStep>>),
     Closure(Vec<FunctionId>),
     Externals(Vec<SymbolBinding>),
+    FfiExports(Vec<DefEntry>),
     IndirectTargets(Vec<IndirectTargetsResult>),
 }
 
@@ -188,6 +193,7 @@ impl QueryResults {
             QueryResults::Reach(path) => path.is_none(),
             QueryResults::Closure(items) => items.is_empty(),
             QueryResults::Externals(items) => items.is_empty(),
+            QueryResults::FfiExports(items) => items.is_empty(),
             QueryResults::IndirectTargets(items) => items.is_empty(),
         }
     }
@@ -242,6 +248,12 @@ pub struct Uncertainty {
     /// returns no path: a non-zero count says *this* answer is conditional
     /// without the reader having to walk the step kinds.
     pub conditional_path_steps: usize,
+    /// `ffi-exports` only: external definitions whose symbol is fully
+    /// unmangled but whose language neither debug info nor the producer
+    /// could establish. They might be exports and were not searched.
+    /// Large for a module merged from C and Rust without `-g`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub functions_of_unknown_language: Option<usize>,
 }
 
 /// How one name in the query reached the symbols it named.
@@ -399,6 +411,7 @@ fn session_from_loaded(loaded: load::Loaded) -> Result<Session, Error> {
 pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
     let mut reach_frontier: Option<Vec<SymbolBinding>> = None;
     let mut conditional_path_steps = 0;
+    let mut unknown_language = None;
 
     let results = match query {
         Query::Defs { name } => QueryResults::Defs(defs(session, name)),
@@ -421,6 +434,11 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
             QueryResults::Closure(session.closure(name, *direction))
         }
         Query::Externals => QueryResults::Externals(externals(session)),
+        Query::FfiExports => {
+            let (exports, unknown) = ffi_exports(session);
+            unknown_language = Some(unknown);
+            QueryResults::FfiExports(exports)
+        }
         Query::IndirectTargets { at, heuristics } => {
             QueryResults::IndirectTargets(indirect_targets(session, at, *heuristics)?)
         }
@@ -447,7 +465,10 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
         symbols,
         scope: session.scope().clone(),
         analysis: analysis_of(session.modules()),
-        uncertainty: uncertainty_of(session, frontier, conditional_path_steps),
+        uncertainty: Uncertainty {
+            functions_of_unknown_language: unknown_language,
+            ..uncertainty_of(session, frontier, conditional_path_steps)
+        },
         provenance: Provenance {
             catalog_origin: session.origin().clone(),
             llvm_version: llvm_version(),
@@ -503,7 +524,7 @@ impl QueryResults {
     /// and leave its mangled names unreadable.
     fn collect_symbols(&self, into: &mut BTreeSet<String>) {
         match self {
-            QueryResults::Defs(entries) => {
+            QueryResults::Defs(entries) | QueryResults::FfiExports(entries) => {
                 for entry in entries {
                     collect_function(&entry.function, into);
                 }
@@ -703,6 +724,39 @@ fn externals(session: &Session) -> Vec<SymbolBinding> {
         .collect()
 }
 
+/// Neither a Rust symbol, in either scheme, nor an Itanium one. `#[no_mangle]`
+/// and `#[export_name]` produce these; C++ never does.
+fn is_fully_unmangled(symbol: &str) -> bool {
+    !symbol.starts_with("_Z") && rustc_demangle::try_demangle(symbol).is_err()
+}
+
+/// The exported Rust definitions, sorted by symbol, and how many fully
+/// unmangled external definitions could not be attributed to a language.
+fn ffi_exports(session: &Session) -> (Vec<DefEntry>, usize) {
+    let mut exports = Vec::new();
+    let mut unknown = 0;
+    for function in session.functions().iter().filter(|function| {
+        function.is_definition
+            && function.linkage == Linkage::External
+            && is_fully_unmangled(&function.id.symbol)
+    }) {
+        match function.language.map(|language| language.name) {
+            Some(Language::Rust) => exports.push(DefEntry {
+                function: function.id.clone(),
+                configuration_id: configuration_of(session, &function.id.module_id),
+                location: function.location.clone(),
+            }),
+            Some(Language::Other) => {}
+            None => unknown += 1,
+        }
+    }
+    exports.sort_by(|left, right| {
+        (&left.function.symbol, &left.function.module_id)
+            .cmp(&(&right.function.symbol, &right.function.module_id))
+    });
+    (exports, unknown)
+}
+
 fn indirect_targets(
     session: &Session,
     at: &str,
@@ -784,7 +838,10 @@ impl Query {
             | Query::Closure { name, .. } => vec![name],
             Query::Reach { from, to } => vec![from, to],
             // These take a location or nothing at all.
-            Query::At { .. } | Query::Externals | Query::IndirectTargets { .. } => Vec::new(),
+            Query::At { .. }
+            | Query::Externals
+            | Query::FfiExports
+            | Query::IndirectTargets { .. } => Vec::new(),
         }
     }
 
@@ -906,6 +963,9 @@ fn uncertainty_of(
             .count(),
         frontier,
         conditional_path_steps,
+        // Overwritten by `run` for `Query::FfiExports`; every other query
+        // leaves it absent.
+        functions_of_unknown_language: None,
     }
 }
 
@@ -916,7 +976,7 @@ mod tests {
         ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes, write_catalog,
     };
 
-    use crate::{load::load_catalog, testing::*};
+    use crate::{facts::Language, load::load_catalog, testing::*};
 
     #[test]
     fn a_module_is_analyzed_only_after_it_parses() {
@@ -1305,6 +1365,60 @@ mod tests {
         assert!(externals.resolution.is_empty());
         let json = serde_json::to_value(&externals).unwrap();
         assert!(json.get("resolution").is_none(), "omitted when empty");
+    }
+
+    #[test]
+    fn ffi_exports_lists_unmangled_external_rust_definitions() {
+        let rust = Some(Language::Rust);
+        let mut declared = attributed("imported", Linkage::External, rust);
+        declared.is_definition = false;
+        let session = Session::new(
+            facts(
+                vec![
+                    attributed("lib_add", Linkage::External, rust),
+                    attributed("_RNvCs9jdNsLYHTiK_3lib6helper", Linkage::External, rust),
+                    attributed(
+                        "_ZN3lib6legacy17h0123456789abcdefE",
+                        Linkage::External,
+                        rust,
+                    ),
+                    attributed("internal_helper", Linkage::Internal, rust),
+                    declared,
+                    attributed("c_fn", Linkage::External, Some(Language::Other)),
+                    attributed("_Z5twicei", Linkage::External, None),
+                    attributed("mystery", Linkage::External, None),
+                ],
+                vec![],
+            ),
+            vec![],
+        );
+        let result = run(&session, &Query::FfiExports).unwrap();
+        let QueryResults::FfiExports(entries) = &result.results else {
+            panic!("wrong result kind");
+        };
+        let symbols: Vec<&str> = entries.iter().map(|e| e.function.symbol.as_str()).collect();
+        assert_eq!(symbols, ["lib_add"]);
+        assert_eq!(
+            result.uncertainty.functions_of_unknown_language,
+            Some(1),
+            "`mystery` is counted; the C++ `_Z5twicei` never could be an export"
+        );
+    }
+
+    #[test]
+    fn only_ffi_exports_reports_the_unknown_language_count() {
+        let session = Session::new(
+            facts(vec![attributed("mystery", Linkage::External, None)], vec![]),
+            vec![],
+        );
+        let externals = run(&session, &Query::Externals).unwrap();
+        assert_eq!(externals.uncertainty.functions_of_unknown_language, None);
+        let json = serde_json::to_value(&externals).unwrap();
+        assert!(
+            json["uncertainty"]
+                .get("functions_of_unknown_language")
+                .is_none()
+        );
     }
 
     /// A synthetic one-module catalog whose module bytes are not real
