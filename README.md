@@ -26,6 +26,26 @@ rllvm-info hello.bc      # target, function, block, instruction counts
 On first run, tool paths are detected from `llvm-config` and written to
 `~/.rllvm/config.toml`.
 
+## Claude Code plugin
+
+In Claude Code, the rllvm plugin covers the whole workflow, from installing
+rllvm to reading an answer:
+
+```text
+/plugin marketplace add h1994st/rllvm
+/plugin install rllvm@rllvm
+```
+
+| Part | What it does |
+| --- | --- |
+| `setup` skill | Installs `rllvm` and `rllvm-query` with your approval, picks an LLVM every reader of the bitcode accepts, configures, and troubleshoots |
+| `capture` skill | Chooses how to capture your build — C, C++, Objective-C, Rust, mixed, a compilation database, cross, WebAssembly, eBPF — and what to extract |
+| `query` skill | Picks the query that answers your question and reports what the answer does not cover |
+| MCP server | `rllvm-query mcp`, configured automatically |
+
+Builds run as ordinary shell commands you approve, never inside the server.
+See the [plugin example](examples/claude-plugin/).
+
 ## Coming from wllvm or gllvm?
 
 rllvm follows the `CC`/`CXX` → build → extract workflow that
@@ -41,6 +61,7 @@ with it afterwards, does.
 | --- | --- | --- |
 | 🦀 Languages | [C, C++, Objective-C, **Rust**](#languages) | C, C++; Fortran in gllvm |
 | 🔍 Analysis | [Source-level queries, MCP server](#analyzing-bitcode) | ❌ |
+| 🤖 Agents | [Claude Code plugin: setup, capture, queries](#claude-code-plugin) | ❌ |
 | 📋 No wrapper build | [Import `compile_commands.json`](#from-a-compilation-database) | ❌ |
 | 🎯 Targets | [Native, **cross**, **WebAssembly, eBPF**](#cross-compilation) | Native |
 | 🔗 LTO | [Three modes, dispatched on object content](#lto) | `-flto` unlikely to survive extraction |
@@ -378,20 +399,8 @@ The client chooses what to analyse with `load_catalog` (a catalog JSON) or
 `inventory` (a binary, archive or `.bc`), and can keep several loaded at once.
 Each is analysed once and answers from memory after that.
 
-See the [MCP example](examples/mcp/).
-
-#### Claude Code plugin
-
-The plugin bundles this server with skills to set rllvm up, capture bitcode
-from any supported build, and choose and read queries:
-
-```text
-/plugin marketplace add h1994st/rllvm
-/plugin install rllvm@rllvm
-```
-
-It uses the `rllvm` and `rllvm-query` installed above. See the
-[plugin example](examples/claude-plugin/).
+See the [MCP example](examples/mcp/). In Claude Code, the
+[plugin](#claude-code-plugin) configures this server for you.
 
 ## Configuration
 
