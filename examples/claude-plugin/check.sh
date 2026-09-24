@@ -12,7 +12,7 @@ mkdir -p "$OUT"
 
 # The server entry is read from the plugin's own .mcp.json, so this proves
 # what ships rather than a hand-written copy of it.
-python3 - "$PLUGIN/.mcp.json" <<'PY'
+python3 - "$PLUGIN/.mcp.json" "$OUT/tools.json" <<'PY'
 import json, subprocess, sys
 
 server = json.load(open(sys.argv[1]))["mcpServers"]["rllvm-query"]
@@ -21,6 +21,7 @@ reply = subprocess.run(
     [server["command"], *server["args"]],
     input=request, capture_output=True, text=True, check=True,
 ).stdout
+open(sys.argv[2], "w").write(reply)
 names = {tool["name"] for tool in json.loads(reply)["result"]["tools"]}
 for expected in ("load_catalog", "inventory"):
     if expected not in names:
@@ -141,6 +142,73 @@ for skill in skills:
             sys.exit(f"{skill}: {script} does not exist")
 PY
 echo "ok: every skill is named, described, self-contained, and its scripts exist"
+
+# The skills condense the README for agents. Every name they use must exist
+# where it is defined: environment variables, config keys and packages in the
+# README, flags in the tool's own help, MCP names in tools/list, and envelope
+# fields in the query crate. A rename there fails here until the skills follow.
+python3 - "$PLUGIN" "$REPO" "$OUT/tools.json" <<'PY'
+import json, pathlib, re, shutil, subprocess, sys
+
+plugin, repo = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+readme = (repo / "README.md").read_text()
+tools = json.load(open(sys.argv[3]))["result"]["tools"]
+mcp = {t["name"] for t in tools}
+mcp |= {k for t in tools for k in t["inputSchema"].get("properties", {})}
+config_keys = set(re.findall(r"^\| `([a-z_]+)` \| (?:Yes|No) \|", readme, re.M))
+fields = {
+    name
+    for source in [*(repo / "crates/query/src").glob("*.rs"), repo / "crates/core/src/catalog.rs"]
+    for name in re.findall(r"pub ([a-z_]+):", source.read_text())
+}
+# rllvm-rustc passes its arguments to rustc, whose help lists them.
+EXTRA_HELP = {"rllvm-rustc": ["rustc", "--help", "-v"]}
+helps = {}
+
+def help_text(command, sub):
+    if (command, sub) not in helps:
+        if not shutil.which(command):
+            sys.exit(f"skills name {command}, which is not installed")
+        runs = [[command, sub, "--help"]] if sub else []
+        runs += [[command, "--help"], [command, "--rllvm-help"]]
+        runs += [EXTRA_HELP[command]] if command in EXTRA_HELP else []
+        helps[command, sub] = "".join(
+            subprocess.run(r, capture_output=True, text=True).stdout for r in runs
+        )
+    return helps[command, sub]
+
+problems = []
+for skill in sorted((plugin / "skills").glob("*/SKILL.md")):
+    text = skill.read_text().split("\n---\n", 1)[1]
+    fenced = re.findall(r"```\w*\n(.*?)```", text, re.S)
+    spans = re.findall(r"`([^`\n]+)`", re.sub(r"```.*?```", "", text, flags=re.S))
+    spans += [line.split("#")[0] for block in fenced for line in block.splitlines()]
+    for span in spans:
+        command = re.search(r"(?<![\w-])(rllvm-[a-z-]+)(?: ([a-z]+)\b)?", span)
+        for flag in re.findall(r"(?<![\w-])--[a-z][a-z0-9-]*", span):
+            # Other tools' flags (`cmake --build`) are documented in the README.
+            where = readme + (help_text(*command.groups()) if command else "")
+            if flag not in where:
+                problems.append(f"{skill.parent.name}: {flag} in `{span}`")
+        for package in re.findall(r"(?:brew|cargo|apt) install ([^;]+)", span):
+            for name in package.split():
+                if not name.startswith("-") and name not in readme:
+                    problems.append(f"{skill.parent.name}: package {name}")
+    for span in spans:
+        for var in re.findall(r"\b[A-Z][A-Z0-9]*_[A-Z0-9_]+\b", span):
+            if not var.startswith("CLAUDE_") and var not in readme:
+                problems.append(f"{skill.parent.name}: {var} is not in the README")
+        # A file name (`compile_commands.json`) is not a key.
+        for key in re.findall(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b(?!\.\w)", span):
+            if key not in config_keys | mcp | fields:
+                problems.append(f"{skill.parent.name}: {key} is not a config key, MCP name or envelope field")
+    for dev in re.findall(r"`([a-z0-9-]*-N-dev)`", text):
+        if dev not in readme:
+            problems.append(f"{skill.parent.name}: package {dev}")
+if problems:
+    sys.exit("skills drifted from their sources:\n  " + "\n  ".join(sorted(set(problems))))
+PY
+echo "ok: every name the skills use exists in the README, the tools or the server"
 
 # CI does not install Claude Code, so strict validation runs where it is.
 # Validating the plugin also covers its skills.
