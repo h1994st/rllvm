@@ -30,8 +30,13 @@ create a tag by hand.
    it reaches crates.io through the publish job, which every dispatch runs and
    which uploads only the versions crates.io does not already have.
    The Claude Code plugin in `plugins/rllvm` has no app either; the workflow
-   tags it `rllvm-plugin-v<version>`, and users receive the new version from
-   the marketplace.
+   publishes a `rllvm-plugin-v<version>` GitHub Release with its CHANGELOG
+   entry, never marked latest, and users receive the new version from the
+   marketplace.
+
+A new package starts at `0.0.0` in `.release-please-manifest.json` with an
+`initial-version` in its config, so its first release PR proposes that version
+with a CHANGELOG entry. Any other manifest version reads as already released.
 
 Editing the CHANGELOG before merging the release PR is fine and expected — it is
 a normal PR.

@@ -22,8 +22,13 @@ jobs:
     # at all -- see that step for what that costs. One list rather than two:
     # adding a package to the config tags it by default, and only promoting it
     # to a dist app edits this line.
+    #
+    # ANNOUNCED lists packages outside DIST_APPS that still get a GitHub
+    # Release, so users hear about a new version: the Claude Code plugin ships
+    # no artifacts, but its users update from the marketplace.
     env:
       DIST_APPS: "crates/tools crates/query"
+      ANNOUNCED: "plugins/rllvm"
     steps:
       # release-please labels its release PR `autorelease: pending` and flips it
       # to `autorelease: tagged` once it creates the release. With
@@ -166,10 +171,34 @@ jobs:
             VERSION="$(jq -er --arg pkg "$PKG_PATH" '.[$pkg]' .release-please-manifest.json)"
             TAG="${COMPONENT}-v${VERSION}"
 
+            # 0.0.0 is a package awaiting its first release: its release PR
+            # proposes `initial-version`. Tagging 0.0.0 would claim a release
+            # that never happened.
+            if [ "$VERSION" = "0.0.0" ]; then
+              echo "::notice::${COMPONENT} has not been released yet."
+              continue
+            fi
+
             if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
               echo "::notice::${TAG} is already tagged; nothing to do."
               continue
             fi
+
+            # A GitHub Release creates its tag. Not marked latest: that stays
+            # with rllvm's own release.
+            case " $ANNOUNCED " in
+              *" $PKG_PATH "*)
+                NOTES="$(mktemp)"
+                awk -v v="$VERSION" '
+                  /^## / { if (found) exit; found = index($0, "[" v "]") || index($0, "## " v " ") }
+                  found && !/^## /
+                ' "$PKG_PATH/CHANGELOG.md" >"$NOTES"
+                echo "::notice::releasing ${TAG} at ${SHA}."
+                gh release create "$TAG" --repo "$REPO" --target "$SHA" \
+                  --title "${COMPONENT} ${VERSION}" --notes-file "$NOTES" --latest=false
+                continue
+                ;;
+            esac
 
             echo "::notice::tagging ${TAG} at ${SHA}."
             gh api --method POST "repos/${REPO}/git/refs" \
