@@ -34,34 +34,6 @@ The static library is the tidiest target: it carries the same name on every
 platform, while the shared one is `libnghttp2.dylib` on macOS and
 `libnghttp2.so` on Linux. Either extracts.
 
-## Querying it
-
-Can bytes from the network reach the HPACK header decoder, and through what?
-
-```bash
-rllvm-info build/lib/libnghttp2.a --json > catalog.json
-
-rllvm-query --catalog catalog.json reach nghttp2_session_mem_recv2 nghttp2_hd_inflate_hd_nv
-rllvm-query --catalog catalog.json callers nghttp2_hd_inflate_hd_nv
-rllvm-query --catalog catalog.json at lib/nghttp2_session.c 3237
-```
-
-```text
-call              nghttp2_session_mem_recv2
-call              session_mem_recv
-binding           nghttp2_hd_inflate_hd_nv  (unique, 1 candidate(s))
-```
-
-Two calls separate received bytes from the decoder. `callers` adds the public
-`nghttp2_hd_inflate_hd*` entry points, each with the line of its call.
-
-Line 3237 is where nghttp2 calls the application's `on_frame_recv_callback`.
-The static helper holding that call is inlined into every frame handler, so
-`at` lists eleven handlers, and every site is `unresolved`: the application
-that registers the callback is not in this module. `reach` cannot follow a path
-through a callback, so an empty answer across one is not proof that no path
-exists.
-
 ## The other two
 
 Same commands, with these differences:
@@ -75,8 +47,34 @@ Same commands, with these differences:
 nghttp3's library compiles `lib/sfparse` from a submodule: clone with
 `--recursive` and run `git submodule update --init` after the checkout.
 
+## Querying them
+
+Can bytes from the network reach each library's header or packet decoder, and
+what does the answer leave out? Two queries per library, shown for nghttp2:
+
+```bash
+rllvm-info build/lib/libnghttp2.a --json > catalog.json
+
+rllvm-query --catalog catalog.json reach nghttp2_session_mem_recv2 nghttp2_hd_inflate_hd_nv
+rllvm-query --catalog catalog.json at lib/nghttp2_session.c 3237
+```
+
+The same two, with the names below, answer for the other two libraries:
+
+| Library | Data enters | Decoder | `reach` finds | Callback called at | Unresolved |
+|---|---|---|---|---|---|
+| nghttp2 | `nghttp2_session_mem_recv2` | HPACK `nghttp2_hd_inflate_hd_nv` | via `session_mem_recv` | `on_frame_recv_callback`, `lib/nghttp2_session.c:3237` | 18 sites in 10 functions |
+| nghttp3 | `nghttp3_conn_read_stream2` | QPACK `nghttp3_qpack_decoder_read_request` | via `nghttp3_conn_read_bidi`, `nghttp3_conn_on_headers` | `recv_data`, `lib/nghttp3_conn.c:1828` | 2 sites in 2 functions |
+| ngtcp2 | `ngtcp2_conn_read_pkt_versioned` | QUIC `ngtcp2_pkt_decode_hd_long` | via `conn_recv_pkt` | `recv_stream_data`, `lib/ngtcp2_conn.c:142` | 2 sites in 2 functions |
+
+Every decoder is a few calls from the network. Every callback site is
+`unresolved`: the application that registers the callback is not in these
+modules, and each helper that makes the call is inlined into several callers.
+`reach` cannot follow a path through a callback, so an empty answer across one
+is not proof that no path exists — the modules hold 123, 60 and 493 indirect
+call sites, none with an LLVM target bound.
+
 ## Validated against
 
 Clang 23.1.1 on arm64 macOS, at the commits above: 469, 393 and 799 functions
-in the extracted modules. `reach` finds the two-call path, and line 3237 has 18
-unresolved callback sites across 11 handlers.
+in the extracted modules, and the paths and unresolved sites in the table.

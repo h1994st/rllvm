@@ -38,25 +38,31 @@ build nghttp2 nghttp2/nghttp2 140157a8 "" -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_
 build nghttp3 ngtcp2/nghttp3 2304973 --recursive
 build ngtcp2 ngtcp2/ngtcp2 3c23148e ""
 
-cd nghttp2
-rllvm-info build/lib/libnghttp2.a --json >catalog.json
-query() { rllvm-query --catalog catalog.json "$@"; }
+# probe <name> <entry> <decoder> <file> <line>: one row of the README's table.
+# Fails if reach finds no path or the callback site is not unresolved.
+probe() {
+    local name=$1 entry=$2 decoder=$3 file=$4 line=$5 path sites
+    rllvm-info "$name/build/lib/lib$name.a" --json >"$name/catalog.json"
+    query() { rllvm-query --catalog "$name/catalog.json" "$@"; }
 
-if query --json reach nghttp2_session_mem_recv2 nghttp2_hd_inflate_hd_nv |
-    grep -q '"results": null'; then
-    echo "reach found no path from nghttp2_session_mem_recv2 to the decoder" >&2
-    exit 1
-fi
-query reach nghttp2_session_mem_recv2 nghttp2_hd_inflate_hd_nv
-query callers nghttp2_hd_inflate_hd_nv
+    if query --json reach "$entry" "$decoder" | grep -q '"results": null'; then
+        echo "$name: reach found no path from $entry to $decoder" >&2
+        exit 1
+    fi
+    path=$(query reach "$entry" "$decoder" | awk '$1 == "call" { print $2 }' | paste -sd' ' -)
 
-sites=$(query at lib/nghttp2_session.c 3237)
-unresolved=$(grep -c unresolved <<<"$sites" || true)
-handlers=$(grep -c '^[a-z]' <<<"$sites" || true)
-[ "$unresolved" -gt 0 ] || {
-    echo "$sites"
-    echo "no unresolved callback site at nghttp2_session.c:3237" >&2
-    exit 1
+    sites=$(query at "$file" "$line")
+    local unresolved functions
+    unresolved=$(grep -c unresolved <<<"$sites" || true)
+    functions=$(grep -v '^note:' <<<"$sites" | grep -c '^[a-z]' || true)
+    [ "$unresolved" -gt 0 ] || {
+        echo "$name: no unresolved callback site at $file:$line" >&2
+        exit 1
+    }
+    echo "$name: $path -> $decoder; $file:$line has $unresolved unresolved sites in $functions functions"
 }
-echo "nghttp2_session.c:3237: $unresolved unresolved callback sites across $handlers handlers"
-echo "README records 469, 393 and 799 functions, and 18 sites across 11 handlers."
+
+probe nghttp2 nghttp2_session_mem_recv2 nghttp2_hd_inflate_hd_nv lib/nghttp2_session.c 3237
+probe nghttp3 nghttp3_conn_read_stream2 nghttp3_qpack_decoder_read_request lib/nghttp3_conn.c 1828
+probe ngtcp2 ngtcp2_conn_read_pkt_versioned ngtcp2_pkt_decode_hd_long lib/ngtcp2_conn.c 142
+echo "README records 469, 393 and 799 functions, and 18/10, 2/2 and 2/2 unresolved sites/functions."
