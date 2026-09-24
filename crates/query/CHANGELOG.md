@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.6.2...rllvm-query-v0.7.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* print rllvm-query answers as text by default ([#248](https://github.com/h1994st/rllvm/issues/248))
+
+### Features
+
+* add --version to rllvm-query ([#251](https://github.com/h1994st/rllvm/issues/251)) ([6e4daa7](https://github.com/h1994st/rllvm/commit/6e4daa70b07d3485290a717e68c4b5fd5246e242))
+* print rllvm-query answers as text by default ([#248](https://github.com/h1994st/rllvm/issues/248)) ([3cbd678](https://github.com/h1994st/rllvm/commit/3cbd678bdad724dbb6c556bd06bef18331a23204))
+
+
+### Bug Fixes
+
+* use US spelling of analyze throughout ([#257](https://github.com/h1994st/rllvm/issues/257)) ([88883c4](https://github.com/h1994st/rllvm/commit/88883c432cf8b3a5df6f7e1e8ac697677418f521))
+
 ## [0.6.2](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.6.1...rllvm-query-v0.6.2) (2026-09-22)
 
 
