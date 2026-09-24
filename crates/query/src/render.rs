@@ -442,12 +442,12 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
         .map(|(label, count)| format!("{count} {label}"))
         .collect();
     if !unread.is_empty() {
-        // The count of modules not analysed, not the count of non-zero
+        // The count of modules not analyzed, not the count of non-zero
         // categories: 3 failed + 2 missing is 5 unread modules, and
         // `unread.len()` (2, one per category) would understate that.
         let unread_modules: usize = module_counts.iter().map(|(_, count)| count).sum();
         notes.push(format!(
-            "{} of {} modules were not analysed: {}",
+            "{} of {} modules were not analyzed: {}",
             unread_modules,
             analysis.modules.len(),
             unread.join(", ")
@@ -1321,7 +1321,7 @@ mod tests {
         let result = run(&Session::new(facts, vec![]), &Query::Externals).unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
         assert!(
-            text.contains("5 of 5 modules were not analysed: 3 failed, 2 missing"),
+            text.contains("5 of 5 modules were not analyzed: 3 failed, 2 missing"),
             "got: {text}"
         );
     }
