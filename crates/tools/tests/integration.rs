@@ -2241,6 +2241,25 @@ fn info_rejects_a_file_that_is_neither_bitcode_nor_object() {
     );
 }
 
+/// `--help` belongs to rustc, like `--version`: it builds nothing, so there is
+/// no bitcode path to derive and nothing for the wrapper to do.
+#[test]
+fn rustc_help_passes_through_to_rustc() {
+    let output = rllvm("rllvm-rustc")
+        .arg("--help")
+        .output()
+        .expect("Failed to run rllvm-rustc --help");
+    assert!(
+        output.status.success(),
+        "rllvm-rustc --help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("--crate-type"),
+        "--help did not reach rustc"
+    );
+}
+
 /// `rllvm-rustc` works both as `RUSTC` and as `RUSTC_WRAPPER`.
 ///
 /// cargo invokes a wrapper as `rllvm-rustc <path-to-rustc> <args...>` but a
