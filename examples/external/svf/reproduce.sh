@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproduces README.md: builds SVF through rllvm, extracts its `wpa` tool as
-# one module, and has `wpa` analyse it. On the host it builds the pinned
+# one module, and has `wpa` analyze it. On the host it builds the pinned
 # container from this checkout and reruns itself inside it.
 #
 #   examples/external/svf/reproduce.sh

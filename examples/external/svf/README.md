@@ -1,7 +1,7 @@
 # SVF + rllvm Example
 
-[SVF](https://github.com/SVF-tools/SVF) analyses one LLVM IR module. Here it
-analyses itself: build SVF through the wrappers, extract its `wpa` tool as a
+[SVF](https://github.com/SVF-tools/SVF) analyzes one LLVM IR module. Here it
+analyzes itself: build SVF through the wrappers, extract its `wpa` tool as a
 module, and run `wpa` on it.
 
 No `check.sh` — see [external/](../README.md).
@@ -31,7 +31,7 @@ still need the `apt-get` lines above inside it:
 docker build --build-arg LLVM_VERSION=22 -t rllvm:llvm22 .
 ```
 
-## SVF analyses itself
+## SVF analyzes itself
 
 ```bash
 export CC=rllvm-cc CXX=rllvm-cxx
