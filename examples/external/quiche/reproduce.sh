@@ -19,16 +19,6 @@ for tool in git cargo curl rllvm-cc rllvm-rustc rllvm-get-bc rllvm-info rllvm-qu
     }
 done
 
-# LLVM's own llvm-nm, from the toolchain rllvm is configured with: a system nm
-# on an older LLVM rejects the bitcode rustc embeds in std and core.
-config=${RLLVM_CONFIG:-$HOME/.rllvm/config.toml}
-llvm_bindir=$(dirname "$(sed -n "s/^llvm_config_filepath *= *[\"']\(.*\)[\"'] *\$/\1/p" "$config")")
-LLVM_NM=$llvm_bindir/llvm-nm
-[ -x "$LLVM_NM" ] || {
-    echo "no llvm-nm beside the configured llvm-config ($LLVM_NM)" >&2
-    exit 1
-}
-
 WORK=${WORK:-$(mktemp -d)}
 echo "working in $WORK"
 cd "$WORK"
@@ -85,9 +75,8 @@ query callers quiche_connection_id_iter_next | grep -q 'cid_logger.c:20' || fail
 query callees quiche_connection_id_iter_next | grep -q drop_glue || fail "0.29.1 lost its drop_glue"
 query callees quiche_connection_id_iter_next
 
-"$LLVM_NM" target/debug/libquiche.a 2>/dev/null |
-    awk '$2=="T" && $3 ~ /^_quiche_/ { print substr($3, 2) }' |
-    sort -u >surface.txt
+rllvm-query --catalog cat/catalog.json ffi-exports |
+    awk 'NF && $1 != "note:" { print $NF }' >surface.txt
 candidates=()
 while read -r fn; do
     out=$(query callees "$fn")

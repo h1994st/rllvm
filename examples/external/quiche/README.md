@@ -160,9 +160,8 @@ value and drops that value before returning. Both halves appear in `callees`,
 so the surface can be swept.
 
 ```bash
-llvm-nm target/debug/libquiche.a 2>/dev/null \
-  | awk '$2=="T" && $3 ~ /^_quiche_/ { print substr($3, 2) }' \
-  | sort -u > surface.txt          # 169 names, without the Mach-O underscore
+rllvm-query --catalog cat/catalog.json ffi-exports \
+  | awk 'NF && $1 != "note:" { print $NF }' > surface.txt   # 169 names
 
 for fn in $(cat surface.txt); do
   out=$(rllvm-query --catalog cat/catalog.json callees "$fn")
@@ -177,13 +176,9 @@ Keeping the entry points whose callees hold both `drop_glue::<T>` and something
 taking a pointer into `T` leaves 7 of 169, including both functions the
 advisory names.
 
-Use LLVM's `llvm-nm`, not the system one: rustc ships `std` and `core` into the
-archive with embedded bitcode, and a reader built on an older LLVM fails with
-`Unknown attribute kind`. Its stderr carries harmless "no symbols" notes for
-empty members. The `substr` drops Mach-O's leading underscore, which the queries
-do not want; an ELF build matches `/^quiche_/` and keeps the whole name. Issue
-#243 tracks reporting this surface from the catalog instead of shelling out at
-all.
+`ffi-exports` lists the definitions quiche's Rust modules export under an
+unmangled name, which is what `#[no_mangle]` produces: no `nm`, no `quiche_`
+prefix, and no Mach-O underscore to strip.
 
 The other five are safe, and show where call-graph answers stop.
 `quiche_conn_source_id` drops a `ConnectionId`, but `ConnectionId` is Cow-like

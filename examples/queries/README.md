@@ -29,8 +29,8 @@ rllvm-query --catalog build/catalog.json callers helper
 rllvm-query --catalog build/catalog.json callees main
 ```
 
-The other six are `at`, `uses`, `reach`, `closure`, `externals` and
-`indirect-targets`.
+The other seven are `at`, `uses`, `reach`, `closure`, `externals`,
+`ffi-exports` and `indirect-targets`.
 
 ## Reading an answer
 

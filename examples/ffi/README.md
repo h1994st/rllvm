@@ -55,6 +55,14 @@ rllvm-query --catalog build/catalog_c.json callers rust_scale # main,       c_ma
 rllvm-query --catalog build/catalog_c.json callers c_offset   # rust_scale, rust_side.rs:7
 ```
 
+`ffi-exports` lists what the Rust side makes callable from C, straight from
+the catalog:
+
+```bash
+rllvm-query --catalog build/catalog.json ffi-exports    # rust_add
+rllvm-query --catalog build/catalog_c.json ffi-exports  # rust_scale
+```
+
 Its module holds three functions, not the whole Rust runtime: the staticlib
 pulls in a prebuilt std that was never built through the wrapper.
 

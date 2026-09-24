@@ -352,6 +352,7 @@ rllvm-query --catalog catalog.json uses parse_frame            # where its addre
 rllvm-query --catalog catalog.json reach main parse_frame      # a path between two functions
 rllvm-query --catalog catalog.json closure parse_frame in      # everything that reaches it
 rllvm-query --catalog catalog.json externals                   # unbound symbols
+rllvm-query --catalog catalog.json ffi-exports                 # Rust functions C can call
 rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an indirect call
 ```
 
