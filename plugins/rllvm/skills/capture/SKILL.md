@@ -18,7 +18,9 @@ starting. If rllvm is not set up, use the `setup` skill first.
 | Objective-C / Objective-C++ | also `OBJC=rllvm-cc OBJCXX=rllvm-cxx` |
 | Cargo | `RUSTC_WRAPPER=rllvm-rustc cargo build` |
 | One Rust file | `rllvm-rustc main.rs -o app` |
-| Mixed C/C++ and Rust | `CC=rllvm-cc CXX=rllvm-cxx RUSTC_WRAPPER=rllvm-rustc cargo build` |
+| Cargo with a C/C++ build script | `CC=rllvm-cc CXX=rllvm-cxx RUSTC_WRAPPER=rllvm-rustc cargo build` |
+| Rust calling C/C++ | C/C++ objects through the wrappers into `libx.a`, then `rllvm-rustc main.rs -o app -L <dir> -l static=x` |
+| C calling Rust | `rllvm-rustc --crate-type staticlib lib.rs -o librust.a`, then `rllvm-cc main.c librust.a -o app` |
 | Only `compile_commands.json`, no rebuild wanted | `rllvm-compdb generate build/ --output-dir DIR` (narrow with `--source` or `--entry`; only direct `clang`/`clang++` drivers are supported) |
 | A hand-written command or `@response` file | the wrappers take the same arguments |
 
@@ -26,7 +28,7 @@ A fresh build directory avoids reusing objects compiled without the wrappers.
 `rllvm-compdb` describes the current source tree, not what a real link
 contained; prefer wrapper capture when that matters. `cargo check` and
 procedural-macro crates are not captured, and the Rust standard library is not
-rebuilt.
+rebuilt: it is prebuilt, so its functions never appear in the module.
 
 ## 2. What needs care
 
@@ -45,6 +47,8 @@ Compiler flags reach the real compiler unchanged. These need a decision:
   time.
 - **A tree that will move:** build with `RLLVM_BITCODE_ROOT="$PWD/build"`, then
   extract with `--bitcode-root <new location>`.
+- **Source lines.** Compile with `-g` when answers need `file:line`: `at` and
+  every location in an answer come from debug info.
 - **Rebuilds:** `RLLVM_CACHE=1` reuses bitcode after validating inputs; leave
   it off when side inputs such as optimisation profiles change.
 
@@ -56,14 +60,21 @@ Compiler flags reach the real compiler unchanged. These need a decision:
 | --- | --- |
 | Whole program | `rllvm-get-bc app -o app.bc` |
 | Look before extracting | `rllvm-info app` (`--json` lists every module) |
+| A catalog of the whole program | `rllvm-info app --json > catalog.json` |
 | A library as an archive of modules | `rllvm-get-bc --merge-strategy archive libfoo.a` |
 | A subset, as a catalog | `rllvm-get-bc app --source src/x.c --output-dir DIR` (also `--module`, `--configuration`) |
 
 `--output-dir` must be new; it writes `DIR/catalog.json`.
 
-**Handing a module to another tool** (PhASAR, SVF, KLEE, `opt`): extract one
-module with `-o x.bc`, never an archive (`-b`); capture with an LLVM no newer
-than the tool's; turn LTO off to extract a single library.
+**Handing a module to another tool** (PhASAR, SVF, KLEE, `opt`):
+
+1. Build the program under analysis, not the tool, through the wrappers, with
+   an LLVM no newer than the one the tool reads (`setup` skill, step 3).
+2. Extract one module with `-o x.bc`. Never `-b`: it writes an archive of
+   modules, and these tools load a single module.
+3. For one library of an LTO build, rebuild with LTO off first; a linked
+   executable extracts either way.
+4. Pass `x.bc` to the tool as its input module.
 
 ## 4. Query it
 

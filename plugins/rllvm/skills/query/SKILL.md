@@ -8,6 +8,12 @@ description: Choose the rllvm-query tool that answers a question about a capture
 Load the program first with `load_catalog` or `inventory` (the `capture`
 skill). With more than one catalog loaded, pass `catalog`.
 
+Without the MCP server, the same queries run as
+`rllvm-query --catalog catalog.json <query>`, with kebab-case names
+(`indirect-targets`). Output is text with its caveats in a footer; `--json`
+prints the envelope described below, and `--full` adds scope, analysis and
+uncertainty to the text.
+
 ## Choosing the query
 
 | Question | Tool |
@@ -24,6 +30,17 @@ skill). With more than one catalog loaded, pass `catalog`.
 
 A name can be the mangled symbol, the full demangled reading, or a bare
 identifier.
+
+## Is a vulnerable function present and reachable?
+
+Ask per build: features and configurations change what is compiled in.
+
+1. `defs` on the function. No result: it is not in this captured program.
+2. `callers`. None: it is linked but has no captured direct caller; check
+   `uses` for its address being taken before concluding anything.
+3. `reach` from each entry point (`main`, or the exported API) to the
+   function. A path is evidence; no path is not proof (see below).
+4. `callees` on the entry point shows what it actually does on the way.
 
 ## Reading the answer
 
@@ -48,6 +65,10 @@ Report what the answer supports, and say what it does not:
   `inventory` only from when the catalog was written. `source_status`:
   `modified` means locations may be off, `missing` means the file is gone,
   `unknown` means no digest was recorded to check.
+- **Code without bitcode is invisible.** Assembly, prebuilt libraries and the
+  Rust standard library contribute no functions; calls into them appear in
+  `externals` as unbound. `indirect_targets`' `assumptions` state that
+  `dlopen` and callbacks registered by uncaptured code escape its bound.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.

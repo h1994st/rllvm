@@ -24,6 +24,9 @@ brew install h1994st/tap/rllvm llvm        # or: cargo install rllvm
 brew install h1994st/tap/rllvm-query       # or: cargo install rllvm-query
 ```
 
+The Homebrew `rllvm-query` brings its own LLVM; `rllvm-query --llvm-version`
+reports which.
+
 On Ubuntu/Debian, LLVM for capture comes from
 `sudo apt install llvm llvm-dev clang libclang-dev`.
 
@@ -43,8 +46,9 @@ Rust bitcode from `rustc`), and any analyser the user hands the module to
 
 The config is `$RLLVM_CONFIG`, else `~/.rllvm/config.toml`.
 
-- **No config:** show `rllvm-init --dry-run` (add `--llvm-prefix <dir>` to pick
-  a toolchain), then run `rllvm-init` with the same flags.
+- **No config:** show `rllvm-init --dry-run`, then run `rllvm-init` with the
+  same flags. `--llvm-prefix <dir>` picks a toolchain: the directory holding
+  `bin/llvm-config`, such as `$(brew --prefix llvm)` or `/usr/lib/llvm-22`.
 - **A config exists:** do not run `rllvm-init` over it — it rewrites the file
   and drops keys the user set by hand (`bitcode_store_path`, `cache_enabled`,
   `lto_mode`, …). Show `rllvm-init --dry-run`, and write only with the user's
@@ -53,6 +57,19 @@ The config is `$RLLVM_CONFIG`, else `~/.rllvm/config.toml`.
 
 Any wrapper run with no config writes one from detection, so configure before
 the first build.
+
+Optional keys worth knowing, with the environment variable that overrides
+each where one exists:
+
+| Key | Effect | Override |
+| --- | --- | --- |
+| `bitcode_store_path` | one absolute directory for all bitcode | |
+| `bitcode_root` | record bitcode paths relative to this root | `RLLVM_BITCODE_ROOT` |
+| `lto_mode` | `marker` (default), `save-temps` or `skip` | `RLLVM_LTO_MODE` |
+| `cache_enabled`, `cache_dir` | reuse validated bitcode (default off, `~/.rllvm/cache`) | `RLLVM_CACHE` |
+| `log_level` | 0 errors (default) up to 4+ trace | `RLLVM_LOG_LEVEL` |
+| `llvm_objcopy_filepath` | embedding tool; needed for targets such as RISC-V | |
+| `rustc_filepath` | the real `rustc` for `rllvm-rustc` | `RLLVM_REAL_RUSTC` |
 
 ## 5. Verify
 
