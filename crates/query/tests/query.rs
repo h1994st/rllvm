@@ -1702,7 +1702,7 @@ mod mcp {
 
     #[test]
     fn a_server_started_with_no_catalog_loads_one_and_answers_from_it() {
-        // The point of the registry: the client chooses what to analyse.
+        // The point of the registry: the client chooses what to analyze.
         // Started bare, the server has nothing to answer from; after
         // `load_catalog` it answers about that program, in the same process.
         let scratch = tempfile::tempdir().unwrap();

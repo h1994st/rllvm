@@ -48,7 +48,7 @@ Report what the answer supports, and say what it does not:
 
 - **`scope` is not coverage.** `scope` is what the catalog claims; `analysis`
   is what actually parsed. Report failed, missing, unsupported or unbuilt
-  modules; an answer covers only what was analysed.
+  modules; an answer covers only what was analyzed.
 - **No path is not unreachable.** An empty `reach` means no path over
   *resolved* edges. Mention `uncertainty.indirect_call_sites` and the
   frontier; say "no path found", never "unreachable".

@@ -21,9 +21,9 @@ that stdout carried protocol frames and nothing else.
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | rllvm-query mcp
 ```
 
-A real client keeps the session open, chooses what to analyse with
+A real client keeps the session open, chooses what to analyze with
 `load_catalog` (a catalog JSON) or `inventory` (a binary, archive or `.bc`),
-and can keep several loaded at once. Each is analysed once and answers from
+and can keep several loaded at once. Each is analyzed once and answers from
 memory after that.
 
 ## Pointing a client at it
