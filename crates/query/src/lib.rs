@@ -344,6 +344,7 @@ fn session_from_loaded(loaded: load::Loaded) -> Result<Session, Error> {
             Ok(facts) => {
                 if let Some(report) = reports.iter_mut().find(|report| report.id == module.id) {
                     report.status = ModuleAnalysis::Analyzed;
+                    report.producers = facts.producers.clone();
                     if !facts.diagnostics.is_empty() {
                         let joined = facts.diagnostics.join("; ");
                         report.diagnostic = Some(match report.diagnostic.take() {

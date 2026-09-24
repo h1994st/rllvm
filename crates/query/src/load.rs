@@ -95,6 +95,7 @@ pub fn load_catalog_value(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<
             configuration_id: record.configuration_id.clone(),
             content_sha256: record.content_sha256.clone(),
             target_triple: record.target_triple.clone(),
+            producers: Vec::new(),
             diagnostic,
         };
 

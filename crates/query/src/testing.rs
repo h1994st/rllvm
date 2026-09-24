@@ -30,6 +30,7 @@ pub(crate) fn function(
         },
         is_definition,
         linkage,
+        language: None,
         signature: "i32 (i32, i32)".into(),
         location: None,
         mapped_lines: Default::default(),
@@ -102,6 +103,7 @@ pub(crate) fn report(id: &str, status: ModuleAnalysis) -> ModuleReport {
         configuration_id: None,
         content_sha256: None,
         target_triple: None,
+        producers: Vec::new(),
         diagnostic: None,
     }
 }
