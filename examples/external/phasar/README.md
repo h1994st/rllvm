@@ -4,6 +4,8 @@
 LLVM IR module. rllvm produces it: build through the wrappers, then extract.
 
 No `check.sh` — see [external/](../README.md).
+[`reproduce.sh`](reproduce.sh) runs both flows below in the container and
+prints the numbers under [Validated against](#validated-against).
 
 ## Setup
 
