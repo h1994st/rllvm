@@ -26,6 +26,10 @@ pub(crate) struct Actions {
 const LINKING_CRATE_TYPES: [&str; 3] = ["bin", "cdylib", "dylib"];
 /// Crate types that make rustc write an archive itself.
 const ARCHIVING_CRATE_TYPES: [&str; 3] = ["lib", "rlib", "staticlib"];
+/// Flags that make rustc print information and exit without building.
+const INFO_FLAGS: [&str; 5] = ["--help", "-h", "--version", "-V", "-vV"];
+/// Flags that print their own help when given `help`: `-C help`, `-Whelp`.
+const HELP_TAKING_FLAGS: [&str; 3] = ["-C", "-W", "-Z"];
 
 /// Value of `--flag value` or `--flag=value`.
 pub(crate) fn flag_value<'a>(args: &[&'a str], flag: &str) -> Option<&'a str> {
@@ -76,13 +80,26 @@ fn crate_types<'a>(args: &[&'a str]) -> Vec<&'a str> {
     types
 }
 
+/// Whether rustc will only print information: help, a version, an error
+/// explanation, or `--print` output.
+fn prints_information(args: &[&str]) -> bool {
+    args.iter().any(|arg| {
+        INFO_FLAGS.contains(arg)
+            || arg.starts_with("--print")
+            || arg.starts_with("--explain")
+            || HELP_TAKING_FLAGS
+                .iter()
+                .any(|flag| arg.strip_prefix(flag) == Some("help"))
+    }) || args
+        .windows(2)
+        .any(|pair| HELP_TAKING_FLAGS.contains(&pair[0]) && pair[1] == "help")
+}
+
 /// Decide what to do with an invocation. `None` means pass it through.
 pub(crate) fn classify(args: &[&str]) -> Option<Actions> {
-    // Query invocations produce no artifact.
-    if args
-        .iter()
-        .any(|a| matches!(*a, "--version" | "-V" | "-vV") || a.starts_with("--print"))
-    {
+    // Query invocations produce no artifact, and neither does a bare `rustc`,
+    // which prints its usage.
+    if args.is_empty() || prints_information(args) {
         tracing::debug!("rustc: query invocation, passing through");
         return None;
     }
@@ -298,6 +315,23 @@ mod tests {
             ])
             .is_none()
         );
+    }
+
+    #[test]
+    fn help_and_explain_invocations_pass_through() {
+        for args in [
+            &["--help"][..],
+            &["-h"],
+            &["--explain", "E0308"],
+            &["--explain=E0308"],
+            &["-C", "help"],
+            &["-Chelp"],
+            &["-W", "help"],
+            &["-Zhelp"],
+            &[],
+        ] {
+            assert!(classify(args).is_none(), "{args:?} was not passed through");
+        }
     }
 
     #[test]
