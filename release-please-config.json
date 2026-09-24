@@ -9,7 +9,15 @@
   "packages": {
     "crates/core": { "component": "rllvm-core", "include-component-in-tag": true },
     "crates/tools": { "component": "rllvm", "include-component-in-tag": true },
-    "crates/query": { "component": "rllvm-query", "include-component-in-tag": true }
+    "crates/query": { "component": "rllvm-query", "include-component-in-tag": true },
+    "plugins/rllvm": {
+      "component": "rllvm-plugin",
+      "include-component-in-tag": true,
+      "release-type": "simple",
+      "extra-files": [
+        { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" }
+      ]
+    }
   },
   "plugins": [{ "type": "cargo-workspace", "merge": false }]
 }
