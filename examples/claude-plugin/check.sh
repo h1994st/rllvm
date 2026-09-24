@@ -161,8 +161,6 @@ fields = {
     for source in [*(repo / "crates/query/src").glob("*.rs"), repo / "crates/core/src/catalog.rs"]
     for name in re.findall(r"pub ([a-z_]+):", source.read_text())
 }
-# rllvm-rustc passes its arguments to rustc, whose help lists them.
-EXTRA_HELP = {"rllvm-rustc": ["rustc", "--help", "-v"]}
 helps = {}
 
 def help_text(command, sub):
@@ -171,7 +169,6 @@ def help_text(command, sub):
             sys.exit(f"skills name {command}, which is not installed")
         runs = [[command, sub, "--help"]] if sub else []
         runs += [[command, "--help"], [command, "--rllvm-help"]]
-        runs += [EXTRA_HELP[command]] if command in EXTRA_HELP else []
         helps[command, sub] = "".join(
             subprocess.run(r, capture_output=True, text=True).stdout for r in runs
         )
