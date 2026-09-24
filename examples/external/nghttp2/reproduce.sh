@@ -31,7 +31,7 @@ build() {
         -DENABLE_LIB_ONLY=ON -DBUILD_TESTING=OFF "$@" >"$name/cmake.log"
     cmake --build "$name/build" >"$name/build.log"
     rllvm-get-bc "$name/build/lib/lib$name.a" -o "$name.bc"
-    echo "$name: $(rllvm-info "$name.bc" | awk '$1 == "Functions" { print $3 }') functions"
+    echo "$name.bc (from lib$name.a): $(rllvm-info "$name.bc" | awk '$1 == "Functions" { print $3 }') functions"
 }
 
 build nghttp2 nghttp2/nghttp2 140157a8 "" -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF
@@ -65,4 +65,4 @@ probe() {
 probe nghttp2 nghttp2_session_mem_recv2 nghttp2_hd_inflate_hd_nv lib/nghttp2_session.c 3237
 probe nghttp3 nghttp3_conn_read_stream2 nghttp3_qpack_decoder_read_request lib/nghttp3_conn.c 1828
 probe ngtcp2 ngtcp2_conn_read_pkt_versioned ngtcp2_pkt_decode_hd_long lib/ngtcp2_conn.c 142
-echo "README records 469, 393 and 799 functions, and 18/10, 2/2 and 2/2 unresolved sites/functions."
+echo "README records nghttp2.bc 469, nghttp3.bc 393 and ngtcp2.bc 799 functions, and 18/10, 2/2 and 2/2 unresolved sites/functions."

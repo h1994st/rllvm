@@ -34,15 +34,15 @@ The static library is the tidiest target: it carries the same name on every
 platform, while the shared one is `libnghttp2.dylib` on macOS and
 `libnghttp2.so` on Linux. Either extracts.
 
-## The other two
+## All three
 
-Same commands, with these differences:
+The same commands build each, with these differences:
 
-| Project | Clone | Commit | Static library | Extract from |
-|---|---|---|---|---|
-| nghttp2 | `github.com/nghttp2/nghttp2` | `140157a8` | `-DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF` | `build/lib/libnghttp2.a` |
-| nghttp3 | `github.com/ngtcp2/nghttp3`, `--recursive` | `2304973` | built by default | `build/lib/libnghttp3.a` |
-| ngtcp2 | `github.com/ngtcp2/ngtcp2` | `3c23148e` | built by default | `build/lib/libngtcp2.a` |
+| Project | Clone | Commit | Static library | Extract | Functions in the module |
+|---|---|---|---|---|---|
+| nghttp2 | `github.com/nghttp2/nghttp2` | `140157a8` | `-DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF` | `build/lib/libnghttp2.a` to `nghttp2.bc` | 469 |
+| nghttp3 | `github.com/ngtcp2/nghttp3`, `--recursive` | `2304973` | built by default | `build/lib/libnghttp3.a` to `nghttp3.bc` | 393 |
+| ngtcp2 | `github.com/ngtcp2/ngtcp2` | `3c23148e` | built by default | `build/lib/libngtcp2.a` to `ngtcp2.bc` | 799 |
 
 nghttp3's library compiles `lib/sfparse` from a submodule: clone with
 `--recursive` and run `git submodule update --init` after the checkout.
@@ -76,5 +76,5 @@ call sites, none with an LLVM target bound.
 
 ## Validated against
 
-Clang 23.1.1 on arm64 macOS, at the commits above: 469, 393 and 799 functions
-in the extracted modules, and the paths and unresolved sites in the table.
+Clang 23.1.1 on arm64 macOS, at the commits above: the function counts in the
+build table, and the paths and unresolved sites in the query table.
