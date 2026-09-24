@@ -18,7 +18,7 @@ starting. If rllvm is not set up, use the `setup` skill first.
 | Objective-C / Objective-C++ | also `OBJC=rllvm-cc OBJCXX=rllvm-cxx` |
 | Cargo | `RUSTC_WRAPPER=rllvm-rustc cargo build` |
 | One Rust file | `rllvm-rustc main.rs -o app` |
-| Mixed C/C++ and Rust | `CC=rllvm-cc CXX=rllvm-cxx RUSTC_WRAPPER=rllvm-rustc cargo build` ([ffi example](https://github.com/h1994st/rllvm/tree/main/examples/ffi)) |
+| Mixed C/C++ and Rust | `CC=rllvm-cc CXX=rllvm-cxx RUSTC_WRAPPER=rllvm-rustc cargo build` |
 | Only `compile_commands.json`, no rebuild wanted | `rllvm-compdb generate build/ --output-dir DIR` (narrow with `--source` or `--entry`; only direct `clang`/`clang++` drivers are supported) |
 | A hand-written command or `@response` file | the wrappers take the same arguments |
 
@@ -63,8 +63,7 @@ Compiler flags reach the real compiler unchanged. These need a decision:
 
 **Handing a module to another tool** (PhASAR, SVF, KLEE, `opt`): extract one
 module with `-o x.bc`, never an archive (`-b`); capture with an LLVM no newer
-than the tool's; turn LTO off to extract a single library. Worked hand-offs:
-[examples/external](https://github.com/h1994st/rllvm/tree/main/examples/external).
+than the tool's; turn LTO off to extract a single library.
 
 ## 4. Query it
 
@@ -77,7 +76,3 @@ to replace it. Then use the `query` skill.
 Rerun one compile with `--rllvm-verbose=3` (under Cargo,
 `RLLVM_LOG_LEVEL=3`) and read what the wrapper did before changing anything.
 The `setup` skill's troubleshooting table covers the common causes.
-
-Details: [Capturing bitcode](https://github.com/h1994st/rllvm#capturing-bitcode)
-and [Extracting bitcode](https://github.com/h1994st/rllvm#extracting-bitcode)
-in the rllvm README.

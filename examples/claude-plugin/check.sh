@@ -127,6 +127,11 @@ for skill in skills:
         sys.exit(f"{skill}: name is {fields.get('name')!r}, not {skill.parent.name!r}")
     if not fields.get("description", "").strip():
         sys.exit(f"{skill}: no description")
+    # Only the plugin directory is installed, so a skill can point at nothing
+    # outside it: no URLs, and no Markdown links.
+    outside = re.findall(r"https?://\S+|\]\([^)]*\)", text)
+    if outside:
+        sys.exit(f"{skill}: links outside the plugin: {outside}")
     bare = re.findall(r"scripts/[\w.-]+", text)
     resolved = re.findall(r"\$\{CLAUDE_SKILL_DIR\}/(\.\./\.\./scripts/[\w.-]+)", text)
     if len(bare) != len(resolved):
@@ -135,7 +140,7 @@ for skill in skills:
         if not (skill.parent / script).resolve().is_file():
             sys.exit(f"{skill}: {script} does not exist")
 PY
-echo "ok: every skill is named, described, and points at scripts that exist"
+echo "ok: every skill is named, described, self-contained, and its scripts exist"
 
 # CI does not install Claude Code, so strict validation runs where it is.
 # Validating the plugin also covers its skills.

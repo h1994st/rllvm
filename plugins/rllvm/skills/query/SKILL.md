@@ -23,9 +23,7 @@ skill). With more than one catalog loaded, pass `catalog`.
 | What does the program call outside itself? | `externals` |
 
 A name can be the mangled symbol, the full demangled reading, or a bare
-identifier. The quiche CVE triage in
-[examples/external/quiche](https://github.com/h1994st/rllvm/tree/main/examples/external/quiche)
-is a worked flow chaining several of these queries.
+identifier.
 
 ## Reading the answer
 
@@ -53,6 +51,3 @@ Report what the answer supports, and say what it does not:
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.
-
-Why these rules hold:
-[crates/query/README.md](https://github.com/h1994st/rllvm/blob/main/crates/query/README.md).
