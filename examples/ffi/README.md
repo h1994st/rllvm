@@ -59,7 +59,7 @@ rllvm-query --catalog build/catalog_c.json callers c_offset   # rust_scale, rust
 the catalog:
 
 ```bash
-rllvm-query --catalog build/catalog.json ffi-exports    # rust_add
+rllvm-query --catalog build/catalog.json ffi-exports    # rust_add, note: 1 unknown (rustc's C main, no debug info)
 rllvm-query --catalog build/catalog_c.json ffi-exports  # rust_scale
 ```
 

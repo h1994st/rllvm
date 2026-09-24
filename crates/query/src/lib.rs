@@ -251,7 +251,9 @@ pub struct Uncertainty {
     /// `ffi-exports` only: external definitions whose symbol is fully
     /// unmangled but whose language neither debug info nor the producer
     /// could establish. They might be exports and were not searched.
-    /// Large for a module merged from C and Rust without `-g`.
+    /// Non-zero when a module holding several languages has unmangled
+    /// definitions without debug info: built without `-g`, or code the
+    /// compiler generates, such as the C `main` rustc emits for a binary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub functions_of_unknown_language: Option<usize>,
 }

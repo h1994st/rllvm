@@ -75,8 +75,9 @@ Report what the answer supports, and say what it does not:
   lists Rust definitions exported under an unmangled name, each attributed
   to Rust by debug info or by the module's producer.
   `uncertainty.functions_of_unknown_language` counts unmangled definitions
-  it could not attribute and did not search — non-zero for a module merged
-  from C and Rust without `-g`. Report it; a per-object catalog avoids it.
+  it could not attribute and did not search — non-zero for code built
+  without `-g`, or compiler-generated code such as a Rust binary's C
+  `main`. Report it; a per-object catalog avoids it.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.

@@ -500,7 +500,7 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
         && unknown > 0
     {
         notes.push(format!(
-            "{unknown} unmangled definition(s) could not be attributed to a language and were not searched; catalog per object or build with -g"
+            "{unknown} unmangled definition(s) could not be attributed to a language and were not searched: they have no debug info, and their module's producers are mixed or absent"
         ));
     }
 
@@ -1534,7 +1534,9 @@ mod tests {
     fn an_ffi_exports_answer_names_what_it_could_not_attribute() {
         let text = ffi_exports_text(vec![attributed("mystery", Linkage::External, None)]);
         assert!(
-            text.contains("1 unmangled definition(s) could not be attributed to a language"),
+            text.contains(
+                "1 unmangled definition(s) could not be attributed to a language and were not searched: they have no debug info"
+            ),
             "got: {text}"
         );
         assert!(

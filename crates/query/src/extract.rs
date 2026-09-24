@@ -930,6 +930,8 @@ unsafe fn extract_inner(
         functions.push(FunctionFact {
             id: id.clone(),
             is_definition,
+            // SAFETY: `function` is a live global value, which these
+            // accessors accept.
             linkage: linkage_of(unsafe { LLVMGetLinkage(function) }),
             // A declaration is not written in the module that declares it,
             // so it gets no language even when the module's producer or a

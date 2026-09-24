@@ -1347,9 +1347,10 @@ fn extract_module(module: &Path) -> rllvm_query::ModuleFacts {
     rllvm_query::extract::extract(&loaded, &Default::default()).unwrap()
 }
 
-/// Assembles textual IR, for the shapes a compiler will not produce on
-/// request: a module merged from two languages, or one naming no producer.
-fn extract_ir(scratch: &tempfile::TempDir, ir: &str) -> rllvm_query::ModuleFacts {
+/// Assembles textual IR to a `.bc` file, for the shapes a compiler will not
+/// produce on request: a module merged from two languages, or one naming no
+/// producer.
+fn assemble_ir(scratch: &tempfile::TempDir, ir: &str) -> PathBuf {
     let source = scratch.path().join("t.ll");
     let module = scratch.path().join("t.bc");
     std::fs::write(&source, ir).unwrap();
@@ -1360,7 +1361,11 @@ fn extract_ir(scratch: &tempfile::TempDir, ir: &str) -> rllvm_query::ModuleFacts
         .status()
         .unwrap();
     assert!(status.success(), "llvm-as rejected the fixture");
-    extract_module(&module)
+    module
+}
+
+fn extract_ir(scratch: &tempfile::TempDir, ir: &str) -> rllvm_query::ModuleFacts {
+    extract_module(&assemble_ir(scratch, ir))
 }
 
 fn language_of(facts: &rllvm_query::ModuleFacts, symbol: &str) -> Option<SourceLanguage> {
@@ -1652,6 +1657,10 @@ fn ffi_exports_lists_what_no_mangle_and_export_name_make_c_callable() {
 
     let catalog = plain_module_catalog(&scratch, &[rust, c]);
     let answer = query_json(&scratch, &catalog, &["ffi-exports"]);
+    assert_eq!(
+        answer["analysis"]["analyzed"], 2,
+        "a module failed to parse -- is rustc's LLVM newer than the reader?: {answer}"
+    );
     let symbols: Vec<&str> = answer["results"]
         .as_array()
         .unwrap()
@@ -1660,6 +1669,30 @@ fn ffi_exports_lists_what_no_mangle_and_export_name_make_c_callable() {
         .collect();
     assert_eq!(symbols, ["lib_add", "renamed"]);
     assert_eq!(answer["uncertainty"]["functions_of_unknown_language"], 0);
+}
+
+/// `MERGED_IR` holds `no_debug`, a function with neither debug info nor a
+/// single producer to fall back on: it is counted as unknown, not searched,
+/// and so never appears among the results.
+#[test]
+fn a_merged_module_without_debug_info_is_counted_not_searched() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = assemble_ir(&scratch, MERGED_IR);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+
+    let answer = query_json(&scratch, &catalog, &["ffi-exports"]);
+    assert_eq!(
+        answer["analysis"]["analyzed"], 1,
+        "the merged fixture failed to parse: {answer}"
+    );
+    let symbols: Vec<&str> = answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["function"]["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(symbols, ["rust_fn"]);
+    assert_eq!(answer["uncertainty"]["functions_of_unknown_language"], 1);
 }
 
 // --- MCP stdio server -------------------------------------------------
