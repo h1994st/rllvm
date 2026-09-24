@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.4](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.3...rllvm-v0.6.4) (2026-09-24)
+
+
+### Bug Fixes
+
+* pass rustc help invocations through ([#253](https://github.com/h1994st/rllvm/issues/253)) ([49a7ce7](https://github.com/h1994st/rllvm/commit/49a7ce7d894436c5fdcf840d8232b37376f7bc60))
+
 ## [0.6.3](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.2...rllvm-v0.6.3) (2026-09-22)
 
 

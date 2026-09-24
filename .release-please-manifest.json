@@ -1,6 +1,6 @@
 {
   "crates/core": "0.6.2",
-  "crates/tools": "0.6.3",
-  "crates/query": "0.6.2",
-  "plugins/rllvm": "0.0.0"
+  "crates/tools": "0.6.4",
+  "crates/query": "0.7.0",
+  "plugins/rllvm": "0.1.0"
 }

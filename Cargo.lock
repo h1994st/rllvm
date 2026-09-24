@@ -751,7 +751,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rllvm"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "clap",
  "clap_complete",
@@ -794,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "rllvm-query"
-version = "0.6.2"
+version = "0.7.0"
 dependencies = [
  "clap",
  "clap_complete",
