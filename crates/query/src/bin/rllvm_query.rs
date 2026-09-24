@@ -139,7 +139,7 @@ fn stdout_color() -> Color {
 }
 
 /// Serves MCP over stdio. `--catalog` is optional here and only preloads:
-/// the point of the server is that a client chooses what to analyse, through
+/// the point of the server is that a client chooses what to analyze, through
 /// `load_catalog` and `inventory`, and keeps several catalogs loaded at once.
 /// A preload failure is still fatal -- a client that asked for a catalog on
 /// the command line should hear that it could not be read, not discover it

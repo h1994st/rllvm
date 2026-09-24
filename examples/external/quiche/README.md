@@ -185,7 +185,7 @@ reports the absence rather than inventing a path.
 
 The modules also disagree about the target triple — 282 from clang say
 `arm64-apple-macosx26.5.0`, 16 from rustc say `arm64-apple-macosx11.0.0`,
-being rustc's deployment target. They merge and analyse anyway; all 298 carry
+being rustc's deployment target. They merge and analyze anyway; all 298 carry
 debug info and none failed to parse.
 
 ## Validated against

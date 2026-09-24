@@ -101,7 +101,7 @@ pub fn load_catalog_value(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<
         // Each recorded status keeps its own meaning, and its recorded
         // diagnostics travel with it. Collapsing all of them to Missing
         // discards the reason the capture already knew. `Available` maps to
-        // `None`: it is analysed below rather than reported from its
+        // `None`: it is analyzed below rather than reported from its
         // catalog status alone, so there is no arm left to panic on.
         let unavailable = match record.status {
             ModuleStatus::Missing => Some(ModuleAnalysis::Missing),
@@ -205,7 +205,7 @@ pub fn load_catalog_value(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<
             }
         }
 
-        // Verified, not yet analysed: extraction decides that, and it has not
+        // Verified, not yet analyzed: extraction decides that, and it has not
         // run. Recording Analyzed here would claim a parse that never happened.
         drop(bytes);
         reports.push(report_base(ModuleAnalysis::Verified, None));

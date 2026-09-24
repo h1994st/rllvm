@@ -1,6 +1,6 @@
 # PhASAR + rllvm Example
 
-[PhASAR](https://github.com/secure-software-engineering/phasar) analyses one
+[PhASAR](https://github.com/secure-software-engineering/phasar) analyzes one
 LLVM IR module. rllvm produces it: build through the wrappers, then extract.
 
 No `check.sh` — see [external/](../README.md).

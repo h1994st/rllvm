@@ -8,7 +8,7 @@
 //! which an interactive session does. [`Registry`] holds what has been
 //! loaded for the life of the process, so a catalog's analysis is paid once
 //! and every query after it answers from memory. `--catalog` survives as a
-//! preload for a client that always analyses the same program.
+//! preload for a client that always analyzes the same program.
 //!
 //! Dual-era, exactly as the specification permits. A request whose
 //! `params._meta["io.modelcontextprotocol/protocolVersion"]` is present is

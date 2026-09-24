@@ -1,6 +1,6 @@
 ---
 name: capture
-description: Capture LLVM bitcode from a project with rllvm and turn it into a catalog or module. Use when the user wants bitcode, a whole-program .bc, a catalog, or to analyse or query code that has not been captured yet — C, C++, Objective-C, Rust, mixed-language, cross-compiled, WebAssembly or eBPF.
+description: Capture LLVM bitcode from a project with rllvm and turn it into a catalog or module. Use when the user wants bitcode, a whole-program .bc, a catalog, or to analyze or query code that has not been captured yet — C, C++, Objective-C, Rust, mixed-language, cross-compiled, WebAssembly or eBPF.
 ---
 
 # Capturing bitcode

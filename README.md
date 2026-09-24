@@ -395,9 +395,9 @@ Serves the same queries as JSON-RPC 2.0 tools over stdio. Point a client at it:
 }
 ```
 
-The client chooses what to analyse with `load_catalog` (a catalog JSON) or
+The client chooses what to analyze with `load_catalog` (a catalog JSON) or
 `inventory` (a binary, archive or `.bc`), and can keep several loaded at once.
-Each is analysed once and answers from memory after that.
+Each is analyzed once and answers from memory after that.
 
 See the [MCP example](examples/mcp/). In Claude Code, the
 [plugin](#claude-code-plugin) configures this server for you.
