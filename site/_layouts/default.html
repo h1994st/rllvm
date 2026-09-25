@@ -48,7 +48,7 @@
     <a class="skip" href="#content">Skip to content</a>
 
     <header class="masthead">
-      <a class="wordmark" href="{{ '/' | relative_url }}"><img class="art" src="{{ '/assets/images/logo-header.png' | relative_url }}" alt="rllvm" width="241" height="128"></a>
+      <a class="wordmark" href="{{ '/' | relative_url }}"><img src="{{ '/assets/images/logo-header.png' | relative_url }}" alt="rllvm" width="241" height="128"></a>
       {%- if page.version %}
       <span class="version">{{ page.version }}</span>
       {%- endif %}
@@ -63,7 +63,7 @@
     </header>
 
     <section class="hero">
-      <img class="banner art" src="{{ '/assets/images/banner-web.png' | relative_url }}" alt="rllvm: extract, catalog, query. LLVM bitcode from real software." width="1600" height="253">
+      <img class="banner" src="{{ '/assets/images/banner-web.png' | relative_url }}" alt="rllvm: extract, catalog, query. LLVM bitcode from real software." width="1600" height="253">
 
       <div class="pitch">
         <h1>{{ page.tagline | default: site.description }}</h1>
