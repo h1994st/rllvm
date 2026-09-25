@@ -1,5 +1,7 @@
 # rllvm
 
+![banner](site/assets/images/banner.png)
+
 [![CI](https://github.com/h1994st/rllvm/actions/workflows/ci.yml/badge.svg)](https://github.com/h1994st/rllvm/actions/workflows/ci.yml)
 [![codecov](https://codecov.io/github/h1994st/rllvm/graph/badge.svg?token=PWKZ6H64BS)](https://codecov.io/github/h1994st/rllvm)
 [![crates.io](https://img.shields.io/crates/v/rllvm.svg)](https://crates.io/crates/rllvm)

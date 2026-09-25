@@ -16,11 +16,15 @@ baseurl: /rllvm
 
 repository: h1994st/rllvm
 
-# GitHub renders and keeps this card current, so there is no image asset to
-# regenerate whenever the repository description changes.
-image: https://opengraph.githubassets.com/1/h1994st/rllvm
-twitter:
-  card: summary_large_image
+# The banner on a white 1200x630 canvas: link previews crop to about 1.91:1
+# and show transparency as black, which would hide the dark artwork.
+# jekyll-seo-tag reads `image` from the page, not the site, so it is set as a
+# default for every page; with an image it emits a large Twitter card itself.
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /assets/images/social-card.png
 
 # No `theme`: the layout in `_layouts/` is the design.
 plugins:

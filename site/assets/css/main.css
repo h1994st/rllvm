@@ -130,9 +130,26 @@ a:hover {
 }
 
 .wordmark {
-  font-weight: 600;
-  letter-spacing: -0.02em;
+  display: flex;
   text-decoration: none;
+}
+
+.wordmark img {
+  height: 2rem;
+  width: auto;
+}
+
+/* The artwork is dark ink on a transparent ground. On the dark palette it is
+   inverted and the hue turned back, so the ink goes light and the nodes stay
+   blue and green, the green somewhat darker. */
+:root[data-theme="dark"] .art {
+  filter: invert(1) hue-rotate(180deg);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] .art {
+    filter: invert(1) hue-rotate(180deg);
+  }
 }
 
 .version {
@@ -200,6 +217,13 @@ a:hover {
   .hero {
     grid-template-columns: 1.05fr 0.95fr;
   }
+}
+
+.banner {
+  grid-column: 1 / -1;
+  width: 100%;
+  max-width: 44rem;
+  height: auto;
 }
 
 .pitch h1 {

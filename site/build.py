@@ -6,8 +6,8 @@ so the published page cannot drift from the repository's front page.
 
 Four things change on the way:
 
-* The `# rllvm` heading and the badge images are repository chrome. The page
-  has a designed header instead.
+* The `# rllvm` heading, the banner and the badge images are repository chrome.
+  The page has a designed header instead, which carries the banner itself.
 * The tagline and the paragraph under it move into front matter, so the layout
   can set them in the hero rather than repeating them in the body.
 * Relative links work on github.com and 404 on the site, which has no
@@ -40,6 +40,9 @@ OUTPUT = Path(__file__).resolve().parent / "index.md"
 LINK = re.compile(r"(?<=\]\()([^)\s]+)(?=[)\s])")
 
 ABSOLUTE = ("http://", "https://", "#", "mailto:", "//")
+
+# The banner (`![`) and the badges (`[![`) above the first `##`.
+IMAGE_LINES = ("![", "[![")
 
 
 def rewrite(target: str) -> str:
@@ -88,7 +91,7 @@ def split_front(markdown: str) -> tuple[str, str, str, str]:
     paragraphs = [
         " ".join(block.split())
         for block in "\n".join(
-            line for line in intro if not line.startswith("[![")
+            line for line in intro if not line.startswith(IMAGE_LINES)
         ).split("\n\n")
         if block.strip()
     ]
