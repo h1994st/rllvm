@@ -794,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "rllvm-query"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "clap",
  "clap_complete",
