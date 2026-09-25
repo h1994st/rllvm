@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.7.0...rllvm-query-v0.7.1) (2026-09-25)
+
+
+### Features
+
+* add the ffi-exports query ([#262](https://github.com/h1994st/rllvm/issues/262)) ([4aff714](https://github.com/h1994st/rllvm/commit/4aff7148d747c501afaaf520bc5b22fef72a2e54))
+
 ## [0.7.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.6.2...rllvm-query-v0.7.0) (2026-09-24)
 
 

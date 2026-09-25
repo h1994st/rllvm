@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.1.0...rllvm-plugin-v0.1.1) (2026-09-25)
+
+
+### Features
+
+* add the ffi-exports query ([#262](https://github.com/h1994st/rllvm/issues/262)) ([4aff714](https://github.com/h1994st/rllvm/commit/4aff7148d747c501afaaf520bc5b22fef72a2e54))
+
 ## 0.1.0 (2026-09-24)
 
 
