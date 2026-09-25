@@ -74,11 +74,44 @@ pub enum Linkage {
     Other,
 }
 
+/// The language a function was written in, as far as the bitcode says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Language {
+    Rust,
+    /// Any language other than Rust. Not refined further: `ffi-exports`, the
+    /// only reader, asks whether a function is Rust and nothing more.
+    Other,
+}
+
+/// Where a [`SourceLanguage`] came from, because the two prove different
+/// things: debug info names the function's own compile unit, while the
+/// producer speaks for the whole module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageBasis {
+    /// The `DICompileUnit` the function's subprogram belongs to.
+    DebugInfo,
+    /// The module's `!llvm.ident`, when every entry agrees.
+    Producer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceLanguage {
+    pub name: Language,
+    pub basis: LanguageBasis,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FunctionFact {
     pub id: FunctionId,
     pub is_definition: bool,
     pub linkage: Linkage,
+    /// `None` for a declaration, which is not written in the module that
+    /// declares it, and when neither debug info nor the module's producer
+    /// says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<SourceLanguage>,
     pub signature: String,
     pub location: Option<SourceLocation>,
     /// Lines any instruction in this function maps to. Supports `at`; this is
@@ -166,6 +199,10 @@ pub struct ModuleReport {
     pub configuration_id: Option<String>,
     pub content_sha256: Option<String>,
     pub target_triple: Option<String>,
+    /// Quoted from the module's `!llvm.ident`, in order. Empty until
+    /// extraction reads it, and for a module whose producer wrote none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub producers: Vec<String>,
     /// The capture's recorded reason, or the failure observed here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<String>,

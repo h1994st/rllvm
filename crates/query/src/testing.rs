@@ -11,8 +11,9 @@ use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
 use crate::{
     bind::{BindingCandidate, BindingStatus, SymbolBinding},
     facts::{
-        CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Linkage, ModuleAnalysis,
-        ModuleReport, ProgramFacts, SourceLocation, SourceStatus, UseFact, UseKind,
+        CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Language, LanguageBasis,
+        Linkage, ModuleAnalysis, ModuleReport, ProgramFacts, SourceLanguage, SourceLocation,
+        SourceStatus, UseFact, UseKind,
     },
     index::Session,
 };
@@ -30,10 +31,25 @@ pub(crate) fn function(
         },
         is_definition,
         linkage,
+        language: None,
         signature: "i32 (i32, i32)".into(),
         location: None,
         mapped_lines: Default::default(),
     }
+}
+
+/// A definition in module `m`, attributed to `language` by its producer.
+pub(crate) fn attributed(
+    symbol: &str,
+    linkage: Linkage,
+    language: Option<Language>,
+) -> FunctionFact {
+    let mut fact = function("m", symbol, true, linkage);
+    fact.language = language.map(|name| SourceLanguage {
+        name,
+        basis: LanguageBasis::Producer,
+    });
+    fact
 }
 
 /// A current, uninlined `file:line`. Only the two fields a fixture ever
@@ -102,6 +118,7 @@ pub(crate) fn report(id: &str, status: ModuleAnalysis) -> ModuleReport {
         configuration_id: None,
         content_sha256: None,
         target_triple: None,
+        producers: Vec::new(),
         diagnostic: None,
     }
 }

@@ -1,4 +1,4 @@
-//! MCP stdio server: the nine source-level queries as JSON-RPC 2.0 tools,
+//! MCP stdio server: the ten source-level queries as JSON-RPC 2.0 tools,
 //! newline-delimited over stdin/stdout, plus four that decide which catalogs
 //! they run against.
 //!
@@ -423,7 +423,7 @@ fn tools_list_result() -> Value {
 macro_rules! management_tool_surface {
     ($($variant:ident => $name:literal, $description:literal, $schema:expr;)+) => {
         /// A tool that decides which catalogs are loaded, as opposed to the
-        /// nine that ask a question of one.
+        /// ten that ask a question of one.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum Management { $($variant),+ }
 
@@ -579,10 +579,11 @@ query_tool_surface! {
     Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new() }, "reach";
     Query::Closure { .. } => Query::Closure { name: String::new(), direction: Direction::In }, "closure";
     Query::Externals => Query::Externals, "externals";
+    Query::FfiExports => Query::FfiExports, "ffi_exports";
     Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
 }
 
-/// The `name` argument four of the nine tools take, identically. Spelled
+/// The `name` argument four of the ten tools take, identically. Spelled
 /// once: four copies of one schema drift apart, and a client reads the
 /// drifted one as a real difference between the tools.
 fn symbol_property() -> Value {
@@ -605,8 +606,8 @@ fn symbol_tool(name: &str, description: &str) -> Value {
     })
 }
 
-/// Which loaded catalog a query runs against. Added to all nine schemas at
-/// one point below rather than written into each: nine copies of an optional
+/// Which loaded catalog a query runs against. Added to all ten schemas at
+/// one point below rather than written into each: ten copies of an optional
 /// argument drift, and a client reads the drift as a real difference.
 fn catalog_property() -> Value {
     json!({
@@ -694,6 +695,11 @@ fn query_tool(query: &Query) -> Value {
         Query::Externals => json!({
             "name": name,
             "description": "Unbound symbols: the captured program's boundary.",
+            "inputSchema": { "type": "object", "properties": {} }
+        }),
+        Query::FfiExports => json!({
+            "name": name,
+            "description": "Rust definitions exported under an unmangled name, callable from C: the FFI surface.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         Query::IndirectTargets { .. } => json!({
@@ -819,6 +825,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
             Ok(Query::Closure { name, direction })
         }
         "externals" => Ok(Query::Externals),
+        "ffi_exports" => Ok(Query::FfiExports),
         "indirect_targets" => Ok(Query::IndirectTargets {
             at: string_field("at")?,
             heuristics: arguments
@@ -865,6 +872,7 @@ mod tests {
             Query::Reach { .. } => json!({ "from": "a", "to": "b" }),
             Query::Closure { .. } => json!({ "name": "a", "direction": "in" }),
             Query::Externals => json!({}),
+            Query::FfiExports => json!({}),
             Query::IndirectTargets { .. } => json!({ "at": "t.c:4" }),
         }
     }
@@ -961,7 +969,7 @@ mod tests {
 
     /// Every query tool takes the same optional `catalog` argument. It is
     /// added at one point in `tool_for`, and this is what says it reached
-    /// all nine.
+    /// all ten.
     #[test]
     fn every_query_tool_accepts_a_catalog_argument() {
         for query in sample_queries() {

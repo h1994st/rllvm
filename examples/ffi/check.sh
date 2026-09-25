@@ -47,6 +47,14 @@ defines "$crossings" '"file": *"main\.rs"' "the Rust call sites carry no source"
 c_to_rust=$(rllvm-query --catalog "$OUT/catalog.json" --json callers rust_add)
 defines "$c_to_rust" '"file": *"c_side\.c"' "no C call site recorded for rust_add"
 
+# The FFI surface, from the catalog: Rust's `#[no_mangle]` definitions, and
+# none of the C or C++ ones beside them.
+exports=$(rllvm-query --catalog "$OUT/catalog.json" --json ffi-exports)
+defines "$exports" '"symbol": *"rust_add"' "ffi-exports omits rust_add"
+if grep -Eq '"symbol": *"(c_double|cxx_triple)"' <<<"$exports"; then
+    fail "ffi-exports listed a C or C++ definition"
+fi
+
 # The other lead direction: a C `main` against a Rust staticlib, so the entry
 # point is C rather than Rust. Only three functions land in the module --
 # Rust's prebuilt std is not built through the wrapper and contributes none.
@@ -66,5 +74,11 @@ defines "$c_lead" '"file": *"c_main\.c"' "no C call site recorded for rust_scale
 
 rust_back=$(rllvm-query --catalog "$OUT/catalog_c.json" --json callers c_offset)
 defines "$rust_back" '"file": *"rust_side\.rs"' "no Rust call site recorded for c_offset"
+
+exports_c=$(rllvm-query --catalog "$OUT/catalog_c.json" --json ffi-exports)
+defines "$exports_c" '"symbol": *"rust_scale"' "ffi-exports omits rust_scale"
+if grep -Eq '"symbol": *"(main|c_offset)"' <<<"$exports_c"; then
+    fail "ffi-exports listed a C definition"
+fi
 
 echo "ok: both lead directions cross FFI, with source on each side"

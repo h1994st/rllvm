@@ -6,7 +6,7 @@ use std::{
 
 use rllvm_core::catalog::read_catalog;
 use rllvm_query::load::{for_each_module, load_catalog};
-use rllvm_query::{CallTarget, Linkage};
+use rllvm_query::{CallTarget, Language, LanguageBasis, Linkage, SourceLanguage};
 use rllvm_testkit::{
     MODULE_ID, SourceFixture, compile_bitcode, compile_bitcode_file, llvm_bin,
     scratch_rllvm_config, source_and_header, write_catalog_json,
@@ -712,26 +712,34 @@ fn query_json(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> ser
 /// them can be removed from under a load that already verified it. Returns
 /// the catalog and the path of the first module.
 fn two_plain_module_catalog(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
-    let mut modules = Vec::new();
+    let modules: Vec<PathBuf> = ADD_AND_MAIN
+        .iter()
+        .map(|(name, source)| compile_bitcode(scratch, name, source))
+        .collect();
+    let first = modules[0].clone();
+    let catalog = plain_module_catalog(scratch, &modules);
+    (catalog, first)
+}
+
+/// Inventories each module file and writes one catalog holding them all.
+fn plain_module_catalog(scratch: &tempfile::TempDir, modules: &[PathBuf]) -> PathBuf {
+    let mut collected = Vec::new();
     let mut origin = None;
-    let mut first = None;
-    for (name, source) in ADD_AND_MAIN {
-        let object = compile_bitcode(scratch, name, source);
+    for object in modules {
         let catalog =
-            rllvm_core::catalog::inventory(&object, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            rllvm_core::catalog::inventory(object, scratch.path(), Some(&llvm_bin("llvm-dis")))
                 .unwrap();
         origin.get_or_insert(catalog.origin.clone());
-        first.get_or_insert(object);
-        modules.extend(catalog.modules);
+        collected.extend(catalog.modules);
     }
     let catalog = rllvm_core::catalog::ModuleCatalog::new(
         origin.expect("at least one module"),
         "recorded_modules",
-        modules,
+        collected,
     );
     let path = scratch.path().join("plain-catalog.json");
     write_catalog_json(&path, &catalog);
-    (path, first.expect("at least one module"))
+    path
 }
 
 /// The shape every C++ program that uses templates or `inline` has: a
@@ -1326,13 +1334,191 @@ fn compile_and_extract(
     name: &str,
     flags: &[&str],
 ) -> rllvm_query::ModuleFacts {
-    let module = compile_bitcode_file(&scratch.path().join(name), flags);
+    extract_module(&compile_bitcode_file(&scratch.path().join(name), flags))
+}
+
+/// Extracts one module file under the fixed id `t`.
+fn extract_module(module: &Path) -> rllvm_query::ModuleFacts {
     let loaded = rllvm_query::load::LoadedModule {
         id: "t".into(),
-        bytes: std::fs::read(&module).unwrap(),
+        bytes: std::fs::read(module).unwrap(),
         record: Default::default(),
     };
     rllvm_query::extract::extract(&loaded, &Default::default()).unwrap()
+}
+
+/// Assembles textual IR to a `.bc` file, for the shapes a compiler will not
+/// produce on request: a module merged from two languages, or one naming no
+/// producer.
+fn assemble_ir(scratch: &tempfile::TempDir, ir: &str) -> PathBuf {
+    let source = scratch.path().join("t.ll");
+    let module = scratch.path().join("t.bc");
+    std::fs::write(&source, ir).unwrap();
+    let status = Command::new(llvm_bin("llvm-as"))
+        .arg(&source)
+        .arg("-o")
+        .arg(&module)
+        .status()
+        .unwrap();
+    assert!(status.success(), "llvm-as rejected the fixture");
+    module
+}
+
+fn extract_ir(scratch: &tempfile::TempDir, ir: &str) -> rllvm_query::ModuleFacts {
+    extract_module(&assemble_ir(scratch, ir))
+}
+
+fn language_of(facts: &rllvm_query::ModuleFacts, symbol: &str) -> Option<SourceLanguage> {
+    facts
+        .functions
+        .iter()
+        .find(|function| function.id.symbol == symbol)
+        .unwrap_or_else(|| panic!("no function {symbol}"))
+        .language
+}
+
+/// What `llvm-link` makes of a C module and a Rust one built with `-g`:
+/// both producers in `llvm.ident`, and one compile unit per original file.
+const MERGED_IR: &str = r#"define void @rust_fn() !dbg !10 {
+  ret void
+}
+
+define void @c_fn() !dbg !20 {
+  ret void
+}
+
+define void @no_debug() {
+  ret void
+}
+
+!llvm.dbg.cu = !{!1, !2}
+!llvm.ident = !{!3, !4}
+!llvm.module.flags = !{!5}
+
+!1 = distinct !DICompileUnit(language: DW_LANG_Rust, file: !6, producer: "rustc", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+!2 = distinct !DICompileUnit(language: DW_LANG_C11, file: !7, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)
+!3 = !{!"rustc version 1.98.0 (88d9e12ae 2026-08-18)"}
+!4 = !{!"clang version 23.1.1"}
+!5 = !{i32 2, !"Debug Info Version", i32 3}
+!6 = !DIFile(filename: "lib.rs", directory: "/src")
+!7 = !DIFile(filename: "c.c", directory: "/src")
+!8 = !DISubroutineType(types: !9)
+!9 = !{}
+!10 = distinct !DISubprogram(name: "rust_fn", scope: !6, file: !6, line: 1, type: !8, spFlags: DISPFlagDefinition, unit: !1)
+!20 = distinct !DISubprogram(name: "c_fn", scope: !7, file: !7, line: 1, type: !8, spFlags: DISPFlagDefinition, unit: !2)
+"#;
+
+/// rustc's module without `-g`: the producer is the only evidence. Also
+/// declares `imported`, an external symbol this module borrows rather than
+/// writes -- the producer must not speak for it.
+const RUSTC_IR_WITHOUT_DEBUG_INFO: &str = r#"define void @exported() {
+  ret void
+}
+
+declare void @imported()
+
+!llvm.ident = !{!0}
+!0 = !{!"rustc version 1.98.0 (88d9e12ae 2026-08-18)"}
+"#;
+
+const IR_WITHOUT_PRODUCER: &str = "define void @x() {\n  ret void\n}\n";
+
+fn by_debug_info(name: Language) -> Option<SourceLanguage> {
+    Some(SourceLanguage {
+        name,
+        basis: LanguageBasis::DebugInfo,
+    })
+}
+
+fn by_producer(name: Language) -> Option<SourceLanguage> {
+    Some(SourceLanguage {
+        name,
+        basis: LanguageBasis::Producer,
+    })
+}
+
+#[test]
+fn debug_info_attributes_each_function_of_a_merged_module() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_ir(&scratch, MERGED_IR);
+    assert_eq!(
+        language_of(&facts, "rust_fn"),
+        by_debug_info(Language::Rust)
+    );
+    assert_eq!(language_of(&facts, "c_fn"), by_debug_info(Language::Other));
+    assert_eq!(
+        language_of(&facts, "no_debug"),
+        None,
+        "mixed producers cannot speak for a function without debug info"
+    );
+    assert_eq!(
+        facts.producers,
+        [
+            "rustc version 1.98.0 (88d9e12ae 2026-08-18)",
+            "clang version 23.1.1"
+        ]
+    );
+}
+
+#[test]
+fn a_dwarf_6_language_name_attributes_too() {
+    let scratch = tempfile::tempdir().unwrap();
+    let ir = MERGED_IR.replace(
+        "language: DW_LANG_Rust",
+        "sourceLanguageName: DW_LNAME_Rust",
+    );
+    let facts = extract_ir(&scratch, &ir);
+    assert_eq!(
+        language_of(&facts, "rust_fn"),
+        by_debug_info(Language::Rust)
+    );
+}
+
+#[test]
+fn the_producer_attributes_a_module_without_debug_info() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_ir(&scratch, RUSTC_IR_WITHOUT_DEBUG_INFO);
+    assert_eq!(language_of(&facts, "exported"), by_producer(Language::Rust));
+    assert_eq!(
+        language_of(&facts, "imported"),
+        None,
+        "a declaration is not written in the module that declares it"
+    );
+}
+
+#[test]
+fn a_module_naming_no_producer_is_unattributed() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_ir(&scratch, IR_WITHOUT_PRODUCER);
+    assert_eq!(language_of(&facts, "x"), None);
+    assert!(facts.producers.is_empty());
+}
+
+#[test]
+fn a_clang_module_is_attributed_to_another_language() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = "int f(void) { return 1; }\n";
+    let without_debug_info = extract_source_with_flags(&scratch, source, &["-O0"]);
+    assert_eq!(
+        language_of(&without_debug_info, "f"),
+        by_producer(Language::Other)
+    );
+    let debug = extract_source(&scratch, source);
+    assert_eq!(language_of(&debug, "f"), by_debug_info(Language::Other));
+}
+
+#[test]
+fn an_answer_quotes_each_module_s_producers() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (catalog, _) = write_catalog_with_one_module(&scratch);
+    let answer = query_json(&scratch, &catalog, &["externals"]);
+    let producers = answer["analysis"]["modules"][0]["producers"]
+        .as_array()
+        .expect("an analyzed clang module names its producer");
+    assert!(
+        producers[0].as_str().unwrap().contains("clang version"),
+        "got {producers:?}"
+    );
 }
 
 /// Stands in for a catalog whose capture recorded a compiler this LLVM is
@@ -1432,6 +1618,81 @@ fn a_c_answer_carries_no_symbol_table() {
         answer.get("symbols").is_none(),
         "nothing in a C answer demangles: {answer}"
     );
+}
+
+const RUST_EXPORTS: &str = r#"#[unsafe(no_mangle)]
+pub extern "C" fn lib_add(a: i32, b: i32) -> i32 { helper(a) + b }
+
+#[unsafe(export_name = "renamed")]
+pub extern "C" fn lib_renamed() {}
+
+pub extern "C" fn stays_mangled() {}
+
+#[inline(never)]
+fn helper(a: i32) -> i32 { a * 2 }
+"#;
+
+/// Real rustc output rather than a hand-written `llvm.ident`, without `-g`,
+/// beside a C module: the attribution rests on what rustc actually writes.
+#[test]
+fn ffi_exports_lists_what_no_mangle_and_export_name_make_c_callable() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = scratch.path().join("lib.rs");
+    let rust = scratch.path().join("lib.bc");
+    std::fs::write(&source, RUST_EXPORTS).unwrap();
+    let status = Command::new("rustc")
+        .args([
+            "--crate-type=staticlib",
+            "--emit=llvm-bc",
+            "-C",
+            "codegen-units=1",
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(&rust)
+        .status()
+        .unwrap();
+    assert!(status.success(), "rustc failed");
+    let c = compile_bitcode(&scratch, "c.c", "int c_fn(void) { return 1; }\n");
+
+    let catalog = plain_module_catalog(&scratch, &[rust, c]);
+    let answer = query_json(&scratch, &catalog, &["ffi-exports"]);
+    assert_eq!(
+        answer["analysis"]["analyzed"], 2,
+        "a module failed to parse -- is rustc's LLVM newer than the reader?: {answer}"
+    );
+    let symbols: Vec<&str> = answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["function"]["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(symbols, ["lib_add", "renamed"]);
+    assert_eq!(answer["uncertainty"]["functions_of_unknown_language"], 0);
+}
+
+/// `MERGED_IR` holds `no_debug`, a function with neither debug info nor a
+/// single producer to fall back on: it is counted as unknown, not searched,
+/// and so never appears among the results.
+#[test]
+fn a_merged_module_without_debug_info_is_counted_not_searched() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = assemble_ir(&scratch, MERGED_IR);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+
+    let answer = query_json(&scratch, &catalog, &["ffi-exports"]);
+    assert_eq!(
+        answer["analysis"]["analyzed"], 1,
+        "the merged fixture failed to parse: {answer}"
+    );
+    let symbols: Vec<&str> = answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["function"]["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(symbols, ["rust_fn"]);
+    assert_eq!(answer["uncertainty"]["functions_of_unknown_language"], 1);
 }
 
 // --- MCP stdio server -------------------------------------------------
@@ -1682,11 +1943,11 @@ mod mcp {
         );
     }
 
-    /// One tool over the wire. That every one of the nine is listed under a
+    /// One tool over the wire. That every one of the ten is listed under a
     /// name `query_from_call` resolves is `mcp.rs`'s own
     /// `every_query_variant_is_listed_and_resolves_through_a_call`, which
     /// checks it against a match the compiler forces to stay exhaustive --
-    /// driving the same nine through a subprocess here proves nothing extra
+    /// driving the same ten through a subprocess here proves nothing extra
     /// about the transport this test already covers.
     #[test]
     fn a_modern_tool_call_returns_a_call_tool_result() {

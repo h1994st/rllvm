@@ -27,6 +27,7 @@ uncertainty to the text.
 | Can A reach B — for example, is a vulnerable function reachable? | `reach`; if it finds no path, `closure` to see where the search stopped |
 | Everything that reaches X, or that X reaches | `closure` with `direction` `in` or `out` |
 | What does the program call outside itself? | `externals` |
+| Which Rust functions can C call — the FFI surface? | `ffi_exports` |
 
 A name can be the mangled symbol, the full demangled reading, or a bare
 identifier.
@@ -38,8 +39,9 @@ Ask per build: features and configurations change what is compiled in.
 1. `defs` on the function. No result: it is not in this captured program.
 2. `callers`. None: it is linked but has no captured direct caller; check
    `uses` for its address being taken before concluding anything.
-3. `reach` from each entry point (`main`, or the exported API) to the
-   function. A path is evidence; no path is not proof (see below).
+3. `reach` from each entry point to the function: `main`, or the exported
+   API — `ffi_exports` lists a Rust library's. A path is evidence; no path is
+   not proof (see below).
 4. `callees` on the entry point shows what it actually does on the way.
 
 ## Reading the answer
@@ -69,6 +71,13 @@ Report what the answer supports, and say what it does not:
   Rust standard library contribute no functions; calls into them appear in
   `externals` as unbound. `indirect_targets`' `assumptions` state that
   `dlopen` and callbacks registered by uncaptured code escape its bound.
+- **An FFI surface is only as complete as its attribution.** `ffi_exports`
+  lists Rust definitions exported under an unmangled name, each attributed
+  to Rust by debug info or by the module's producer.
+  `uncertainty.functions_of_unknown_language` counts unmangled definitions
+  it could not attribute and did not search — non-zero for code built
+  without `-g`, or compiler-generated code such as a Rust binary's C
+  `main`. Report it; a per-object catalog avoids it.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.

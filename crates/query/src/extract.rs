@@ -15,7 +15,8 @@ use llvm_sys::{
     debuginfo::{
         LLVMDIFileGetDirectory, LLVMDIFileGetFilename, LLVMDILocationGetColumn,
         LLVMDILocationGetInlinedAt, LLVMDILocationGetLine, LLVMDILocationGetScope,
-        LLVMDIScopeGetFile, LLVMInstructionGetDebugLoc,
+        LLVMDIScopeGetFile, LLVMGetMetadataKind, LLVMGetSubprogram, LLVMInstructionGetDebugLoc,
+        LLVMMetadataKind,
     },
     error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage},
     prelude::*,
@@ -123,6 +124,8 @@ pub struct ModuleFacts {
     pub functions: Vec<FunctionFact>,
     pub call_sites: Vec<CallSiteFact>,
     pub uses: Vec<UseFact>,
+    /// Quoted from `!llvm.ident`, in order.
+    pub producers: Vec<String>,
     /// Non-fatal problems observed while extracting. Surfaced in the
     /// analysis report, not swallowed into logging.
     pub diagnostics: Vec<String>,
@@ -457,6 +460,135 @@ fn linkage_of(linkage: LLVMLinkage) -> Linkage {
     }
 }
 
+/// How rustc's `!llvm.ident` entries begin, on every toolchain checked
+/// (1.85 through 1.100 nightly), with or without `-g`.
+const RUSTC_PRODUCER_PREFIX: &str = "rustc version ";
+
+/// The operand of a `DISubprogram` that holds its `DICompileUnit`. Checked
+/// against the node's kind before use, so a layout change reads as no
+/// answer rather than as another node's text.
+const SUBPROGRAM_UNIT_OPERAND: usize = 5;
+
+/// The keys a printed `DICompileUnit` names its language under, and the
+/// value that means Rust: DWARF 5 codes and DWARF 6 language names.
+const DWARF_LANGUAGE_KEYS: [(&str, &str); 2] = [
+    ("language: DW_LANG_", "Rust"),
+    ("sourceLanguageName: DW_LNAME_", "Rust"),
+];
+
+/// Rust when every entry is rustc's, another language when none is.
+/// Unknown when they are mixed -- a module `llvm-link` merged from both
+/// cannot speak for any one function -- or when there are none.
+fn producer_language(producers: &[String]) -> Option<Language> {
+    let rustc = producers
+        .iter()
+        .filter(|producer| producer.starts_with(RUSTC_PRODUCER_PREFIX))
+        .count();
+    if producers.is_empty() || (rustc != 0 && rustc != producers.len()) {
+        None
+    } else if rustc == 0 {
+        Some(Language::Other)
+    } else {
+        Some(Language::Rust)
+    }
+}
+
+/// The language a printed `DICompileUnit` names, or `None` when it names
+/// none this reader recognizes.
+fn dwarf_language(unit: &str) -> Option<Language> {
+    DWARF_LANGUAGE_KEYS.iter().find_map(|(key, rust)| {
+        let start = unit.find(key)? + key.len();
+        let name = unit[start..].split([',', ')']).next()?.trim();
+        if name.is_empty() {
+            None
+        } else if name == *rust {
+            Some(Language::Rust)
+        } else {
+            Some(Language::Other)
+        }
+    })
+}
+
+/// Every operand of an MDNode value, null operands included.
+///
+/// # Safety
+/// `node` must be a live MDNode wrapped as a value.
+unsafe fn md_node_operands(node: LLVMValueRef) -> Vec<LLVMValueRef> {
+    // SAFETY: the caller guarantees a live MDNode value.
+    let count = unsafe { LLVMGetMDNodeNumOperands(node) } as usize;
+    let mut operands = vec![std::ptr::null_mut(); count];
+    // SAFETY: `operands` holds exactly the `count` slots just reported.
+    unsafe { LLVMGetMDNodeOperands(node, operands.as_mut_ptr()) };
+    operands
+}
+
+/// Every `!llvm.ident` entry, in order.
+///
+/// # Safety
+/// `module` must be a live module.
+unsafe fn read_producers(module: LLVMModuleRef) -> Vec<String> {
+    let name = c"llvm.ident";
+    // SAFETY: live module, NUL-terminated name.
+    let count = unsafe { LLVMGetNamedMetadataNumOperands(module, name.as_ptr()) } as usize;
+    let mut nodes = vec![std::ptr::null_mut(); count];
+    // SAFETY: `nodes` holds exactly the `count` slots just reported.
+    unsafe { LLVMGetNamedMetadataOperands(module, name.as_ptr(), nodes.as_mut_ptr()) };
+    nodes
+        .into_iter()
+        .filter(|node| !node.is_null())
+        .filter_map(|node| {
+            // SAFETY: a live operand of the named metadata, which is an MDNode.
+            let first = *unsafe { md_node_operands(node) }.first()?;
+            if first.is_null() {
+                return None;
+            }
+            let mut length = 0;
+            // SAFETY: `first` is live; a non-string operand answers null.
+            let text = unsafe { LLVMGetMDString(first, &mut length) };
+            // SAFETY: `text` spans `length` bytes, or is null.
+            (!text.is_null()).then(|| unsafe { owned(text, length as usize) })
+        })
+        .collect()
+}
+
+/// The language of the compile unit `function`'s subprogram belongs to.
+///
+/// The C API has no getter for a unit's language, so the unit is printed
+/// and the language read from its text. Units are few and shared by many
+/// functions, so each is printed once.
+///
+/// # Safety
+/// `function` must be a live function in `context`.
+unsafe fn debug_info_language(
+    context: LLVMContextRef,
+    function: LLVMValueRef,
+    units: &mut HashMap<LLVMMetadataRef, Option<Language>>,
+) -> Option<Language> {
+    // SAFETY: the caller guarantees a live function.
+    let subprogram = unsafe { LLVMGetSubprogram(function) };
+    if subprogram.is_null() {
+        return None;
+    }
+    // SAFETY: `subprogram` is live metadata in `context`.
+    let node = unsafe { LLVMMetadataAsValue(context, subprogram) };
+    // SAFETY: a `DISubprogram` is an MDNode.
+    let unit = *unsafe { md_node_operands(node) }.get(SUBPROGRAM_UNIT_OPERAND)?;
+    if unit.is_null() {
+        return None;
+    }
+    // SAFETY: `unit` is a live metadata operand wrapped as a value.
+    let metadata = unsafe { LLVMValueAsMetadata(unit) };
+    // SAFETY: as above.
+    let kind = unsafe { LLVMGetMetadataKind(metadata) };
+    if !matches!(kind, LLVMMetadataKind::LLVMDICompileUnitMetadataKind) {
+        return None;
+    }
+    *units.entry(metadata).or_insert_with(|| {
+        // SAFETY: `unit` is live; the printed string is owned by this call.
+        dwarf_language(&unsafe { owned_message(LLVMPrintValueToString(unit)) })
+    })
+}
+
 /// Reads CVP's `!callees` metadata off an indirect call, if CVP attached
 /// any.
 ///
@@ -480,11 +612,7 @@ unsafe fn indirect_target_bound(
         return None;
     }
     // SAFETY: `node` is the live MDNode value CVP attached to `instruction`.
-    let count = unsafe { LLVMGetNumOperands(node) } as usize;
-    let mut operands = vec![std::ptr::null_mut(); count];
-    // SAFETY: `node` is that same live MDNode, and `operands` holds exactly
-    // the `count` slots `LLVMGetNumOperands` just reported for it.
-    unsafe { LLVMGetMDNodeOperands(node, operands.as_mut_ptr()) };
+    let operands = unsafe { md_node_operands(node) };
     Some(
         operands
             .into_iter()
@@ -733,6 +861,11 @@ unsafe fn extract_inner(
     // CVP attaches its upper bound under.
     let callees_kind = unsafe { LLVMGetMDKindIDInContext(context.0, c"callees".as_ptr(), 7) };
 
+    // SAFETY: `parsed` is a module in the live context.
+    let producers = unsafe { read_producers(parsed.0) };
+    let module_language = producer_language(&producers);
+    let mut units = HashMap::new();
+
     let mut functions = Vec::new();
     let mut call_sites = Vec::new();
     let mut uses = Vec::new();
@@ -791,12 +924,34 @@ unsafe fn extract_inner(
             block_index += 1;
         }
 
+        // SAFETY: `function` is a live global value.
+        let is_definition = unsafe { LLVMIsDeclaration(function) } == 0;
+
         functions.push(FunctionFact {
             id: id.clone(),
-            // SAFETY: `function` is a live global value, which all four
+            is_definition,
+            // SAFETY: `function` is a live global value, which these
             // accessors accept.
-            is_definition: unsafe { LLVMIsDeclaration(function) } == 0,
             linkage: linkage_of(unsafe { LLVMGetLinkage(function) }),
+            // A declaration is not written in the module that declares it,
+            // so it gets no language even when the module's producer or a
+            // borrowed unit would otherwise suggest one. Debug info first
+            // for a definition: it names this function's own unit, where
+            // the producer speaks for the module as a whole.
+            // SAFETY: `function` is live in `context`.
+            language: if is_definition {
+                unsafe { debug_info_language(context.0, function, &mut units) }
+                    .map(|name| SourceLanguage {
+                        name,
+                        basis: LanguageBasis::DebugInfo,
+                    })
+                    .or(module_language.map(|name| SourceLanguage {
+                        name,
+                        basis: LanguageBasis::Producer,
+                    }))
+            } else {
+                None
+            },
             // The value type, not `LLVMTypeOf`: an opaque pointer prints as
             // `ptr` and would record no signature at all.
             signature: unsafe {
@@ -825,6 +980,7 @@ unsafe fn extract_inner(
         functions,
         call_sites,
         uses,
+        producers,
         diagnostics,
     })
 }
@@ -832,6 +988,40 @@ unsafe fn extract_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn producers_decide_a_module_only_when_they_agree() {
+        let rustc = "rustc version 1.98.0".to_string();
+        let clang = "clang version 23.1.1".to_string();
+        assert_eq!(
+            producer_language(std::slice::from_ref(&rustc)),
+            Some(Language::Rust)
+        );
+        assert_eq!(
+            producer_language(std::slice::from_ref(&clang)),
+            Some(Language::Other)
+        );
+        assert_eq!(producer_language(&[rustc, clang]), None, "merged");
+        assert_eq!(producer_language(&[]), None, "no producer named");
+    }
+
+    #[test]
+    fn a_printed_unit_names_its_language_under_either_key() {
+        let unit = |text: &str| format!("distinct !DICompileUnit({text}, file: !1)");
+        assert_eq!(
+            dwarf_language(&unit("language: DW_LANG_Rust")),
+            Some(Language::Rust)
+        );
+        assert_eq!(
+            dwarf_language(&unit("language: DW_LANG_C11")),
+            Some(Language::Other)
+        );
+        assert_eq!(
+            dwarf_language(&unit("sourceLanguageName: DW_LNAME_Rust")),
+            Some(Language::Rust)
+        );
+        assert_eq!(dwarf_language("distinct !DICompileUnit(file: !1)"), None);
+    }
 
     /// The rows that matter are the refusals: a demangler that guessed at a
     /// name it does not understand would put a fabricated C++ signature in an
