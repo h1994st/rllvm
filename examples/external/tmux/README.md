@@ -68,6 +68,31 @@ cmdq_next
 note: 103 indirect call site(s), 2 with an LLVM target bound
 ```
 
+`uses` finds where the address went instead, and `--heuristics` lists what
+that call could reach by signature alone:
+
+```bash
+rllvm-query --catalog cat/catalog.json uses cmd_kill_server_exec
+rllvm-query --catalog cat/catalog.json indirect-targets cmd-queue.c:625 --heuristics
+```
+
+```text
+global_initializer  in cmd_start_server_entry  at <no location>
+global_initializer  in cmd_kill_server_entry  at <no location>
+cmd-queue.c:625  i32 (ptr, ptr)
+    unresolved
+    address-taken candidates: 93 of 668 address-taken function(s) match the signature
+
+note: 103 indirect call site(s), 2 with an LLVM target bound
+note: address-taken candidates are signature-matched, never call edges
+```
+
+`kill-server` and `start-server` share one implementation. Of the 93
+candidates, 61 are `cmd_*_exec` functions; the rest are comparators and
+callbacks such as `sort_session_cmp` and `cfg_done`, which have the same shape
+once pointers are opaque. The candidates are opt-in and never become edges, so
+`reach` still stops at this call.
+
 ## Where a pane's output goes
 
 What a program in a pane writes reaches `input_parse_buffer`, which runs it
@@ -89,7 +114,18 @@ note: 103 indirect call site(s), 2 with an LLVM target bound
 ```
 
 Every escape sequence a pane prints is handled through that call, yet `reach`
-finds no path: an empty answer is not proof, and the note says so.
+finds no path: an empty answer is not proof, and the note says so. `uses`
+shows where the handler is registered:
+
+```bash
+rllvm-query --catalog cat/catalog.json uses input_csi_dispatch
+```
+
+```text
+global_initializer  in input_state_csi_parameter_table  at <no location>
+global_initializer  in input_state_csi_intermediate_table  at <no location>
+global_initializer  in input_state_csi_enter_table  at <no location>
+```
 
 ## Validated against
 
