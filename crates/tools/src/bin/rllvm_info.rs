@@ -6,7 +6,7 @@ use rllvm::cli::InfoArgs;
 use rllvm_core::{
     bitcode_info::{BitcodeInfo, analyze_bitcode},
     error::Error,
-    utils::{InputKind, extract_bitcode_filepaths_from_parsed_object},
+    utils::{InputKind, extract_bitcode_filepaths_from_parsed_object, print_stdout},
 };
 
 /// Try to parse as an object file to check for embedded bitcode.
@@ -23,32 +23,34 @@ fn try_extract_bitcode_from_object(path: &PathBuf) -> Result<Option<PathBuf>, Er
     Ok(None)
 }
 
-fn print_info(info: &BitcodeInfo, show_functions: bool) {
-    println!("{}", "=== Bitcode Info ===".bold());
-    println!("File         : {}", info.file_path.display());
-    println!("File size    : {} bytes", info.file_size);
+fn format_info(info: &BitcodeInfo, show_functions: bool) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{}\n", "=== Bitcode Info ===".bold()));
+    out.push_str(&format!("File         : {}\n", info.file_path.display()));
+    out.push_str(&format!("File size    : {} bytes\n", info.file_size));
     if let Some(triple) = &info.target_triple {
-        println!("Target triple: {}", triple);
+        out.push_str(&format!("Target triple: {}\n", triple));
     }
     if let Some(layout) = &info.data_layout {
-        println!("Data layout  : {}", layout);
+        out.push_str(&format!("Data layout  : {}\n", layout));
     }
-    println!("Functions    : {}", info.functions.len());
-    println!("Basic blocks : {}", info.total_basic_blocks);
-    println!("Instructions : {}", info.total_instructions);
+    out.push_str(&format!("Functions    : {}\n", info.functions.len()));
+    out.push_str(&format!("Basic blocks : {}\n", info.total_basic_blocks));
+    out.push_str(&format!("Instructions : {}\n", info.total_instructions));
 
     if show_functions && !info.functions.is_empty() {
-        println!();
-        println!("{}", "=== Functions ===".bold());
+        out.push('\n');
+        out.push_str(&format!("{}\n", "=== Functions ===".bold()));
         for func in &info.functions {
-            println!(
-                "  {} (blocks: {}, instructions: {})",
+            out.push_str(&format!(
+                "  {} (blocks: {}, instructions: {})\n",
                 func.name.green(),
                 func.basic_block_count,
                 func.instruction_count,
-            );
+            ));
         }
     }
+    out
 }
 
 fn run() -> Result<(), Error> {
@@ -67,7 +69,7 @@ fn run() -> Result<(), Error> {
         )?;
         let json = serde_json::to_string_pretty(&selected)
             .map_err(|error| Error::InvalidArguments(error.to_string()))?;
-        println!("{json}");
+        print_stdout(&format!("{json}\n"))?;
         if selected
             .modules
             .iter()
@@ -105,7 +107,7 @@ fn run() -> Result<(), Error> {
     };
 
     let info = analyze_bitcode(&bc_path)?;
-    print_info(&info, args.functions);
+    print_stdout(&format_info(&info, args.functions))?;
 
     Ok(())
 }

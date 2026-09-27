@@ -35,6 +35,13 @@ mod response_file;
 pub use response_file::execute_llvm_tool_in_for_output;
 pub(crate) use response_file::{execute_llvm_tool, expand_response_files_in};
 
+/// Writing a binary's answer to stdout
+mod stdout;
+/// Binary-side plumbing shared by `rllvm-info` and `rllvm-query`, not a
+/// supported interface.
+#[doc(hidden)]
+pub use stdout::print_stdout;
+
 /// Filepath-related utility functions
 mod path_utils;
 pub use path_utils::calculate_filepath_hash;

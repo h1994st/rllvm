@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser};
-use rllvm_core::{config::try_rllvm_config, error::Error};
+use rllvm_core::{config::try_rllvm_config, error::Error, utils::print_stdout};
 use rllvm_query::{
     Color, Query, TextMode,
     cli::{ClosureDirection, QueryArgs, QueryCommand},
@@ -110,14 +110,14 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     if args.json {
         let json = serde_json::to_string_pretty(&result)
             .map_err(|error| Error::InvalidArguments(error.to_string()))?;
-        println!("{json}");
+        print_stdout(&format!("{json}\n"))?;
     } else {
         let mode = if args.full {
             TextMode::Full
         } else {
             TextMode::Adaptive
         };
-        print!("{}", rllvm_query::render(&result, mode, stdout_color()));
+        print_stdout(&rllvm_query::render(&result, mode, stdout_color()))?;
     }
     Ok(())
 }
@@ -163,8 +163,7 @@ fn main() -> ExitCode {
         // falling into `run_query`, or `--llvm-version --catalog c mcp`
         // would print a bare version line onto stdout ahead of the
         // JSON-RPC frames, corrupting the protocol stream.
-        println!("{}", llvm_version());
-        return ExitCode::SUCCESS;
+        return rllvm_core::error::report(print_stdout(&format!("{}\n", llvm_version())));
     }
     // Also before any configuration is read: generating a completion script
     // is a property of the CLI definition alone, and must not fail on a

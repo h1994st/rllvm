@@ -689,6 +689,30 @@ fn the_heuristics_flag_may_follow_its_subcommand() {
     );
 }
 
+#[test]
+fn a_reader_that_closes_stdout_early_is_not_an_error() {
+    // `rllvm-query ... | head` closes the pipe before the answer is written.
+    // The reader dropped here before the spawn makes that deterministic.
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    for format in [None, Some("--json")] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(format)
+            .args(["callers", "add"])
+            .stdout(writer)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{format:?}; stderr: {stderr}");
+        assert!(stderr.is_empty(), "{format:?}; stderr: {stderr}");
+    }
+}
+
 /// Runs `rllvm-query --catalog <catalog> --json <args...>` and parses its
 /// stdout. `--json` is explicit here, not the default: text is.
 fn query_json(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> serde_json::Value {
