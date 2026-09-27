@@ -300,7 +300,11 @@ fn shown_in(results: &QueryResults) -> Shown {
         }
         QueryResults::Callees(sites) => shown_in_sites(sites, &mut shown),
         QueryResults::Uses(uses) => {
-            shown.missing_location = uses.iter().any(|use_fact| use_fact.location.is_none());
+            // Only a use inside a function lacks a location for want of debug
+            // info; a global's initializer has none to lack.
+            shown.missing_location = uses
+                .iter()
+                .any(|use_fact| use_fact.in_function.is_some() && use_fact.location.is_none());
         }
         QueryResults::Reach(path) => {
             // A path prints no locations, and its only indirect step is the
@@ -830,7 +834,7 @@ mod tests {
     use super::*;
     use crate::{
         Query,
-        facts::{FunctionFact, Language, Linkage, ModuleAnalysis, ModuleReport},
+        facts::{FunctionFact, Language, Linkage, ModuleAnalysis, ModuleReport, UseFact, UseKind},
         index::{Direction, Session},
         run,
         testing::*,
@@ -1214,6 +1218,34 @@ mod tests {
         let loud = defs_of("unlocated");
         assert!(loud.contains(NO_LOCATION), "got: {loud:?}");
         assert!(loud.contains("without a source location"), "got: {loud:?}");
+    }
+
+    #[test]
+    fn a_use_in_a_global_initializer_does_not_blame_functions_for_its_location() {
+        let run_fn = function("m", "run", true, Linkage::Internal);
+        let mut base = facts(vec![run_fn.clone()], vec![]);
+        base.uses = vec![UseFact {
+            used: run_fn.id,
+            in_function: None,
+            in_global: Some("table".into()),
+            location: None,
+            kind: UseKind::GlobalInitializer,
+        }];
+        let session = Session::new(base, Vec::new());
+        let result = run(&session, &Query::Uses { name: "run".into() }).unwrap();
+        assert!(result.uncertainty.functions_without_location > 0, "fixture");
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("in table"), "got: {text:?}");
+        assert!(
+            !text.contains("without a source location"),
+            "a global's use has no function to lack a location: {text:?}"
+        );
+
+        // A use inside a function without debug info still carries the note.
+        let session = session_with_address_taken_function();
+        let result = run(&session, &Query::Uses { name: "add".into() }).unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("without a source location"), "got: {text:?}");
     }
 
     #[test]
