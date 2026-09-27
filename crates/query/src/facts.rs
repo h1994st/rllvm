@@ -161,6 +161,9 @@ pub enum UseKind {
 pub struct UseFact {
     pub used: FunctionId,
     pub in_function: Option<FunctionId>,
+    /// The global whose initializer holds the address, directly or inside an
+    /// aggregate such as a dispatch table.
+    pub in_global: Option<String>,
     pub location: Option<SourceLocation>,
     pub kind: UseKind,
 }

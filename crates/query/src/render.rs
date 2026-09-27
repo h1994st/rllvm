@@ -722,14 +722,15 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
         QueryResults::Callees(sites) => call_sites(symbols, sites, NO_INDENT, ctx, out),
         QueryResults::Uses(uses) => {
             for use_fact in uses {
-                let in_function = match &use_fact.in_function {
-                    Some(id) => name(symbols, &id.symbol, ctx),
-                    None => paint("<no function>", ctx.color, Paint::Muted),
+                let holder = match (&use_fact.in_function, &use_fact.in_global) {
+                    (Some(id), _) => name(symbols, &id.symbol, ctx),
+                    (None, Some(global)) => name(symbols, global, ctx),
+                    (None, None) => paint("<no function>", ctx.color, Paint::Muted),
                 };
                 out.push_str(&format!(
                     "{}  in {}  at {}\n",
                     paint(&serde_name(&use_fact.kind), ctx.color, Paint::Uncertain),
-                    in_function,
+                    holder,
                     location(use_fact.location.as_ref(), ctx)
                 ));
             }
