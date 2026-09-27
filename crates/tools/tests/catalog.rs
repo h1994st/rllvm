@@ -436,3 +436,24 @@ fn an_unresolvable_relative_source_gets_no_inventory_digest() {
         }
     }
 }
+
+#[test]
+fn a_reader_that_closes_stdout_early_is_not_an_error() {
+    // `rllvm-info x | head` closes the pipe before the answer is written.
+    // The reader dropped here before the spawn makes that deterministic.
+    let f = Fixture::new();
+    let module = f.module("first", "first.c", "int first(void){return 1;}");
+    for json in [false, true] {
+        let (reader, writer) = std::io::pipe().unwrap();
+        drop(reader);
+        let mut command = f.command("info");
+        command.arg(&module);
+        if json {
+            command.arg("--json");
+        }
+        let output = command.stdout(writer).output().unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "json: {json}; stderr: {stderr}");
+        assert!(stderr.is_empty(), "json: {json}; stderr: {stderr}");
+    }
+}
