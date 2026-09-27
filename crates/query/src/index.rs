@@ -810,7 +810,7 @@ mod tests {
     fn uses_reports_the_heuristic_inventory_verbatim() {
         let session = session_with_address_taken_function();
         let uses = session.uses();
-        assert_eq!(uses.len(), 1);
-        assert_eq!(uses[0].used.symbol, "add");
+        let used: Vec<&str> = uses.iter().map(|u| u.used.symbol.as_str()).collect();
+        assert_eq!(used, ["add", "log"]);
     }
 }

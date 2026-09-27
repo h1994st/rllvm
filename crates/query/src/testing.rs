@@ -222,12 +222,18 @@ pub(crate) fn session_with_indirect_gap() -> Session {
     Session::new(facts(vec![a, b, c], vec![call, indirect]), Vec::new())
 }
 
-/// One indirect site at `t.c:4`, and an `add` whose address is taken.
+/// One `i32 (i32, i32)` indirect site at `t.c:4`, an `add` of that signature
+/// whose address is taken, and a `log` whose address is taken but whose
+/// signature does not match.
 pub(crate) fn session_with_address_taken_function() -> Session {
     let add = function("m", "add", true, Linkage::Internal);
+    let log = FunctionFact {
+        signature: "void (ptr)".into(),
+        ..function("m", "log", true, Linkage::Internal)
+    };
     let caller = function("m", "caller", true, Linkage::Internal);
     let mut base = facts(
-        vec![add.clone(), caller.clone()],
+        vec![add.clone(), log.clone(), caller.clone()],
         vec![indirect_call(
             &caller,
             0,
@@ -243,12 +249,15 @@ pub(crate) fn session_with_address_taken_function() -> Session {
             None,
         )],
     );
-    base.uses = vec![UseFact {
-        used: add.id,
-        in_function: Some(caller.id),
-        location: None,
-        kind: UseKind::StoredToMemory,
-    }];
+    base.uses = [add.id, log.id]
+        .into_iter()
+        .map(|used| UseFact {
+            used,
+            in_function: Some(caller.id.clone()),
+            location: None,
+            kind: UseKind::StoredToMemory,
+        })
+        .collect();
     Session::new(base, Vec::new())
 }
 
