@@ -48,10 +48,16 @@ expect "no caller of cmd_kill_server_exec" '^note: no call to the target' \
     callers cmd_kill_server_exec
 expect "an unresolved call in cmdq_next" 'cmd-queue.c:625 +indirect .*unresolved' \
     at cmd-queue.c 625
+expect "the command tables holding cmd_kill_server_exec" \
+    '^global_initializer +in cmd_kill_server_entry' uses cmd_kill_server_exec
+expect "signature-matched candidates at cmdq_next" \
+    'address-taken candidates: 93 of 668 ' indirect-targets cmd-queue.c:625 --heuristics
 expect "no path to input_csi_dispatch" '^note: no path over resolved edges' \
     reach input_parse_buffer input_csi_dispatch
 expect "an unresolved call in input_parse" 'input.c:1013 +indirect .*unresolved' \
     at input.c 1013
+expect "the state tables holding input_csi_dispatch" \
+    '^global_initializer +in input_state_csi_enter_table' uses input_csi_dispatch
 
 modules=$(find cat -name '*.bc' | wc -l | tr -d ' ')
 echo "tmux.bc: $modules modules, $functions functions"
