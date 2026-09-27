@@ -801,11 +801,19 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                     )),
                     (None, false) => {}
                 }
-                if let Some(inventory) = &entry.address_taken_inventory {
+                // The candidates are the signature-compatible subset; the
+                // unfiltered inventory is only its denominator.
+                if let (Some(inventory), Some(compatible)) =
+                    (&entry.address_taken_inventory, &entry.signature_compatible)
+                {
                     out.push_str(&format!(
                         "    {}\n",
                         paint(
-                            &format!("address-taken candidates: {}", inventory.len()),
+                            &format!(
+                                "address-taken candidates: {} of {} address-taken function(s) match the signature",
+                                compatible.len(),
+                                inventory.len()
+                            ),
                             ctx.color,
                             Paint::Uncertain
                         )
@@ -1097,6 +1105,27 @@ mod tests {
         // Nothing was bounded here, so there is no bound to qualify.
         assert!(
             !text.contains("only within the captured scope"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn heuristic_candidates_count_only_signature_matches() {
+        // `add` and `log` both have their address taken; only `add` matches
+        // the site's signature. The note calls the candidates
+        // signature-matched, so the count must be too.
+        let session = session_with_address_taken_function();
+        let result = run(
+            &session,
+            &Query::IndirectTargets {
+                at: "t.c:4".into(),
+                heuristics: true,
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(
+            text.contains("address-taken candidates: 1 of 2 address-taken function(s) match"),
             "got: {text}"
         );
     }
