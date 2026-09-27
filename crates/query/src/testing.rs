@@ -254,6 +254,7 @@ pub(crate) fn session_with_address_taken_function() -> Session {
         .map(|used| UseFact {
             used,
             in_function: Some(caller.id.clone()),
+            in_global: None,
             location: None,
             kind: UseKind::StoredToMemory,
         })

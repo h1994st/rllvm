@@ -3,7 +3,7 @@
 //! data.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, VecDeque},
     ffi::{CStr, c_char, c_int, c_void},
     path::PathBuf,
 };
@@ -697,9 +697,42 @@ unsafe fn enclosing_function(instruction: LLVMValueRef, module_id: &str) -> Opti
     })
 }
 
+/// The constants an address can sit inside on its way to the value that
+/// holds it: an expression over it, or an aggregate such as a table entry.
+const WRAPPING_CONSTANTS: [unsafe extern "C" fn(LLVMValueRef) -> LLVMValueRef; 4] = [
+    LLVMIsAConstantExpr,
+    LLVMIsAConstantStruct,
+    LLVMIsAConstantArray,
+    LLVMIsAConstantVector,
+];
+
+/// Each use of `value` as a `(value, user)` pair, in use-list order.
+///
+/// # Safety
+/// `value` must be a live value in a live module.
+unsafe fn users_of(value: LLVMValueRef) -> Vec<(LLVMValueRef, LLVMValueRef)> {
+    let mut users = Vec::new();
+    // SAFETY: the caller guarantees a live value.
+    let mut current = unsafe { LLVMGetFirstUse(value) };
+    while !current.is_null() {
+        // SAFETY: `current` is a live use of that value.
+        let user = unsafe { LLVMGetUser(current) };
+        // SAFETY: as above.
+        current = unsafe { LLVMGetNextUse(current) };
+        if !user.is_null() {
+            users.push((value, user));
+        }
+    }
+    users
+}
+
 /// Records every use of `function` that is not a call with it in callee
 /// position: those are already call sites, and counting them twice would
 /// report an ordinary call as a taken address.
+///
+/// A use inside a wrapping constant is followed to whatever uses that
+/// constant, so an address in a dispatch table is attributed to the global
+/// holding the table rather than to an anonymous constant.
 ///
 /// # Safety
 /// `function` must be a live function in a live module.
@@ -711,17 +744,8 @@ unsafe fn collect_uses(
     uses: &mut Vec<UseFact>,
 ) {
     // SAFETY: the caller guarantees a live function.
-    let mut current = unsafe { LLVMGetFirstUse(function) };
-    while !current.is_null() {
-        // SAFETY: `current` is a live use of that function.
-        let user = unsafe { LLVMGetUser(current) };
-        // SAFETY: as above; advancing here keeps the loop total even when the
-        // body skips this use.
-        current = unsafe { LLVMGetNextUse(current) };
-        if user.is_null() {
-            continue;
-        }
-
+    let mut pending: VecDeque<_> = unsafe { users_of(function) }.into();
+    while let Some((used, user)) = pending.pop_front() {
         // SAFETY: `user` is a live value; `LLVMIsAInstruction` is the guard
         // that makes the instruction-only accessors below legal.
         let is_instruction = !unsafe { LLVMIsAInstruction(user) }.is_null();
@@ -731,7 +755,20 @@ unsafe fn collect_uses(
         let is_call = matches!(opcode, Some(LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke));
         // SAFETY: reached only for a call or invoke, as this accessor
         // requires.
-        if is_call && unsafe { LLVMGetCalledValue(user) } == function {
+        if is_call && unsafe { LLVMGetCalledValue(user) } == used {
+            continue;
+        }
+
+        // SAFETY: `user` is a live value, which these accessors accept.
+        let is_global = !unsafe { LLVMIsAGlobalVariable(user) }.is_null();
+        let wraps = !is_instruction
+            && !is_global
+            && WRAPPING_CONSTANTS
+                .iter()
+                .any(|is_a| !unsafe { is_a(user) }.is_null());
+        if wraps {
+            // SAFETY: `user` is a live constant.
+            pending.extend(unsafe { users_of(user) });
             continue;
         }
 
@@ -740,8 +777,7 @@ unsafe fn collect_uses(
             Some(LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke) => UseKind::PassedAsArgument,
             Some(LLVMOpcode::LLVMRet) => UseKind::ReturnedValue,
             Some(_) => UseKind::Other,
-            // SAFETY: `user` is a live value, which this accessor accepts.
-            None if !unsafe { LLVMIsAGlobalVariable(user) }.is_null() => UseKind::GlobalInitializer,
+            None if is_global => UseKind::GlobalInitializer,
             None => UseKind::Other,
         };
 
@@ -751,6 +787,8 @@ unsafe fn collect_uses(
             in_function: is_instruction
                 .then(|| unsafe { enclosing_function(user, module_id) })
                 .flatten(),
+            // SAFETY: reached only for a live global variable.
+            in_global: is_global.then(|| unsafe { value_name(user) }),
             location: is_instruction
                 .then(|| unsafe { location_of(user, module_id, source_status) })
                 .flatten(),

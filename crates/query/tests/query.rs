@@ -713,6 +713,45 @@ fn a_reader_that_closes_stdout_early_is_not_an_error() {
     }
 }
 
+#[test]
+fn a_use_in_a_global_initializer_names_the_global() {
+    // A dispatch table stores the address inside an aggregate constant, so
+    // the function's user is the constant, not the global that holds it.
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(
+        &scratch,
+        "table",
+        &[(
+            "table.c",
+            "struct command { int (*exec)(void); };\n\
+             static int run(void) { return 0; }\n\
+             struct command table[] = { { run } };\n\
+             int (*direct)(void) = run;\n",
+        )],
+    );
+    let value = query_json(&scratch, &catalog, &["uses", "run"]);
+    let mut uses: Vec<(String, String)> = value["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|use_fact| {
+            (
+                use_fact["kind"].as_str().unwrap().to_string(),
+                use_fact["in_global"].as_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    uses.sort();
+    assert_eq!(
+        uses,
+        [
+            ("global_initializer".to_string(), "direct".to_string()),
+            ("global_initializer".to_string(), "table".to_string()),
+        ],
+        "{value}"
+    );
+}
+
 /// Runs `rllvm-query --catalog <catalog> --json <args...>` and parses its
 /// stdout. `--json` is explicit here, not the default: text is.
 fn query_json(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> serde_json::Value {
