@@ -15,11 +15,15 @@ use clap::{Parser, ValueEnum};
 /// Arguments for `rllvm-query`.
 ///
 /// The subcommand is optional so `rllvm-query --llvm-version` keeps working
-/// with no query requested.
+/// with no query requested, and so `--catalog` alone can answer the queries
+/// piped on stdin.
 #[derive(Debug, Parser)]
 #[command(
     name = "rllvm-query",
     about = "Query captured bitcode at source level",
+    after_help = "With --catalog and no query, reads one query per line from stdin, \
+                  written as on the command line, and answers them all from one load \
+                  of the catalog.",
     version
 )]
 pub struct QueryArgs {

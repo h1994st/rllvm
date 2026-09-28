@@ -14,6 +14,13 @@ Without the MCP server, the same queries run as
 prints the envelope described below, and `--full` adds scope, analysis and
 uncertainty to the text.
 
+Each invocation reloads the whole catalog, which on a large program takes
+seconds. For many queries, pipe them on stdin to `rllvm-query --catalog
+catalog.json` with no query argument, one per line as written on the command
+line: the catalog loads once, each text answer follows a `== <query>` line,
+and `--json` prints one envelope per line. Every line is checked before the
+catalog is read.
+
 ## Choosing the query
 
 | Question | Tool |

@@ -362,6 +362,17 @@ Answers print as text. Add `--json` for the full machine-readable envelope, or
 `--full` to print the scope, analysis, uncertainty and provenance blocks as
 text too. The MCP server always speaks JSON.
 
+Each invocation loads the whole catalog. To ask many questions, pipe them in,
+one per line, and the catalog loads once:
+
+```bash
+printf '%s\n' 'callees main' 'callers parse_frame' \
+  | rllvm-query --catalog catalog.json
+```
+
+Each answer follows a `== <query>` line; with `--json`, each is one line of
+JSON. Every line is checked before the catalog is read.
+
 Every answer carries the results plus what it could *not* see: which modules
 failed to parse, which call sites are indirect, which symbols bind
 ambiguously, and whether each location's source has changed since it was
