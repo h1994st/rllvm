@@ -2,5 +2,13 @@
   "attribution": {
     "commit": "",
     "pr": ""
+  },
+  "permissions": {
+    "deny": [
+      "Read(./.env)",
+      "Read(./.mcp.json)",
+      "Bash(cat ./.env)",
+      "Bash(cat ./.mcp.json)"
+    ]
   }
 }
