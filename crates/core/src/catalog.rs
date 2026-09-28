@@ -2,7 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    fs::File,
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -300,8 +300,8 @@ impl ModuleCatalog {
 
 /// Read and validate a catalog; resolving its relative paths is a separate operation.
 pub fn read_catalog(path: &Path) -> Result<ModuleCatalog, Error> {
-    let file = File::open(path).map_err(|error| Error::file(path, error))?;
-    let catalog: ModuleCatalog = serde_json::from_reader(file).map_err(|error| {
+    let bytes = fs::read(path).map_err(|error| Error::file(path, error))?;
+    let catalog: ModuleCatalog = serde_json::from_slice(&bytes).map_err(|error| {
         Error::InvalidArguments(format!(
             "invalid catalog JSON in {}: {error}",
             path.display()
