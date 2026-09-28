@@ -107,31 +107,41 @@ impl ResponseExpansion {
         }
         self.active.push(path);
         let contents = contents.strip_prefix('\u{feff}').unwrap_or(&contents);
-        // GNU response syntax is not shell syntax: backslashes escape the
-        // next character even in single quotes, no substitutions run, and
-        // an unfinished quote extends to EOF. Clang discards empty tokens.
-        let mut chars = contents.chars();
-        let mut quote = None;
-        let mut token = String::new();
-        while let Some(ch) = chars.next() {
-            match ch {
-                '\\' => token.push(chars.next().unwrap_or('\\')),
-                '\'' | '"' if quote.is_none() => quote = Some(ch),
-                ch if quote == Some(ch) => quote = None,
-                ' ' | '\t' | '\r' | '\n' if quote.is_none() => {
-                    if !token.is_empty() {
-                        self.append(std::mem::take(&mut token))?;
-                    }
-                }
-                _ => token.push(ch),
-            }
-        }
-        if !token.is_empty() {
+        for token in split_response_arguments(contents) {
             self.append(token)?;
         }
         self.active.pop();
         Ok(())
     }
+}
+
+/// Split text into arguments the way Clang reads a GNU response file.
+///
+/// GNU response syntax is not shell syntax: backslashes escape the next
+/// character even in single quotes, no substitutions run, and an unfinished
+/// quote extends to the end of the text. Clang discards empty tokens.
+pub fn split_response_arguments(text: &str) -> Vec<String> {
+    let mut arguments = Vec::new();
+    let mut chars = text.chars();
+    let mut quote = None;
+    let mut token = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => token.push(chars.next().unwrap_or('\\')),
+            '\'' | '"' if quote.is_none() => quote = Some(ch),
+            ch if quote == Some(ch) => quote = None,
+            ' ' | '\t' | '\r' | '\n' if quote.is_none() => {
+                if !token.is_empty() {
+                    arguments.push(std::mem::take(&mut token));
+                }
+            }
+            _ => token.push(ch),
+        }
+    }
+    if !token.is_empty() {
+        arguments.push(token);
+    }
+    arguments
 }
 
 /// Characters that LLVM's GNU-style tokenizer reads as separators or quoting,
@@ -261,6 +271,18 @@ mod tests {
         fs::write(nested.join("outer.rsp"), "@inner.rsp -c 'file name.c'").unwrap();
         let args = expand_response_files_in(&["@nested/outer.rsp".into()], scratch.path()).unwrap();
         assert_eq!(args, ["-DVALUE=17", "-c", "file name.c"]);
+    }
+
+    #[test]
+    fn splitting_follows_gnu_quoting_not_shell_quoting() {
+        assert_eq!(
+            split_response_arguments("defs 'int twice<int>(int)'  \"a b\"\tc\\ d"),
+            ["defs", "int twice<int>(int)", "a b", "c d"]
+        );
+        // A backslash escapes even inside single quotes, and empty tokens
+        // are discarded, as Clang does.
+        assert_eq!(split_response_arguments(r"'it\'s' '' x"), ["it's", "x"]);
+        assert!(split_response_arguments(" \t\r\n").is_empty());
     }
 
     #[test]

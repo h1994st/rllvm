@@ -713,6 +713,114 @@ fn a_reader_that_closes_stdout_early_is_not_an_error() {
     }
 }
 
+/// Runs `rllvm-query --catalog <catalog> <flags>` with `input` on stdin.
+fn query_stdin(
+    scratch: &tempfile::TempDir,
+    catalog: &Path,
+    flags: &[&str],
+    input: &str,
+) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(catalog)
+        .args(flags)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn query_text(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(catalog)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "rllvm-query {args:?} failed");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn queries_piped_on_stdin_answer_as_their_separate_invocations_would() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let output = query_stdin(&scratch, &catalog, &[], "callers add\n\ncallees main\n");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let expected = format!(
+        "== callers add\n{}== callees main\n{}",
+        query_text(&scratch, &catalog, &["callers", "add"]),
+        query_text(&scratch, &catalog, &["callees", "main"]),
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+}
+
+#[test]
+fn queries_piped_on_stdin_print_one_json_envelope_per_line() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let output = query_stdin(
+        &scratch,
+        &catalog,
+        &["--json"],
+        "callers add\ncallees main\n",
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let answers: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        answers,
+        [
+            query_json(&scratch, &catalog, &["callers", "add"]),
+            query_json(&scratch, &catalog, &["callees", "main"]),
+        ]
+    );
+}
+
+#[test]
+fn a_bad_stdin_line_fails_before_the_catalog_is_read() {
+    // The catalog does not exist: an error naming the line, not the missing
+    // file, proves every line was checked before anything was opened.
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = scratch.path().join("absent.json");
+    let output = query_stdin(
+        &scratch,
+        &catalog,
+        &[],
+        "callers add\nindirect-targets main.c\n",
+    );
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "no answer may reach stdout");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("line 2:"), "stderr: {stderr}");
+}
+
+#[test]
+fn empty_stdin_answers_nothing() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let output = query_stdin(&scratch, &catalog, &[], "");
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+}
+
 #[test]
 fn a_use_in_a_global_initializer_names_the_global() {
     // A dispatch table stores the address inside an aggregate constant, so

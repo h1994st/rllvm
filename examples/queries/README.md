@@ -32,6 +32,14 @@ rllvm-query --catalog build/catalog.json callees main
 The other seven are `at`, `uses`, `reach`, `closure`, `externals`,
 `ffi-exports` and `indirect-targets`.
 
+Each of those loads the catalog again. Piped in, one per line, several queries
+share one load, and each answer follows a `== <query>` line:
+
+```bash
+printf '%s\n' 'defs helper' 'callers helper' \
+  | rllvm-query --catalog build/catalog.json
+```
+
 ## Reading an answer
 
 Every answer carries the results **and** what it could not see: which modules

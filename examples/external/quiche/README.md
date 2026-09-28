@@ -161,20 +161,19 @@ so the surface can be swept.
 
 ```bash
 rllvm-query --catalog cat/catalog.json ffi-exports \
-  | awk 'NF && $1 != "note:" { print $NF }' > surface.txt   # 169 names
-
-for fn in $(cat surface.txt); do
-  out=$(rllvm-query --catalog cat/catalog.json callees "$fn")
-  if grep -q drop_glue <<<"$out" &&
-     grep -Eq '::(as_ref|as_ptr|as_slice)$' <<<"$out"; then
-    echo "$fn"
-  fi
-done
+  | awk 'NF && $1 != "note:" { print "callees " $NF }' \
+  | rllvm-query --catalog cat/catalog.json \
+  | awk '/^== / { fn = $3 }
+         /drop_glue/ { dropped[fn] = 1 }
+         /::(as_ref|as_ptr|as_slice)$/ { borrowed[fn] = 1 }
+         END { for (fn in dropped) if (fn in borrowed) print fn }'
 ```
 
-Keeping the entry points whose callees hold both `drop_glue::<T>` and something
-taking a pointer into `T` leaves 7 of 169, including both functions the
-advisory names.
+The second `rllvm-query` reads one `callees` query per line and answers all
+169 from one load of the catalog, each after a `== callees <name>` line: a few
+seconds, where 169 separate invocations take minutes. Keeping the entry points
+whose callees hold both `drop_glue::<T>` and something taking a pointer into
+`T` leaves 7 of 169, including both functions the advisory names.
 
 `ffi-exports` lists the definitions quiche's Rust modules export under an
 unmangled name, which is what `#[no_mangle]` produces: no `nm`, no `quiche_`

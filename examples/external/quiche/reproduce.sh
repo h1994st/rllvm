@@ -2,8 +2,7 @@
 # Reproduces README.md on a macOS host: the capture table at the pinned commit,
 # the queries into BoringSSL, and the CVE-2026-11941 triage on 0.29.1 and
 # 0.29.2, including the FFI surface scan. Work happens in $WORK, a fresh
-# temporary directory by default. Takes a while: four cargo builds and one
-# query per C entry point.
+# temporary directory by default. Takes a while: four cargo builds.
 #
 #   examples/external/quiche/reproduce.sh
 set -euo pipefail
@@ -75,17 +74,13 @@ query callers quiche_connection_id_iter_next | grep -q 'cid_logger.c:20' || fail
 query callees quiche_connection_id_iter_next | grep -q drop_glue || fail "0.29.1 lost its drop_glue"
 query callees quiche_connection_id_iter_next
 
-rllvm-query --catalog cat/catalog.json ffi-exports |
-    awk 'NF && $1 != "note:" { print $NF }' >surface.txt
-candidates=()
-while read -r fn; do
-    out=$(query callees "$fn")
-    if grep -q drop_glue <<<"$out" &&
-        grep -Eq '::(as_ref|as_ptr|as_slice)$' <<<"$out"; then
-        candidates+=("$fn")
-    fi
-done <surface.txt
-echo "scan: ${#candidates[@]} of $(wc -l <surface.txt | tr -d ' ') entry points: ${candidates[*]}"
+query ffi-exports | awk 'NF && $1 != "note:" { print "callees " $NF }' >surface.txt
+candidates=$(query <surface.txt |
+    awk '/^== / { fn = $3 }
+         /drop_glue/ { dropped[fn] = 1 }
+         /::(as_ref|as_ptr|as_slice)$/ { borrowed[fn] = 1 }
+         END { for (fn in dropped) if (fn in borrowed) print fn }' | sort)
+echo "scan: $(wc -l <<<"$candidates" | tr -d ' ') of $(wc -l <surface.txt | tr -d ' ') entry points:" $candidates
 
 triage 0.29.2 cat-fixed
 if rllvm-query --catalog cat-fixed/catalog.json callees quiche_connection_id_iter_next |

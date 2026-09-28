@@ -54,4 +54,12 @@ case $text in
 '{'*) fail "default output looks like JSON, expected text: $text" ;;
 esac
 
-echo "ok: defs, callers and callees agree, over 2 analyzed modules, default output is text"
+# Piped queries share one load and answer as their separate invocations do.
+piped=$(printf '%s\n' 'defs helper' 'callers helper' |
+    rllvm-query --catalog "$OUT/catalog.json")
+separate=$(printf '== defs helper\n%s\n== callers helper\n%s' \
+    "$text" "$(rllvm-query --catalog "$OUT/catalog.json" callers helper)")
+[ "$piped" = "$separate" ] ||
+    fail "piped answers differ from separate ones: $piped"
+
+echo "ok: defs, callers and callees agree, over 2 analyzed modules, default output is text, piped queries match"

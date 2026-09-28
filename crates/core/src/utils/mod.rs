@@ -33,6 +33,11 @@ mod response_file;
 /// Wrapper-side plumbing, not a supported interface.
 #[doc(hidden)]
 pub use response_file::execute_llvm_tool_in_for_output;
+/// Splits one line of text into arguments with Clang's GNU response-file
+/// quoting. `rllvm-query` reads the queries on its stdin with it, not a
+/// supported interface.
+#[doc(hidden)]
+pub use response_file::split_response_arguments;
 pub(crate) use response_file::{execute_llvm_tool, expand_response_files_in};
 
 /// Writing a binary's answer to stdout
