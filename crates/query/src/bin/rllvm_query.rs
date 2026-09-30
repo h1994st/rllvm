@@ -120,11 +120,18 @@ fn run_cache(action: Option<&CacheAction>, format: Format) -> Result<(), Error> 
                     serde_json::to_string(&cleared)
                         .map_err(|error| Error::InvalidArguments(error.to_string()))?
                 )),
-                Format::Text(_) => print_stdout(&format!(
-                    "removed {} entries, {}\n",
-                    cleared.entries,
-                    rllvm_query::render::human_bytes(cleared.bytes)
-                )),
+                Format::Text(_) => {
+                    let orphans = if cleared.orphans > 0 {
+                        format!(" and {} orphaned temp file(s)", cleared.orphans)
+                    } else {
+                        String::new()
+                    };
+                    print_stdout(&format!(
+                        "removed {} entries{orphans}, {}\n",
+                        cleared.entries,
+                        rllvm_query::render::human_bytes(cleared.bytes)
+                    ))
+                }
             }
         }
         None => {

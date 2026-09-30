@@ -13,6 +13,7 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,15 @@ const ENTRY_EXTENSION: &str = "mpz";
 
 /// zstd level: measured on quiche at ~29x smaller than JSON, +11 ms per load.
 const ZSTD_LEVEL: i32 = 3;
+
+/// How old an abandoned `.tmp*` write must be before `clear` removes it: long
+/// enough that it cannot belong to a write still in progress.
+const ORPHAN_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Prefix `tempfile::NamedTempFile::new_in` gives every temporary file it
+/// creates, so `clear` can recognise one left behind by a process killed
+/// mid-write.
+const TEMP_PREFIX: &str = ".tmp";
 
 /// What an entry claims to be. Checked on read, so a renamed or misplaced
 /// file cannot be served under another key.
@@ -226,9 +236,11 @@ impl FactsCache {
     }
 
     /// Removes entries: every generation's, or only those this binary no
-    /// longer reads. Deletes only `.mpz` files inside `query-facts/`
-    /// generation directories, then each directory left empty; anything
-    /// else there is not the cache's to delete.
+    /// longer reads. Deletes `.mpz` files inside `query-facts/` generation
+    /// directories, plus any `.tmp*` file old enough (`ORPHAN_AGE`) to be an
+    /// abandoned write rather than one still in progress, then each
+    /// directory left empty; anything else there is not the cache's to
+    /// delete.
     pub fn clear(&self, stale_only: bool) -> Cleared {
         let mut cleared = Cleared::default();
         for generation in self.generations() {
@@ -241,13 +253,37 @@ impl FactsCache {
             };
             for file in files.filter_map(Result::ok) {
                 let path = file.path();
-                if path.extension().is_none_or(|ext| ext != ENTRY_EXTENSION) {
+                if path.extension().is_some_and(|ext| ext == ENTRY_EXTENSION) {
+                    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    if fs::remove_file(&path).is_ok() {
+                        cleared.entries += 1;
+                        cleared.bytes += size;
+                    }
                     continue;
                 }
-                let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                if !file.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+                    continue;
+                }
+                // An orphaned write: a process killed between creating its
+                // temp file and renaming it into place. Only removed once
+                // old enough that it cannot belong to a write still in
+                // progress; an unreadable mtime is left alone rather than
+                // guessed at.
+                let Ok(metadata) = file.metadata() else {
+                    continue;
+                };
+                let Ok(modified) = metadata.modified() else {
+                    continue;
+                };
+                let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
+                    continue;
+                };
+                if age <= ORPHAN_AGE {
+                    continue;
+                }
                 if fs::remove_file(&path).is_ok() {
-                    cleared.entries += 1;
-                    cleared.bytes += size;
+                    cleared.orphans += 1;
+                    cleared.bytes += metadata.len();
                 }
             }
             // Fails, harmlessly, when something that is not an entry remains.
@@ -275,6 +311,9 @@ pub struct CacheUsage {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Cleared {
     pub entries: usize,
+    /// Orphaned `.tmp*` writes removed alongside the entries; their sizes
+    /// are folded into `bytes` too.
+    pub orphans: usize,
     pub bytes: u64,
 }
 
@@ -439,5 +478,100 @@ mod tests {
             cache.directory().join("f0-llvm1.0.0/keep.txt").exists(),
             "never ours to delete"
         );
+    }
+
+    /// An hour old plus a margin: comfortably past `ORPHAN_AGE`.
+    fn stale_mtime() -> std::time::SystemTime {
+        std::time::SystemTime::now() - Duration::from_secs(60 * 61)
+    }
+
+    #[test]
+    fn clear_removes_an_orphaned_temp_file_older_than_an_hour() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = FactsCache::new(root.path(), u64::MAX);
+        let generation = cache.directory().join(FactsCache::generation());
+        std::fs::create_dir_all(&generation).unwrap();
+        let orphan = generation.join(".tmpABCDEF");
+        std::fs::write(&orphan, [0u8; 7]).unwrap();
+        std::fs::File::open(&orphan)
+            .unwrap()
+            .set_modified(stale_mtime())
+            .unwrap();
+
+        let cleared = cache.clear(false);
+
+        assert_eq!(cleared.orphans, 1);
+        assert_eq!(cleared.bytes, 7);
+        assert!(!orphan.exists());
+    }
+
+    #[test]
+    fn clear_leaves_a_fresh_temp_file_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = FactsCache::new(root.path(), u64::MAX);
+        let generation = cache.directory().join(FactsCache::generation());
+        std::fs::create_dir_all(&generation).unwrap();
+        let fresh = generation.join(".tmpFRESH01");
+        std::fs::write(&fresh, [0u8; 3]).unwrap();
+
+        let cleared = cache.clear(false);
+
+        assert_eq!(cleared.orphans, 0);
+        assert!(
+            fresh.exists(),
+            "a temp file that might still be written must survive"
+        );
+    }
+
+    #[test]
+    fn clearing_a_generation_with_only_an_old_orphan_removes_the_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = FactsCache::new(root.path(), u64::MAX);
+        let generation = cache.directory().join(FactsCache::generation());
+        std::fs::create_dir_all(&generation).unwrap();
+        let orphan = generation.join(".tmpONLYONE");
+        std::fs::write(&orphan, [0u8; 5]).unwrap();
+        std::fs::File::open(&orphan)
+            .unwrap()
+            .set_modified(stale_mtime())
+            .unwrap();
+
+        cache.clear(false);
+
+        assert!(!generation.exists());
+    }
+
+    #[test]
+    fn stale_clear_only_removes_orphans_in_stale_generations() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = FactsCache::new(root.path(), u64::MAX);
+
+        let current = cache.directory().join(FactsCache::generation());
+        std::fs::create_dir_all(&current).unwrap();
+        let current_orphan = current.join(".tmpCURRENT");
+        std::fs::write(&current_orphan, [0u8; 4]).unwrap();
+        std::fs::File::open(&current_orphan)
+            .unwrap()
+            .set_modified(stale_mtime())
+            .unwrap();
+
+        let stale = cache.directory().join("f0-llvm1.0.0");
+        std::fs::create_dir_all(&stale).unwrap();
+        let stale_orphan = stale.join(".tmpSTALE01");
+        std::fs::write(&stale_orphan, [0u8; 6]).unwrap();
+        std::fs::File::open(&stale_orphan)
+            .unwrap()
+            .set_modified(stale_mtime())
+            .unwrap();
+
+        let cleared = cache.clear(true);
+
+        assert_eq!(cleared.orphans, 1);
+        assert_eq!(cleared.bytes, 6);
+        assert!(
+            current_orphan.exists(),
+            "--stale must not touch the current generation"
+        );
+        assert!(!stale_orphan.exists());
     }
 }
