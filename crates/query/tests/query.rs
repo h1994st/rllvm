@@ -3069,6 +3069,25 @@ fn the_cache_command_reports_and_clears_without_a_catalog() {
     assert_eq!(after["total_bytes"], 0);
 }
 
+/// `rllvm-query cache` only reads: inspecting a cache that has never been
+/// written must not bring its directory into existence.
+#[test]
+fn the_cache_command_does_not_create_the_cache_directory() {
+    let scratch = tempfile::tempdir().unwrap();
+    let cache_dir = scratch.path().join("cache"); // named by scratch_rllvm_config, never created
+
+    let report = query_cache_command(&scratch, &["cache"]);
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    assert!(
+        !cache_dir.exists(),
+        "inspecting the cache must not create its directory"
+    );
+}
+
 #[test]
 fn an_answer_over_the_threshold_says_how_to_prune() {
     let scratch = tempfile::tempdir().unwrap();
