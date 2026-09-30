@@ -376,6 +376,15 @@ JSON. Every line is checked before the catalog is read.
 Each answer's `analysis.cache` (and `--full`) reports hits, misses and disk
 use. `RLLVM_QUERY_CACHE=0` turns it off.
 
+```bash
+rllvm-query cache               # the facts cache's location and disk use
+rllvm-query cache clear         # delete every cached entry
+rllvm-query cache clear --stale # delete only generations this binary no longer reads
+```
+
+An answer whose facts cache is over `query_cache_warn_mb` adds a footer note
+naming `rllvm-query cache clear`.
+
 Every answer carries the results plus what it could *not* see: which modules
 failed to parse, which call sites are indirect, which symbols bind
 ambiguously, and whether each location's source has changed since it was

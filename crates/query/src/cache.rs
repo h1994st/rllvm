@@ -57,15 +57,12 @@ struct Entry {
 }
 
 /// One generation directory's usage.
-// `name`, `entries` and `current` are read by `usage`, which arrives with the
-// `cache` command (Task 7 removes this allow).
-#[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct GenerationUsage {
-    name: String,
-    entries: usize,
-    bytes: u64,
-    current: bool,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GenerationUsage {
+    pub name: String,
+    pub entries: usize,
+    pub bytes: u64,
+    pub current: bool,
 }
 
 /// The facts cache at one location. Cheap to build; touches the disk only
@@ -213,6 +210,101 @@ impl FactsCache {
         generations.sort_by(|a, b| a.name.cmp(&b.name));
         generations
     }
+
+    pub fn usage(&self, enabled: bool) -> CacheUsage {
+        let generations = self.generations();
+        let total_bytes = generations.iter().map(|g| g.bytes).sum();
+        CacheUsage {
+            directory: self.directory.clone(),
+            enabled,
+            current: FactsCache::generation(),
+            generations,
+            total_bytes,
+            warn_bytes: self.warn_bytes,
+            over_threshold: total_bytes > self.warn_bytes,
+        }
+    }
+
+    /// Removes entries: every generation's, or only those this binary no
+    /// longer reads. Deletes only `.mpz` files inside `query-facts/`
+    /// generation directories, then each directory left empty; anything
+    /// else there is not the cache's to delete.
+    pub fn clear(&self, stale_only: bool) -> Cleared {
+        let mut cleared = Cleared::default();
+        for generation in self.generations() {
+            if stale_only && generation.current {
+                continue;
+            }
+            let directory = self.directory.join(&generation.name);
+            let Ok(files) = fs::read_dir(&directory) else {
+                continue;
+            };
+            for file in files.filter_map(Result::ok) {
+                let path = file.path();
+                if path.extension().is_none_or(|ext| ext != ENTRY_EXTENSION) {
+                    continue;
+                }
+                let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                if fs::remove_file(&path).is_ok() {
+                    cleared.entries += 1;
+                    cleared.bytes += size;
+                }
+            }
+            // Fails, harmlessly, when something that is not an entry remains.
+            let _ = fs::remove_dir(&directory);
+        }
+        cleared
+    }
+}
+
+/// What `rllvm-query cache` reports.
+#[derive(Clone, Debug, Serialize)]
+pub struct CacheUsage {
+    pub directory: PathBuf,
+    /// Whether loads use the cache (`query_cache`, `RLLVM_QUERY_CACHE`).
+    pub enabled: bool,
+    /// The generation this binary reads and writes.
+    pub current: String,
+    pub generations: Vec<GenerationUsage>,
+    pub total_bytes: u64,
+    pub warn_bytes: u64,
+    pub over_threshold: bool,
+}
+
+/// What a `clear` removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct Cleared {
+    pub entries: usize,
+    pub bytes: u64,
+}
+
+/// The text form of `rllvm-query cache`.
+pub fn render_usage(usage: &CacheUsage) -> String {
+    let mut out = format!("directory:   {}\n", usage.directory.display());
+    if !usage.enabled {
+        out.push_str("enabled:     no (query_cache = false or RLLVM_QUERY_CACHE=0)\n");
+    }
+    let current = usage.generations.iter().find(|g| g.current);
+    let (entries, bytes) = current.map_or((0, 0), |g| (g.entries, g.bytes));
+    out.push_str(&format!(
+        "current:     {:<16} {entries:>5} entries   {}\n",
+        usage.current,
+        crate::render::human_bytes(bytes)
+    ));
+    for stale in usage.generations.iter().filter(|g| !g.current) {
+        out.push_str(&format!(
+            "stale:       {:<16} {:>5} entries   {}\n",
+            stale.name,
+            stale.entries,
+            crate::render::human_bytes(stale.bytes)
+        ));
+    }
+    out.push_str(&format!(
+        "total:       {} of {} warning threshold\n",
+        crate::render::human_bytes(usage.total_bytes),
+        crate::render::human_bytes(usage.warn_bytes).replace(".0 MB", " MB")
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -299,5 +391,53 @@ mod tests {
         std::fs::write(stale.join(format!("{SHA}.mpz")), [0u8; 10]).unwrap();
         std::fs::write(stale.join("README"), [0u8; 99]).unwrap();
         assert_eq!(cache.disk_bytes(), written + 10);
+    }
+
+    fn with_stale_generation(root: &Path) -> FactsCache {
+        let cache = FactsCache::new(root, 1);
+        cache.write(SHA, &sample()).unwrap();
+        let stale = cache.directory().join("f0-llvm1.0.0");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join(format!("{SHA}.mpz")), [0u8; 10]).unwrap();
+        std::fs::write(stale.join("keep.txt"), b"not ours").unwrap();
+        cache
+    }
+
+    #[test]
+    fn usage_separates_the_current_generation_from_stale_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = with_stale_generation(root.path());
+        let usage = cache.usage(true);
+        assert_eq!(usage.current, FactsCache::generation());
+        assert_eq!(usage.generations.len(), 2);
+        assert_eq!(usage.generations.iter().filter(|g| g.current).count(), 1);
+        assert_eq!(usage.total_bytes, cache.disk_bytes());
+        assert!(usage.over_threshold, "warn_bytes is 1");
+    }
+
+    #[test]
+    fn clearing_stale_generations_keeps_the_current_one_and_foreign_files() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = with_stale_generation(root.path());
+        let cleared = cache.clear(true);
+        assert_eq!((cleared.entries, cleared.bytes), (1, 10));
+        assert!(cache.read(SHA).is_some(), "the current entry survives");
+        assert!(cache.directory().join("f0-llvm1.0.0/keep.txt").exists());
+    }
+
+    #[test]
+    fn clearing_everything_removes_every_entry_and_empty_generation() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = with_stale_generation(root.path());
+        let before = cache.disk_bytes();
+        let cleared = cache.clear(false);
+        assert_eq!(cleared.entries, 2);
+        assert_eq!(cleared.bytes, before);
+        assert_eq!(cache.disk_bytes(), 0);
+        assert!(!cache.directory().join(FactsCache::generation()).exists());
+        assert!(
+            cache.directory().join("f0-llvm1.0.0/keep.txt").exists(),
+            "never ours to delete"
+        );
     }
 }

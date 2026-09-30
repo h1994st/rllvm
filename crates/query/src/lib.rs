@@ -58,7 +58,7 @@ pub mod bind;
 pub use bind::{BindingCandidate, BindingStatus, SymbolBinding};
 
 pub mod cache;
-pub use cache::FactsCache;
+pub use cache::{CacheUsage, Cleared, FactsCache, GenerationUsage, render_usage};
 
 /// How the per-module facts cache served one load. Present on an answer only
 /// when the session was opened with a cache.

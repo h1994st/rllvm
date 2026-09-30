@@ -3029,3 +3029,69 @@ fn full_text_prints_the_cache_line() {
     let text = query_text(&scratch, &catalog, &["--full", "callers", "add"]);
     assert!(text.contains("cache: 0 hit, 2 miss, 2 written, "), "{text}");
 }
+
+fn query_cache_command(scratch: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn the_cache_command_reports_and_clears_without_a_catalog() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    query_json(&scratch, &catalog, &["callers", "add"]);
+
+    let report = query_cache_command(&scratch, &["--json", "cache"]);
+    assert!(
+        report.status.success(),
+        "{}",
+        String::from_utf8_lossy(&report.stderr)
+    );
+    let usage: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+    assert_eq!(usage["generations"][0]["entries"], 2);
+    assert_eq!(usage["over_threshold"], false);
+
+    let text = String::from_utf8(query_cache_command(&scratch, &["cache"]).stdout).unwrap();
+    assert!(
+        text.contains("current:") && text.contains("2 entries"),
+        "{text}"
+    );
+
+    let cleared = query_cache_command(&scratch, &["cache", "clear"]);
+    assert!(cleared.status.success());
+    assert!(String::from_utf8_lossy(&cleared.stdout).contains("removed 2 entries"));
+    let after: serde_json::Value =
+        serde_json::from_slice(&query_cache_command(&scratch, &["--json", "cache"]).stdout)
+            .unwrap();
+    assert_eq!(after["total_bytes"], 0);
+}
+
+#[test]
+fn an_answer_over_the_threshold_says_how_to_prune() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let config = scratch_rllvm_config(scratch.path());
+    let mut contents = std::fs::read_to_string(&config).unwrap();
+    contents.push_str("query_cache_warn_mb = 0\n");
+    std::fs::write(&config, contents).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", &config)
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["callers", "add"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains("over query_cache_warn_mb (0 MB); prune with rllvm-query cache clear"),
+        "{text}"
+    );
+}

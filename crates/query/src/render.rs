@@ -81,7 +81,11 @@ struct Ctx {
 const MIB: u64 = 1024 * 1024;
 
 /// `3774873` → `3.6 MB`.
-pub(crate) fn human_bytes(bytes: u64) -> String {
+///
+/// `pub` so the `rllvm-query` binary can format `cache clear`'s byte count
+/// with it; not part of the crate's documented API.
+#[doc(hidden)]
+pub fn human_bytes(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / MIB as f64)
 }
 
@@ -469,6 +473,16 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
         ));
     }
 
+    // Rule 5: a facts cache past its threshold, the one cache fact a reader
+    // must act on.
+    if let Some(cache) = analysis.cache.as_ref().filter(|cache| cache.over_threshold) {
+        notes.push(format!(
+            "facts cache is {}, over query_cache_warn_mb ({} MB); prune with rllvm-query cache clear",
+            human_bytes(cache.disk_bytes),
+            cache.warn_bytes / MIB
+        ));
+    }
+
     // Rule 4: every non-zero uncertainty count. The two counts that are
     // program-wide rather than per-answer print only when they can bear on
     // this answer: because it shows the thing they count (see [`Shown`]),
@@ -851,7 +865,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
 mod tests {
     use super::*;
     use crate::{
-        Query,
+        CacheReport, Query,
         facts::{FunctionFact, Language, Linkage, ModuleAnalysis, ModuleReport, UseFact, UseKind},
         index::{Direction, Session},
         run,
@@ -1349,9 +1363,18 @@ mod tests {
 
     #[test]
     fn a_clean_answer_prints_no_footer() {
-        // `session_from` leaves every function's `location` unset, which
-        // would itself trip the footer's "functions without a location"
-        // count; a genuinely clean answer needs functions that have one.
+        let text = render(&clean_callers_answer(), TextMode::Adaptive, Color::Never);
+        assert!(
+            !text.contains("note:"),
+            "clean answer gained a footer: {text}"
+        );
+    }
+
+    /// A callers-of-`b` answer with no footer notes: `session_from` leaves
+    /// every function's `location` unset, which would itself trip the
+    /// footer's "functions without a location" count, so this gives each
+    /// function one instead.
+    fn clean_callers_answer() -> QueryResult {
         let caller = FunctionFact {
             location: Some(source_location("a.c", 1)),
             ..function("m", "a", true, Linkage::Internal)
@@ -1362,12 +1385,38 @@ mod tests {
         };
         let site = direct_call(&caller, &callee, 0);
         let session = Session::new(facts(vec![caller, callee], vec![site]), Vec::new());
-        let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
+        run(&session, &Query::Callers { name: "b".into() }).unwrap()
+    }
+
+    #[test]
+    fn a_cache_past_its_threshold_says_how_to_prune() {
+        let mut result = clean_callers_answer();
+        result.analysis.cache = Some(CacheReport {
+            disk_bytes: 2 * MIB,
+            warn_bytes: MIB,
+            over_threshold: true,
+            ..Default::default()
+        });
         let text = render(&result, TextMode::Adaptive, Color::Never);
         assert!(
-            !text.contains("note:"),
-            "clean answer gained a footer: {text}"
+            text.contains(
+                "facts cache is 2.0 MB, over query_cache_warn_mb (1 MB); prune with rllvm-query cache clear"
+            ),
+            "got: {text}"
         );
+    }
+
+    #[test]
+    fn a_cache_under_its_threshold_prints_no_note() {
+        let mut result = clean_callers_answer();
+        result.analysis.cache = Some(CacheReport {
+            disk_bytes: MIB / 2,
+            warn_bytes: MIB,
+            over_threshold: false,
+            ..Default::default()
+        });
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(!text.contains("facts cache"), "got: {text}");
     }
 
     #[test]
