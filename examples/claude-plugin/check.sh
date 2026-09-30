@@ -246,7 +246,7 @@ if command -v jq >/dev/null; then
         '{cache: {hits: 1, misses: 0, written: 0,
           disk_bytes: 1363148800, warn_bytes: 1073741824, over_threshold: true}}')
     said=$(payload s-toplevel "$toplevel" string | "$hook")
-    printf '%s' "$said" | jq -e '.systemMessage | test("over query_cache_warn_mb \\(1024 MB\\)")' \
+    printf '%s' "$said" | jq -e '.systemMessage | test("1.3 GB, over query_cache_warn_mb \\(1024 MB\\)")' \
         >/dev/null || fail "no warning for a top-level cache report: $said"
 
     # A cache report missing disk_bytes/warn_bytes is not actionable: the

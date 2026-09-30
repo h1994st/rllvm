@@ -3069,18 +3069,44 @@ fn the_cache_command_reports_and_clears_without_a_catalog() {
     assert_eq!(after["total_bytes"], 0);
 }
 
+/// An abandoned `.tmp*` write sitting in the current generation is counted
+/// separately from the entries `clear` removes, and named in the text
+/// summary.
+#[test]
+fn clearing_the_cache_counts_orphaned_temp_files_in_its_summary() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    query_json(&scratch, &catalog, &["callers", "add"]);
+
+    let generation = scratch
+        .path()
+        .join("cache/query-facts")
+        .join(rllvm_query::FactsCache::generation());
+    let orphan = generation.join(".tmpORPHAN1");
+    std::fs::write(&orphan, [0u8; 3]).unwrap();
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60 * 61);
+    std::fs::File::open(&orphan)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+
+    let cleared = query_cache_command(&scratch, &["cache", "clear"]);
+    assert!(cleared.status.success());
+    let text = String::from_utf8_lossy(&cleared.stdout);
+    assert!(
+        text.contains("removed 2 entries and 1 orphaned temp file(s)"),
+        "{text}"
+    );
+    assert!(!orphan.exists());
+}
+
 /// `cache` reads no catalog, so `--catalog` alongside it is a mistake, not a
 /// catalog to load -- even one that does not exist.
 #[test]
 fn the_cache_command_rejects_a_catalog() {
     let scratch = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
-        .arg("--catalog")
-        .arg(scratch.path().join("nonexistent.json"))
-        .arg("cache")
-        .output()
-        .unwrap();
+    let catalog = scratch.path().join("nonexistent.json");
+    let output = query_cache_command(&scratch, &["--catalog", catalog.to_str().unwrap(), "cache"]);
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(
