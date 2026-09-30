@@ -24,7 +24,10 @@ catalog is read.
 Loads also reuse each module's extracted facts from a persistent cache keyed
 by its content hash, so a rerun over the same bitcode skips re-extraction.
 `analysis.cache` (and `--full`) reports hits, misses and disk use; a cached
-answer is identical to an uncached one.
+answer is identical to an uncached one. `rllvm-query cache` reports the
+cache's location and per-generation disk use, and `rllvm-query cache clear
+[--stale]` prunes it — `--stale` keeps this binary's own generation and
+removes only ones an older or newer LLVM left behind.
 
 ## Choosing the query
 

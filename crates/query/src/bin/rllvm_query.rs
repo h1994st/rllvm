@@ -12,7 +12,7 @@ use rllvm_core::{
 };
 use rllvm_query::{
     Color, FactsCache, Query, TextMode,
-    cli::{ClosureDirection, QueryArgs, QueryCommand},
+    cli::{CacheAction, ClosureDirection, QueryArgs, QueryCommand},
     index::Direction,
     llvm_version, mcp, open_with_cache, run,
 };
@@ -53,6 +53,7 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
         // `main` answers this one before `run_query` is ever called; the arm
         // is here so adding a mode variant cannot compile without a decision.
         QueryCommand::Completions { .. } => return None,
+        QueryCommand::Cache { .. } => return None,
     })
 }
 
@@ -104,6 +105,40 @@ fn parse_queries(input: &str, heuristics: bool) -> Result<Vec<(String, Query)>, 
 /// The facts cache the configuration asks for, or `None` when disabled.
 fn facts_cache() -> Result<Option<FactsCache>, Error> {
     Ok(FactsCache::from_config(try_rllvm_config()?))
+}
+
+/// `rllvm-query cache [clear [--stale]]`: needs no catalog.
+fn run_cache(action: Option<&CacheAction>, format: Format) -> Result<(), Error> {
+    let config = try_rllvm_config()?;
+    let cache = FactsCache::configured(config)?;
+    match action {
+        Some(CacheAction::Clear { stale }) => {
+            let cleared = cache.clear(*stale);
+            match format {
+                Format::Json => print_stdout(&format!(
+                    "{}\n",
+                    serde_json::to_string(&cleared)
+                        .map_err(|error| Error::InvalidArguments(error.to_string()))?
+                )),
+                Format::Text(_) => print_stdout(&format!(
+                    "removed {} entries, {}\n",
+                    cleared.entries,
+                    rllvm_query::render::human_bytes(cleared.bytes)
+                )),
+            }
+        }
+        None => {
+            let usage = cache.usage(config.query_cache_enabled());
+            match format {
+                Format::Json => print_stdout(&format!(
+                    "{}\n",
+                    serde_json::to_string_pretty(&usage)
+                        .map_err(|error| Error::InvalidArguments(error.to_string()))?
+                )),
+                Format::Text(_) => print_stdout(&rllvm_query::render_usage(&usage)),
+            }
+        }
+    }
 }
 
 /// Answers the queries piped on stdin from one load of `catalog`. Reading
@@ -199,6 +234,7 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         // `completions_name_the_query_binary` fails when it is, because
         // nothing reaches stdout.
         QueryCommand::Completions { .. } => return Ok(()),
+        QueryCommand::Cache { action } => return run_cache(action.as_ref(), format),
         QueryCommand::Defs { .. }
         | QueryCommand::At { .. }
         | QueryCommand::Callers { .. }

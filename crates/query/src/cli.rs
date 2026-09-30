@@ -73,8 +73,9 @@ pub enum ClosureDirection {
 }
 
 /// The ten source-level queries `rllvm-query` answers, plus `Mcp` to serve
-/// them over MCP stdio instead of running one and exiting, and `Completions`
-/// to print a shell completion script -- twelve variants in all.
+/// them over MCP stdio instead of running one and exiting, `Completions` to
+/// print a shell completion script, and `Cache` to inspect or prune the
+/// per-module facts cache -- thirteen variants in all.
 ///
 /// The ten query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
@@ -154,5 +155,21 @@ pub enum QueryCommand {
         /// Shell to generate completions for
         #[arg(value_enum)]
         shell: clap_complete::Shell,
+    },
+    /// Show the per-module facts cache's location and disk use, or prune it.
+    Cache {
+        #[command(subcommand)]
+        action: Option<CacheAction>,
+    },
+}
+
+/// What `rllvm-query cache` does besides reporting.
+#[derive(clap::Subcommand, Debug)]
+pub enum CacheAction {
+    /// Delete cached facts: every generation, or only stale ones
+    Clear {
+        /// Delete only generations this rllvm-query no longer reads
+        #[arg(long)]
+        stale: bool,
     },
 }
