@@ -206,7 +206,7 @@ fn catalog_summary(key: &Path, session: &Session) -> Value {
     json!({
         "catalog": key.display().to_string(),
         "scope": session.scope(),
-        "analysis": analysis_of(session.modules()),
+        "analysis": analysis_of(session.modules(), session.cache_report()),
     })
 }
 

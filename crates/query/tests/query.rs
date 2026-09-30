@@ -2634,3 +2634,267 @@ fn the_facts_format_names_what_extraction_produces() {
         rllvm_query::cache::FACTS_FORMAT + 1,
     );
 }
+
+/// `entry` calls `outer` through an always-inline helper, so the answers
+/// carry an inlined frame; `outer` is defined in the second module.
+const INLINED_AND_OUTER: &[(&str, &str)] = &[
+    (
+        "entry.c",
+        "int outer(int);\n\
+         static inline __attribute__((always_inline)) int add(int a,int b){ return outer(a+b); }\n\
+         int entry(void){ return add(2,3); }\n",
+    ),
+    ("outer.c", "int outer(int x){ return x; }\n"),
+];
+
+fn scratch_cache(scratch: &tempfile::TempDir, warn_bytes: u64) -> rllvm_query::FactsCache {
+    rllvm_query::FactsCache::new(&scratch.path().join("cache"), warn_bytes)
+}
+
+/// The `results` of the queries every cache test compares.
+fn cache_probe_answers(session: &rllvm_query::Session) -> Vec<serde_json::Value> {
+    use rllvm_query::Query;
+    [
+        Query::Defs {
+            name: "outer".into(),
+        },
+        Query::Callers {
+            name: "outer".into(),
+        },
+        Query::Callees {
+            name: "entry".into(),
+        },
+    ]
+    .iter()
+    .map(|query| serde_json::to_value(&rllvm_query::run(session, query).unwrap().results).unwrap())
+    .collect()
+}
+
+#[test]
+fn a_warm_cache_answers_exactly_as_extraction_does() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let cache = scratch_cache(&scratch, u64::MAX);
+
+    let uncached = rllvm_query::open(&catalog).unwrap();
+    let cold = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let warm = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+
+    assert_eq!(uncached.cache_report(), None);
+    let cold_report = cold.cache_report().unwrap();
+    assert_eq!(
+        (cold_report.hits, cold_report.misses, cold_report.written),
+        (0, 2, 2)
+    );
+    let warm_report = warm.cache_report().unwrap();
+    assert_eq!(
+        (warm_report.hits, warm_report.misses, warm_report.written),
+        (2, 0, 0)
+    );
+
+    let expected = cache_probe_answers(&uncached);
+    assert_eq!(cache_probe_answers(&cold), expected);
+    assert_eq!(cache_probe_answers(&warm), expected);
+}
+
+#[test]
+fn an_edited_source_changes_status_on_a_warm_cache_without_a_miss() {
+    let scratch = tempfile::tempdir().unwrap();
+    let fixture = source_and_header(&scratch);
+    let cache = scratch_cache(&scratch, u64::MAX);
+    rllvm_query::open_with_cache(&fixture.catalog, Some(&cache)).unwrap();
+
+    std::fs::write(&fixture.header, "int helper(int x){return x+2;}\n").unwrap();
+    let session = rllvm_query::open_with_cache(&fixture.catalog, Some(&cache)).unwrap();
+
+    let report = session.cache_report().unwrap();
+    assert_eq!((report.hits, report.misses), (1, 0));
+    let answer = serde_json::to_value(
+        rllvm_query::run(
+            &session,
+            &rllvm_query::Query::Defs {
+                name: "helper".into(),
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        answer["results"][0]["location"]["source_status"],
+        "modified"
+    );
+}
+
+#[test]
+fn the_same_bitcode_in_another_catalog_hits_under_its_own_ids() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let cache = scratch_cache(&scratch, u64::MAX);
+    rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+
+    let mut renamed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+    for (index, module) in renamed["modules"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        module["id"] = format!("renamed-{index}").into();
+    }
+    let other = scratch.path().join("renamed-catalog.json");
+    std::fs::write(&other, serde_json::to_vec(&renamed).unwrap()).unwrap();
+
+    let session = rllvm_query::open_with_cache(&other, Some(&cache)).unwrap();
+    assert_eq!(session.cache_report().unwrap().hits, 2);
+    let answer = serde_json::to_value(
+        rllvm_query::run(
+            &session,
+            &rllvm_query::Query::Defs {
+                name: "outer".into(),
+            },
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let module_id = answer["results"][0]["function"]["module_id"]
+        .as_str()
+        .unwrap();
+    assert!(module_id.starts_with("renamed-"), "{module_id}");
+}
+
+#[test]
+fn two_modules_with_identical_bytes_share_an_entry_but_not_an_id() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (catalog, _) = write_catalog_with_one_module(&scratch);
+    let mut doubled: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&catalog).unwrap()).unwrap();
+    let mut copy = doubled["modules"][0].clone();
+    copy["id"] = "add-copy".into();
+    doubled["modules"].as_array_mut().unwrap().push(copy);
+    // `read_catalog` checks `scope.selected_entries` against the actual
+    // module count; the fixture starts at one real module, so the doubled
+    // catalog must say so too, or the load is rejected before the cache is
+    // ever consulted.
+    doubled["scope"]["selected_entries"] = 2.into();
+    doubled["scope"]["total_entries"] = 2.into();
+    std::fs::write(&catalog, serde_json::to_vec(&doubled).unwrap()).unwrap();
+    let cache = scratch_cache(&scratch, u64::MAX);
+
+    let session = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let report = session.cache_report().unwrap();
+    assert_eq!(report.hits + report.misses, 2);
+    let answer = serde_json::to_value(
+        rllvm_query::run(&session, &rllvm_query::Query::Defs { name: "add".into() }).unwrap(),
+    )
+    .unwrap();
+    let ids: BTreeSet<&str> = answer["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["function"]["module_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, BTreeSet::from(["add", "add-copy"]));
+}
+
+#[test]
+fn a_catalog_without_content_hashes_bypasses_the_cache() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (catalog_path, _) = write_catalog_with_one_module(&scratch);
+    let mut catalog = read_catalog(&catalog_path).unwrap();
+    catalog.modules[0].content_sha256 = None;
+    let cache = scratch_cache(&scratch, u64::MAX);
+
+    let session =
+        rllvm_query::open_catalog_with_cache(catalog, scratch.path(), Some(&cache)).unwrap();
+    let report = session.cache_report().unwrap();
+    assert_eq!((report.hits, report.misses, report.written), (0, 0, 0));
+    assert_eq!(cache.disk_bytes(), 0);
+    assert_eq!(
+        session.modules()[0].status,
+        rllvm_query::ModuleAnalysis::Analyzed
+    );
+}
+
+#[test]
+fn a_corrupt_entry_is_a_miss_that_still_answers_and_is_replaced() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let cache = scratch_cache(&scratch, u64::MAX);
+    let expected =
+        cache_probe_answers(&rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap());
+
+    let generation = cache
+        .directory()
+        .join(rllvm_query::FactsCache::generation());
+    for entry in std::fs::read_dir(&generation).unwrap() {
+        std::fs::write(entry.unwrap().path(), b"junk").unwrap();
+    }
+    let recovered = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    assert_eq!(recovered.cache_report().unwrap().misses, 2);
+    assert_eq!(cache_probe_answers(&recovered), expected);
+    let again = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    assert_eq!(
+        again.cache_report().unwrap().hits,
+        2,
+        "the junk was replaced"
+    );
+}
+
+#[test]
+fn an_unwritable_cache_still_answers() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let not_a_directory = scratch.path().join("file");
+    std::fs::write(&not_a_directory, b"x").unwrap();
+    let cache = rllvm_query::FactsCache::new(&not_a_directory, u64::MAX);
+
+    let session = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let report = session.cache_report().unwrap();
+    assert_eq!((report.misses, report.written), (2, 0));
+    assert_eq!(
+        cache_probe_answers(&session),
+        cache_probe_answers(&rllvm_query::open(&catalog).unwrap())
+    );
+}
+
+#[test]
+fn disk_use_counts_existing_and_new_entries_against_the_threshold() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let cache = scratch_cache(&scratch, 1);
+
+    let cold = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let report = cold.cache_report().unwrap();
+    assert_eq!(
+        report.disk_bytes,
+        cache.disk_bytes(),
+        "pre-existing zero plus both writes"
+    );
+    assert_eq!(report.warn_bytes, 1);
+    assert!(report.over_threshold);
+
+    let warm = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    assert_eq!(warm.cache_report().unwrap().disk_bytes, cache.disk_bytes());
+}
+
+#[test]
+fn the_analysis_block_carries_the_cache_report_only_when_cached() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let query = rllvm_query::Query::Defs {
+        name: "outer".into(),
+    };
+
+    let plain = serde_json::to_value(
+        rllvm_query::run(&rllvm_query::open(&catalog).unwrap(), &query).unwrap(),
+    )
+    .unwrap();
+    assert!(plain["analysis"].get("cache").is_none());
+
+    let cache = scratch_cache(&scratch, u64::MAX);
+    let session = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let cached = serde_json::to_value(rllvm_query::run(&session, &query).unwrap()).unwrap();
+    assert_eq!(cached["analysis"]["cache"]["misses"], 2);
+    assert_eq!(cached["schema_version"], 2);
+}
