@@ -560,6 +560,44 @@ fn a_module_that_vanishes_after_loading_is_reported_not_fatal() {
     assert_eq!(unreadable[0].0, vanished);
 }
 
+#[test]
+fn a_module_rewritten_after_loading_is_unreadable_not_parsed() {
+    // Valid bitcode with different bytes: only the hash check can tell. A
+    // cache keyed by the recorded hash must never store what these bytes say.
+    let scratch = tempfile::tempdir().unwrap();
+    let (catalog_path, first_module) = two_plain_module_catalog(&scratch);
+    let loaded = load_catalog(&catalog_path).unwrap();
+    let rewritten = loaded
+        .pending
+        .iter()
+        .find(|module| module.path.file_name() == first_module.file_name())
+        .unwrap()
+        .id
+        .clone();
+
+    let other = compile_bitcode(&scratch, "other.c", "int other(void){return 1;}\n");
+    std::fs::copy(&other, &first_module).unwrap();
+
+    let mut visited = Vec::new();
+    let unreadable = for_each_module(&loaded, |module| {
+        visited.push(module.id.clone());
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(
+        !visited.contains(&rewritten),
+        "rewritten bytes were handed over"
+    );
+    assert_eq!(unreadable.len(), 1);
+    assert_eq!(unreadable[0].0, rewritten);
+    assert!(
+        unreadable[0].1.to_string().contains("changed"),
+        "{}",
+        unreadable[0].1
+    );
+}
+
 /// `rllvm-compdb` belongs to the `rllvm` package, so cargo sets no
 /// `CARGO_BIN_EXE_rllvm-compdb` for this test binary -- that variable only
 /// ever names the current package's own binaries. Both packages share one
