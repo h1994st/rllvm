@@ -16,9 +16,9 @@ use tracing::Level;
 
 use crate::{
     constants::{
-        BITCODE_ROOT_ENV_NAME, DEFAULT_CONF_FILEPATH_UNDER_HOME,
+        BITCODE_ROOT_ENV_NAME, DEFAULT_CONF_FILEPATH_UNDER_HOME, DEFAULT_QUERY_CACHE_WARN_MB,
         DEFAULT_RLLVM_CONF_FILEPATH_ENV_NAME, HOME_ENV_NAME, LOG_LEVEL_ENV_NAME, LTO_MODE_ENV_NAME,
-        RUSTC_ENV_NAME,
+        QUERY_CACHE_ENV_NAME, RUSTC_ENV_NAME,
     },
     diagnostics::{check_version_compatibility, print_missing_tool_error},
     error::Error,
@@ -169,6 +169,14 @@ pub struct RLLVMConfig {
 
     /// Custom cache directory path (Default: `~/.rllvm/cache/`)
     cache_dir: Option<PathBuf>,
+
+    /// Persist rllvm-query's extracted per-module facts (Default: true).
+    /// `RLLVM_QUERY_CACHE=0|1` overrides.
+    query_cache: Option<bool>,
+
+    /// Disk use of the query facts cache, in MiB, past which rllvm-query
+    /// warns (Default: 1024).
+    query_cache_warn_mb: Option<u64>,
 }
 
 impl RLLVMConfig {
@@ -298,6 +306,24 @@ impl RLLVMConfig {
     /// Returns the optional custom cache directory path.
     pub fn cache_dir(&self) -> Option<&PathBuf> {
         self.cache_dir.as_ref()
+    }
+
+    /// Whether rllvm-query reads and writes its facts cache.
+    /// `$RLLVM_QUERY_CACHE` (`0` or `1`) wins over the configuration file.
+    pub fn query_cache_enabled(&self) -> bool {
+        query_cache_override(env::var(QUERY_CACHE_ENV_NAME).ok().as_deref())
+            .unwrap_or_else(|| self.query_cache_enabled_ignoring_env())
+    }
+
+    fn query_cache_enabled_ignoring_env(&self) -> bool {
+        self.query_cache.unwrap_or(true)
+    }
+
+    /// The facts cache size, in bytes, past which rllvm-query warns.
+    pub fn query_cache_warn_bytes(&self) -> u64 {
+        self.query_cache_warn_mb
+            .unwrap_or(DEFAULT_QUERY_CACHE_WARN_MB)
+            .saturating_mul(1024 * 1024)
     }
 }
 
@@ -553,7 +579,19 @@ impl RLLVMConfig {
             bitcode_root: None,
             cache_enabled: None,
             cache_dir: None,
+            query_cache: None,
+            query_cache_warn_mb: None,
         })
+    }
+}
+
+/// `$RLLVM_QUERY_CACHE` as an override: `0` and `1` decide, anything else
+/// defers to the configuration file.
+fn query_cache_override(value: Option<&str>) -> Option<bool> {
+    match value {
+        Some("0") => Some(false),
+        Some("1") => Some(true),
+        _ => None,
     }
 }
 
@@ -739,5 +777,31 @@ mod tests {
             .expect("A config with `llvm_objcopy_filepath` should load");
 
         assert_eq!(config.llvm_objcopy_filepath(), Some(&llvm_objcopy_filepath));
+    }
+
+    #[test]
+    fn the_query_cache_is_on_with_a_one_gib_warning_by_default() {
+        let (_dir, config_filepath, _) = write_config("");
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+        assert!(config.query_cache_enabled_ignoring_env());
+        assert_eq!(config.query_cache_warn_bytes(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_query_cache_keys_are_read_from_the_config_file() {
+        let (_dir, config_filepath, _) =
+            write_config("query_cache = false\nquery_cache_warn_mb = 5\n");
+        let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+        assert!(!config.query_cache_enabled_ignoring_env());
+        assert_eq!(config.query_cache_warn_bytes(), 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn the_environment_overrides_the_query_cache_switch() {
+        assert_eq!(query_cache_override(Some("0")), Some(false));
+        assert_eq!(query_cache_override(Some("1")), Some(true));
+        assert_eq!(query_cache_override(Some("")), None);
+        assert_eq!(query_cache_override(Some("yes")), None);
+        assert_eq!(query_cache_override(None), None);
     }
 }

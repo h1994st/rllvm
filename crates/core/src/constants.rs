@@ -87,6 +87,13 @@ pub(crate) const LOG_LEVEL_ENV_NAME: &str = "RLLVM_LOG_LEVEL";
 /// Overrides `lto_mode`, for the same reason.
 pub(crate) const LTO_MODE_ENV_NAME: &str = "RLLVM_LTO_MODE";
 
+/// `0` disables and `1` enables rllvm-query's per-module facts cache,
+/// overriding `query_cache` in the configuration.
+pub(crate) const QUERY_CACHE_ENV_NAME: &str = "RLLVM_QUERY_CACHE";
+
+/// Disk use of the query facts cache, in MiB, past which rllvm-query warns.
+pub(crate) const DEFAULT_QUERY_CACHE_WARN_MB: u64 = 1024;
+
 /// The default filepath of the configuration file
 pub(crate) const DEFAULT_CONF_FILEPATH_UNDER_HOME: &str = ".rllvm/config.toml";
 

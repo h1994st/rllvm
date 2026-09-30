@@ -18,7 +18,8 @@ pub fn llvm_bin(name: &str) -> PathBuf {
 }
 
 /// Writes an `RLLVM_CONFIG` pointing at the configured toolchain. Tests must
-/// never read or modify the developer's own configuration.
+/// never read or modify the developer's own configuration. Cache directory
+/// is confined to the scratch directory, so no test writes to `~/.rllvm/cache`.
 ///
 /// `llvm_objcopy_filepath` is part of that toolchain. Leaving it out sent every
 /// caller down the `object`-crate rebuild instead, which is the fallback for
@@ -35,13 +36,15 @@ pub fn scratch_rllvm_config(directory: &Path) -> PathBuf {
          clangxx_filepath = '{}'\n\
          llvm_objcopy_filepath = '{}'\n\
          llvm_ar_filepath = '{}'\n\
-         llvm_link_filepath = '{}'\n",
+         llvm_link_filepath = '{}'\n\
+         cache_dir = '{}'\n",
         llvm_bin("llvm-config").display(),
         llvm_bin("clang").display(),
         llvm_bin("clang++").display(),
         llvm_bin("llvm-objcopy").display(),
         llvm_bin("llvm-ar").display(),
         llvm_bin("llvm-link").display(),
+        directory.join("cache").display(),
     );
     let path = directory.join("rllvm-config.toml");
     std::fs::write(&path, contents).unwrap();
