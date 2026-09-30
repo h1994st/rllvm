@@ -468,6 +468,9 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
             }
         }
     }
+    // Buffers are not needed once every module is read; restores the
+    // pre-cache peak-memory behaviour.
+    drop(archives);
     if let Some(report) = &mut report {
         report.over_threshold = report.disk_bytes > report.warn_bytes;
     }
