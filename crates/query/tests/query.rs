@@ -2618,25 +2618,49 @@ const FACTS_GUARD: (u32, &str) = (
     "2607f088fa7949501812e51d3a0f7b2765731abf004c3a95f42b32ade7a14758",
 );
 
-#[test]
-fn the_facts_format_names_what_extraction_produces() {
-    let scratch = tempfile::tempdir().unwrap();
+/// Extracts the neutral facts from `fixtures/facts-guard.ll`: indirect calls,
+/// dispatch-table uses and declarations that the smaller equivalence
+/// fixtures above do not exercise.
+fn guard_module_facts(scratch: &tempfile::TempDir) -> rllvm_query::ModuleFacts {
     let ir = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/facts-guard.ll"),
     )
     .unwrap();
     let loaded = rllvm_query::load::LoadedModule {
         id: "guard".into(),
-        bytes: std::fs::read(assemble_ir(&scratch, &ir)).unwrap(),
+        bytes: std::fs::read(assemble_ir(scratch, &ir)).unwrap(),
         record: Default::default(),
     };
-    let facts = rllvm_query::extract::extract_neutral(&loaded).unwrap();
+    rllvm_query::extract::extract_neutral(&loaded).unwrap()
+}
+
+#[test]
+fn the_facts_format_names_what_extraction_produces() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = guard_module_facts(&scratch);
     let digest = rllvm_core::catalog::hash_bytes(&serde_json::to_vec(&facts).unwrap());
     assert_eq!(
         (rllvm_query::cache::FACTS_FORMAT, digest.as_str()),
         FACTS_GUARD,
         "extraction output changed: bump FACTS_FORMAT and record ({}, \"{digest}\")",
         rllvm_query::cache::FACTS_FORMAT + 1,
+    );
+}
+
+/// The guard fixture's facts round-trip through the cache unchanged: a
+/// cache hit must answer exactly as fresh extraction does, including for the
+/// indirect calls, dispatch-table uses and declarations this fixture adds
+/// that the plain equivalence fixture (`a_warm_cache_answers_exactly_as_extraction_does`) lacks.
+#[test]
+fn the_guard_fixtures_facts_round_trip_through_the_cache() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = guard_module_facts(&scratch);
+    let cache = rllvm_query::FactsCache::new(scratch.path(), u64::MAX);
+    cache.write("guard", &facts).unwrap();
+    let read_back = cache.read("guard").expect("a written entry hits");
+    assert_eq!(
+        serde_json::to_value(&facts).unwrap(),
+        serde_json::to_value(&read_back).unwrap()
     );
 }
 
