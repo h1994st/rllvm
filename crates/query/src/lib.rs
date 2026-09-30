@@ -57,6 +57,9 @@ pub mod load;
 pub mod bind;
 pub use bind::{BindingCandidate, BindingStatus, SymbolBinding};
 
+pub mod cache;
+pub use cache::FactsCache;
+
 pub mod index;
 pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Session};
 

@@ -2602,3 +2602,35 @@ fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
         "the location, not the catalog, must be reported: {stderr}"
     );
 }
+
+/// The digest of the neutral facts extracted from `fixtures/facts-guard.ll`,
+/// recorded with the `FACTS_FORMAT` it was taken under. A mismatch means
+/// extraction output changed: bump `FACTS_FORMAT` in `src/cache.rs`, then
+/// record the new pair here, or old cache entries will be served as if they
+/// were current.
+const FACTS_GUARD: (u32, &str) = (
+    1,
+    "2607f088fa7949501812e51d3a0f7b2765731abf004c3a95f42b32ade7a14758",
+);
+
+#[test]
+fn the_facts_format_names_what_extraction_produces() {
+    let scratch = tempfile::tempdir().unwrap();
+    let ir = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/facts-guard.ll"),
+    )
+    .unwrap();
+    let loaded = rllvm_query::load::LoadedModule {
+        id: "guard".into(),
+        bytes: std::fs::read(assemble_ir(&scratch, &ir)).unwrap(),
+        record: Default::default(),
+    };
+    let facts = rllvm_query::extract::extract_neutral(&loaded).unwrap();
+    let digest = rllvm_core::catalog::hash_bytes(&serde_json::to_vec(&facts).unwrap());
+    assert_eq!(
+        (rllvm_query::cache::FACTS_FORMAT, digest.as_str()),
+        FACTS_GUARD,
+        "extraction output changed: bump FACTS_FORMAT and record ({}, \"{digest}\")",
+        rllvm_query::cache::FACTS_FORMAT + 1,
+    );
+}
