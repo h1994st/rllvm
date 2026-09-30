@@ -339,9 +339,9 @@ pub fn render_usage(usage: &CacheUsage) -> String {
         ));
     }
     out.push_str(&format!(
-        "total:       {} of {} warning threshold\n",
+        "total:       {} of {} MB warning threshold\n",
         crate::render::human_bytes(usage.total_bytes),
-        crate::render::human_bytes(usage.warn_bytes).replace(".0 MB", " MB")
+        usage.warn_bytes / crate::render::MIB
     ));
     out
 }
@@ -452,6 +452,23 @@ mod tests {
         assert_eq!(usage.generations.iter().filter(|g| g.current).count(), 1);
         assert_eq!(usage.total_bytes, cache.disk_bytes());
         assert!(usage.over_threshold, "warn_bytes is 1");
+    }
+
+    #[test]
+    fn the_warning_threshold_always_prints_in_whole_megabytes() {
+        let usage = CacheUsage {
+            directory: PathBuf::from("/cache"),
+            enabled: true,
+            current: FactsCache::generation(),
+            generations: Vec::new(),
+            total_bytes: 0,
+            // A GiB: human_bytes alone would print this as "1.0 GB", but the
+            // threshold is always whole MB, matching query_cache_warn_mb.
+            warn_bytes: 1024 * 1024 * 1024,
+            over_threshold: false,
+        };
+        let text = render_usage(&usage);
+        assert!(text.contains("of 1024 MB warning threshold"), "got: {text}");
     }
 
     #[test]

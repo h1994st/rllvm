@@ -229,7 +229,7 @@ if command -v jq >/dev/null; then
     [ -z "$(payload s1 "$(answer false)" string | "$hook")" ] || fail "hook spoke under the threshold"
     for shape in string blocks array; do
         said=$(payload "s-$shape" "$(answer true)" "$shape" | "$hook")
-        printf '%s' "$said" | jq -e '.systemMessage | test("1300.0 MB, over query_cache_warn_mb \\(1024 MB\\)")' \
+        printf '%s' "$said" | jq -e '.systemMessage | test("1.3 GB, over query_cache_warn_mb \\(1024 MB\\)")' \
             >/dev/null || fail "no warning for a $shape result: $said"
         printf '%s' "$said" | jq -e '.hookSpecificOutput.hookEventName == "PostToolUse"' >/dev/null ||
             fail "no additionalContext for a $shape result: $said"
@@ -258,7 +258,7 @@ if command -v jq >/dev/null; then
 
     # The partial report above must not have consumed s-partial's warning.
     said=$(payload s-partial "$(answer true)" string | "$hook")
-    printf '%s' "$said" | jq -e '.systemMessage | test("1300.0 MB, over query_cache_warn_mb \\(1024 MB\\)")' \
+    printf '%s' "$said" | jq -e '.systemMessage | test("1.3 GB, over query_cache_warn_mb \\(1024 MB\\)")' \
         >/dev/null || fail "a well-formed report after a partial one did not warn: $said"
     echo "ok: the cache warning hook warns once per session over the threshold"
 else

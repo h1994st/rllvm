@@ -31,10 +31,13 @@ cache=$(printf '%s' "$input" | jq -c '
 # given the numeric guard above, but jq is never trusted twice) leaves the
 # session free to warn on a later, well-formed report.
 message=$(printf '%s' "$cache" | jq -c '
-    ((.disk_bytes / 1048576 * 10 | round) / 10 | tostring
+    (if .disk_bytes >= 1073741824
+        then [.disk_bytes / 1073741824, "GB"]
+        else [.disk_bytes / 1048576, "MB"] end) as [$amount, $unit]
+    | (($amount * 10 | round) / 10 | tostring
         | if test("\\.") then . else . + ".0" end) as $size
     | (.warn_bytes / 1048576 | floor | tostring) as $limit
-    | "rllvm-query'"'"'s facts cache is \($size) MB, over query_cache_warn_mb (\($limit) MB)." as $what
+    | "rllvm-query'"'"'s facts cache is \($size) \($unit), over query_cache_warn_mb (\($limit) MB)." as $what
     | {
         systemMessage: "\($what) Prune with `rllvm-query cache clear --stale` or `rllvm-query cache clear`.",
         hookSpecificOutput: {
