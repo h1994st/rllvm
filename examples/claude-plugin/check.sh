@@ -225,6 +225,7 @@ if command -v jq >/dev/null; then
         array) jq -cn --arg s "$1" --arg t "$2" '{session_id: $s, tool_output: [{type: "text", text: $t}]}' ;;
         esac
     }
+    rm -rf "$OUT/hook-tmp"
     export TMPDIR=$OUT/hook-tmp && mkdir -p "$TMPDIR"
     [ -z "$(payload s1 "$(answer false)" string | "$hook")" ] || fail "hook spoke under the threshold"
     for shape in string blocks array; do
