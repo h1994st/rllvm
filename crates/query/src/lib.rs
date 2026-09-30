@@ -345,9 +345,9 @@ pub struct QueryResult {
 /// [`load::load_catalog`]) to `Analyzed`; a module that fails to extract, or
 /// that cannot be read at all by the time its bytes are wanted, is marked
 /// `Failed` with the diagnostic instead, and the run continues -- the other
-/// modules still answer. Second, [`session_from_loaded`] reads and holds one
-/// module's bytes at a time by design, so no bitcode buffer stays resident
-/// once queries start answering.
+/// modules still answer. Second, assembly reads and holds one module's bytes
+/// at a time by design, so no bitcode buffer stays resident once queries
+/// start answering.
 pub fn open(catalog: &Path) -> Result<Session, Error> {
     open_with_cache(catalog, None)
 }

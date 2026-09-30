@@ -1,4 +1,7 @@
 //! Owned facts extracted from bitcode. No LLVM handles, no I/O.
+//!
+//! Changing what these types carry requires bumping `FACTS_FORMAT` in
+//! `cache.rs`: `the_facts_format_names_what_extraction_produces` says how.
 
 use std::{collections::BTreeSet, path::PathBuf};
 

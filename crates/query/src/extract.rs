@@ -1,6 +1,9 @@
 //! The llvm-sys walk. This is the only module in the crate containing
 //! `unsafe`, and no LLVM handle leaves it: every public value is owned Rust
 //! data.
+//!
+//! Changing what this module produces requires bumping `FACTS_FORMAT` in
+//! `cache.rs`: `the_facts_format_names_what_extraction_produces` says how.
 
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
