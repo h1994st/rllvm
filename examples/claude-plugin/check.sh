@@ -239,6 +239,15 @@ if command -v jq >/dev/null; then
     [ -z "$(printf '{"session_id":"x","tool_response":"not json"}' | "$hook")" ] ||
         fail "hook spoke about a non-JSON result"
 
+    # `rllvm-query cache` itself answers with a top-level `cache`, not one
+    # nested under `analysis` -- the hook must read that shape too.
+    toplevel=$(jq -cn \
+        '{cache: {hits: 1, misses: 0, written: 0,
+          disk_bytes: 1363148800, warn_bytes: 1073741824, over_threshold: true}}')
+    said=$(payload s-toplevel "$toplevel" string | "$hook")
+    printf '%s' "$said" | jq -e '.systemMessage | test("over query_cache_warn_mb \\(1024 MB\\)")' \
+        >/dev/null || fail "no warning for a top-level cache report: $said"
+
     # A cache report missing disk_bytes/warn_bytes is not actionable: the
     # hook stays silent and must not exit non-zero or burn the marker.
     partial=$(jq -cn '{analysis: {cache: {over_threshold: true}}}')

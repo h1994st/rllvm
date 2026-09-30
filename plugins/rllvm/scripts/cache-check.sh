@@ -21,7 +21,7 @@ cache=$(printf '%s' "$input" | jq -c '
       elif type == "array" then [.[]?.text // empty] | join("")
       else empty end
     | (fromjson? // empty)
-    | (.analysis.cache // empty)
+    | (.analysis.cache // .cache // empty)
     | select(.over_threshold == true
         and (.disk_bytes | type) == "number"
         and (.warn_bytes | type) == "number")' 2>/dev/null) || exit 0
