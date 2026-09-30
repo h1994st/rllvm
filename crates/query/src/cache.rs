@@ -86,9 +86,10 @@ impl FactsCache {
     }
 
     /// The configured location, whether or not the cache is enabled: the
-    /// `cache` command inspects it either way.
+    /// `cache` command inspects it either way. Never creates the directory --
+    /// resolving where the cache lives is not a reason to make it exist.
     pub fn configured(config: &RLLVMConfig) -> Result<FactsCache, Error> {
-        let root = rllvm_core::cache::cache_dir(config.cache_dir().map(PathBuf::as_path))?;
+        let root = rllvm_core::cache::cache_root(config.cache_dir().map(PathBuf::as_path))?;
         Ok(FactsCache::new(&root, config.query_cache_warn_bytes()))
     }
 

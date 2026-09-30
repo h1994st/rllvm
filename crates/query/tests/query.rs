@@ -2867,6 +2867,53 @@ fn an_unwritable_cache_still_answers() {
     );
 }
 
+/// Resolving the configured cache root must never create it, and never log
+/// at error level when it cannot be created: `facts_cache()` runs before
+/// every query, so a read-only HOME must not print an `ERROR` line on every
+/// answer. `blocked/cache` can never be created because `blocked` is a file.
+#[test]
+fn an_uncreatable_configured_cache_dir_is_a_silent_miss() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let base_config = scratch_rllvm_config(scratch.path());
+    let blocked = scratch.path().join("blocked");
+    std::fs::write(&blocked, b"x").unwrap();
+    let contents = std::fs::read_to_string(&base_config).unwrap();
+    let contents: String = contents
+        .lines()
+        .map(|line| {
+            if line.starts_with("cache_dir") {
+                format!("cache_dir = '{}'\n", blocked.join("cache").display())
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    let config = scratch.path().join("uncreatable-cache-config.toml");
+    std::fs::write(&config, contents).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", &config)
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["--json", "callers", "add"])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(answer["analysis"]["cache"]["written"], 0);
+}
+
 #[test]
 fn disk_use_counts_existing_and_new_entries_against_the_threshold() {
     let scratch = tempfile::tempdir().unwrap();
