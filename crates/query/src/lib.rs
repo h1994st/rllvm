@@ -57,6 +57,27 @@ pub mod load;
 pub mod bind;
 pub use bind::{BindingCandidate, BindingStatus, SymbolBinding};
 
+pub mod cache;
+pub use cache::FactsCache;
+
+/// How the per-module facts cache served one load. Present on an answer only
+/// when the session was opened with a cache.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct CacheReport {
+    /// Modules whose facts came from the cache; their bytes were not re-read.
+    pub hits: usize,
+    /// Modules extracted because the cache had no usable entry.
+    pub misses: usize,
+    /// Misses whose facts were stored for next time.
+    pub written: usize,
+    /// Size of every entry on disk: measured once before this load's writes,
+    /// plus what it wrote.
+    pub disk_bytes: u64,
+    /// `query_cache_warn_mb`, in bytes.
+    pub warn_bytes: u64,
+    pub over_threshold: bool,
+}
+
 pub mod index;
 pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Session};
 
@@ -222,6 +243,9 @@ pub struct Analysis {
     /// misrepresent a mixed catalog, which the compilation-database import
     /// makes an ordinary case.
     pub modules: Vec<ModuleReport>,
+    /// How the facts cache served this load. Absent when the cache is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheReport>,
 }
 
 /// What the answer could not see. Present on every answer, not only walks:
@@ -321,23 +345,45 @@ pub struct QueryResult {
 /// [`load::load_catalog`]) to `Analyzed`; a module that fails to extract, or
 /// that cannot be read at all by the time its bytes are wanted, is marked
 /// `Failed` with the diagnostic instead, and the run continues -- the other
-/// modules still answer. Second, [`load::for_each_module`] hands over one
-/// module's bytes at a time by design, and the `Loaded` value is dropped
-/// before the session is built, so no bitcode buffer stays resident once
-/// queries start answering.
+/// modules still answer. Second, assembly reads and holds one module's bytes
+/// at a time by design, so no bitcode buffer stays resident once queries
+/// start answering.
 pub fn open(catalog: &Path) -> Result<Session, Error> {
-    session_from_loaded(load::load_catalog(catalog)?)
+    open_with_cache(catalog, None)
+}
+
+/// [`open`], reading each module's neutral facts from `cache` when given
+/// (a hit never re-reads that module's bytes) or extracting and storing them
+/// on a miss. Every module is bound to this catalog's ids and source status
+/// the same way regardless of which path produced its facts.
+pub fn open_with_cache(catalog: &Path, cache: Option<&FactsCache>) -> Result<Session, Error> {
+    session_from_loaded(load::load_catalog(catalog)?, cache)
 }
 
 /// [`open`] for a catalog already in memory, resolving its relative module
 /// paths against `catalog_dir`. The MCP `inventory` tool builds a catalog
 /// from an artifact and queries it without ever writing it to disk.
 pub fn open_catalog(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<Session, Error> {
-    session_from_loaded(load::load_catalog_value(catalog, catalog_dir)?)
+    open_catalog_with_cache(catalog, catalog_dir, None)
 }
 
-/// Extraction and binding, shared by both entry points above.
-fn session_from_loaded(loaded: load::Loaded) -> Result<Session, Error> {
+/// [`open_catalog`], reading and filling `cache` when given.
+pub fn open_catalog_with_cache(
+    catalog: ModuleCatalog,
+    catalog_dir: &Path,
+    cache: Option<&FactsCache>,
+) -> Result<Session, Error> {
+    session_from_loaded(load::load_catalog_value(catalog, catalog_dir)?, cache)
+}
+
+/// Extraction and binding, shared by every entry point above.
+///
+/// A module whose facts are already cached under its `content_sha256` is
+/// served from there without reading its bytes at all. Everything else is
+/// read one module at a time, as before: its neutral facts are extracted,
+/// stored in `cache` when one was given, and then bound to this catalog --
+/// exactly as a cache hit's facts are, so the two paths answer identically.
+fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Result<Session, Error> {
     // Every module the loader intends to read, regardless of whether
     // extraction later succeeds: `bind` only consults a module's
     // configuration when it also sees a `FunctionFact` from that module, so
@@ -353,10 +399,55 @@ fn session_from_loaded(loaded: load::Loaded) -> Result<Session, Error> {
     let mut uses: Vec<UseFact> = Vec::new();
     let mut reports = loaded.reports.clone();
 
-    let unreadable = load::for_each_module(&loaded, |module| {
-        match extract::extract(&module, &loaded.source_status) {
-            Ok(facts) => {
-                if let Some(report) = reports.iter_mut().find(|report| report.id == module.id) {
+    let mut report = cache.map(|cache| CacheReport {
+        disk_bytes: cache.disk_bytes(),
+        warn_bytes: cache.warn_bytes(),
+        ..Default::default()
+    });
+    let mut archives = rllvm_core::catalog::ArchiveCache::default();
+    let mut unreadable = Vec::new();
+
+    for pending in &loaded.pending {
+        // A module without a recorded hash cannot be keyed: extract it and
+        // leave the cache alone.
+        let cache_key = cache.zip(pending.record.content_sha256.as_deref());
+        let neutral = match cache_key.and_then(|(cache, key)| cache.read(key)) {
+            Some(facts) => {
+                if let Some(report) = &mut report {
+                    report.hits += 1;
+                }
+                Ok(facts)
+            }
+            None => {
+                let module = match load::read_module(pending, &mut archives) {
+                    Ok(module) => module,
+                    Err(error) => {
+                        unreadable.push((pending.id.clone(), error));
+                        continue;
+                    }
+                };
+                let extracted = extract::extract_neutral(&module);
+                if let (Some((cache, key)), Some(report)) = (cache_key, &mut report) {
+                    report.misses += 1;
+                    if let Ok(facts) = &extracted {
+                        match cache.write(key, facts) {
+                            Ok(size) => {
+                                report.written += 1;
+                                report.disk_bytes += size;
+                            }
+                            Err(error) => {
+                                tracing::debug!(module = %pending.id, %error, "facts not cached")
+                            }
+                        }
+                    }
+                }
+                extracted
+            }
+        };
+        match neutral {
+            Ok(mut facts) => {
+                facts.bind_to_catalog(&pending.id, &loaded.source_status);
+                if let Some(report) = reports.iter_mut().find(|report| report.id == pending.id) {
                     report.status = ModuleAnalysis::Analyzed;
                     report.producers = facts.producers.clone();
                     if !facts.diagnostics.is_empty() {
@@ -372,13 +463,17 @@ fn session_from_loaded(loaded: load::Loaded) -> Result<Session, Error> {
                 uses.extend(facts.uses);
             }
             Err(error) => {
-                tracing::warn!(module = %module.id, %error, "module failed to extract");
-                record_failure(&mut reports, &module.id, error.to_string());
+                tracing::warn!(module = %pending.id, %error, "module failed to extract");
+                record_failure(&mut reports, &pending.id, error.to_string());
             }
         }
-        // A module that fails to extract must not abort the run.
-        Ok(())
-    })?;
+    }
+    // Buffers are not needed once every module is read; restores the
+    // pre-cache peak-memory behaviour.
+    drop(archives);
+    if let Some(report) = &mut report {
+        report.over_threshold = report.disk_bytes > report.warn_bytes;
+    }
 
     // Nor may a module that verified at load time and then vanished or
     // became unreadable: it is recorded in `analysis` like any other
@@ -397,11 +492,10 @@ fn session_from_loaded(loaded: load::Loaded) -> Result<Session, Error> {
         origin: loaded.origin.clone(),
         modules: reports,
     };
-    // `for_each_module` already dropped its own archive cache on return;
-    // this drops `Loaded` itself before the session below starts serving.
+    // This drops `Loaded` itself before the session below starts serving.
     drop(loaded);
 
-    Ok(Session::new(facts, bindings))
+    Ok(Session::new(facts, bindings).with_cache_report(report))
 }
 
 /// Answer one query over an already-loaded session.
@@ -466,7 +560,7 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
         results,
         symbols,
         scope: session.scope().clone(),
-        analysis: analysis_of(session.modules()),
+        analysis: analysis_of(session.modules(), session.cache_report()),
         uncertainty: Uncertainty {
             functions_of_unknown_language: unknown_language,
             ..uncertainty_of(session, frontier, conditional_path_steps)
@@ -883,9 +977,10 @@ fn parse_location(at: &str) -> Result<(PathBuf, u32), Error> {
     Ok((PathBuf::from(file), line))
 }
 
-fn analysis_of(modules: &[ModuleReport]) -> Analysis {
+fn analysis_of(modules: &[ModuleReport], cache: Option<&CacheReport>) -> Analysis {
     let mut analysis = Analysis {
         modules: modules.to_vec(),
+        cache: cache.cloned(),
         ..Default::default()
     };
     for module in modules {
@@ -989,6 +1084,73 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         let loaded = load_catalog(&write_catalog_with_one_module(&scratch)).unwrap();
         assert_eq!(loaded.reports[0].status, ModuleAnalysis::Verified);
+    }
+
+    /// `load_catalog` verifies a module's bytes against its recorded hash,
+    /// but a concurrent rewrite between that check and `session_from_loaded`
+    /// reading the bytes for real is exactly what `load::read_module`'s own
+    /// re-hash exists to catch. On a cache-enabled load this has to happen
+    /// *before* the cache is ever consulted for that module: the module must
+    /// be marked `Failed`, not analyzed under the wrong bitcode, and nothing
+    /// about it may reach the cache.
+    ///
+    /// The replacement is real, parseable bitcode -- different from the
+    /// original, but not garbage -- so this pins the re-hash catching it
+    /// specifically. Garbage bytes would also end up `Failed` with nothing
+    /// cached, just because extraction itself fails, which would pass this
+    /// test even if the re-hash check were silently removed.
+    #[test]
+    fn a_module_rewritten_after_verification_is_failed_and_never_cached() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module_path = rllvm_testkit::compile_bitcode(
+            &scratch,
+            "orig.c",
+            "int add(int a,int b){return a+b;}\n",
+        );
+        let original_bytes = std::fs::read(&module_path).unwrap();
+
+        let mut record = ModuleRecord::new("m");
+        record.path = Some(PathBuf::from(module_path.file_name().unwrap()));
+        record.content_sha256 = Some(hash_bytes(&original_bytes));
+        record.status = ModuleStatus::Available;
+        let catalog = ModuleCatalog::new(
+            CatalogOrigin {
+                kind: "test".into(),
+                input: PathBuf::from("test"),
+                sha256: None,
+            },
+            "test",
+            vec![record],
+        );
+        let catalog_path = scratch.path().join("catalog.json");
+        write_catalog(&catalog_path, &catalog).unwrap();
+
+        let loaded = load_catalog(&catalog_path).unwrap();
+
+        // Overwritten with different, still-valid bitcode after
+        // `load_catalog` already verified the original bytes: the mismatch
+        // is only visible to the re-check inside `session_from_loaded`.
+        let replacement = rllvm_testkit::compile_bitcode(
+            &scratch,
+            "replacement.c",
+            "int sub(int a,int b){return a-b;}\n",
+        );
+        std::fs::copy(&replacement, &module_path).unwrap();
+
+        let cache = FactsCache::new(&scratch.path().join("cache"), u64::MAX);
+        let session = session_from_loaded(loaded, Some(&cache)).unwrap();
+
+        assert_eq!(
+            session.modules()[0].status,
+            ModuleAnalysis::Failed,
+            "a module that changed after verification must not be silently analyzed"
+        );
+        let report = session.cache_report().unwrap();
+        assert_eq!(
+            report.written, 0,
+            "a module that was never read must never be cached"
+        );
+        assert_eq!(cache.disk_bytes(), 0);
     }
 
     #[test]

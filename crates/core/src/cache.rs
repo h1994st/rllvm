@@ -49,17 +49,24 @@ pub fn is_cache_enabled(config_enabled: bool) -> bool {
     config_enabled
 }
 
+/// Returns the cache directory's path. Touches no filesystem, so it is safe
+/// to call just to find out where the cache lives.
+///
+/// Uses `cache_dir` from config if provided, otherwise defaults to `~/.rllvm/cache/`.
+pub fn cache_root(config_cache_dir: Option<&Path>) -> Result<PathBuf, Error> {
+    if let Some(d) = config_cache_dir {
+        return Ok(d.to_path_buf());
+    }
+    let home = env::var("HOME")
+        .map_err(|_| Error::ConfigError("HOME environment variable not set".into()))?;
+    Ok(PathBuf::from(home).join(DEFAULT_CACHE_DIR))
+}
+
 /// Returns the cache directory, creating it if necessary.
 ///
 /// Uses `cache_dir` from config if provided, otherwise defaults to `~/.rllvm/cache/`.
 pub fn cache_dir(config_cache_dir: Option<&Path>) -> Result<PathBuf, Error> {
-    let dir = if let Some(d) = config_cache_dir {
-        d.to_path_buf()
-    } else {
-        let home = env::var("HOME")
-            .map_err(|_| Error::ConfigError("HOME environment variable not set".into()))?;
-        PathBuf::from(home).join(DEFAULT_CACHE_DIR)
-    };
+    let dir = cache_root(config_cache_dir)?;
 
     if !dir.exists() {
         fs::create_dir_all(&dir).map_err(|err| {
@@ -524,6 +531,27 @@ mod tests {
         let result = cache_dir(Some(&cache)).unwrap();
         assert_eq!(result, cache);
         assert!(cache.exists());
+    }
+
+    #[test]
+    fn cache_root_returns_a_configured_path_without_creating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("configured_cache_dir");
+        assert!(!cache.exists());
+
+        let result = cache_root(Some(&cache)).unwrap();
+        assert_eq!(result, cache);
+        assert!(!cache.exists(), "cache_root must not touch the filesystem");
+    }
+
+    #[test]
+    fn cache_root_defaults_under_home_without_creating_it() {
+        let home = env::var("HOME").unwrap();
+        let expected = PathBuf::from(home).join(DEFAULT_CACHE_DIR);
+
+        let result = cache_root(None).unwrap();
+
+        assert_eq!(result, expected);
     }
 
     #[test]

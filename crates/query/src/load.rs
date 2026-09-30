@@ -228,6 +228,33 @@ pub fn load_catalog_value(catalog: ModuleCatalog, catalog_dir: &Path) -> Result<
     })
 }
 
+/// Reads one verified module's bytes and checks them against the hash
+/// `load_catalog` verified. A file rewritten in between is not the module the
+/// catalog names: parsing it would answer about other code, and caching it
+/// under the recorded hash would keep doing so.
+pub fn read_module(
+    pending: &PendingModule,
+    archives: &mut ArchiveCache,
+) -> Result<LoadedModule, Error> {
+    let bytes = match &pending.member {
+        Some(member) => archives.module(&pending.path, member)?.to_vec(),
+        None => std::fs::read(&pending.path)?,
+    };
+    if let Some(recorded) = &pending.record.content_sha256
+        && hash_bytes(&bytes) != *recorded
+    {
+        return Err(Error::InvalidArguments(format!(
+            "module {} changed on disk after it was verified",
+            pending.id
+        )));
+    }
+    Ok(LoadedModule {
+        id: pending.id.clone(),
+        bytes,
+        record: pending.record.clone(),
+    })
+}
+
 /// Reads and hands over one module at a time, so only one bitcode buffer is
 /// resident. The archive cache is dropped when the loop ends, before any
 /// session begins serving requests.
@@ -245,22 +272,10 @@ pub fn for_each_module(
     let mut archives = ArchiveCache::default();
     let mut unreadable = Vec::new();
     for pending in &loaded.pending {
-        let bytes = match &pending.member {
-            Some(member) => archives.module(&pending.path, member).map(<[u8]>::to_vec),
-            None => std::fs::read(&pending.path).map_err(Error::from),
-        };
-        let bytes = match bytes {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                unreadable.push((pending.id.clone(), error));
-                continue;
-            }
-        };
-        visit(LoadedModule {
-            id: pending.id.clone(),
-            bytes,
-            record: pending.record.clone(),
-        })?;
+        match read_module(pending, &mut archives) {
+            Ok(module) => visit(module)?,
+            Err(error) => unreadable.push((pending.id.clone(), error)),
+        }
     }
     Ok(unreadable)
 }

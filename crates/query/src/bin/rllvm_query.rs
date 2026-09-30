@@ -11,10 +11,10 @@ use rllvm_core::{
     utils::{print_stdout, split_response_arguments},
 };
 use rllvm_query::{
-    Color, Query, TextMode,
+    Color, FactsCache, Query, TextMode,
     cli::{ClosureDirection, QueryArgs, QueryCommand},
     index::Direction,
-    llvm_version, mcp, open, run,
+    llvm_version, mcp, open_with_cache, run,
 };
 use tracing_subscriber::FmtSubscriber;
 
@@ -101,6 +101,11 @@ fn parse_queries(input: &str, heuristics: bool) -> Result<Vec<(String, Query)>, 
     Ok(queries)
 }
 
+/// The facts cache the configuration asks for, or `None` when disabled.
+fn facts_cache() -> Result<Option<FactsCache>, Error> {
+    Ok(FactsCache::from_config(try_rllvm_config()?))
+}
+
 /// Answers the queries piped on stdin from one load of `catalog`. Reading
 /// a terminal would wait for input nobody knows to type, so that is an
 /// error; empty stdin answers nothing.
@@ -118,7 +123,7 @@ fn run_stdin_queries(catalog: &Path, heuristics: bool, format: Format) -> Result
         return Ok(());
     }
     init_logging()?;
-    let session = open(catalog)?;
+    let session = open_with_cache(catalog, facts_cache()?.as_ref())?;
     for (line, query) in queries {
         let result = run(&session, &query)?;
         let answer = match format {
@@ -221,7 +226,7 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     let catalog = args.catalog.ok_or_else(|| {
         Error::InvalidArguments("--catalog is required to run a query".to_string())
     })?;
-    let result = run(&open(&catalog)?, &query)?;
+    let result = run(&open_with_cache(&catalog, facts_cache()?.as_ref())?, &query)?;
 
     match format {
         Format::Json => {
@@ -261,7 +266,7 @@ fn stdout_color() -> Color {
 /// the command line should hear that it could not be read, not discover it
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
-    let mut registry = mcp::Registry::new();
+    let mut registry = mcp::Registry::with_cache(facts_cache()?);
     if let Some(catalog) = catalog {
         registry.load(catalog)?;
     }

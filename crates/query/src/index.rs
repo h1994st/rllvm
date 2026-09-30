@@ -17,6 +17,8 @@ use serde::Serialize;
 
 use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
 
+use crate::CacheReport;
+
 use super::{
     bind::{BindingStatus, SymbolBinding},
     extract::demangle,
@@ -150,6 +152,9 @@ pub struct Session {
     demangled: BTreeMap<String, String>,
     /// Function ids keyed by their exact demangled reading.
     by_demangled: HashMap<String, Vec<FunctionId>>,
+    /// How the facts cache served this session's load; `None` when the
+    /// session was opened without one.
+    cache_report: Option<CacheReport>,
 }
 
 impl Session {
@@ -257,7 +262,18 @@ impl Session {
             by_file_line,
             demangled,
             by_demangled,
+            cache_report: None,
         }
+    }
+
+    /// Records how the facts cache served the load that built this session.
+    pub fn with_cache_report(mut self, report: Option<CacheReport>) -> Session {
+        self.cache_report = report;
+        self
+    }
+
+    pub fn cache_report(&self) -> Option<&CacheReport> {
+        self.cache_report.as_ref()
     }
 
     /// The symbols a queried name names, and how it got there.

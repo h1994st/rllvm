@@ -76,6 +76,15 @@ struct Ctx {
     color: Color,
 }
 
+/// Bytes per MiB. Cache sizes print in MiB labelled "MB", matching
+/// `query_cache_warn_mb`.
+const MIB: u64 = 1024 * 1024;
+
+/// `3774873` → `3.6 MB`.
+pub(crate) fn human_bytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / MIB as f64)
+}
+
 /// Printed where a fact has no source location, rather than an empty column
 /// that would silently align the next field into the location's place.
 const NO_LOCATION: &str = "<no location>";
@@ -588,6 +597,15 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
         "  failed: {}  unsupported: {}  not_built: {}\n",
         analysis.failed, analysis.unsupported, analysis.not_built
     ));
+    if let Some(cache) = &analysis.cache {
+        out.push_str(&format!(
+            "  cache: {} hit, {} miss, {} written, {}\n",
+            cache.hits,
+            cache.misses,
+            cache.written,
+            human_bytes(cache.disk_bytes)
+        ));
+    }
     // `ir_stage` beside `debug_info`, never aggregated: `Analysis::modules`
     // carries both per module because one summary flag would misrepresent a
     // mixed catalog, and printing only one half does the same.
@@ -1637,5 +1655,12 @@ mod tests {
             render(&result, TextMode::Adaptive, Color::Never)
                 .contains("no functions were found in the selected scope for that direction")
         );
+    }
+
+    #[test]
+    fn byte_counts_print_in_mebibytes_with_one_decimal() {
+        assert_eq!(human_bytes(0), "0.0 MB");
+        assert_eq!(human_bytes(3_774_873), "3.6 MB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024), "1024.0 MB");
     }
 }

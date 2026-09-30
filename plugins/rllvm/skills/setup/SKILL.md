@@ -67,6 +67,7 @@ each where one exists:
 | `bitcode_root` | record bitcode paths relative to this root | `RLLVM_BITCODE_ROOT` |
 | `lto_mode` | `marker` (default), `save-temps` or `skip` | `RLLVM_LTO_MODE` |
 | `cache_enabled`, `cache_dir` | reuse validated bitcode (default off, `~/.rllvm/cache`) | `RLLVM_CACHE` |
+| `query_cache`, `query_cache_warn_mb` | reuse rllvm-query's extracted per-module facts (default on, warns past 1024 MB) | `RLLVM_QUERY_CACHE` |
 | `log_level` | 0 errors (default) up to 4+ trace | `RLLVM_LOG_LEVEL` |
 | `llvm_objcopy_filepath` | embedding tool; needed for targets such as RISC-V | |
 | `rustc_filepath` | the real `rustc` for `rllvm-rustc` | `RLLVM_REAL_RUSTC` |
