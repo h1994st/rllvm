@@ -238,6 +238,19 @@ if command -v jq >/dev/null; then
     done
     [ -z "$(printf '{"session_id":"x","tool_response":"not json"}' | "$hook")" ] ||
         fail "hook spoke about a non-JSON result"
+
+    # A cache report missing disk_bytes/warn_bytes is not actionable: the
+    # hook stays silent and must not exit non-zero or burn the marker.
+    partial=$(jq -cn '{analysis: {cache: {over_threshold: true}}}')
+    status=0
+    said=$(payload s-partial "$partial" string | "$hook") || status=$?
+    [ -z "$said" ] || fail "hook spoke about a partial cache report: $said"
+    [ "$status" = 0 ] || fail "hook exited $status on a partial cache report"
+
+    # The partial report above must not have consumed s-partial's warning.
+    said=$(payload s-partial "$(answer true)" string | "$hook")
+    printf '%s' "$said" | jq -e '.systemMessage | test("1300.0 MB, over query_cache_warn_mb \\(1024 MB\\)")' \
+        >/dev/null || fail "a well-formed report after a partial one did not warn: $said"
     echo "ok: the cache warning hook warns once per session over the threshold"
 else
     echo "skip: jq is not installed, so the cache warning hook is not exercised"
