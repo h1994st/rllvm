@@ -241,7 +241,14 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         // `completions_name_the_query_binary` fails when it is, because
         // nothing reaches stdout.
         QueryCommand::Completions { .. } => return Ok(()),
-        QueryCommand::Cache { action } => return run_cache(action.as_ref(), format),
+        QueryCommand::Cache { action } => {
+            if args.catalog.is_some() {
+                return Err(Error::InvalidArguments(
+                    "the cache command reads no catalog; drop --catalog".into(),
+                ));
+            }
+            return run_cache(action.as_ref(), format);
+        }
         QueryCommand::Defs { .. }
         | QueryCommand::At { .. }
         | QueryCommand::Callers { .. }

@@ -3069,6 +3069,27 @@ fn the_cache_command_reports_and_clears_without_a_catalog() {
     assert_eq!(after["total_bytes"], 0);
 }
 
+/// `cache` reads no catalog, so `--catalog` alongside it is a mistake, not a
+/// catalog to load -- even one that does not exist.
+#[test]
+fn the_cache_command_rejects_a_catalog() {
+    let scratch = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(scratch.path().join("nonexistent.json"))
+        .arg("cache")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("drop --catalog"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `rllvm-query cache` only reads: inspecting a cache that has never been
 /// written must not bring its directory into existence.
 #[test]
