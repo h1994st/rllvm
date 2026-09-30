@@ -44,6 +44,7 @@ rllvm to reading an answer:
 | `capture` skill | Chooses how to capture your build — C, C++, Objective-C, Rust, mixed, a compilation database, cross, WebAssembly, eBPF — and what to extract |
 | `query` skill | Picks the query that answers your question and reports what the answer does not cover |
 | MCP server | `rllvm-query mcp`, configured automatically |
+| Cache warning | A `PostToolUse` hook notes once per session when the facts cache passes `query_cache_warn_mb`; needs `jq` |
 
 Builds run as ordinary shell commands you approve, never inside the server.
 See the [plugin example](examples/claude-plugin/).
