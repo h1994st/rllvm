@@ -812,6 +812,11 @@ fn queries_piped_on_stdin_answer_as_their_separate_invocations_would() {
 fn queries_piped_on_stdin_print_one_json_envelope_per_line() {
     let scratch = tempfile::tempdir().unwrap();
     let catalog = two_module_catalog(&scratch);
+    // Every invocation below shares this scratch config's cache directory.
+    // Warming it first means each one reports the same steady-state
+    // `analysis.cache` (a hit for every module) rather than whichever
+    // happens to run first paying the miss and the rest hitting behind it.
+    query_json(&scratch, &catalog, &["externals"]);
     let output = query_stdin(
         &scratch,
         &catalog,
@@ -2901,4 +2906,55 @@ fn the_analysis_block_carries_the_cache_report_only_when_cached() {
     let cached = serde_json::to_value(rllvm_query::run(&session, &query).unwrap()).unwrap();
     assert_eq!(cached["analysis"]["cache"]["misses"], 2);
     assert_eq!(cached["schema_version"], 2);
+}
+
+#[test]
+fn the_cli_fills_the_configured_cache_and_hits_it_next_time() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let cold = query_json(&scratch, &catalog, &["callers", "add"]);
+    assert_eq!(cold["analysis"]["cache"]["written"], 2);
+    let warm = query_json(&scratch, &catalog, &["callers", "add"]);
+    assert_eq!(warm["analysis"]["cache"]["hits"], 2);
+    assert_eq!(warm["results"], cold["results"]);
+    assert!(
+        scratch.path().join("cache/query-facts").is_dir(),
+        "the scratch config must confine the cache"
+    );
+}
+
+#[test]
+fn rllvm_query_cache_0_turns_the_cache_off() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .env("RLLVM_QUERY_CACHE", "0")
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["--json", "callers", "add"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(answer["analysis"].get("cache").is_none());
+    assert!(!scratch.path().join("cache/query-facts").exists());
+}
+
+#[test]
+fn an_mcp_load_reports_the_cache() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let mut registry =
+        rllvm_query::mcp::Registry::with_cache(Some(scratch_cache(&scratch, u64::MAX)));
+    let summary = registry.load(&catalog).unwrap();
+    assert_eq!(summary["analysis"]["cache"]["misses"], 2);
+}
+
+#[test]
+fn full_text_prints_the_cache_line() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let text = query_text(&scratch, &catalog, &["--full", "callers", "add"]);
+    assert!(text.contains("cache: 0 hit, 2 miss, 2 written, "), "{text}");
 }

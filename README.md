@@ -373,6 +373,9 @@ printf '%s\n' 'callees main' 'callers parse_frame' \
 Each answer follows a `== <query>` line; with `--json`, each is one line of
 JSON. Every line is checked before the catalog is read.
 
+Each answer's `analysis.cache` (and `--full`) reports hits, misses and disk
+use. `RLLVM_QUERY_CACHE=0` turns it off.
+
 Every answer carries the results plus what it could *not* see: which modules
 failed to parse, which call sites are indirect, which symbols bind
 ambiguously, and whether each location's source has changed since it was
@@ -442,7 +445,9 @@ and `-o` selects the file to write.
 | `lto_mode` | No | How `-flto` builds record bitcode: `marker` (default), `save-temps`, `skip`; `RLLVM_LTO_MODE` overrides |
 | `is_configure_only` | No | Skip extra C/C++ bitcode work (default: `false`) |
 | `cache_enabled` | No | Reuse C/C++ bitcode across rebuilds; overridden by `RLLVM_CACHE` (default: `false`) |
-| `cache_dir` | No | Cache directory (default: `~/.rllvm/cache`) |
+| `cache_dir` | No | Cache directory; also holds rllvm-query's `query-facts/` (default: `~/.rllvm/cache`) |
+| `query_cache` | No | Reuse rllvm-query's extracted per-module facts; overridden by `RLLVM_QUERY_CACHE` (default: `true`) |
+| `query_cache_warn_mb` | No | Facts cache size, in MB, past which rllvm-query warns (default: `1024`) |
 | `log_level` | No | 0=error (default), 1=warn, 2=info, 3=debug, 4+=trace; `RLLVM_LOG_LEVEL` overrides |
 
 </details>

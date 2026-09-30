@@ -62,4 +62,8 @@ separate=$(printf '== defs helper\n%s\n== callers helper\n%s' \
 [ "$piped" = "$separate" ] ||
     fail "piped answers differ from separate ones: $piped"
 
+# A second load of the same bitcode reads its facts from the cache.
+hits=$(ask defs helper | field 'a["analysis"]["cache"]["hits"]')
+[ "$hits" = 2 ] || fail "a repeat load hit the facts cache for $hits modules, expected 2"
+
 echo "ok: defs, callers and callees agree, over 2 analyzed modules, default output is text, piped queries match"

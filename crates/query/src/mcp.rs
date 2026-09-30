@@ -52,7 +52,10 @@ use serde_json::{Value, json};
 
 use rllvm_core::error::Error;
 
-use super::{Direction, Query, Session, analysis_of, open, open_catalog, run};
+use super::{
+    Direction, FactsCache, Query, Session, analysis_of, open_catalog_with_cache, open_with_cache,
+    run,
+};
 
 /// The modern protocol revision this server has been checked against.
 const MODERN: &str = "2026-07-28";
@@ -73,6 +76,8 @@ const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabiliti
 #[derive(Default)]
 pub struct Registry {
     sessions: BTreeMap<PathBuf, Session>,
+    /// The facts cache every load reads and fills; `None` when disabled.
+    cache: Option<FactsCache>,
 }
 
 impl Registry {
@@ -80,12 +85,20 @@ impl Registry {
         Registry::default()
     }
 
+    /// A registry whose loads go through `cache`.
+    pub fn with_cache(cache: Option<FactsCache>) -> Registry {
+        Registry {
+            cache,
+            ..Registry::default()
+        }
+    }
+
     /// Reads the catalog JSON at `path` and makes it queryable. Returns the
     /// same summary the `load_catalog` tool answers with: what the catalog
     /// claims, and what actually parsed.
     pub fn load(&mut self, path: &Path) -> Result<Value, Error> {
         let key = path.canonicalize()?;
-        let session = open(&key)?;
+        let session = open_with_cache(&key, self.cache.as_ref())?;
         Ok(self.insert(key, session))
     }
 
@@ -96,7 +109,7 @@ impl Registry {
         let key = artifact.canonicalize()?;
         let catalog = rllvm_core::catalog::inventory(&key, bitcode_root, None)?;
         let directory = key.parent().unwrap_or(Path::new(".")).to_path_buf();
-        let session = open_catalog(catalog, &directory)?;
+        let session = open_catalog_with_cache(catalog, &directory, self.cache.as_ref())?;
         Ok(self.insert(key, session))
     }
 
@@ -109,6 +122,7 @@ impl Registry {
                 .into_iter()
                 .map(|(key, session)| (PathBuf::from(key), session))
                 .collect(),
+            ..Registry::default()
         }
     }
 

@@ -21,6 +21,11 @@ line: the catalog loads once, each text answer follows a `== <query>` line,
 and `--json` prints one envelope per line. Every line is checked before the
 catalog is read.
 
+Loads also reuse each module's extracted facts from a persistent cache keyed
+by its content hash, so a rerun over the same bitcode skips re-extraction.
+`analysis.cache` (and `--full`) reports hits, misses and disk use; a cached
+answer is identical to an uncached one.
+
 ## Choosing the query
 
 | Question | Tool |
