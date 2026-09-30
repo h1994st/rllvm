@@ -401,10 +401,9 @@ impl Session {
     }
 
     /// Per-module analysis reports, quoted from the catalog load and
-    /// extraction. Backs the envelope's `analysis` block, which must count
-    /// every recorded status, and lets a caller that built its own `Session`
-    /// inspect what a load recorded.
-    pub fn modules(&self) -> &[ModuleReport] {
+    /// extraction. Not public API: internal plumbing for the envelope's
+    /// `analysis` block, which must count every recorded status.
+    pub(crate) fn modules(&self) -> &[ModuleReport] {
         &self.facts.modules
     }
 

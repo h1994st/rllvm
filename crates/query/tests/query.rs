@@ -2783,7 +2783,7 @@ fn two_modules_with_identical_bytes_share_an_entry_but_not_an_id() {
 
     let session = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
     let report = session.cache_report().unwrap();
-    assert_eq!(report.hits + report.misses, 2);
+    assert_eq!((report.hits, report.misses, report.written), (1, 1, 1));
     let answer = serde_json::to_value(
         rllvm_query::run(&session, &rllvm_query::Query::Defs { name: "add".into() }).unwrap(),
     )
@@ -2810,8 +2810,12 @@ fn a_catalog_without_content_hashes_bypasses_the_cache() {
     let report = session.cache_report().unwrap();
     assert_eq!((report.hits, report.misses, report.written), (0, 0, 0));
     assert_eq!(cache.disk_bytes(), 0);
+    let analysis = rllvm_query::run(&session, &rllvm_query::Query::Externals)
+        .unwrap()
+        .analysis;
+    assert_eq!(analysis.analyzed, 1);
     assert_eq!(
-        session.modules()[0].status,
+        analysis.modules[0].status,
         rllvm_query::ModuleAnalysis::Analyzed
     );
 }

@@ -1083,6 +1083,73 @@ mod tests {
         assert_eq!(loaded.reports[0].status, ModuleAnalysis::Verified);
     }
 
+    /// `load_catalog` verifies a module's bytes against its recorded hash,
+    /// but a concurrent rewrite between that check and `session_from_loaded`
+    /// reading the bytes for real is exactly what `load::read_module`'s own
+    /// re-hash exists to catch. On a cache-enabled load this has to happen
+    /// *before* the cache is ever consulted for that module: the module must
+    /// be marked `Failed`, not analyzed under the wrong bitcode, and nothing
+    /// about it may reach the cache.
+    ///
+    /// The replacement is real, parseable bitcode -- different from the
+    /// original, but not garbage -- so this pins the re-hash catching it
+    /// specifically. Garbage bytes would also end up `Failed` with nothing
+    /// cached, just because extraction itself fails, which would pass this
+    /// test even if the re-hash check were silently removed.
+    #[test]
+    fn a_module_rewritten_after_verification_is_failed_and_never_cached() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module_path = rllvm_testkit::compile_bitcode(
+            &scratch,
+            "orig.c",
+            "int add(int a,int b){return a+b;}\n",
+        );
+        let original_bytes = std::fs::read(&module_path).unwrap();
+
+        let mut record = ModuleRecord::new("m");
+        record.path = Some(PathBuf::from(module_path.file_name().unwrap()));
+        record.content_sha256 = Some(hash_bytes(&original_bytes));
+        record.status = ModuleStatus::Available;
+        let catalog = ModuleCatalog::new(
+            CatalogOrigin {
+                kind: "test".into(),
+                input: PathBuf::from("test"),
+                sha256: None,
+            },
+            "test",
+            vec![record],
+        );
+        let catalog_path = scratch.path().join("catalog.json");
+        write_catalog(&catalog_path, &catalog).unwrap();
+
+        let loaded = load_catalog(&catalog_path).unwrap();
+
+        // Overwritten with different, still-valid bitcode after
+        // `load_catalog` already verified the original bytes: the mismatch
+        // is only visible to the re-check inside `session_from_loaded`.
+        let replacement = rllvm_testkit::compile_bitcode(
+            &scratch,
+            "replacement.c",
+            "int sub(int a,int b){return a-b;}\n",
+        );
+        std::fs::copy(&replacement, &module_path).unwrap();
+
+        let cache = FactsCache::new(&scratch.path().join("cache"), u64::MAX);
+        let session = session_from_loaded(loaded, Some(&cache)).unwrap();
+
+        assert_eq!(
+            session.modules()[0].status,
+            ModuleAnalysis::Failed,
+            "a module that changed after verification must not be silently analyzed"
+        );
+        let report = session.cache_report().unwrap();
+        assert_eq!(
+            report.written, 0,
+            "a module that was never read must never be cached"
+        );
+        assert_eq!(cache.disk_bytes(), 0);
+    }
+
     #[test]
     fn scope_counts_survive_a_failed_module() {
         let facts = facts_with_one_failed_module();
