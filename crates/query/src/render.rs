@@ -473,16 +473,6 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
         ));
     }
 
-    // Rule 5: a facts cache past its threshold, the one cache fact a reader
-    // must act on.
-    if let Some(cache) = analysis.cache.as_ref().filter(|cache| cache.over_threshold) {
-        notes.push(format!(
-            "facts cache is {}, over query_cache_warn_mb ({} MB); prune with rllvm-query cache clear",
-            human_bytes(cache.disk_bytes),
-            cache.warn_bytes / MIB
-        ));
-    }
-
     // Rule 4: every non-zero uncertainty count. The two counts that are
     // program-wide rather than per-answer print only when they can bear on
     // this answer: because it shows the thing they count (see [`Shown`]),
@@ -555,6 +545,16 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
                 notes.push(assumption.clone());
             }
         }
+    }
+
+    // Rule 7: a facts cache past its threshold, the one cache fact a reader
+    // must act on.
+    if let Some(cache) = analysis.cache.as_ref().filter(|cache| cache.over_threshold) {
+        notes.push(format!(
+            "facts cache is {}, over query_cache_warn_mb ({} MB); prune with rllvm-query cache clear",
+            human_bytes(cache.disk_bytes),
+            cache.warn_bytes / MIB
+        ));
     }
 
     if notes.is_empty() {
