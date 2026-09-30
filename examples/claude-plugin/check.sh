@@ -207,6 +207,55 @@ if problems:
 PY
 echo "ok: every name the skills use exists in the README, the tools or the server"
 
+# The cache warning hook: silent under the threshold, one warning per session
+# over it, whichever shape the tool result arrives in.
+if command -v jq >/dev/null; then
+    hook=$PLUGIN/scripts/cache-check.sh
+    jq -e '.hooks.PostToolUse[0].matcher == "mcp__plugin_rllvm_rllvm-query__.*"' \
+        "$PLUGIN/hooks/hooks.json" >/dev/null || fail "hooks.json does not match the server's tools"
+    answer() { # over_threshold
+        jq -cn --argjson over "$1" \
+            '{analysis: {cache: {hits: 1, misses: 0, written: 0,
+              disk_bytes: 1363148800, warn_bytes: 1073741824, over_threshold: $over}}}'
+    }
+    payload() { # session, answer, shape
+        case $3 in
+        string) jq -cn --arg s "$1" --arg t "$2" '{session_id: $s, tool_response: $t}' ;;
+        blocks) jq -cn --arg s "$1" --arg t "$2" '{session_id: $s, tool_response: {content: [{type: "text", text: $t}]}}' ;;
+        array) jq -cn --arg s "$1" --arg t "$2" '{session_id: $s, tool_output: [{type: "text", text: $t}]}' ;;
+        esac
+    }
+    export TMPDIR=$OUT/hook-tmp && mkdir -p "$TMPDIR"
+    [ -z "$(payload s1 "$(answer false)" string | "$hook")" ] || fail "hook spoke under the threshold"
+    for shape in string blocks array; do
+        said=$(payload "s-$shape" "$(answer true)" "$shape" | "$hook")
+        printf '%s' "$said" | jq -e '.systemMessage | test("1300.0 MB, over query_cache_warn_mb \\(1024 MB\\)")' \
+            >/dev/null || fail "no warning for a $shape result: $said"
+        printf '%s' "$said" | jq -e '.hookSpecificOutput.hookEventName == "PostToolUse"' >/dev/null ||
+            fail "no additionalContext for a $shape result: $said"
+        [ -z "$(payload "s-$shape" "$(answer true)" "$shape" | "$hook")" ] ||
+            fail "hook warned twice in one session ($shape)"
+    done
+    [ -z "$(printf '{"session_id":"x","tool_response":"not json"}' | "$hook")" ] ||
+        fail "hook spoke about a non-JSON result"
+
+    # A cache report missing disk_bytes/warn_bytes is not actionable: the
+    # hook stays silent and must not exit non-zero or burn the marker.
+    partial=$(jq -cn '{analysis: {cache: {over_threshold: true}}}')
+    status=0
+    said=$(payload s-partial "$partial" string | "$hook") || status=$?
+    [ -z "$said" ] || fail "hook spoke about a partial cache report: $said"
+    [ "$status" = 0 ] || fail "hook exited $status on a partial cache report"
+
+    # The partial report above must not have consumed s-partial's warning.
+    said=$(payload s-partial "$(answer true)" string | "$hook")
+    printf '%s' "$said" | jq -e '.systemMessage | test("1300.0 MB, over query_cache_warn_mb \\(1024 MB\\)")' \
+        >/dev/null || fail "a well-formed report after a partial one did not warn: $said"
+    echo "ok: the cache warning hook warns once per session over the threshold"
+else
+    echo "skip: jq is not installed, so the cache warning hook is not exercised"
+fi
+
 # CI does not install Claude Code, so strict validation runs where it is.
 # Validating the plugin also covers its skills.
 if command -v claude >/dev/null; then

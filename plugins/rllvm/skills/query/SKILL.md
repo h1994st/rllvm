@@ -29,6 +29,9 @@ cache's location and per-generation disk use, and `rllvm-query cache clear
 [--stale]` prunes it — `--stale` keeps this binary's own generation and
 removes only ones an older or newer LLVM left behind.
 
+When a warning about the facts cache appears, offer `rllvm-query cache clear
+--stale` or `cache clear` and run neither without the user's approval.
+
 ## Choosing the query
 
 | Question | Tool |
