@@ -76,17 +76,25 @@ struct Ctx {
     color: Color,
 }
 
-/// Bytes per MiB. Cache sizes print in MiB labelled "MB", matching
-/// `query_cache_warn_mb`.
-const MIB: u64 = 1024 * 1024;
+/// Bytes per MiB. Cache sizes below a GiB print in MiB labelled "MB",
+/// matching `query_cache_warn_mb`.
+pub(crate) const MIB: u64 = 1024 * 1024;
 
-/// `3774873` → `3.6 MB`.
+/// Bytes per GiB: the threshold at which [`human_bytes`] switches from MB to
+/// GB.
+const GIB: u64 = 1024 * MIB;
+
+/// `3774873` → `3.6 MB`; `1363148800` → `1.3 GB`.
 ///
 /// `pub` so the `rllvm-query` binary can format `cache clear`'s byte count
 /// with it; not part of the crate's documented API.
 #[doc(hidden)]
 pub fn human_bytes(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / MIB as f64)
+    if bytes >= GIB {
+        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    }
 }
 
 /// Printed where a fact has no source location, rather than an empty column
@@ -1707,9 +1715,11 @@ mod tests {
     }
 
     #[test]
-    fn byte_counts_print_in_mebibytes_with_one_decimal() {
+    fn byte_counts_print_in_mb_below_a_gib_and_gb_above() {
         assert_eq!(human_bytes(0), "0.0 MB");
         assert_eq!(human_bytes(3_774_873), "3.6 MB");
-        assert_eq!(human_bytes(1024 * 1024 * 1024), "1024.0 MB");
+        assert_eq!(human_bytes(GIB - 1), "1024.0 MB");
+        assert_eq!(human_bytes(GIB), "1.0 GB");
+        assert_eq!(human_bytes(1_363_148_800), "1.3 GB");
     }
 }

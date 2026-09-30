@@ -225,11 +225,12 @@ if command -v jq >/dev/null; then
         array) jq -cn --arg s "$1" --arg t "$2" '{session_id: $s, tool_output: [{type: "text", text: $t}]}' ;;
         esac
     }
+    rm -rf "$OUT/hook-tmp"
     export TMPDIR=$OUT/hook-tmp && mkdir -p "$TMPDIR"
     [ -z "$(payload s1 "$(answer false)" string | "$hook")" ] || fail "hook spoke under the threshold"
     for shape in string blocks array; do
         said=$(payload "s-$shape" "$(answer true)" "$shape" | "$hook")
-        printf '%s' "$said" | jq -e '.systemMessage | test("1300.0 MB, over query_cache_warn_mb \\(1024 MB\\)")' \
+        printf '%s' "$said" | jq -e '.systemMessage | test("1.3 GB, over query_cache_warn_mb \\(1024 MB\\)")' \
             >/dev/null || fail "no warning for a $shape result: $said"
         printf '%s' "$said" | jq -e '.hookSpecificOutput.hookEventName == "PostToolUse"' >/dev/null ||
             fail "no additionalContext for a $shape result: $said"
@@ -238,6 +239,15 @@ if command -v jq >/dev/null; then
     done
     [ -z "$(printf '{"session_id":"x","tool_response":"not json"}' | "$hook")" ] ||
         fail "hook spoke about a non-JSON result"
+
+    # `rllvm-query cache` itself answers with a top-level `cache`, not one
+    # nested under `analysis` -- the hook must read that shape too.
+    toplevel=$(jq -cn \
+        '{cache: {hits: 1, misses: 0, written: 0,
+          disk_bytes: 1363148800, warn_bytes: 1073741824, over_threshold: true}}')
+    said=$(payload s-toplevel "$toplevel" string | "$hook")
+    printf '%s' "$said" | jq -e '.systemMessage | test("1.3 GB, over query_cache_warn_mb \\(1024 MB\\)")' \
+        >/dev/null || fail "no warning for a top-level cache report: $said"
 
     # A cache report missing disk_bytes/warn_bytes is not actionable: the
     # hook stays silent and must not exit non-zero or burn the marker.
@@ -249,7 +259,7 @@ if command -v jq >/dev/null; then
 
     # The partial report above must not have consumed s-partial's warning.
     said=$(payload s-partial "$(answer true)" string | "$hook")
-    printf '%s' "$said" | jq -e '.systemMessage | test("1300.0 MB, over query_cache_warn_mb \\(1024 MB\\)")' \
+    printf '%s' "$said" | jq -e '.systemMessage | test("1.3 GB, over query_cache_warn_mb \\(1024 MB\\)")' \
         >/dev/null || fail "a well-formed report after a partial one did not warn: $said"
     echo "ok: the cache warning hook warns once per session over the threshold"
 else
