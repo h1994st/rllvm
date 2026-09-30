@@ -1,4 +1,5 @@
 use std::{
+    collections::{BTreeSet, HashMap},
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -1123,13 +1124,9 @@ fn a_parse_failure_carries_the_reason_llvm_gave() {
     );
 }
 
-#[test]
-fn an_inlined_frame_carries_its_own_file_not_the_leaf_s() {
-    let scratch = tempfile::tempdir().unwrap();
-    // `add` is inlined into `main`, so the call to `outer` sits in `main`
-    // with a leaf location in the header and a frame above it in `t.c`. Each
-    // frame resolves through its own scope; copying the leaf's file upward
-    // would report the header twice.
+/// Writes the inlining fixture and returns its bitcode: `add` is inlined into
+/// `main`, so the call to `outer` has a leaf in `helper.h` and a frame in `t.c`.
+fn inlined_fixture(scratch: &tempfile::TempDir) -> PathBuf {
     std::fs::write(
         scratch.path().join("helper.h"),
         "int outer(int);\n\
@@ -1143,7 +1140,157 @@ fn an_inlined_frame_carries_its_own_file_not_the_leaf_s() {
          int main(void){ return add(2,3); }\n",
     )
     .unwrap();
-    let facts = compile_and_extract(&scratch, "t.c", &["-g", "-O1"]);
+    compile_bitcode_file(&scratch.path().join("t.c"), &["-g", "-O1"])
+}
+
+/// Every location in `facts`, inlined frames included.
+fn all_locations(facts: &rllvm_query::ModuleFacts) -> Vec<&rllvm_query::SourceLocation> {
+    fn walk<'a>(
+        location: &'a rllvm_query::SourceLocation,
+        into: &mut Vec<&'a rllvm_query::SourceLocation>,
+    ) {
+        into.push(location);
+        for frame in &location.inlined_at {
+            walk(frame, into);
+        }
+    }
+    let mut into = Vec::new();
+    let roots = facts
+        .functions
+        .iter()
+        .filter_map(|f| f.location.as_ref())
+        .chain(facts.call_sites.iter().filter_map(|c| c.location.as_ref()))
+        .chain(facts.uses.iter().filter_map(|u| u.location.as_ref()));
+    for location in roots {
+        walk(location, &mut into);
+    }
+    into
+}
+
+/// Every module id `facts` names.
+fn all_module_ids(facts: &rllvm_query::ModuleFacts) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    for function in &facts.functions {
+        ids.insert(function.id.module_id.clone());
+    }
+    for site in &facts.call_sites {
+        ids.insert(site.id.function.module_id.clone());
+        match &site.target {
+            CallTarget::Direct { callee } => {
+                ids.insert(callee.module_id.clone());
+            }
+            CallTarget::Indirect {
+                llvm_target_bound: Some(bound),
+                ..
+            } => ids.extend(bound.iter().map(|id| id.module_id.clone())),
+            _ => {}
+        }
+    }
+    for use_fact in &facts.uses {
+        ids.insert(use_fact.used.module_id.clone());
+        ids.extend(use_fact.in_function.iter().map(|id| id.module_id.clone()));
+    }
+    ids
+}
+
+fn location_key(location: &rllvm_query::SourceLocation) -> PathBuf {
+    location.directory.as_ref().map_or_else(
+        || location.file.clone(),
+        |directory| directory.join(&location.file),
+    )
+}
+
+#[test]
+fn neutral_facts_name_no_module_and_no_source_status() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = inlined_fixture(&scratch);
+    let loaded = rllvm_query::load::LoadedModule {
+        id: "t".into(),
+        bytes: std::fs::read(&module).unwrap(),
+        record: Default::default(),
+    };
+    let facts = rllvm_query::extract::extract_neutral(&loaded).unwrap();
+
+    assert_eq!(all_module_ids(&facts), BTreeSet::from([String::new()]));
+    let locations = all_locations(&facts);
+    assert!(
+        locations.iter().any(|l| !l.inlined_at.is_empty()),
+        "fixture must inline"
+    );
+    for location in locations {
+        assert_eq!(location.source_status, rllvm_query::SourceStatus::Unknown);
+        assert_eq!(location.status_basis, None);
+    }
+}
+
+#[test]
+fn binding_stamps_the_module_on_every_id_and_status_on_every_frame() {
+    use rllvm_core::catalog::DigestOrigin;
+    use rllvm_query::{SourceStatus, load::SourceState};
+
+    let scratch = tempfile::tempdir().unwrap();
+    let module = inlined_fixture(&scratch);
+    let loaded = rllvm_query::load::LoadedModule {
+        id: "t".into(),
+        bytes: std::fs::read(&module).unwrap(),
+        record: Default::default(),
+    };
+    let mut facts = rllvm_query::extract::extract_neutral(&loaded).unwrap();
+
+    let call = facts
+        .call_sites
+        .iter()
+        .find(|c| matches!(&c.target, CallTarget::Direct { callee } if callee.symbol == "outer"))
+        .expect("call to outer");
+    let leaf = call
+        .location
+        .clone()
+        .expect("an inlined call has a location");
+    let frame = leaf.inlined_at[0].clone();
+    let status = HashMap::from([
+        (
+            ("m".to_string(), location_key(&leaf)),
+            SourceState {
+                status: SourceStatus::Current,
+                basis: Some(DigestOrigin::Capture),
+            },
+        ),
+        (
+            ("m".to_string(), location_key(&frame)),
+            SourceState {
+                status: SourceStatus::Modified,
+                basis: Some(DigestOrigin::Compiler),
+            },
+        ),
+    ]);
+
+    facts.bind_to_catalog("m", &status);
+
+    assert_eq!(all_module_ids(&facts), BTreeSet::from(["m".to_string()]));
+    let call = facts
+        .call_sites
+        .iter()
+        .find(|c| matches!(&c.target, CallTarget::Direct { callee } if callee.symbol == "outer"))
+        .unwrap();
+    let leaf = call.location.as_ref().unwrap();
+    assert_eq!(leaf.source_status, SourceStatus::Current);
+    assert_eq!(leaf.status_basis, Some(DigestOrigin::Capture));
+    assert_eq!(leaf.inlined_at[0].source_status, SourceStatus::Modified);
+    assert_eq!(
+        leaf.inlined_at[0].status_basis,
+        Some(DigestOrigin::Compiler)
+    );
+}
+
+#[test]
+fn an_inlined_frame_carries_its_own_file_not_the_leaf_s() {
+    let scratch = tempfile::tempdir().unwrap();
+    // `add` is inlined into `main`, so the call to `outer` sits in `main`
+    // with a leaf location in the header and a frame above it in `t.c`. Each
+    // frame resolves through its own scope; copying the leaf's file upward
+    // would report the header twice.
+    let module = inlined_fixture(&scratch);
+    let facts = extract_module(&module);
 
     let call = facts
         .call_sites
