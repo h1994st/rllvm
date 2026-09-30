@@ -119,7 +119,12 @@ pub fn llvm_version() -> String {
     format!("{major}.{minor}.{patch}")
 }
 
-#[derive(Clone, Debug, Default)]
+/// The module id neutral facts carry until [`ModuleFacts::bind_to_catalog`]
+/// stamps the catalog's. Extraction must not depend on the catalog: the same
+/// bytes get a different id in every catalog that names them.
+const NEUTRAL_MODULE_ID: &str = "";
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ModuleFacts {
     pub functions: Vec<FunctionFact>,
     pub call_sites: Vec<CallSiteFact>,
@@ -129,6 +134,72 @@ pub struct ModuleFacts {
     /// Non-fatal problems observed while extracting. Surfaced in the
     /// analysis report, not swallowed into logging.
     pub diagnostics: Vec<String>,
+}
+
+impl ModuleFacts {
+    /// Stamps `module_id` on every function id and resolves every location's
+    /// source status, inlined frames included. Runs on every load, whether the
+    /// neutral facts were just extracted or read from the cache, so both paths
+    /// produce the same facts.
+    ///
+    /// Status is keyed by module as well as path: two modules may record
+    /// different hashes for the same file.
+    pub fn bind_to_catalog(
+        &mut self,
+        module_id: &str,
+        source_status: &HashMap<(String, PathBuf), SourceState>,
+    ) {
+        let stamp = |id: &mut FunctionId| id.module_id = module_id.to_string();
+        let resolve = |location: &mut Option<SourceLocation>| {
+            if let Some(location) = location {
+                resolve_status(location, module_id, source_status);
+            }
+        };
+        for function in &mut self.functions {
+            stamp(&mut function.id);
+            resolve(&mut function.location);
+        }
+        for site in &mut self.call_sites {
+            stamp(&mut site.id.function);
+            resolve(&mut site.location);
+            match &mut site.target {
+                CallTarget::Direct { callee } => stamp(callee),
+                CallTarget::Indirect {
+                    llvm_target_bound: Some(bound),
+                    ..
+                } => bound.iter_mut().for_each(stamp),
+                CallTarget::Indirect { .. }
+                | CallTarget::Intrinsic { .. }
+                | CallTarget::InlineAsm => {}
+            }
+        }
+        for use_fact in &mut self.uses {
+            stamp(&mut use_fact.used);
+            if let Some(function) = &mut use_fact.in_function {
+                stamp(function);
+            }
+            resolve(&mut use_fact.location);
+        }
+    }
+}
+
+/// One location and its inlining frames. The path is the one `build_location`
+/// used to key on: the directory joined with the file, or the file alone.
+fn resolve_status(
+    location: &mut SourceLocation,
+    module_id: &str,
+    source_status: &HashMap<(String, PathBuf), SourceState>,
+) {
+    let full = match &location.directory {
+        Some(directory) => directory.join(&location.file),
+        None => location.file.clone(),
+    };
+    let state = source_status.get(&(module_id.to_string(), full)).copied();
+    location.source_status = state.map_or(SourceStatus::Unknown, |state| state.status);
+    location.status_basis = state.and_then(|state| state.basis);
+    for frame in &mut location.inlined_at {
+        resolve_status(frame, module_id, source_status);
+    }
 }
 
 /// Disposes the context on every exit path, including the early returns a
@@ -308,13 +379,8 @@ unsafe fn value_name(value: LLVMValueRef) -> String {
 /// onto the frames above it.
 ///
 /// # Safety
-/// `value` must be a valid `LLVMValueRef` in a live context, and `module_id`
-/// must name the module it came from.
-unsafe fn location_of(
-    value: LLVMValueRef,
-    module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceState>,
-) -> Option<SourceLocation> {
+/// `value` must be a valid `LLVMValueRef` in a live context.
+unsafe fn location_of(value: LLVMValueRef) -> Option<SourceLocation> {
     // SAFETY: the caller guarantees a live value; this accessor accepts
     // functions, globals and instructions alike and answers 0 without one.
     let line = unsafe { LLVMGetDebugLocLine(value) };
@@ -350,7 +416,7 @@ unsafe fn location_of(
                 break;
             }
             // SAFETY: `outer` is the live `DILocation` of the calling frame.
-            inlined_at.push(unsafe { location_of_metadata(outer, module_id, source_status) });
+            inlined_at.push(unsafe { location_of_metadata(outer) });
             metadata = outer;
         }
     }
@@ -363,8 +429,6 @@ unsafe fn location_of(
             directory,
             line,
             LLVMGetDebugLocColumn(value),
-            module_id,
-            source_status,
             inlined_at,
         )
     })
@@ -375,11 +439,7 @@ unsafe fn location_of(
 ///
 /// # Safety
 /// `location` must be a valid `DILocation` metadata reference.
-unsafe fn location_of_metadata(
-    location: LLVMMetadataRef,
-    module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceState>,
-) -> SourceLocation {
+unsafe fn location_of_metadata(location: LLVMMetadataRef) -> SourceLocation {
     // SAFETY: the caller guarantees a live `DILocation`, whose scope always
     // resolves to a file.
     let scope = unsafe { LLVMDILocationGetScope(location) };
@@ -408,40 +468,28 @@ unsafe fn location_of_metadata(
             directory,
             LLVMDILocationGetLine(location),
             LLVMDILocationGetColumn(location),
-            module_id,
-            source_status,
             Vec::new(),
         )
     }
 }
 
-/// Assembles a location and resolves its source status, which is keyed by
-/// module as well as path: two modules may record different hashes for the
-/// same file.
-#[allow(clippy::too_many_arguments)]
-unsafe fn build_location(
+/// Assembles a location with no source status: whether the file is current
+/// is a fact about the catalog and the disk now, which
+/// [`ModuleFacts::bind_to_catalog`] decides, not about the bitcode.
+fn build_location(
     file: String,
     directory: String,
     line: u32,
     column: u32,
-    module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceState>,
     inlined_at: Vec<SourceLocation>,
 ) -> SourceLocation {
-    let file = PathBuf::from(file);
-    let full = if directory.is_empty() {
-        file.clone()
-    } else {
-        PathBuf::from(&directory).join(&file)
-    };
-    let state = source_status.get(&(module_id.to_string(), full)).copied();
     SourceLocation {
-        file,
+        file: PathBuf::from(file),
         directory: (!directory.is_empty()).then(|| PathBuf::from(directory)),
         line,
         column,
-        source_status: state.map_or(SourceStatus::Unknown, |state| state.status),
-        status_basis: state.and_then(|state| state.basis),
+        source_status: SourceStatus::Unknown,
+        status_basis: None,
         inlined_at,
     }
 }
@@ -740,7 +788,6 @@ unsafe fn collect_uses(
     function: LLVMValueRef,
     id: &FunctionId,
     module_id: &str,
-    source_status: &HashMap<(String, PathBuf), SourceState>,
     uses: &mut Vec<UseFact>,
 ) {
     // SAFETY: the caller guarantees a live function.
@@ -790,7 +837,7 @@ unsafe fn collect_uses(
             // SAFETY: reached only for a live global variable.
             in_global: is_global.then(|| unsafe { value_name(user) }),
             location: is_instruction
-                .then(|| unsafe { location_of(user, module_id, source_status) })
+                .then(|| unsafe { location_of(user) })
                 .flatten(),
             kind,
         });
@@ -819,22 +866,30 @@ fn parse_error(module: &LoadedModule, diagnostics: &[String]) -> Error {
     }
 }
 
+/// Facts that depend on the bytes alone: every module id is empty and every
+/// location's status `unknown`. What is cached (see `cache.rs`).
+/// `module` supplies the bytes and, for a parse error, its id and compiler.
+pub fn extract_neutral(module: &LoadedModule) -> Result<ModuleFacts, Error> {
+    // SAFETY: the context, buffer and module are created here, used only
+    // within this function, and disposed before returning.
+    unsafe { extract_inner(module) }
+}
+
+/// Neutral extraction bound to `module`'s catalog id and the source status
+/// observed at load.
 pub fn extract(
     module: &LoadedModule,
     source_status: &HashMap<(String, PathBuf), SourceState>,
 ) -> Result<ModuleFacts, Error> {
-    // SAFETY: the context, buffer and module are created here, used only
-    // within this function, and disposed before returning.
-    unsafe { extract_inner(module, source_status) }
+    let mut facts = extract_neutral(module)?;
+    facts.bind_to_catalog(&module.id, source_status);
+    Ok(facts)
 }
 
 /// # Safety
 /// No preconditions: every handle this touches is created, used and disposed
 /// inside it. It is `unsafe` only because it drives the C API directly.
-unsafe fn extract_inner(
-    module: &LoadedModule,
-    source_status: &HashMap<(String, PathBuf), SourceState>,
-) -> Result<ModuleFacts, Error> {
+unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
     // Declaration order is drop order reversed: the parsed module is disposed
     // first, then the buffer, then the context, and the diagnostic sink last
     // because the context can still reach it while it is being disposed.
@@ -912,7 +967,7 @@ unsafe fn extract_inner(
     let mut function = unsafe { LLVMGetFirstFunction(parsed.0) };
     while !function.is_null() {
         let id = FunctionId {
-            module_id: module.id.clone(),
+            module_id: NEUTRAL_MODULE_ID.to_string(),
             // SAFETY: `function` is a live function in that module.
             symbol: unsafe { value_name(function) },
         };
@@ -931,7 +986,7 @@ unsafe fn extract_inner(
             let mut instruction = unsafe { LLVMGetFirstInstruction(block) };
             while !instruction.is_null() {
                 // SAFETY: `instruction` is live and belongs to `block`.
-                let location = unsafe { location_of(instruction, &module.id, source_status) };
+                let location = unsafe { location_of(instruction) };
                 if let Some(location) = &location {
                     mapped_lines.insert((location.file.clone(), location.line));
                 }
@@ -949,7 +1004,9 @@ unsafe fn extract_inner(
                         },
                         location,
                         // SAFETY: reached only for a call or invoke.
-                        target: unsafe { call_target(instruction, &module.id, callees_kind) },
+                        target: unsafe {
+                            call_target(instruction, NEUTRAL_MODULE_ID, callees_kind)
+                        },
                     });
                 }
 
@@ -995,12 +1052,12 @@ unsafe fn extract_inner(
             signature: unsafe {
                 owned_message(LLVMPrintTypeToString(LLVMGlobalGetValueType(function)))
             },
-            location: unsafe { location_of(function, &module.id, source_status) },
+            location: unsafe { location_of(function) },
             mapped_lines,
         });
 
         // SAFETY: `function` is live in the module being walked.
-        unsafe { collect_uses(function, &id, &module.id, source_status, &mut uses) };
+        unsafe { collect_uses(function, &id, NEUTRAL_MODULE_ID, &mut uses) };
 
         // SAFETY: as above.
         function = unsafe { LLVMGetNextFunction(function) };
