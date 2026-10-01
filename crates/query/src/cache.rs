@@ -183,9 +183,9 @@ fn walk_generation(directory: &Path) -> (usize, u64) {
 
 /// Removes `path` if it is an orphaned `.tmp*` write: one old enough
 /// (`ORPHAN_AGE`) that it cannot belong to a write still in progress.
-/// Returns its size when removed. Factored out of `clear`'s per-generation
-/// sweep so the age check lives in one place. An unreadable mtime is left
-/// alone rather than guessed at.
+/// Returns its size when removed. Shared by the per-generation and
+/// top-level sweeps in `clear`, so the age check lives in one place. An
+/// unreadable mtime is left alone rather than guessed at.
 fn remove_if_orphaned_temp_file(path: &Path) -> Option<u64> {
     let metadata = fs::metadata(path).ok()?;
     let modified = metadata.modified().ok()?;
@@ -513,9 +513,12 @@ impl FactsCache {
     /// Removes entries: every generation's, or only those this binary no
     /// longer reads. Deletes `.mpz` files inside `query-facts/` generation
     /// directories, plus any `.tmp*` file old enough (`ORPHAN_AGE`) to be an
-    /// abandoned write rather than one still in progress, then each
-    /// directory left empty; anything else there is not the cache's to
-    /// delete.
+    /// abandoned write rather than one still in progress -- in every
+    /// generation directory, and at the top level of `query-facts/` itself,
+    /// where a usage-memo write killed mid-rename can leave one beside
+    /// `usage.json` -- then each generation directory left empty; anything
+    /// else there is not the cache's to delete, and `usage.json` is never an
+    /// orphan no matter its age.
     pub fn clear(&self, stale_only: bool) -> Cleared {
         let mut cleared = Cleared::default();
         for generation in self.generations() {
@@ -546,6 +549,23 @@ impl FactsCache {
             }
             // Fails, harmlessly, when something that is not an entry remains.
             let _ = fs::remove_dir(&directory);
+        }
+        if let Ok(files) = fs::read_dir(&self.directory) {
+            for file in files.filter_map(Result::ok) {
+                // Generation directories are handled above; this sweeps only
+                // what sits directly in `query-facts/`.
+                if file.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let path = file.path();
+                if !file.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
+                    continue;
+                }
+                if let Some(size) = remove_if_orphaned_temp_file(&path) {
+                    cleared.orphans += 1;
+                    cleared.bytes += size;
+                }
+            }
         }
         let (_, memo) = self.exact_usage();
         self.write_usage_memo(&memo);
@@ -1009,5 +1029,36 @@ mod tests {
             "--stale must not touch the current generation"
         );
         assert!(!stale_orphan.exists());
+    }
+
+    #[test]
+    fn clear_removes_an_old_orphaned_temp_file_left_beside_the_usage_memo() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = FactsCache::new(root.path(), u64::MAX);
+        std::fs::create_dir_all(cache.directory()).unwrap();
+        std::fs::write(cache.directory().join(USAGE_FILE), b"{}").unwrap();
+
+        let orphan = cache.directory().join(".tmpUSAGE01");
+        std::fs::write(&orphan, [0u8; 9]).unwrap();
+        std::fs::File::open(&orphan)
+            .unwrap()
+            .set_modified(stale_mtime())
+            .unwrap();
+        let fresh = cache.directory().join(".tmpUSAGEFRESH");
+        std::fs::write(&fresh, [0u8; 2]).unwrap();
+
+        let cleared = cache.clear(false);
+
+        assert_eq!(cleared.orphans, 1);
+        assert_eq!(cleared.bytes, 9);
+        assert!(!orphan.exists());
+        assert!(
+            fresh.exists(),
+            "a fresh top-level temp file might still be being written"
+        );
+        assert!(
+            cache.directory().join(USAGE_FILE).exists(),
+            "usage.json is never an orphan, no matter its age"
+        );
     }
 }
