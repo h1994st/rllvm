@@ -406,6 +406,10 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
     });
     let mut archives = rllvm_core::catalog::ArchiveCache::default();
     let mut unreadable = Vec::new();
+    // `report.disk_bytes` starts as the pre-load measurement and grows by
+    // each write's size, so it cannot be handed to `note_writes` directly;
+    // this tracks only what this load wrote.
+    let mut written_bytes: u64 = 0;
 
     for pending in &loaded.pending {
         // A module without a recorded hash cannot be keyed: extract it and
@@ -434,6 +438,7 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
                             Ok(size) => {
                                 report.written += 1;
                                 report.disk_bytes += size;
+                                written_bytes += size;
                             }
                             Err(error) => {
                                 tracing::debug!(module = %pending.id, %error, "facts not cached")
@@ -471,8 +476,11 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
     // Buffers are not needed once every module is read; restores the
     // pre-cache peak-memory behaviour.
     drop(archives);
-    if let Some(report) = &mut report {
+    if let (Some(cache), Some(report)) = (cache, &mut report) {
         report.over_threshold = report.disk_bytes > report.warn_bytes;
+        if report.written > 0 {
+            cache.note_writes(report.written, written_bytes);
+        }
     }
 
     // Nor may a module that verified at load time and then vanished or
