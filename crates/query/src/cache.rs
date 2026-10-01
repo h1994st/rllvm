@@ -902,13 +902,25 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cache = FactsCache::new(root.path(), u64::MAX);
         cache.write(SHA, &sample()).unwrap();
-        // Recorded safely outside the racy window, as a real `disk_bytes()`
-        // call racing its own just-finished write would not be, so this
-        // specifically exercises "mtime changed", not "record was racy".
+
+        // Push the generation directory's mtime 10s into the past -- far
+        // more than any real filesystem's mtime granularity (1s on HFS+) --
+        // so the write below is guaranteed to land in a different tick on
+        // any filesystem, rather than relying on how fast this test happens
+        // to run.
+        let generation_dir = cache.directory().join(FactsCache::generation());
+        std::fs::File::open(&generation_dir)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(10))
+            .unwrap();
+        // A record matching that (backdated) mtime and recorded roughly
+        // now -- trusted because it is safely outside the racy window of
+        // the backdated mtime, not because the test asserts a `recorded`
+        // real code would never produce.
         plant_memo_record(&cache, 1, Duration::from_secs(10));
 
         let other = SHA.replace('1', "4");
-        cache.write(&other, &sample()).unwrap(); // changes the generation dir's mtime
+        cache.write(&other, &sample()).unwrap(); // moves the mtime to now
 
         let exact: u64 = cache.generations().iter().map(|g| g.bytes).sum();
         assert_eq!(cache.disk_bytes(), exact);
