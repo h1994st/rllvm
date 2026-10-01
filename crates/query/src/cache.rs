@@ -17,7 +17,7 @@ use std::{
     fs,
     io::Write as _,
     path::{Path, PathBuf},
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,17 @@ const TEMP_PREFIX: &str = ".tmp";
 /// the `is_dir` filter in `generations()` already ignores it.
 const USAGE_FILE: &str = "usage.json";
 
+/// Git's racy-timestamp margin: a usage record is trusted only once it was
+/// recorded at least this long after the mtime it recorded. Many
+/// filesystems' mtimes are coarser than the gap between two commands running
+/// back to back -- 1 second on HFS+, and tick-granular on some ext4/xfs
+/// configurations -- so a write landing within the same tick as a prior
+/// recording would leave the directory's mtime unchanged even though its
+/// contents did change. A record made comfortably after its own mtime cannot
+/// have missed a same-tick write that way; one made right away might have,
+/// and is re-walked instead of trusted.
+const RACY_WINDOW: Duration = Duration::from_secs(2);
+
 /// What an entry claims to be. Checked on read, so a renamed or misplaced
 /// file cannot be served under another key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,20 +98,41 @@ pub struct GenerationUsage {
 /// and nanoseconds since the epoch. Plain fields, not a duration or
 /// `SystemTime` itself, so the memo's JSON stays stable and comparable
 /// without a custom (de)serializer.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Mtime {
     secs: u64,
     nanos: u32,
 }
 
+impl Mtime {
+    fn as_duration(self) -> Duration {
+        Duration::new(self.secs, self.nanos)
+    }
+}
+
 /// One generation's memoized usage, keyed by generation name in
-/// `UsageMemo`. Valid only as long as `modified` still matches the
-/// directory's actual mtime.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `UsageMemo`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct GenerationRecord {
+    /// The generation directory's mtime when this record was made.
     modified: Mtime,
+    /// Wall-clock time when this record was made (not the directory's
+    /// mtime): the racy-timestamp check in [`GenerationRecord::trusted_for`]
+    /// needs to know how long ago that was, not just what it was.
+    recorded: Mtime,
     entries: usize,
     bytes: u64,
+}
+
+impl GenerationRecord {
+    /// Whether this record can stand in for a walk of a directory whose
+    /// current mtime is `modified`. Requires an exact mtime match *and*
+    /// that the record was made at least [`RACY_WINDOW`] after that mtime --
+    /// see its doc comment for why the match alone is not enough.
+    fn trusted_for(&self, modified: Mtime) -> bool {
+        self.modified == modified
+            && self.recorded.as_duration() >= self.modified.as_duration() + RACY_WINDOW
+    }
 }
 
 /// `query-facts/usage.json`'s contents: every generation this binary has
@@ -110,22 +142,28 @@ struct UsageMemo {
     generations: BTreeMap<String, GenerationRecord>,
 }
 
-/// `dir`'s own mtime, reduced to [`Mtime`]. `None` when it cannot be
-/// statted or predates the epoch (never true in practice) -- never a panic,
-/// since a record that cannot be compared is simply treated as stale.
-fn directory_mtime(dir: &Path) -> Option<Mtime> {
-    let modified = fs::metadata(dir).ok()?.modified().ok()?;
-    let elapsed = modified.duration_since(UNIX_EPOCH).ok()?;
+/// `time` reduced to [`Mtime`]: seconds and nanoseconds since the epoch.
+/// `None` when `time` predates the epoch (never true in practice) -- never a
+/// panic, since a timestamp that cannot be compared is simply treated as
+/// unavailable.
+fn mtime_of(time: SystemTime) -> Option<Mtime> {
+    let elapsed = time.duration_since(UNIX_EPOCH).ok()?;
     Some(Mtime {
         secs: elapsed.as_secs(),
         nanos: elapsed.subsec_nanos(),
     })
 }
 
+/// `dir`'s own mtime, reduced to [`Mtime`]. `None` when it cannot be
+/// statted.
+fn directory_mtime(dir: &Path) -> Option<Mtime> {
+    mtime_of(fs::metadata(dir).ok()?.modified().ok()?)
+}
+
 /// Entry count and total size of one generation directory's `.mpz` files.
-/// Shared by the exact walk (`generations()`) and the memo-aware one
-/// (`disk_bytes()`), so the two paths can never drift. Anything that cannot
-/// be listed or measured counts as zero.
+/// Shared by every exact measurement (`generations()`, `exact_usage()`) and
+/// the memo-aware one (`disk_bytes()`), so the walk logic can never drift
+/// between them. Anything that cannot be listed or measured counts as zero.
 fn walk_generation(directory: &Path) -> (usize, u64) {
     let Ok(files) = fs::read_dir(directory) else {
         return (0, 0);
@@ -141,6 +179,22 @@ fn walk_generation(directory: &Path) -> (usize, u64) {
         .fold((0, 0), |(count, total), metadata| {
             (count + 1, total + metadata.len())
         })
+}
+
+/// Removes `path` if it is an orphaned `.tmp*` write: one old enough
+/// (`ORPHAN_AGE`) that it cannot belong to a write still in progress.
+/// Returns its size when removed. Factored out of `clear`'s per-generation
+/// sweep so the age check lives in one place. An unreadable mtime is left
+/// alone rather than guessed at.
+fn remove_if_orphaned_temp_file(path: &Path) -> Option<u64> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let age = SystemTime::now().duration_since(modified).ok()?;
+    if age <= ORPHAN_AGE {
+        return None;
+    }
+    fs::remove_file(path).ok()?;
+    Some(metadata.len())
 }
 
 /// The facts cache at one location. Cheap to build; touches the disk only
@@ -244,64 +298,61 @@ impl FactsCache {
     /// Total size of every entry in every generation.
     ///
     /// Memo-aware: a generation whose directory mtime still matches
-    /// `query-facts/usage.json`'s record is taken from the memo rather than
-    /// walked. Sound because every entry is published by renaming a temp
-    /// file into the generation directory, and `clear` removes files from
-    /// it; both change the directory's mtime, and nothing else touches an
-    /// entry once written. Any generation that is new, changed, or has no
+    /// `query-facts/usage.json`'s record, and whose record was made safely
+    /// outside [`RACY_WINDOW`] of that mtime, is taken from the memo rather
+    /// than walked. Sound because every entry is published by renaming a
+    /// temp file into the generation directory, and `clear` removes files
+    /// from it; both change the directory's mtime, and nothing else touches
+    /// an entry once written -- subject to the racy-timestamp caveat on
+    /// [`RACY_WINDOW`]. Any generation that is new, changed, racy, or has no
     /// record is walked with [`walk_generation`] and the memo updated; a
     /// generation the memo has that no longer exists on disk is dropped
     /// from it. Changes are saved (best-effort: a write failure is logged
     /// and otherwise ignored, since the memo is an optimization, never a
     /// source of truth). A missing `query-facts/` is 0 and writes no memo.
     pub fn disk_bytes(&self) -> u64 {
-        let Ok(directories) = fs::read_dir(&self.directory) else {
-            return 0;
-        };
+        let directories = self.generation_directories();
         let mut memo = self.read_usage_memo();
+        let now = mtime_of(SystemTime::now());
         let mut seen = BTreeSet::new();
         let mut changed = false;
         let mut total = 0u64;
-        for entry in directories.filter_map(Result::ok) {
-            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = entry.path();
+        for (name, path) in directories {
             let modified = directory_mtime(&path);
             let fresh = modified.and_then(|modified| {
                 memo.generations
                     .get(&name)
-                    .filter(|record| record.modified == modified)
+                    .filter(|record| record.trusted_for(modified))
                     .map(|record| record.bytes)
             });
             let bytes = match fresh {
                 Some(bytes) => bytes,
                 None => {
-                    let walked = walk_generation(&path);
-                    match modified {
-                        Some(modified) => {
+                    let (entries, bytes) = walk_generation(&path);
+                    match (modified, now) {
+                        (Some(modified), Some(recorded)) => {
                             memo.generations.insert(
                                 name.clone(),
                                 GenerationRecord {
                                     modified,
-                                    entries: walked.0,
-                                    bytes: walked.1,
+                                    recorded,
+                                    entries,
+                                    bytes,
                                 },
                             );
                             changed = true;
                         }
-                        None => {
-                            // No reliable mtime to record against: drop any
-                            // stale record so the next load walks again too,
-                            // rather than trusting a comparison it cannot
-                            // make.
+                        _ => {
+                            // No reliable timestamp to record against: drop
+                            // any stale record so the next load walks again
+                            // too, rather than trusting a comparison it
+                            // cannot make.
                             if memo.generations.remove(&name).is_some() {
                                 changed = true;
                             }
                         }
                     }
-                    walked.1
+                    bytes
                 }
             };
             total += bytes;
@@ -316,20 +367,36 @@ impl FactsCache {
         total
     }
 
+    /// The top-level entries of `query-facts/` that are generation
+    /// directories, as (name, path) pairs. The one listing shared by every
+    /// caller that needs it, so it exists in a single place. Empty when
+    /// `query-facts/` does not exist or cannot be listed.
+    fn generation_directories(&self) -> Vec<(String, PathBuf)> {
+        let Ok(directories) = fs::read_dir(&self.directory) else {
+            return Vec::new();
+        };
+        directories
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+            .map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                )
+            })
+            .collect()
+    }
+
     /// Every generation directory with its entry count and size, sorted by
     /// name. Always an exact walk: callers that report or mutate the cache
     /// need the true state, not the memo.
     fn generations(&self) -> Vec<GenerationUsage> {
         let current = FactsCache::generation();
-        let Ok(directories) = fs::read_dir(&self.directory) else {
-            return Vec::new();
-        };
-        let mut generations: Vec<GenerationUsage> = directories
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .map(|directory| {
-                let name = directory.file_name().to_string_lossy().into_owned();
-                let (entries, bytes) = walk_generation(&directory.path());
+        let mut generations: Vec<GenerationUsage> = self
+            .generation_directories()
+            .into_iter()
+            .map(|(name, path)| {
+                let (entries, bytes) = walk_generation(&path);
                 GenerationUsage {
                     current: name == current,
                     name,
@@ -342,50 +409,49 @@ impl FactsCache {
         generations
     }
 
-    /// Folds this load's writes into the current generation's memo record,
-    /// so the next `disk_bytes()` need not walk it. Called only when the
-    /// load wrote at least one entry (`entries == 0` is a no-op).
+    /// An exact measurement of every generation, for the callers (`usage`,
+    /// `clear`) that must rewrite the memo to match the true state exactly
+    /// rather than merge with whatever it held before.
     ///
-    /// Accepted gap: a concurrent writer's entry landing between this
-    /// load's last `write` and this call's read of the generation
-    /// directory's mtime is not counted until that generation changes again
-    /// or `rllvm-query cache` re-walks it exactly. The number only feeds a
-    /// warning threshold.
-    pub fn note_writes(&self, entries: usize, bytes: u64) {
-        if entries == 0 {
-            return;
+    /// Each generation's mtime is read *before* that generation is walked,
+    /// so a write landing mid-walk shows up as a change the *next*
+    /// measurement will catch, rather than being paired with a mtime that
+    /// had already moved past what was counted. `recorded` is one "now"
+    /// taken after every walk in this call has completed, which is also
+    /// after each individual one.
+    fn exact_usage(&self) -> (Vec<GenerationUsage>, UsageMemo) {
+        let current = FactsCache::generation();
+        let mut generations = Vec::new();
+        let mut measured: Vec<(String, Option<Mtime>, usize, u64)> = Vec::new();
+        for (name, path) in self.generation_directories() {
+            let modified = directory_mtime(&path);
+            let (entries, bytes) = walk_generation(&path);
+            generations.push(GenerationUsage {
+                current: name == current,
+                name: name.clone(),
+                entries,
+                bytes,
+            });
+            measured.push((name, modified, entries, bytes));
         }
-        let generation = FactsCache::generation();
-        let Some(modified) = directory_mtime(&self.directory.join(&generation)) else {
-            return;
-        };
-        let mut memo = self.read_usage_memo();
-        let mut record = memo.generations.remove(&generation).unwrap_or_default();
-        record.entries += entries;
-        record.bytes += bytes;
-        record.modified = modified;
-        memo.generations.insert(generation, record);
-        self.write_usage_memo(&memo);
-    }
-
-    /// A fresh memo built from an exact walk's results, for callers
-    /// (`usage`, `clear`) that already have one and want the memo to match
-    /// it precisely rather than merge with whatever it held before.
-    fn memo_from_generations(&self, generations: &[GenerationUsage]) -> UsageMemo {
+        generations.sort_by(|a, b| a.name.cmp(&b.name));
         let mut memo = UsageMemo::default();
-        for generation in generations {
-            if let Some(modified) = directory_mtime(&self.directory.join(&generation.name)) {
-                memo.generations.insert(
-                    generation.name.clone(),
-                    GenerationRecord {
-                        modified,
-                        entries: generation.entries,
-                        bytes: generation.bytes,
-                    },
-                );
+        if let Some(recorded) = mtime_of(SystemTime::now()) {
+            for (name, modified, entries, bytes) in measured {
+                if let Some(modified) = modified {
+                    memo.generations.insert(
+                        name,
+                        GenerationRecord {
+                            modified,
+                            recorded,
+                            entries,
+                            bytes,
+                        },
+                    );
+                }
             }
         }
-        memo
+        (generations, memo)
     }
 
     fn usage_memo_path(&self) -> PathBuf {
@@ -402,21 +468,27 @@ impl FactsCache {
     }
 
     /// Atomically overwrites the memo: written beside it and renamed into
-    /// place, same pattern as `write`. Failure -- including `query-facts/`
-    /// not existing yet, which `disk_bytes` and `note_writes` never create
-    /// just to record a memo -- is logged and otherwise ignored.
+    /// place, same pattern as `write`. Every failure -- including an
+    /// encoding failure, and `query-facts/` not existing yet, which
+    /// `disk_bytes` never creates just to record a memo -- is logged and
+    /// otherwise ignored; the memo is an optimization, never a source of
+    /// truth.
     fn write_usage_memo(&self, memo: &UsageMemo) {
-        if let Err(error) = self.try_write_usage_memo(memo) {
+        let encoded = match serde_json::to_vec_pretty(memo) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                tracing::debug!(%error, "facts cache usage memo not encoded");
+                return;
+            }
+        };
+        if let Err(error) = self.try_write_usage_memo(&encoded) {
             tracing::debug!(%error, "facts cache usage memo not written");
         }
     }
 
-    fn try_write_usage_memo(&self, memo: &UsageMemo) -> Result<(), Error> {
-        let encoded = serde_json::to_vec_pretty(memo).map_err(|error| {
-            Error::InvalidArguments(format!("cannot encode cache usage memo: {error}"))
-        })?;
+    fn try_write_usage_memo(&self, encoded: &[u8]) -> Result<(), Error> {
         let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)?;
-        temporary.write_all(&encoded)?;
+        temporary.write_all(encoded)?;
         temporary
             .persist(self.usage_memo_path())
             .map_err(|error| error.error)?;
@@ -424,9 +496,9 @@ impl FactsCache {
     }
 
     pub fn usage(&self, enabled: bool) -> CacheUsage {
-        let generations = self.generations();
+        let (generations, memo) = self.exact_usage();
         let total_bytes = generations.iter().map(|g| g.bytes).sum();
-        self.write_usage_memo(&self.memo_from_generations(&generations));
+        self.write_usage_memo(&memo);
         CacheUsage {
             directory: self.directory.clone(),
             enabled,
@@ -467,32 +539,16 @@ impl FactsCache {
                 if !file.file_name().to_string_lossy().starts_with(TEMP_PREFIX) {
                     continue;
                 }
-                // An orphaned write: a process killed between creating its
-                // temp file and renaming it into place. Only removed once
-                // old enough that it cannot belong to a write still in
-                // progress; an unreadable mtime is left alone rather than
-                // guessed at.
-                let Ok(metadata) = file.metadata() else {
-                    continue;
-                };
-                let Ok(modified) = metadata.modified() else {
-                    continue;
-                };
-                let Ok(age) = std::time::SystemTime::now().duration_since(modified) else {
-                    continue;
-                };
-                if age <= ORPHAN_AGE {
-                    continue;
-                }
-                if fs::remove_file(&path).is_ok() {
+                if let Some(size) = remove_if_orphaned_temp_file(&path) {
                     cleared.orphans += 1;
-                    cleared.bytes += metadata.len();
+                    cleared.bytes += size;
                 }
             }
             // Fails, harmlessly, when something that is not an entry remains.
             let _ = fs::remove_dir(&directory);
         }
-        self.write_usage_memo(&self.memo_from_generations(&self.generations()));
+        let (_, memo) = self.exact_usage();
+        self.write_usage_memo(&memo);
         cleared
     }
 }
@@ -762,25 +818,72 @@ mod tests {
         assert!(!generation.exists());
     }
 
+    /// Plants a memo containing exactly one record for the current
+    /// generation, with `modified` read fresh from the directory (so it
+    /// matches) and `recorded` offset from it by `recorded_offset` -- never
+    /// from real elapsed wall-clock time, so these tests cannot depend on
+    /// how long they take to run.
+    fn plant_memo_record(cache: &FactsCache, bytes: u64, recorded_offset: Duration) {
+        let generation_dir = cache.directory().join(FactsCache::generation());
+        let modified = directory_mtime(&generation_dir).expect("generation dir exists");
+        let recorded = modified.as_duration() + recorded_offset;
+        let memo = serde_json::json!({
+            "generations": {
+                FactsCache::generation(): {
+                    "modified": {"secs": modified.secs, "nanos": modified.nanos},
+                    "recorded": {"secs": recorded.as_secs(), "nanos": recorded.subsec_nanos()},
+                    "entries": 1,
+                    "bytes": bytes,
+                }
+            }
+        });
+        std::fs::write(
+            cache.directory().join(USAGE_FILE),
+            serde_json::to_vec(&memo).unwrap(),
+        )
+        .unwrap();
+    }
+
     #[test]
-    fn an_unchanged_generation_is_served_from_the_memo() {
+    fn a_record_recorded_well_after_its_mtime_is_served_from_the_memo() {
         let root = tempfile::tempdir().unwrap();
         let cache = FactsCache::new(root.path(), u64::MAX);
         cache.write(SHA, &sample()).unwrap();
-        let exact = cache.disk_bytes();
-        assert!(exact > 0);
 
-        let memo_path = cache.directory().join(USAGE_FILE);
-        let mut memo: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&memo_path).unwrap()).unwrap();
-        let generation = FactsCache::generation();
-        memo["generations"][generation.as_str()]["bytes"] = serde_json::json!(999_999);
-        std::fs::write(&memo_path, serde_json::to_vec(&memo).unwrap()).unwrap();
+        // Comfortably outside RACY_WINDOW (2s): trusted without a walk.
+        plant_memo_record(&cache, 999_999, Duration::from_secs(10));
 
         assert_eq!(
             cache.disk_bytes(),
             999_999,
-            "an unchanged generation must be served from the memo, not walked"
+            "a record made well after its mtime, with a matching mtime, must be trusted"
+        );
+    }
+
+    #[test]
+    fn a_record_recorded_within_the_racy_window_is_rewalked() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = FactsCache::new(root.path(), u64::MAX);
+        let written = cache.write(SHA, &sample()).unwrap();
+
+        // Inside RACY_WINDOW: a change within the same mtime tick as the
+        // recording would be invisible, so this record must not be
+        // trusted even though its mtime matches.
+        plant_memo_record(&cache, 999_999, Duration::from_secs(1));
+
+        assert_eq!(
+            cache.disk_bytes(),
+            written,
+            "a racy record must be rewalked rather than trusted"
+        );
+
+        let memo: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(cache.directory().join(USAGE_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(
+            memo["generations"][FactsCache::generation().as_str()]["bytes"],
+            written,
+            "the rewalk must replace the sentinel with the true size"
         );
     }
 
@@ -789,7 +892,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let cache = FactsCache::new(root.path(), u64::MAX);
         cache.write(SHA, &sample()).unwrap();
-        cache.disk_bytes(); // records the memo
+        // Recorded safely outside the racy window, as a real `disk_bytes()`
+        // call racing its own just-finished write would not be, so this
+        // specifically exercises "mtime changed", not "record was racy".
+        plant_memo_record(&cache, 1, Duration::from_secs(10));
 
         let other = SHA.replace('1', "4");
         cache.write(&other, &sample()).unwrap(); // changes the generation dir's mtime
@@ -845,35 +951,6 @@ mod tests {
             memo["generations"]["f0-llvm1.0.0"].is_null(),
             "a removed generation must not linger in the memo: {memo}"
         );
-    }
-
-    #[test]
-    fn note_writes_updates_the_record_so_disk_bytes_needs_no_walk() {
-        let root = tempfile::tempdir().unwrap();
-        let cache = FactsCache::new(root.path(), u64::MAX);
-        let size = cache.write(SHA, &sample()).unwrap();
-        cache.note_writes(1, size);
-
-        let generation_dir = cache.directory().join(FactsCache::generation());
-        let modified = std::fs::metadata(&generation_dir)
-            .unwrap()
-            .modified()
-            .unwrap();
-        let expected = modified
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap();
-
-        let memo: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(cache.directory().join(USAGE_FILE)).unwrap())
-                .unwrap();
-        let record = &memo["generations"][FactsCache::generation().as_str()];
-        assert_eq!(record["modified"]["secs"], expected.as_secs());
-        assert_eq!(record["modified"]["nanos"], expected.subsec_nanos());
-        assert_eq!(record["entries"], 1);
-        assert_eq!(record["bytes"], size);
-
-        let exact: u64 = cache.generations().iter().map(|g| g.bytes).sum();
-        assert_eq!(cache.disk_bytes(), exact);
     }
 
     #[test]
