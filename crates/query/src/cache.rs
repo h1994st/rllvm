@@ -61,7 +61,10 @@ const USAGE_FILE: &str = "usage.json";
 /// recording would leave the directory's mtime unchanged even though its
 /// contents did change. A record made comfortably after its own mtime cannot
 /// have missed a same-tick write that way; one made right away might have,
-/// and is re-walked instead of trusted.
+/// and is re-walked instead of trusted. Like git's rule, this assumes the
+/// clock `recorded` is read from is never ahead of the clock that stamps an
+/// mtime by more than this margin -- not guaranteed on a network filesystem
+/// with its own clock, but true of every local filesystem this cache targets.
 const RACY_WINDOW: Duration = Duration::from_secs(2);
 
 /// What an entry claims to be. Checked on read, so a renamed or misplaced
@@ -389,40 +392,31 @@ impl FactsCache {
 
     /// Every generation directory with its entry count and size, sorted by
     /// name. Always an exact walk: callers that report or mutate the cache
-    /// need the true state, not the memo.
+    /// need the true state, not the memo. Delegates to [`Self::exact_usage`]
+    /// so the two never drift; the memo it also builds is simply unused
+    /// here.
     fn generations(&self) -> Vec<GenerationUsage> {
-        let current = FactsCache::generation();
-        let mut generations: Vec<GenerationUsage> = self
-            .generation_directories()
-            .into_iter()
-            .map(|(name, path)| {
-                let (entries, bytes) = walk_generation(&path);
-                GenerationUsage {
-                    current: name == current,
-                    name,
-                    entries,
-                    bytes,
-                }
-            })
-            .collect();
-        generations.sort_by(|a, b| a.name.cmp(&b.name));
-        generations
+        self.exact_usage().0
     }
 
-    /// An exact measurement of every generation, for the callers (`usage`,
-    /// `clear`) that must rewrite the memo to match the true state exactly
-    /// rather than merge with whatever it held before.
+    /// An exact measurement of every generation, for the callers
+    /// (`generations`, `usage`, `clear`) that need the true state rather
+    /// than one the memo may have served, or must rewrite the memo to match
+    /// it exactly rather than merge with whatever it held before.
     ///
     /// Each generation's mtime is read *before* that generation is walked,
     /// so a write landing mid-walk shows up as a change the *next*
     /// measurement will catch, rather than being paired with a mtime that
     /// had already moved past what was counted. `recorded` is one "now"
-    /// taken after every walk in this call has completed, which is also
-    /// after each individual one.
+    /// taken *before* any generation in this call is walked, matching
+    /// `disk_bytes`: the racy-timestamp rule in
+    /// [`GenerationRecord::trusted_for`] only holds if a record's
+    /// `recorded` can never be later than the walk it describes.
     fn exact_usage(&self) -> (Vec<GenerationUsage>, UsageMemo) {
         let current = FactsCache::generation();
+        let recorded = mtime_of(SystemTime::now());
         let mut generations = Vec::new();
-        let mut measured: Vec<(String, Option<Mtime>, usize, u64)> = Vec::new();
+        let mut memo = UsageMemo::default();
         for (name, path) in self.generation_directories() {
             let modified = directory_mtime(&path);
             let (entries, bytes) = walk_generation(&path);
@@ -432,25 +426,19 @@ impl FactsCache {
                 entries,
                 bytes,
             });
-            measured.push((name, modified, entries, bytes));
-        }
-        generations.sort_by(|a, b| a.name.cmp(&b.name));
-        let mut memo = UsageMemo::default();
-        if let Some(recorded) = mtime_of(SystemTime::now()) {
-            for (name, modified, entries, bytes) in measured {
-                if let Some(modified) = modified {
-                    memo.generations.insert(
-                        name,
-                        GenerationRecord {
-                            modified,
-                            recorded,
-                            entries,
-                            bytes,
-                        },
-                    );
-                }
+            if let (Some(modified), Some(recorded)) = (modified, recorded) {
+                memo.generations.insert(
+                    name,
+                    GenerationRecord {
+                        modified,
+                        recorded,
+                        entries,
+                        bytes,
+                    },
+                );
             }
         }
+        generations.sort_by(|a, b| a.name.cmp(&b.name));
         (generations, memo)
     }
 
@@ -518,7 +506,9 @@ impl FactsCache {
     /// where a usage-memo write killed mid-rename can leave one beside
     /// `usage.json` -- then each generation directory left empty; anything
     /// else there is not the cache's to delete, and `usage.json` is never an
-    /// orphan no matter its age.
+    /// orphan no matter its age. The top-level sweep belongs to no
+    /// generation, so `stale_only` (`--stale`) narrows only the
+    /// per-generation deletions above and never skips it.
     pub fn clear(&self, stale_only: bool) -> Cleared {
         let mut cleared = Cleared::default();
         for generation in self.generations() {
