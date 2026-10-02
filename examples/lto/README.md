@@ -18,7 +18,8 @@ enough — and ThinLTO has no single merged module, so use `marker` for it.
 ```
 
 It builds the program under both modes and checks each extraction defines
-`main` and `helper`.
+`main` and `helper`, then checks a static library of `-flto` objects extracts
+`helper`.
 
 ## What it does
 
@@ -26,6 +27,15 @@ It builds the program under both modes and checks each extraction defines
 RLLVM_LTO_MODE=marker     rllvm-cc -flto lib.c app.c -o build/marker/app
 RLLVM_LTO_MODE=save-temps rllvm-cc -flto lib.c app.c -o build/save-temps/app
 rllvm-get-bc build/marker/app -o build/marker/app.bc
+```
+
+A static library of `-flto` objects extracts without linking a program: its
+members are bitcode, and each one is taken as a module.
+
+```bash
+rllvm-cc -flto -c lib.c -o build/archive/lib.o
+llvm-ar rcs build/archive/libhelper.a build/archive/lib.o
+rllvm-get-bc build/archive/libhelper.a -o build/archive/libhelper.bc
 ```
 
 ## Inspect the result

@@ -3864,6 +3864,61 @@ fn lto_thin_binary_yields_whole_program_bitcode() {
 }
 
 #[test]
+fn lto_static_archive_extracts_without_linking() {
+    // An LTO object is bitcode, so a static library of them has no native
+    // member to read a section from; the members themselves are the modules.
+    for lto_flag in ["-flto", "-flto=thin"] {
+        let tmp = TempDir::new().unwrap();
+        let sources = write_lto_sources(tmp.path());
+        let mut objects = vec![];
+        for source in &sources[..2] {
+            let object = source.with_extension("o");
+            let status = rllvm("rllvm-cc")
+                .args(["--", lto_flag, "-c", "-o"])
+                .arg(&object)
+                .arg(source)
+                .status()
+                .expect("Failed to run rllvm-cc");
+            assert!(status.success(), "rllvm-cc {lto_flag} failed on {source:?}");
+            objects.push(object);
+        }
+        let nm = find_llvm_nm().expect("llvm-nm not found");
+        let status = Command::new(nm.with_file_name("llvm-ar"))
+            .arg("rcs")
+            .arg(tmp.path().join("libfoo.a"))
+            .args(&objects)
+            .status()
+            .expect("Failed to run llvm-ar");
+        assert!(status.success(), "llvm-ar failed");
+
+        // Without -o the output is named like any other archive's.
+        let output = rllvm("rllvm-get-bc")
+            .current_dir(tmp.path())
+            .arg("libfoo.a")
+            .output()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(
+            output.status.success(),
+            "rllvm-get-bc failed on a {lto_flag} archive: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let bitcode = tmp.path().join("libfoo.a.bc");
+        assert_bitcode_magic(&bitcode);
+        let output = Command::new(nm)
+            .arg(&bitcode)
+            .output()
+            .expect("llvm-nm failed");
+        let symbols = String::from_utf8_lossy(&output.stdout);
+        for symbol in ["a_fn", "b_fn"] {
+            assert!(
+                symbols.contains(symbol),
+                "{symbol} missing from the {lto_flag} archive's module:\n{symbols}"
+            );
+        }
+    }
+}
+
+#[test]
 #[cfg(target_vendor = "apple")]
 fn lto_marker_survives_dead_strip() {
     // Nothing references the section, so a dead-stripping link discards it
