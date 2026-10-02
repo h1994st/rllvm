@@ -20,7 +20,7 @@ pub fn run() -> Result<(), Error> {
             InputKind::Bitcode | InputKind::JsonObject
         )
     {
-        return extract_catalog(&args);
+        return extract_catalog(&args, false);
     }
 
     // Set log level
@@ -103,6 +103,11 @@ pub fn run() -> Result<(), Error> {
                     err
                 );
             })?;
+            // An `-flto` member is the module itself, with no section to read.
+            // The catalog inventory already takes such members as modules.
+            if InputKind::from_reader(member_object_data)? == InputKind::Bitcode {
+                return extract_catalog(&args, true);
+            }
             let object_file = object::File::parse(member_object_data).inspect_err(|err| {
                 tracing::error!(
                     "Failed to parse the object data of the archive member: member={}, err={}",
@@ -212,7 +217,9 @@ pub fn run() -> Result<(), Error> {
     Ok(())
 }
 
-fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
+/// `archive_input` keeps the default output name of the archive path above,
+/// `libfoo.a.bc`, for an archive routed here because it holds bitcode members.
+fn extract_catalog(args: &ExtractionArgs, archive_input: bool) -> Result<(), Error> {
     use rllvm_core::catalog::{copy_modules, inventory, select_modules};
     let root = args.bitcode_root.as_deref().unwrap_or(Path::new("."));
     let catalog = inventory(&args.input, root, None)?;
@@ -260,6 +267,8 @@ fn extract_catalog(args: &ExtractionArgs) -> Result<(), Error> {
             "{stem}.{}",
             if strategy == MergeStrategy::Archive {
                 "bca"
+            } else if archive_input {
+                "a.bc"
             } else {
                 "bc"
             }

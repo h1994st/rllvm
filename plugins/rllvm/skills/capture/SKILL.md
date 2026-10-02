@@ -36,9 +36,8 @@ Compiler flags reach the real compiler unchanged. These need a decision:
 
 - **LTO.** `RLLVM_LTO_MODE`: `marker` (default), `save-temps` (full LTO's
   merged module), or `skip`; use the same mode for compile and link. An
-  archive of `-flto` objects, full or thin, holds bitcode, not objects, and
-  cannot be extracted — turn LTO off to extract a library. A linked
-  executable still extracts either way.
+  archive of `-flto` objects, full or thin, holds bitcode members, and each
+  member is extracted as a module; a linked executable extracts too.
 - **Cross-compilation.** `--target=<triple>` as for Clang. Linking ELF from a
   non-ELF host needs LLD (`-fuse-ld=lld`). RISC-V and other targets the
   internal fallback does not model need `llvm_objcopy_filepath` in the config.
@@ -72,9 +71,7 @@ Compiler flags reach the real compiler unchanged. These need a decision:
    an LLVM no newer than the one the tool reads (`setup` skill, step 3).
 2. Extract one module with `-o x.bc`. Never `-b`: it writes an archive of
    modules, and these tools load a single module.
-3. For one library of an LTO build, rebuild with LTO off first; a linked
-   executable extracts either way.
-4. Pass `x.bc` to the tool as its input module.
+3. Pass `x.bc` to the tool as its input module.
 
 ## 4. Query it
 

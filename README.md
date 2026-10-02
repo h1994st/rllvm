@@ -235,6 +235,8 @@ rllvm-get-bc hello -o hello.bc
 
 `save-temps` needs real LTO inputs — adding `-flto` only at link time is not
 enough — and ThinLTO has no single merged module, so use `marker` for it.
+A static library of `-flto` objects extracts without linking: its members are
+bitcode, and each one is taken as a module.
 COFF and WebAssembly reject `marker` and direct you to `skip`.
 
 See the [LTO example](examples/lto/).
