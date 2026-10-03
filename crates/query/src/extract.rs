@@ -160,6 +160,9 @@ impl ModuleFacts {
         };
         for function in &mut self.functions {
             stamp(&mut function.id);
+            if let Some(target) = &mut function.alias_of {
+                stamp(target);
+            }
             resolve(&mut function.location);
         }
         for site in &mut self.call_sites {
@@ -602,6 +605,59 @@ unsafe fn read_producers(module: LLVMModuleRef) -> Vec<String> {
         .collect()
 }
 
+/// How many aliases deep `alias_target` follows before giving up. The
+/// verifier rejects alias cycles, so a real module never comes close; the
+/// bound only keeps a malformed one from looping.
+const MAX_ALIAS_DEPTH: usize = 16;
+
+/// The function an alias stands for, following aliases of aliases. `None`
+/// for an alias of data or of an expression that is not a function.
+///
+/// # Safety
+/// `alias` must be a live global alias.
+unsafe fn alias_target(alias: LLVMValueRef) -> Option<LLVMValueRef> {
+    let mut value = alias;
+    for _ in 0..MAX_ALIAS_DEPTH {
+        // SAFETY: `value` is the live alias or a live aliasee of it.
+        if !unsafe { LLVMIsAFunction(value) }.is_null() {
+            return Some(value);
+        }
+        // SAFETY: as above.
+        if unsafe { LLVMIsAGlobalAlias(value) }.is_null() {
+            return None;
+        }
+        // SAFETY: `value` was just checked to be a global alias.
+        value = unsafe { LLVMAliasGetAliasee(value) };
+        if value.is_null() {
+            return None;
+        }
+    }
+    None
+}
+
+/// A definition's language: debug info first, since it names the
+/// function's own unit, where the producer speaks for the module as a whole.
+///
+/// # Safety
+/// `function` must be a live function in `context`.
+unsafe fn definition_language(
+    context: LLVMContextRef,
+    function: LLVMValueRef,
+    units: &mut HashMap<LLVMMetadataRef, Option<Language>>,
+    module_language: Option<Language>,
+) -> Option<SourceLanguage> {
+    // SAFETY: the caller's guarantee, passed through.
+    unsafe { debug_info_language(context, function, units) }
+        .map(|name| SourceLanguage {
+            name,
+            basis: LanguageBasis::DebugInfo,
+        })
+        .or(module_language.map(|name| SourceLanguage {
+            name,
+            basis: LanguageBasis::Producer,
+        }))
+}
+
 /// The language of the compile unit `function`'s subprogram belongs to.
 ///
 /// The C API has no getter for a unit's language, so the unit is printed
@@ -703,6 +759,21 @@ unsafe fn call_target(instruction: LLVMValueRef, module_id: &str, callees_kind: 
                         symbol,
                     },
                 }
+            };
+        }
+        // A call through an alias calls the function the alias stands for,
+        // under the alias's own name. It is not indirect: nothing about the
+        // target is unknown.
+        // SAFETY: as above; `alias_target` is reached only for an alias.
+        if !unsafe { LLVMIsAGlobalAlias(called) }.is_null()
+            && unsafe { alias_target(called) }.is_some()
+        {
+            return CallTarget::Direct {
+                callee: FunctionId {
+                    module_id: module_id.to_string(),
+                    // SAFETY: as above.
+                    symbol: unsafe { value_name(called) },
+                },
             };
         }
         // SAFETY: as above.
@@ -1033,20 +1104,10 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
             linkage: linkage_of(unsafe { LLVMGetLinkage(function) }),
             // A declaration is not written in the module that declares it,
             // so it gets no language even when the module's producer or a
-            // borrowed unit would otherwise suggest one. Debug info first
-            // for a definition: it names this function's own unit, where
-            // the producer speaks for the module as a whole.
+            // borrowed unit would otherwise suggest one.
             // SAFETY: `function` is live in `context`.
             language: if is_definition {
-                unsafe { debug_info_language(context.0, function, &mut units) }
-                    .map(|name| SourceLanguage {
-                        name,
-                        basis: LanguageBasis::DebugInfo,
-                    })
-                    .or(module_language.map(|name| SourceLanguage {
-                        name,
-                        basis: LanguageBasis::Producer,
-                    }))
+                unsafe { definition_language(context.0, function, &mut units, module_language) }
             } else {
                 None
             },
@@ -1057,6 +1118,7 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
             },
             location: unsafe { location_of(function) },
             mapped_lines,
+            alias_of: None,
         });
 
         // SAFETY: `function` is live in the module being walked.
@@ -1064,6 +1126,47 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
 
         // SAFETY: as above.
         function = unsafe { LLVMGetNextFunction(function) };
+    }
+
+    // An alias is a definition under its own name with its target's body:
+    // `rustc` emits one for an `extern "C"` wrapper that compiles to the same
+    // code as the method it calls. It has no instructions to walk, so its
+    // language and location are its target's, and queries follow
+    // `alias_of` to the target's calls. An alias of data is not a function.
+    // SAFETY: `parsed` is a module in the live context.
+    let mut alias = unsafe { LLVMGetFirstGlobalAlias(parsed.0) };
+    while !alias.is_null() {
+        // SAFETY: `alias` is a live global alias in that module.
+        if let Some(target) = unsafe { alias_target(alias) } {
+            functions.push(FunctionFact {
+                id: FunctionId {
+                    module_id: NEUTRAL_MODULE_ID.to_string(),
+                    // SAFETY: as above.
+                    symbol: unsafe { value_name(alias) },
+                },
+                is_definition: true,
+                // SAFETY: an alias is a live global value, which this accepts.
+                linkage: linkage_of(unsafe { LLVMGetLinkage(alias) }),
+                // SAFETY: `target` is a live function in `context`.
+                language: unsafe {
+                    definition_language(context.0, target, &mut units, module_language)
+                },
+                // SAFETY: as above, for the alias's own value type.
+                signature: unsafe {
+                    owned_message(LLVMPrintTypeToString(LLVMGlobalGetValueType(alias)))
+                },
+                // SAFETY: `target` is a live function.
+                location: unsafe { location_of(target) },
+                mapped_lines: BTreeSet::new(),
+                alias_of: Some(FunctionId {
+                    module_id: NEUTRAL_MODULE_ID.to_string(),
+                    // SAFETY: `target` is a live function.
+                    symbol: unsafe { value_name(target) },
+                }),
+            });
+        }
+        // SAFETY: `alias` is live in the module being walked.
+        alias = unsafe { LLVMGetNextGlobalAlias(alias) };
     }
 
     // Dispose before reading the sink, so nothing LLVM emits while tearing

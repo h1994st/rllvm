@@ -29,7 +29,7 @@ use crate::extract::{ModuleFacts, llvm_version};
 /// Version of what extraction produces. Bump it whenever a change to
 /// `extract.rs` or the fact types changes the neutral facts for some input;
 /// `the_facts_format_names_what_extraction_produces` fails until you do.
-pub const FACTS_FORMAT: u32 = 1;
+pub const FACTS_FORMAT: u32 = 2;
 
 /// Subdirectory of the cache root that holds every generation.
 const DIRECTORY: &str = "query-facts";
@@ -634,6 +634,7 @@ mod tests {
                 signature: "i32 ()".into(),
                 location: None,
                 mapped_lines: Default::default(),
+                alias_of: None,
             }],
             producers: vec!["clang".into()],
             ..Default::default()

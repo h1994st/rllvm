@@ -120,6 +120,11 @@ pub struct FunctionFact {
     /// Lines any instruction in this function maps to. Supports `at`; this is
     /// not source-range containment.
     pub mapped_lines: BTreeSet<(PathBuf, u32)>,
+    /// For an alias, the function in the same module it stands for. An alias
+    /// is a definition with no body of its own: calls to it run the target,
+    /// so queries follow it there. `None` for every ordinary function.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alias_of: Option<FunctionId>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
