@@ -128,6 +128,15 @@ impl RustcWrapper {
         actions: rustc_args::Actions,
     ) -> Result<(), Error> {
         let direct_object = actions.object && !actions.links && !actions.archives;
+        let prefixes = if actions.archives {
+            let extra = rustc_args::codegen_value(args, "extra-filename").unwrap_or("");
+            let stem = rustc_args::flag_value(args, "-o")
+                .and_then(|output| Path::new(output).file_stem())
+                .map(|stem| stem.to_string_lossy().into_owned());
+            rustc_marker::member_prefixes(&self.crate_name(args)?, extra, stem.as_deref())
+        } else {
+            Vec::new()
+        };
         for artifact in self.output_artifacts(args)? {
             if !artifact.exists() {
                 continue;
@@ -135,7 +144,7 @@ impl RustcWrapper {
 
             let data = fs::read(&artifact)?;
             if object::read::archive::ArchiveFile::parse(&*data).is_ok() {
-                let patched = rustc_marker::patch_archive(&artifact, bitcode)?;
+                let patched = rustc_marker::patch_archive(&artifact, bitcode, &prefixes)?;
                 tracing::debug!("rustc: patched {patched} members of {artifact:?}");
             } else if object::File::parse(&*data).is_ok_and(|object| {
                 object.kind() == ObjectKind::Relocatable
@@ -163,6 +172,26 @@ impl RustcWrapper {
     /// `-o` names the single output outright. Otherwise rustc is asked, rather
     /// than rllvm reimplementing its naming rules across crate types and
     /// platforms; `--print` does not compile, so this costs one spawn.
+    /// The crate's name, which prefixes the names of its own archive members.
+    /// Cargo always passes `--crate-name`; a direct `rustc` invocation leaves
+    /// rustc to derive it from the source file, so ask rustc.
+    fn crate_name(&self, args: &[&str]) -> Result<String, Error> {
+        if let Some(name) = rustc_args::flag_value(args, "--crate-name") {
+            return Ok(name.to_string());
+        }
+        let output = Command::new(&self.rustc_path)
+            .args(args)
+            .arg("--print=crate-name")
+            .output()?;
+        if !output.status.success() {
+            return Err(Error::ExecutionFailure(format!(
+                "rustc --print=crate-name failed, so the archive members this crate owns are unknown: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
     fn output_artifacts(&self, args: &[&str]) -> Result<Vec<PathBuf>, Error> {
         if let Some(output) = rustc_args::flag_value(args, "-o") {
             return Ok(vec![PathBuf::from(output)]);
