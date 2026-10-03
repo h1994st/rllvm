@@ -467,19 +467,19 @@ and `-o` selects the file to write.
 ## Benchmarks
 
 Clean build-only time relative to native compilation, on an Apple M4 with
-LLVM 22.1.8:
+LLVM 23.1.2:
 
 | Workload | Cache disabled | Primed C/C++ cache |
 |---|---:|---:|
-| nghttp2 C (CMake) | 1.84× | 1.61× |
-| nghttp2 C++ (CMake) | 1.83× | 1.20× |
-| Quiche (Cargo) | 1.59× | 1.50× |
+| nghttp2 C (CMake) | 1.86× | 1.65× |
+| nghttp2 C++ (CMake) | 1.88× | 1.28× |
+| Quiche (Cargo) | 1.28× | 1.23× |
 
 C/C++ capture adds a bitcode compilation per source; Rust emits bitcode in the
 same rustc invocation. Unchanged rebuilds stay near native time, but extraction
 repeats its merge every run.
 
-See the [baseline](benchmarks/baselines/2026-09-12-apple-m4/README.md) for
+See the [baseline](benchmarks/baselines/2026-10-03-apple-m4/README.md) for
 conditions and the [benchmark guide](benchmarks/README.md) for reproduction.
 
 ## Related projects

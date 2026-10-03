@@ -1,0 +1,15 @@
+{
+  "kind": "post-baseline-source-audit",
+  "projects": {
+    "nghttp2": {
+      "commit": "ea02d8bc7d15f4b899ebf32c52e5934c246127da",
+      "status_porcelain": ""
+    },
+    "quiche": {
+      "commit": "f0c7193c3b130d766f0d6f3e75d4f2405c85d376",
+      "status_porcelain": "?? .cid_logger_af7b281f45aa5f9f.o\n?? .cid_logger_af7b281f45aa5f9f.o.bc\n?? cat/\n?? cid_logger\n?? cid_logger.c\n?? cid_logger.dSYM/\n"
+    }
+  },
+  "schema_version": 1,
+  "source_root_layout": "EXAMPLES_ROOT/PROJECT"
+}

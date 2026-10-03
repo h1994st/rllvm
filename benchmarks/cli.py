@@ -7,6 +7,7 @@ from typing import Annotated, Any
 
 import typer
 
+from benchmarks.baseline import BaselineError, package_baseline
 from benchmarks.fixtures import FixtureError, PreparedFixture, prepare_fixture
 from benchmarks.process import CommandFailed
 from benchmarks.recipes import DEFAULT_PROFILES, get_recipe, recipes
@@ -344,6 +345,66 @@ def report(
         typer.echo(str(artifacts.csv))
         typer.echo(str(artifacts.json))
     except (ReportError, RecordError, OSError) as error:
+        _fail(error, output)
+
+
+@app.command()
+def baseline(
+    runs: Annotated[
+        Path,
+        typer.Argument(help="Saved run-group.json or its directory."),
+    ],
+    report: Annotated[
+        Path,
+        typer.Option(
+            "--report",
+            help="report.json, or its directory, generated from these runs.",
+        ),
+    ],
+    prepared: Annotated[
+        Path,
+        typer.Option(
+            "--prepared",
+            help="prepared-group.json the runs were measured from.",
+        ),
+    ],
+    examples_root: Annotated[
+        Path,
+        typer.Option(
+            "--examples-root",
+            help="Source checkouts to audit after measurement.",
+        ),
+    ],
+    conditions: Annotated[
+        str,
+        typer.Option(
+            "--conditions",
+            help="Markdown host conditions the records cannot establish.",
+        ),
+    ],
+    output: OutputOption,
+    context: Annotated[
+        list[Path] | None,
+        typer.Option(
+            "--context",
+            help="Extra evidence file for the archive; repeat as needed.",
+        ),
+    ] = None,
+) -> None:
+    """Package a compact baseline and records archive from saved records."""
+    try:
+        artifacts = package_baseline(
+            runs,
+            report,
+            prepared,
+            examples_root,
+            conditions,
+            output,
+            tuple(context or ()),
+        )
+        typer.echo(str(artifacts.readme))
+        typer.echo(str(artifacts.archive))
+    except (BaselineError, ReportError, RecordError, OSError) as error:
         _fail(error, output)
 
 

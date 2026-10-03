@@ -1,0 +1,111 @@
+{
+  "files": {
+    "context/baseline-load-end.txt": {
+      "bytes": 64,
+      "sha256": "64b21ae2503ed31fceac33ed53420a82d8bfe2e120566715028535bf51381000"
+    },
+    "context/baseline-load-start.txt": {
+      "bytes": 64,
+      "sha256": "25aa50e4f642791d0ab2d56ff6657d0da94965e67314e35fe39bd466fafde164"
+    },
+    "context/rllvm-provenance.json": {
+      "bytes": 184,
+      "sha256": "f75b0625b583b8fb0dd8fb3fc8e633d50a938bbb79a4f603e8b1bb88b0f27d0b"
+    },
+    "original-groups/prepared-group.json": {
+      "bytes": 818,
+      "sha256": "6fccfa246e0dd727681f1a0930ea97b0b124539a42dcccfc7037b7840ccf6bb7"
+    },
+    "original-groups/run-group.json": {
+      "bytes": 934,
+      "sha256": "055a094f637606c878f7ddabbec3f72d52676d5d438a1c9fd979edbe11d25394"
+    },
+    "report/report.json": {
+      "bytes": 469074,
+      "sha256": "419f9d840bfe91184355c61f11c396455d519236593420f3b3d457d47961145c"
+    },
+    "report/report.md": {
+      "bytes": 212535,
+      "sha256": "9ad9900c9429daaad502176fdcc69de876f1e6fd0806c77f05703e1bfee98fc1"
+    },
+    "report/samples.csv": {
+      "bytes": 392429,
+      "sha256": "72f55d0e3b50432cd317fd7092187e2766fbce1c5ddd7e732b5a5d0387dc8353"
+    },
+    "runs/nghttp2-c-cmake/commands.jsonl": {
+      "bytes": 72666935,
+      "sha256": "7fa14532f602efc28ef7dcc9d52fec5ca4d4e365890d8a979760cbd6cf8cf09d"
+    },
+    "runs/nghttp2-c-cmake/diagnostics.jsonl": {
+      "bytes": 2504310,
+      "sha256": "b3e7a347359d97a67e6a79dafc491a26f94518e86017c097588b4b35c0bbd081"
+    },
+    "runs/nghttp2-c-cmake/operations.jsonl": {
+      "bytes": 2140663,
+      "sha256": "81b36699571736ef43fb7900e3ec935e46043dd9f213829ddf69fa625adf8cf5"
+    },
+    "runs/nghttp2-c-cmake/run.json": {
+      "bytes": 78780,
+      "sha256": "d2aa69ecbd57bf7e3e0fad6d2bd071ae21123e8bde1e59a2f4a7ef8088d4258f"
+    },
+    "runs/nghttp2-c-cmake/samples.jsonl": {
+      "bytes": 62461968,
+      "sha256": "ce2caede6acfa41eededa32679c6a897de819027469dd455390e85499d21c25e"
+    },
+    "runs/nghttp2-c-cmake/validations.jsonl": {
+      "bytes": 62339865,
+      "sha256": "1968cc4693e3b9aa532d3d044c2a34fab3869b3122d0f88171dc6afd1fca9ce1"
+    },
+    "runs/nghttp2-cxx-cmake/commands.jsonl": {
+      "bytes": 91040771,
+      "sha256": "97b2c89de92d398310793fe61acc27002256644d108416bfc28041b10d81d48f"
+    },
+    "runs/nghttp2-cxx-cmake/diagnostics.jsonl": {
+      "bytes": 3216118,
+      "sha256": "04c5cf9b8022db06927c6479d49150fdd8d99f55a5472a1b4526c015cc67e5b1"
+    },
+    "runs/nghttp2-cxx-cmake/operations.jsonl": {
+      "bytes": 3411735,
+      "sha256": "310dffb37fb710eed207591818a7f5bdf136d1183326a6e76b19b8c7f29d454d"
+    },
+    "runs/nghttp2-cxx-cmake/run.json": {
+      "bytes": 87248,
+      "sha256": "b6eb957e0af04d72e219d7b9838183639f0948ca894937e1accc6cb605988010"
+    },
+    "runs/nghttp2-cxx-cmake/samples.jsonl": {
+      "bytes": 123253570,
+      "sha256": "8d1bf972fc5728eca8cdabab309f0a9967a2e4d960bdff189fca63f6b011b6e8"
+    },
+    "runs/nghttp2-cxx-cmake/validations.jsonl": {
+      "bytes": 123130243,
+      "sha256": "3e123998a812b1d213743b1bf830a1da0d1a231d8e7e4a130bc38a0c47c7e5bb"
+    },
+    "runs/quiche-cargo/commands.jsonl": {
+      "bytes": 532539130,
+      "sha256": "dc3369ecf1d304004d6ae8a60b9c5b680424be369553cf9ca9ed69f846d8e0b4"
+    },
+    "runs/quiche-cargo/diagnostics.jsonl": {
+      "bytes": 11118464,
+      "sha256": "b1ceaac9fdf60b66366931dcb350b004f9cd7bc2c574dcb6fb9c440e0435f2f0"
+    },
+    "runs/quiche-cargo/operations.jsonl": {
+      "bytes": 2081888,
+      "sha256": "21b342ef143a4febc00ff328b5d29d7699e354be4546f51a5dff34562d80e6ef"
+    },
+    "runs/quiche-cargo/run.json": {
+      "bytes": 70299,
+      "sha256": "1f6d028a824f9ac8f1d99bb3b0b1c7796711187c2b44772ab855efda581379fa"
+    },
+    "runs/quiche-cargo/samples.jsonl": {
+      "bytes": 729474186,
+      "sha256": "e5f2f14c245b58ac81e298715af6a9a4e6acc21a4dc3aabe382bb2e3b2fc213b"
+    },
+    "runs/quiche-cargo/validations.jsonl": {
+      "bytes": 728351584,
+      "sha256": "c659f8cd8ee847615e21f3852716b2bb2b9936b14871c13426e8f76472313a69"
+    }
+  },
+  "kind": "workflow-baseline-evidence",
+  "schema_version": 1,
+  "scope": "Original run and preparation group manifests, report outputs, supplied context files, run manifests and all indexed JSONL streams; build trees and full LLVM/stdout logs remain outside Git."
+}
