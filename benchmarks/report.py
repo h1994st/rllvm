@@ -7,6 +7,7 @@ import math
 import os
 import statistics
 from collections import defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,7 +31,7 @@ class ReportArtifacts:
 
 
 @dataclass(frozen=True)
-class _SavedRun:
+class SavedRun:
     manifest: dict[str, Any]
     samples: tuple[dict[str, Any], ...]
     commands: tuple[dict[str, Any], ...]
@@ -39,6 +40,7 @@ class _SavedRun:
     identity: dict[str, object]
     profile: str
     token: int
+    stream_paths: dict[str, Path]
 
 
 def generate_report(
@@ -46,7 +48,7 @@ def generate_report(
 ) -> ReportArtifacts:
     """Generate stable Markdown, CSV and JSON without executing any commands."""
     try:
-        paths = _resolve_manifests(tuple(manifests))
+        paths = resolve_manifests(tuple(manifests))
         if not paths:
             raise ReportError("at least one workflow run manifest is required")
         runs = tuple(
@@ -83,7 +85,8 @@ def generate_report(
     return artifacts
 
 
-def _resolve_manifests(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+def resolve_manifests(paths: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Expand run directories and run groups into run manifest paths."""
     resolved: list[Path] = []
     for supplied in paths:
         path = supplied.absolute()
@@ -117,7 +120,14 @@ def _resolve_manifests(paths: tuple[Path, ...]) -> tuple[Path, ...]:
     return tuple(resolved)
 
 
-def _load_run(path: Path, token: int) -> _SavedRun:
+def _load_run(path: Path, token: int) -> SavedRun:
+    return read_saved_run(path, token)[0]
+
+
+def read_saved_run(
+    path: Path, token: int = 0
+) -> tuple[SavedRun, dict[str, tuple[dict[str, Any], ...]]]:
+    """Load and validate one run, also returning every indexed stream."""
     try:
         manifest = read_json(path)
     except (OSError, RecordError) as error:
@@ -228,7 +238,12 @@ def _load_run(path: Path, token: int) -> _SavedRun:
         raise ReportError(f"workflow run has inconsistent validity: {path}")
     _validate_evidence(samples, streams, missing_streams, path)
     identity = _workload_identity(manifest, fixture, recipe)
-    return _SavedRun(
+    present = {
+        name: stream_path
+        for name, stream_path in stream_paths.items()
+        if stream_path is not None and name not in missing_streams
+    }
+    saved = SavedRun(
         manifest,
         samples,
         streams["commands"],
@@ -237,7 +252,9 @@ def _load_run(path: Path, token: int) -> _SavedRun:
         identity,
         profile,
         token,
+        present,
     )
+    return saved, streams
 
 
 def _mapping(value: object, label: str, path: Path) -> dict[str, Any]:
@@ -598,7 +615,7 @@ def _canonical(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def _validate_compatible_profiles(runs: tuple[_SavedRun, ...]) -> None:
+def _validate_compatible_profiles(runs: tuple[SavedRun, ...]) -> None:
     identities: dict[str, dict[str, object]] = {}
     treatments: dict[tuple[str, str, str], tuple[object, ...]] = {}
     phase_sets: dict[tuple[str, str, str], tuple[str, ...]] = {}
@@ -644,10 +661,16 @@ def _validate_compatible_profiles(runs: tuple[_SavedRun, ...]) -> None:
                     )
 
 
-def _timed(sample: dict[str, Any]) -> tuple[float | None, str | None]:
+def timed_wall_seconds(
+    phase_totals: dict[str, Any], *, phase_suffix: str = ""
+) -> tuple[float | None, str | None]:
+    """Sum complete `timed:*` wall phases whose names end in `phase_suffix`.
+
+    Returns the total, or `None` with the reason it is unavailable.
+    """
     values = []
-    for name, raw in sample["phase_totals"].items():
-        if not name.startswith("timed:"):
+    for name, raw in phase_totals.items():
+        if not name.startswith("timed:") or not name.endswith(phase_suffix):
             continue
         if not isinstance(raw, dict):
             return None, f"malformed phase total {name}"
@@ -660,11 +683,16 @@ def _timed(sample: dict[str, Any]) -> tuple[float | None, str | None]:
             return None, f"non-finite wall time for {name}"
         values.append(float(value))
     if not values:
-        return None, "no timed phase totals"
+        selected = f"timed:*{phase_suffix}" if phase_suffix else "timed"
+        return None, f"no {selected} phase totals"
     return sum(values), None
 
 
-def _render(runs: tuple[_SavedRun, ...]) -> tuple[str, list[dict], dict]:
+def _timed(sample: dict[str, Any]) -> tuple[float | None, str | None]:
+    return timed_wall_seconds(sample["phase_totals"])
+
+
+def _render(runs: tuple[SavedRun, ...]) -> tuple[str, list[dict], dict]:
     lines = [
         "# rllvm workflow benchmark report",
         "",
@@ -795,7 +823,7 @@ def _render(runs: tuple[_SavedRun, ...]) -> tuple[str, list[dict], dict]:
     return "\n".join(lines).rstrip() + "\n", rows, structured
 
 
-def _failures(runs: tuple[_SavedRun, ...]) -> list[str]:
+def _failures(runs: tuple[SavedRun, ...]) -> list[str]:
     result = []
     for run in runs:
         for error in run.manifest.get("errors", []):
@@ -846,6 +874,17 @@ def _missing_reason(items: list[tuple]) -> str | None:
     return "; ".join(dict.fromkeys(reasons)) or None
 
 
+def paired_ratios[K](
+    native: dict[K, float], wrapped: Iterable[tuple[K, float]]
+) -> list[float]:
+    """Divide each wrapped value by the nonzero native value it pairs with."""
+    return [
+        value / base
+        for key, value in wrapped
+        if (base := native.get(key)) is not None and base != 0
+    ]
+
+
 def _paired_ratio(native: list[tuple], wrapped: list[tuple]) -> tuple:
     native_values = {
         (run.token, sample["repetition"]): value
@@ -854,17 +893,16 @@ def _paired_ratio(native: list[tuple], wrapped: list[tuple]) -> tuple:
         and missing is None
         and value is not None
     }
-    ratios = []
-    for run, sample, value, missing, planned in wrapped:
-        base = native_values.get((run.token, sample["repetition"]))
-        if (
-            _sample_is_eligible(sample, planned)
+    ratios = paired_ratios(
+        native_values,
+        (
+            ((run.token, sample["repetition"]), value)
+            for run, sample, value, missing, planned in wrapped
+            if _sample_is_eligible(sample, planned)
             and missing is None
             and value is not None
-            and base is not None
-            and base != 0
-        ):
-            ratios.append(value / base)
+        ),
+    )
     return (statistics.median(ratios) if ratios else None, ratios)
 
 
@@ -873,7 +911,7 @@ def _sample_is_eligible(sample: dict[str, Any], planned: bool) -> bool:
 
 
 def _sample_row(
-    run: _SavedRun,
+    run: SavedRun,
     sample: dict[str, Any],
     total: float | None,
     missing: str | None,
@@ -908,7 +946,7 @@ def _sample_row(
     }
 
 
-def _phase_section(runs: tuple[_SavedRun, ...]) -> list[str]:
+def _phase_section(runs: tuple[SavedRun, ...]) -> list[str]:
     lines = [
         "## Phase totals and cumulative workflow costs",
         "",
@@ -948,7 +986,7 @@ def _phase_section(runs: tuple[_SavedRun, ...]) -> list[str]:
     return lines + [""]
 
 
-def _missing_metrics_section(runs: tuple[_SavedRun, ...]) -> list[str]:
+def _missing_metrics_section(runs: tuple[SavedRun, ...]) -> list[str]:
     lines = ["## Missing metrics", ""]
     absent_streams = False
     missing: dict[tuple[str, str, str, str], int] = defaultdict(int)
@@ -999,7 +1037,7 @@ def _missing_metrics_section(runs: tuple[_SavedRun, ...]) -> list[str]:
     return lines + [""]
 
 
-def _disk_section(runs: tuple[_SavedRun, ...]) -> list[str]:
+def _disk_section(runs: tuple[SavedRun, ...]) -> list[str]:
     lines = [
         "## Memory scope and disk categories",
         "",
@@ -1023,7 +1061,7 @@ def _disk_section(runs: tuple[_SavedRun, ...]) -> list[str]:
     return lines + [""]
 
 
-def _diagnostic_section(runs: tuple[_SavedRun, ...]) -> list[str]:
+def _diagnostic_section(runs: tuple[SavedRun, ...]) -> list[str]:
     lines = ["## Invocation diagnostics", ""]
     for run in runs:
         if not run.diagnostics:
@@ -1057,7 +1095,7 @@ def _diagnostic_section(runs: tuple[_SavedRun, ...]) -> list[str]:
     return lines + [""]
 
 
-def _coverage_section(runs: tuple[_SavedRun, ...]) -> list[str]:
+def _coverage_section(runs: tuple[SavedRun, ...]) -> list[str]:
     lines = ["## Coverage boundaries and limitations", ""]
     boundaries = set()
     limitations = set()

@@ -255,6 +255,32 @@ comparison. Changed source/tool/dependency/configuration or stable host
 identity cannot be pooled. Reports reject malformed, truncated, contradictory,
 or missing required evidence and refuse to overwrite existing report artifacts.
 
+Package a measured run group as a committed baseline from the same saved
+records. Supply its report, the prepared group it was measured from, the source
+checkouts to audit, and host conditions the records cannot establish, such as
+whether the host was idle or on AC power:
+
+```sh
+uv run python -m benchmarks baseline \
+  "$BENCH_ROOT/baseline/run-group.json" \
+  --report "$BENCH_ROOT/report" \
+  --prepared "$BENCH_ROOT/prepared/prepared-group.json" \
+  --examples-root "$EXAMPLES_ROOT" \
+  --conditions "$(cat "$BENCH_ROOT/conditions.md")" \
+  --context "$BENCH_ROOT/rllvm-provenance.json" \
+  --output benchmarks/baselines/YYYY-MM-DD-host
+```
+
+The new output directory receives `README.md`, `summary.json`,
+`provenance.json`, `evidence-manifest.json`, `source-preservation.json`, and
+`records.tar.xz`, which Git ignores; retain the archive separately. Build
+figures sum each valid sample's `timed:*-build` phases, and workflow figures are
+the report's summaries. Apart from a read-only Git audit of the source
+checkouts, the command reads saved records only. It fails when a required
+record is missing or the report does not match the runs. A value the records
+cannot supply stays `null`, with its reason under `unavailable`. Repeat
+`--context` to retain further evidence, such as load readings, in the archive.
+
 Keep the run's `run.json`, five indexed JSONL streams, preparation manifests,
 provenance, and every referenced log/build evidence file together under a
 stable run identifier. Record paths can be absolute; relocating or packaging
