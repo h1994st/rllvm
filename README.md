@@ -62,11 +62,11 @@ with it afterwards, does.
 
 | | 🌟 rllvm | wllvm / gllvm |
 | --- | --- | --- |
-| 🦀 Languages | [C, C++, Objective-C, **Rust**](#languages) | C, C++; Fortran in gllvm |
+| 🦀 Languages | [C, C++, Objective-C, **Rust**](#languages) | C, C++, Fortran |
 | 🔍 Analysis | [Source-level queries, MCP server](#analyzing-bitcode) | ❌ |
 | 🤖 Agents | [Claude Code plugin: setup, capture, queries](#claude-code-plugin) | ❌ |
 | 📋 No wrapper build | [Import `compile_commands.json`](#from-a-compilation-database) | ❌ |
-| 🎯 Targets | [Native, **cross**, **WebAssembly, eBPF**](#cross-compilation) | Native |
+| 🎯 Targets | [Native, cross, **WebAssembly, eBPF**](#cross-compilation) | Native; cross with a target `objcopy` |
 | 🔗 LTO | [Three modes, dispatched on object content](#lto) | `-flto` unlikely to survive extraction |
 | ♻️ Rebuilds | [Cache validated against inputs](#caching) | No bitcode cache |
 | 📦 Moving a build tree | [Paths relative to a root](#moving-a-build-tree) | Absolute bitcode paths |
