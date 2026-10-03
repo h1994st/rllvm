@@ -35,6 +35,7 @@ pub(crate) fn function(
         signature: "i32 (i32, i32)".into(),
         location: None,
         mapped_lines: Default::default(),
+        alias_of: None,
     }
 }
 

@@ -2614,13 +2614,13 @@ fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
 /// record the new pair here, or old cache entries will be served as if they
 /// were current.
 const FACTS_GUARD: (u32, &str) = (
-    1,
-    "2607f088fa7949501812e51d3a0f7b2765731abf004c3a95f42b32ade7a14758",
+    2,
+    "d9109a8587a4b3e0d43a11589257a4191553138723761a9c1148117f5d16410f",
 );
 
 /// Extracts the neutral facts from `fixtures/facts-guard.ll`: indirect calls,
-/// dispatch-table uses and declarations that the smaller equivalence
-/// fixtures above do not exercise.
+/// dispatch-table uses, declarations and an alias that the smaller
+/// equivalence fixtures above do not exercise.
 fn guard_module_facts(scratch: &tempfile::TempDir) -> rllvm_query::ModuleFacts {
     let ir = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/facts-guard.ll"),
@@ -3159,5 +3159,107 @@ fn an_answer_over_the_threshold_says_how_to_prune() {
     assert!(
         text.contains("over query_cache_warn_mb (0 MB); prune with rllvm-query cache clear"),
         "{text}"
+    );
+}
+
+/// What a compiler emits when two symbols share one body: `rustc` turns an
+/// `extern "C"` wrapper that compiles to the same code as the method it calls
+/// into an alias of that method. Module A defines the body and the alias and
+/// calls through the alias itself; module B reaches it by name.
+const ALIASED_MODULES: [(&str, &str); 2] = [
+    (
+        "aliased",
+        r#"define void @leaf() {
+  ret void
+}
+
+define void @impl() {
+  call void @leaf()
+  ret void
+}
+
+@exported = alias void (), ptr @impl
+
+define void @local_caller() {
+  call void @exported()
+  ret void
+}
+"#,
+    ),
+    (
+        "user",
+        r#"declare void @exported()
+
+define void @main() {
+  call void @exported()
+  ret void
+}
+"#,
+    ),
+];
+
+fn aliased_catalog(scratch: &tempfile::TempDir) -> PathBuf {
+    let modules: Vec<PathBuf> = ALIASED_MODULES
+        .iter()
+        .map(|(name, ir)| {
+            let directory = scratch.path().join(name);
+            std::fs::create_dir(&directory).unwrap();
+            let source = directory.join(format!("{name}.ll"));
+            let module = directory.join(format!("{name}.bc"));
+            std::fs::write(&source, ir).unwrap();
+            let status = Command::new(llvm_bin("llvm-as"))
+                .arg(&source)
+                .arg("-o")
+                .arg(&module)
+                .status()
+                .unwrap();
+            assert!(status.success(), "llvm-as rejected {name}");
+            module
+        })
+        .collect();
+    plain_module_catalog(scratch, &modules)
+}
+
+#[test]
+fn an_alias_is_a_definition_that_forwards_to_its_target() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = aliased_catalog(&scratch);
+
+    let defs = query_json(&scratch, &catalog, &["defs", "exported"]);
+    assert_eq!(
+        defs["results"].as_array().map(Vec::len),
+        Some(1),
+        "the alias is defined in the captured code: {defs}"
+    );
+
+    let callees = query_json(&scratch, &catalog, &["callees", "local_caller"]);
+    assert_eq!(
+        callees["results"][0]["target"]["kind"], "direct",
+        "a call through an alias names its callee: {callees}"
+    );
+    assert_eq!(
+        callees["results"][0]["target"]["callee"]["symbol"],
+        "exported"
+    );
+
+    let reach = query_json(&scratch, &catalog, &["reach", "main", "leaf"]);
+    let steps = reach["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a path runs through the alias: {reach}"));
+    assert!(
+        steps.iter().any(|step| step["kind"] == "alias"),
+        "the path names the alias step: {reach}"
+    );
+
+    let callers = query_json(&scratch, &catalog, &["callers", "impl"]);
+    let callers: Vec<&str> = callers["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|caller| caller["function"]["symbol"].as_str().unwrap())
+        .collect();
+    assert!(
+        callers.contains(&"main") && callers.contains(&"local_caller"),
+        "calls through an alias are calls to its target: {callers:?}"
     );
 }

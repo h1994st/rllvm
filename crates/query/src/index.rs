@@ -111,6 +111,12 @@ pub enum PathStep {
     },
     /// A declaration resolved to its one visible definition.
     Binding(SymbolBinding),
+    /// An alias followed to the function it stands for. Certain: the alias
+    /// has no body of its own, so whatever calls it runs `target`.
+    Alias {
+        alias: FunctionId,
+        target: FunctionId,
+    },
 }
 
 /// The result of a `Session::reach` query.
@@ -142,6 +148,9 @@ pub struct Session {
     /// `Unique` bindings keyed by their one candidate, for reverse (`In`)
     /// closure walks back through the declaration that resolved to it.
     bindings_by_candidate: HashMap<FunctionId, Vec<usize>>,
+    /// Aliases keyed by the function they stand for, for walking back from a
+    /// target to the names it is called by.
+    aliases_by_target: HashMap<FunctionId, Vec<FunctionId>>,
     /// Functions mapped to a source file and line. Read by `functions_at`.
     by_file_line: HashMap<(PathBuf, u32), Vec<FunctionId>>,
     /// The C++ reading of every symbol that has one, keyed by the mangled
@@ -162,7 +171,14 @@ impl Session {
         let mut by_name: HashMap<String, Vec<FunctionId>> = HashMap::new();
         let mut function_index: HashMap<FunctionId, usize> = HashMap::new();
         let mut by_file_line: HashMap<(PathBuf, u32), Vec<FunctionId>> = HashMap::new();
+        let mut aliases_by_target: HashMap<FunctionId, Vec<FunctionId>> = HashMap::new();
         for (idx, function) in facts.functions.iter().enumerate() {
+            if let Some(target) = &function.alias_of {
+                aliases_by_target
+                    .entry(target.clone())
+                    .or_default()
+                    .push(function.id.clone());
+            }
             by_name
                 .entry(function.id.symbol.clone())
                 .or_default()
@@ -259,6 +275,7 @@ impl Session {
             callers_by_function,
             bindings_by_symbol,
             bindings_by_candidate,
+            aliases_by_target,
             by_file_line,
             demangled,
             by_demangled,
@@ -316,19 +333,39 @@ impl Session {
     }
 
     /// Call sites that resolve to the named function: a direct call, or an
-    /// indirect call CVP bounded to a set that includes it.
+    /// indirect call CVP bounded to a set that includes it. A call to one of
+    /// its aliases runs it too, so those sites count, including calls from
+    /// other modules whose declaration binds uniquely to the alias.
     pub fn callers(&self, name: &str) -> Vec<CallSiteFact> {
-        self.ids_by_name(name)
+        let mut targets = Vec::new();
+        for id in self.ids_by_name(name) {
+            for alias in self.aliases_by_target.get(&id).into_iter().flatten() {
+                targets.push(alias.clone());
+                for &binding_idx in self.bindings_by_candidate.get(alias).into_iter().flatten() {
+                    let binding = &self.bindings[binding_idx];
+                    targets.extend(binding.declared_in.iter().map(|module| FunctionId {
+                        module_id: module.clone(),
+                        symbol: binding.symbol.clone(),
+                    }));
+                }
+            }
+            targets.push(id);
+        }
+        let mut seen = BTreeSet::new();
+        targets
             .iter()
             .flat_map(|id| self.callers_by_function.get(id).into_iter().flatten())
+            .filter(|&&idx| seen.insert(idx))
             .map(|&idx| self.facts.call_sites[idx].clone())
             .collect()
     }
 
-    /// Call sites the named function makes, resolved or not.
+    /// Call sites the named function makes, resolved or not. An alias has no
+    /// body, so its call sites are its target's.
     pub fn callees(&self, name: &str) -> Vec<CallSiteFact> {
         self.ids_by_name(name)
             .iter()
+            .map(|id| self.alias_target(id).unwrap_or(id))
             .flat_map(|id| self.callees_by_function.get(id).into_iter().flatten())
             .map(|&idx| self.facts.call_sites[idx].clone())
             .collect()
@@ -518,6 +555,13 @@ impl Session {
             .unwrap_or_default()
     }
 
+    /// The function `id` stands for when it is an alias.
+    fn alias_target(&self, id: &FunctionId) -> Option<&FunctionId> {
+        self.function_index
+            .get(id)
+            .and_then(|&idx| self.facts.functions[idx].alias_of.as_ref())
+    }
+
     fn is_definition(&self, id: &FunctionId) -> bool {
         self.function_index
             .get(id)
@@ -561,6 +605,14 @@ impl Session {
                 },
                 None => (Vec::new(), None),
             };
+        }
+
+        if let Some(target) = self.alias_target(id) {
+            let step = PathStep::Alias {
+                alias: id.clone(),
+                target: target.clone(),
+            };
+            return (vec![(target.clone(), step)], None);
         }
 
         let mut edges = Vec::new();
@@ -627,6 +679,14 @@ impl Session {
                 };
                 edges.push((declaration, PathStep::Binding(binding.clone())));
             }
+        }
+
+        for alias in self.aliases_by_target.get(id).into_iter().flatten() {
+            let step = PathStep::Alias {
+                alias: alias.clone(),
+                target: id.clone(),
+            };
+            edges.push((alias.clone(), step));
         }
         edges
     }

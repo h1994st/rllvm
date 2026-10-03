@@ -824,6 +824,12 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                             binding.candidates.len()
                         ));
                     }
+                    PathStep::Alias { alias, target } => out.push_str(&format!(
+                        "{}             {}  (of {})\n",
+                        paint("alias", ctx.color, Paint::Resolved),
+                        name(symbols, &alias.symbol, ctx),
+                        name(symbols, &target.symbol, ctx)
+                    )),
                 }
             }
         }

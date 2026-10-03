@@ -716,6 +716,10 @@ fn collect_step(step: &PathStep, into: &mut BTreeSet<String>) {
             }
         }
         PathStep::Binding(binding) => collect_binding(binding, into),
+        PathStep::Alias { alias, target } => {
+            collect_function(alias, into);
+            collect_function(target, into);
+        }
     }
 }
 
