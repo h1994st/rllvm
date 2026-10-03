@@ -1,0 +1,186 @@
+{
+  "build_command": "cargo build --locked --release --bins -j2",
+  "dependencies": [
+    {
+      "library_sha256": {
+        "libev.4.dylib": "6080635acb2e63d481f75aee389f7b466d4f5b260b6601b5e31dbeef9e6c889b",
+        "libev.a": "44de984a580d0c6e5f60b79478434916071c3aeec84de2cf8ce2285e92c82150"
+      },
+      "name": "libev",
+      "version": "4.33"
+    },
+    {
+      "library_sha256": {
+        "libcrypto.3.dylib": "bae675614cd791d37ec35416ea9f87edcc85407d020810504cf458119b63522c",
+        "libcrypto.a": "f7614ff9568acfceaf8fe328139e03a2f14eae6755e6fc7c3da52c97134470ee",
+        "libssl.3.dylib": "c6ee373222087cf31bc2f3817537d268b3c23e56b7fadd44bbf5c2317caed349",
+        "libssl.a": "a3065132277d7507ff9cbc5252f0d80c47d919efb5a403d9510b459cf3f32402"
+      },
+      "name": "openssl",
+      "version": "3.6.4"
+    },
+    {
+      "library_sha256": {
+        "libz.1.3.1.dylib": "7eae4a30309cb43b15ffed5ab700f8a05ae8f118b987cd00591d783c80e93efc",
+        "libz.a": "27449743e1a8a5dc071d58eb2f3d00731544dbfcb4ba1363d699ba914bf0d317"
+      },
+      "name": "zlib",
+      "version": "1.3.1"
+    }
+  ],
+  "kind": "workflow-baseline-provenance",
+  "known_limitations": [
+    "Tool hashes identify resolved executable files; Cargo/rustc proxies are additionally identified by version output.",
+    "rllvm_binary_sha256 covers the rllvm binaries the harness resolved; other binaries from the build command are not recorded.",
+    "Full commands, paths, flags, logs and original validation data are retained outside Git."
+  ],
+  "revision": "13366a0766657d166c4e0e585b729ec61a4ba75c",
+  "rllvm_binary_sha256": {
+    "rllvm-cc": "1cb5a2352f1a4571c9e8f5364b9cb5188ac5e71670eb0cc71740fddaf1d30678",
+    "rllvm-cxx": "4da093d87fa1d1a2a43ccaca7613276e2681ab46dc0001254c8f3c6a39dea35e",
+    "rllvm-get-bc": "a265d6a1676f974efa67c991aa804108dfb134095c3decc61be9056a014ba321",
+    "rllvm-info": "9beaabbd48cce7b3249aa7a2d0d282d21d56a79dc1961f99ded4aa5fe5c562d5",
+    "rllvm-rustc": "7d61b01b193a37f6ed0cc2f754612020d4884b53f1c079a117fc5cf9b75c9ce4"
+  },
+  "schema_version": 1,
+  "tools": {
+    "cargo": {
+      "invocation_name": "cargo",
+      "resolved_name": "rustup",
+      "sha256": "ec1b9233e7f72990ecd8e62063fa7f6c3dfc2bec8e97f88bff165f9100ac696a",
+      "version": "cargo 1.98.1 (797e8a9bc 2026-08-05)"
+    },
+    "clang": {
+      "invocation_name": "clang",
+      "resolved_name": "clang-23",
+      "sha256": "d64d1ee59d8aff01397eb88adea263e490ac65766faefc8b5323b4a06d0438e5",
+      "version": "Homebrew clang version 23.1.2\nTarget: arm64-apple-darwin25.5.0\nThread model: posix\nInstalledDir: /opt/homebrew/Cellar/llvm/23.1.2/bin\nConfiguration file: /opt/homebrew/Cellar/llvm/23.1.2/etc/clang/arm64-apple-darwin25.cfg"
+    },
+    "clang++": {
+      "invocation_name": "clang++",
+      "resolved_name": "clang-23",
+      "sha256": "d64d1ee59d8aff01397eb88adea263e490ac65766faefc8b5323b4a06d0438e5",
+      "version": "Homebrew clang version 23.1.2\nTarget: arm64-apple-darwin25.5.0\nThread model: posix\nInstalledDir: /opt/homebrew/Cellar/llvm/23.1.2/bin\nConfiguration file: /opt/homebrew/Cellar/llvm/23.1.2/etc/clang/arm64-apple-darwin25.cfg"
+    },
+    "cmake": {
+      "invocation_name": "cmake",
+      "resolved_name": "cmake",
+      "sha256": "01bb5214684f5390e96e0d6aef7aafd7415b77ecbcfd59f6b55b018d8de0d9a2",
+      "version": "cmake version 4.4.3\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."
+    },
+    "ctest": {
+      "invocation_name": "ctest",
+      "resolved_name": "ctest",
+      "sha256": "db1776ae6911a50ee184623ca1e4cbe9ad0949465525caf8873e6e8fd12d4e76",
+      "version": "ctest version 4.4.3\n\nCMake suite maintained and supported by Kitware (kitware.com/cmake)."
+    },
+    "git": {
+      "invocation_name": "git",
+      "resolved_name": "git",
+      "sha256": "5f0351f649aa1321345229d5256fc8043517778b134a3b4571ecdc3818f124b2",
+      "version": "git version 2.55.0"
+    },
+    "llvm-ar": {
+      "invocation_name": "llvm-ar",
+      "resolved_name": "llvm-ar",
+      "sha256": "dcf9f1680c7caf1acaed945942748b9ec84c47b598f5dcc97a3ab19b8a269dbb",
+      "version": "Homebrew LLVM version 23.1.2\n  Optimized build."
+    },
+    "llvm-config": {
+      "invocation_name": "llvm-config",
+      "resolved_name": "llvm-config",
+      "sha256": "4d8a19230d9fd00f2ad304e94303813f9fc44edcb1b1b259e9cbbd43d23f6a30",
+      "version": "23.1.2"
+    },
+    "llvm-dis": {
+      "invocation_name": "llvm-dis",
+      "resolved_name": "llvm-dis",
+      "sha256": "edba4f8b2d6ecaa4d980233b69bc5cb6e64d40c87466b1ad7d0e80c87c2d17e7",
+      "version": "Homebrew LLVM version 23.1.2\n  Optimized build."
+    },
+    "llvm-link": {
+      "invocation_name": "llvm-link",
+      "resolved_name": "llvm-link",
+      "sha256": "a3f76afc2c29911d742ea0c09fdfb294b5f7ee58f37df45c8acc6dd9b8b15b44",
+      "version": "Homebrew LLVM version 23.1.2\n  Optimized build."
+    },
+    "llvm-nm": {
+      "invocation_name": "llvm-nm",
+      "resolved_name": "llvm-nm",
+      "sha256": "6def02fdbbed7a17169eebe2bd5515a960363278faca8ff3614e31ce47e5248c",
+      "version": "llvm-nm, compatible with GNU nm\nHomebrew LLVM version 23.1.2\n  Optimized build."
+    },
+    "llvm-objcopy": {
+      "invocation_name": "llvm-objcopy",
+      "resolved_name": "llvm-objcopy",
+      "sha256": "c27ca35465f609ba69ccd360dffbb14aa3a4c72137da0ff513585fa1e5dadc11",
+      "version": "llvm-objcopy, compatible with GNU objcopy\nHomebrew LLVM version 23.1.2\n  Optimized build."
+    },
+    "llvm-ranlib": {
+      "invocation_name": "llvm-ranlib",
+      "resolved_name": "llvm-ar",
+      "sha256": "dcf9f1680c7caf1acaed945942748b9ec84c47b598f5dcc97a3ab19b8a269dbb",
+      "version": "Homebrew LLVM version 23.1.2\n  Optimized build."
+    },
+    "make": {
+      "invocation_name": "make",
+      "resolved_name": "make",
+      "sha256": "179301dcb41ea78accc3fa0048a7e6f6710d891945a751a34addd622020c1818",
+      "version": "GNU Make 3.81\nCopyright (C) 2006  Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.\nThere is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A\nPARTICULAR PURPOSE.\n\nThis program built for i386-apple-darwin11.3.0"
+    },
+    "ninja": {
+      "invocation_name": "ninja",
+      "resolved_name": "ninja",
+      "sha256": "48761628046784f59bd789f5a72b88da99205c5849e5d19ae4d317854ae09e83",
+      "version": "1.13.2"
+    },
+    "opt": {
+      "invocation_name": "opt",
+      "resolved_name": "opt",
+      "sha256": "5418f8d52e238a1078c9a25408a9888331119b77e9e319cfeaf8457d6fab7a19",
+      "version": "Homebrew LLVM version 23.1.2\n  Optimized build.\n  Default target: arm64-apple-darwin25.5.0\n  Host CPU: apple-m4"
+    },
+    "pkg-config": {
+      "invocation_name": "pkg-config",
+      "resolved_name": "pkgconf",
+      "sha256": "a819e53e8eb8017661e5d686ae8e63102239d1b9c2b7e75988fc8d565fe3ad53",
+      "version": "2.5.1"
+    },
+    "rllvm-cc": {
+      "invocation_name": "rllvm-cc",
+      "resolved_name": "rllvm-cc",
+      "sha256": "1cb5a2352f1a4571c9e8f5364b9cb5188ac5e71670eb0cc71740fddaf1d30678",
+      "version": "rllvm-cc 0.6.4"
+    },
+    "rllvm-cxx": {
+      "invocation_name": "rllvm-cxx",
+      "resolved_name": "rllvm-cxx",
+      "sha256": "4da093d87fa1d1a2a43ccaca7613276e2681ab46dc0001254c8f3c6a39dea35e",
+      "version": "rllvm-cxx 0.6.4"
+    },
+    "rllvm-get-bc": {
+      "invocation_name": "rllvm-get-bc",
+      "resolved_name": "rllvm-get-bc",
+      "sha256": "a265d6a1676f974efa67c991aa804108dfb134095c3decc61be9056a014ba321",
+      "version": "rllvm-get-bc 0.6.4"
+    },
+    "rllvm-info": {
+      "invocation_name": "rllvm-info",
+      "resolved_name": "rllvm-info",
+      "sha256": "9beaabbd48cce7b3249aa7a2d0d282d21d56a79dc1961f99ded4aa5fe5c562d5",
+      "version": "rllvm-info 0.6.4"
+    },
+    "rllvm-rustc": {
+      "invocation_name": "rllvm-rustc",
+      "resolved_name": "rllvm-rustc",
+      "sha256": "7d61b01b193a37f6ed0cc2f754612020d4884b53f1c079a117fc5cf9b75c9ce4",
+      "version": "rllvm-rustc 0.6.4"
+    },
+    "rustc": {
+      "invocation_name": "rustc",
+      "resolved_name": "rustup",
+      "sha256": "ec1b9233e7f72990ecd8e62063fa7f6c3dfc2bec8e97f88bff165f9100ac696a",
+      "version": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: aarch64-apple-darwin\nrelease: 1.98.1\nLLVM version: 22.1.8"
+    }
+  }
+}
