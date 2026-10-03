@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.5](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.4...rllvm-v0.6.5) (2026-10-03)
+
+
+### Bug Fixes
+
+* exit quietly when a reader closes stdout early ([#269](https://github.com/h1994st/rllvm/issues/269)) ([9570486](https://github.com/h1994st/rllvm/commit/9570486ac6c72f65322cfa3d7c0fd4b17c7b9a36))
+* extract static archives of LTO objects ([#287](https://github.com/h1994st/rllvm/issues/287)) ([9521891](https://github.com/h1994st/rllvm/commit/9521891b3d2884ff7b689e138da6b63144252bad))
+* patch only a crate's own archive members ([#290](https://github.com/h1994st/rllvm/issues/290)) ([13366a0](https://github.com/h1994st/rllvm/commit/13366a0766657d166c4e0e585b729ec61a4ba75c))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * rllvm-core bumped from 0.6.2 to 0.6.3
+
 ## [0.6.4](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.3...rllvm-v0.6.4) (2026-09-24)
 
 
