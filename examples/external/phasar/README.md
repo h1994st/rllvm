@@ -55,8 +55,9 @@ each source module in a marker that the LTO link carries into the binary.
 
 ## A single library
 
-Under ThinLTO an archive holds raw bitcode rather than objects, so there is no
-object left to carry a recorded path; turn it off to extract from a library:
+`rllvm-get-bc` also extracts a single library. Under ThinLTO its archive holds
+bitcode members, which are taken as modules directly; the flow validated below
+builds with LTO off:
 
 ```bash
 export CC=rllvm-cc CXX=rllvm-cxx
