@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.3](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.2...rllvm-core-v0.6.3) (2026-10-04)
+
+
+### Features
+
+* answer queries piped on stdin from one load ([#277](https://github.com/h1994st/rllvm/issues/277)) ([59e1884](https://github.com/h1994st/rllvm/commit/59e18844f9c96d2f773ed7ef02ee4693b710e19c))
+* cache extracted facts per module ([#281](https://github.com/h1994st/rllvm/issues/281)) ([db0441d](https://github.com/h1994st/rllvm/commit/db0441dab64faec1afcb8f9235bd9227723ac5fb))
+
+
+### Bug Fixes
+
+* exit quietly when a reader closes stdout early ([#269](https://github.com/h1994st/rllvm/issues/269)) ([9570486](https://github.com/h1994st/rllvm/commit/9570486ac6c72f65322cfa3d7c0fd4b17c7b9a36))
+* read the catalog in one call ([#275](https://github.com/h1994st/rllvm/issues/275)) ([1a4e910](https://github.com/h1994st/rllvm/commit/1a4e910ec542c71c50d7b54d6e42ba164ab7fbcc))
+
 ## [0.6.2](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.1...rllvm-core-v0.6.2) (2026-09-22)
 
 
