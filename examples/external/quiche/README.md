@@ -180,13 +180,14 @@ unmangled name, which is what `#[no_mangle]` produces: no `nm`, no `quiche_`
 prefix, and no Mach-O underscore to strip.
 
 The other five are safe, and show where call-graph answers stop.
-`quiche_conn_source_id` drops a `ConnectionId`, but `ConnectionId` is Cow-like
-(`enum { Vec(Vec<u8>), Ref(&'a [u8]) }`) and the dropped value is the borrowed
-variant, so nothing is freed. `quiche_h3_take_last_priority_update` hands its
-pointer to a C callback before freeing, so its safety depends on code the Rust
-side cannot see. Both need data-flow analysis (#149) rather than a call graph.
-Two more are noise from matching the method name `as_ref`, which also catches
-`Option::as_ref`.
+`quiche_conn_source_id` and `quiche_conn_destination_id` drop a `ConnectionId`,
+but `ConnectionId` is Cow-like (`enum { Vec(Vec<u8>), Ref(&'a [u8]) }`) and the
+dropped value is the borrowed variant, so nothing is freed.
+`quiche_h3_take_last_priority_update` hands its pointer to a C callback before
+freeing, so its safety depends on code the Rust side cannot see. These three
+need data-flow analysis (#149) rather than a call graph. The last two,
+`quiche_accept` and `quiche_conn_new_with_tls`, are noise from matching the
+method name `as_ref`, which also catches `Option::as_ref`.
 
 [rllvm: From Capture to Query](https://shengtuo.me/blog/from-capture-to-query/)
 walks through this triage at length.
