@@ -41,10 +41,10 @@ jobs:
       # instead, so reconcile the label here -- before release-please runs, so it
       # sees a clean slate.
       #
-      # The label is no longer what retries a failed release: it is reconciled
-      # against rllvm's tag alone, so a release that tagged rllvm but not
-      # rllvm-query still clears. What retries is the dispatch step below, which
+      # The label is not what retries a failed release: the dispatch step below
       # re-dispatches any component whose tag is missing on every push to main.
+      # The label only holds release-please back until every version the last
+      # release PR wrote is tagged, and clears on the first push after that.
       - uses: actions/checkout@v7
 
       - name: Reconcile labels on already-released PRs
@@ -68,27 +68,36 @@ jobs:
           # With multiple packages the release PR title is generic ("chore:
           # release main") and carries no version, so it can no longer tell us
           # what was released. main's checked-out .release-please-manifest.json
-          # can: a merged release PR is exactly what wrote that file, so its
-          # "crates/tools" entry is the version the rllvm component last
-          # released at. rllvm is the witness because it is the component
-          # almost every release bumps; rllvm-core has no dist app and reaches
-          # crates.io through the publish job instead. A release PR that bumps
-          # only rllvm-query is reconciled against rllvm's existing tag and so
-          # clears early, which is still the point of this step: unblocking the
-          # next run.
-          VER="$(jq -er '.["crates/tools"]' .release-please-manifest.json)"
-          TAG="rllvm-v${VER}"
+          # can: a merged release PR is exactly what wrote that file. It is
+          # released once every version there is tagged. Checking one package
+          # is not enough: a release that bumps only rllvm-query would clear
+          # against rllvm's earlier tag, and release-please would then build
+          # the next PR before rllvm-query's new tag exists, counting the
+          # crate's whole history as unreleased.
+          MISSING=""
+          for PKG_PATH in $(jq -er '.packages | keys[]' release-please-config.json); do
+            COMPONENT="$(jq -er --arg pkg "$PKG_PATH" \
+              '.packages[$pkg].component' release-please-config.json)"
+            VERSION="$(jq -er --arg pkg "$PKG_PATH" '.[$pkg]' .release-please-manifest.json)"
+            if [ "$VERSION" = "0.0.0" ]; then
+              continue
+            fi
+            TAG="${COMPONENT}-v${VERSION}"
+            if ! gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+              MISSING="${MISSING} ${TAG}"
+            fi
+          done
 
           gh pr list --repo "$REPO" --state merged --label "$PENDING" \
             --json number --limit 20 | jq -c '.[]' | while read -r pr; do
             NUM="$(jq -r '.number' <<<"$pr")"
 
-            if gh api "repos/${REPO}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
-              echo "::notice::${TAG} is tagged; marking PR #${NUM} as released."
+            if [ -z "$MISSING" ]; then
+              echo "::notice::Every released version is tagged; marking PR #${NUM} as released."
               gh pr edit "$NUM" --repo "$REPO" \
                 --add-label "$TAGGED" --remove-label "$PENDING"
             else
-              echo "::notice::${TAG} is not tagged yet; leaving PR #${NUM} pending."
+              echo "::notice::Not tagged yet:${MISSING}; leaving PR #${NUM} pending."
             fi
           done
 
