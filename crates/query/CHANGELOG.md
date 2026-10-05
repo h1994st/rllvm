@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.7.1...rllvm-query-v0.7.2) (2026-10-05)
+
+
+### Bug Fixes
+
+* use spec-valid cacheScope in modern MCP results ([#294](https://github.com/h1994st/rllvm/issues/294)) ([e6a7aec](https://github.com/h1994st/rllvm/commit/e6a7aec3f0500d8e9ded7b2330986b69bf5bfb90))
+
 ## [0.7.1](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.7.0...rllvm-query-v0.7.1) (2026-10-04)
 
 
