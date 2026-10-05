@@ -348,7 +348,7 @@ fn handle_line(registry: &mut Registry, line: &str) -> Option<Value> {
                 map.insert("resultType".into(), json!("complete"));
                 if cacheable {
                     map.insert("ttlMs".into(), json!(60_000));
-                    map.insert("cacheScope".into(), json!("session"));
+                    map.insert("cacheScope".into(), json!("private"));
                 }
             }
             success_response(id, result)
