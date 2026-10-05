@@ -48,7 +48,10 @@ When a warning about the facts cache appears, offer `rllvm-query cache clear
 | Which Rust functions can C call — the FFI surface? | `ffi_exports` |
 
 A name can be the mangled symbol, the full demangled reading, or a bare
-identifier.
+identifier. A bare identifier matches a C++ demangled reading that contains
+it as a whole identifier; a C symbol has no reading, so a bare C name
+resolves only to its own exact symbol. When a bare name matches nothing,
+find the exact symbol with `at`, `callers` or `callees`, then query that.
 
 ## Is a vulnerable function present and reachable?
 

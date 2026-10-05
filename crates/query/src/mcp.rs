@@ -603,7 +603,7 @@ query_tool_surface! {
 fn symbol_property() -> Value {
     json!({
         "type": "string",
-        "description": "Symbol to look up. Accepts a mangled symbol (`_Z5twiceIiET_S0_`), a full demangled reading (`int twice<int>(int)`), or a bare identifier (`twice`), which matches every function whose reading contains it. The answer's `resolution` block says which applied."
+        "description": "Symbol to look up. Accepts a mangled symbol (`_Z5twiceIiET_S0_`), a full demangled reading (`int twice<int>(int)`), or a bare identifier (`twice`). A bare identifier matches a C++ demangled reading that contains it as a whole identifier, so `twice` finds `int twice<int>(int)`; a C symbol has no reading, so a bare C name matches only its own exact symbol. The answer's `resolution` block says which applied."
     })
 }
 
