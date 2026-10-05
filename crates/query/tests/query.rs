@@ -2279,6 +2279,10 @@ mod mcp {
             serde_json::json!({}),
         ));
         assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(
+            response["result"]["cacheScope"], "private",
+            "modern cacheScope must be a spec-valid MCP enum value (public|private)"
+        );
         assert!(response["result"]["tools"].as_array().unwrap().len() >= 9);
     }
 
