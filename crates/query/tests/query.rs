@@ -1056,6 +1056,48 @@ fn a_static_function_named_like_another_module_s_variable_is_not_emitted() {
     assert!(!out.exists());
 }
 
+/// A private function never appears in its own module's symbol listing, yet
+/// cut out it becomes an external definition that `b`'s call to some other
+/// `pf` would bind to.
+#[test]
+fn a_private_function_that_would_bind_another_module_s_call_is_not_emitted() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = ir_catalog(
+        &scratch,
+        &[
+            (
+                "a",
+                "declare void @leaf()\n\
+                 define private void @pf() {\n  call void @leaf()\n  ret void\n}\n\
+                 define void @fa() {\n  call void @pf()\n  ret void\n}\n",
+            ),
+            (
+                "b",
+                "declare void @pf()\n\
+                 define void @leaf() {\n  call void @pf()\n  ret void\n}\n",
+            ),
+            (
+                "main",
+                "declare void @fa()\n\
+                 define void @main() {\n  call void @fa()\n  ret void\n}\n",
+            ),
+        ],
+    );
+    let out = scratch.path().join("slice.bc");
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["slice", "main", "leaf", "--emit-module"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a module was emitted: {stderr}");
+    assert!(stderr.contains("`pf` is static in module"), "{stderr}");
+    assert!(!out.exists());
+}
+
 /// Both modules keep a `static usage`, but only off-path functions use it,
 /// so neither copy reaches the emitted module and nothing collides.
 #[test]
@@ -3894,7 +3936,13 @@ define void @main() {
 ];
 
 fn aliased_catalog(scratch: &tempfile::TempDir) -> PathBuf {
-    let modules: Vec<PathBuf> = ALIASED_MODULES
+    ir_catalog(scratch, &ALIASED_MODULES)
+}
+
+/// Assembles each `(name, IR)` into its own module and catalogs them all,
+/// for shapes a C compiler will not produce on request.
+fn ir_catalog(scratch: &tempfile::TempDir, ir_modules: &[(&str, &str)]) -> PathBuf {
+    let modules: Vec<PathBuf> = ir_modules
         .iter()
         .map(|(name, ir)| {
             let directory = scratch.path().join(name);

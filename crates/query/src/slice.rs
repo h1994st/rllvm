@@ -16,7 +16,7 @@ use rllvm_core::{catalog::ArchiveCache, error::Error, utils::execute_llvm_tool_i
 
 use crate::{
     Query, QueryResult, QueryResults, Session,
-    facts::FunctionId,
+    facts::{FunctionId, Linkage},
     load::{load_catalog, read_module},
 };
 
@@ -29,6 +29,14 @@ const LLVM_NM: &str = "llvm-nm";
 /// The `llvm-nm` type letters of a symbol local to its module: a `static`
 /// function, variable or constant. Lowercase `w`, `v` and `u` are not local.
 const LOCAL_SYMBOL_TYPES: &[char] = &['t', 'd', 'b', 'r', 's'];
+
+/// What a target may put before every IR name in its symbol table: nothing
+/// on ELF, `_` on Mach-O.
+const GLOBAL_PREFIXES: &[&str] = &["", "_"];
+
+/// Marks an IR name the target must spell exactly as written, unprefixed:
+/// an Objective-C method's, or one given with `asm`.
+const VERBATIM_NAME: char = '\u{1}';
 
 /// What [`emit_module`] wrote.
 #[derive(Debug, Serialize)]
@@ -60,10 +68,13 @@ pub struct EmittedModule {
 /// `llvm-link` then binds it by name. So every piece's symbols, functions
 /// and data, defined and undefined, are listed with the `llvm-nm` beside
 /// `llvm-link`, and a `static` of one module that stays in its piece under a
-/// name another piece also holds is refused rather than linked. What remains
-/// is compiler-private data such as string literals, which `llvm-nm` does
-/// not list for its source module: it too becomes an external declaration,
-/// and same-named ones from two pieces merge into one declaration.
+/// name another piece also holds is refused rather than linked. A `static`
+/// is what the source module's listing calls local, or a function the facts
+/// give internal or private linkage: `llvm-nm` omits private symbols, so the
+/// facts name those, spelled with the prefix the piece's own listing shows.
+/// What remains is compiler-private data such as string literals, in neither
+/// list: it too becomes an external declaration, and same-named ones from two
+/// pieces merge into one declaration.
 pub fn emit_module(
     session: &Session,
     catalog: &Path,
@@ -140,7 +151,7 @@ pub fn emit_module(
             run_tool(&llvm_nm, &[file.as_os_str()], scratch.path(), &environment)
                 .map(|stdout| symbol_table(&String::from_utf8_lossy(&stdout)))
         };
-        let statics: BTreeSet<String> = list(&piece.input)?
+        let mut statics: BTreeSet<String> = list(&piece.input)?
             .into_iter()
             .filter(|(kind, _)| LOCAL_SYMBOL_TYPES.contains(kind))
             .map(|(_, name)| name)
@@ -149,6 +160,12 @@ pub fn emit_module(
             .into_iter()
             .map(|(_, name)| name)
             .collect();
+        // A private function is internal in the facts but absent from the
+        // listing, so the facts name it too, spelled as the target does.
+        let prefix = global_prefix(&piece.plan.cut, &piece.symbols);
+        for symbol in &piece.plan.internal {
+            statics.extend(spellings(symbol, prefix));
+        }
         piece.promoted = piece.symbols.intersection(&statics).cloned().collect();
     }
     refuse_colliding_statics(&pieces)?;
@@ -226,6 +243,13 @@ fn plan_pieces(session: &Session, functions: &[FunctionId]) -> BTreeMap<String, 
                 .and_then(|target| session.function(target));
         }
     }
+    for function in session.functions() {
+        if function.linkage == Linkage::Internal
+            && let Some(plan) = plans.get_mut(&function.id.module_id)
+        {
+            plan.internal.insert(function.id.symbol.clone());
+        }
+    }
     plans
 }
 
@@ -237,6 +261,9 @@ struct Plan {
     definitions: Vec<(&'static str, String)>,
     /// The symbols in `definitions`.
     cut: BTreeSet<String>,
+    /// Every function the module defines with internal or private linkage,
+    /// as the facts name it.
+    internal: BTreeSet<String>,
 }
 
 /// One source module's share of the slice, as files.
@@ -303,6 +330,36 @@ fn symbol_table(listing: &str) -> Vec<(char, String)> {
         .collect()
 }
 
+/// The prefix the piece's target puts on every IR name, read off its own
+/// listing: the one under which every function cut out is listed. `None`
+/// when the listing does not decide between them.
+fn global_prefix(cut: &BTreeSet<String>, symbols: &BTreeSet<String>) -> Option<&'static str> {
+    let mut fitting = GLOBAL_PREFIXES.iter().copied().filter(|prefix| {
+        cut.iter()
+            .filter(|symbol| !symbol.starts_with(VERBATIM_NAME))
+            .all(|symbol| symbols.contains(&format!("{prefix}{symbol}")))
+    });
+    match (fitting.next(), fitting.next()) {
+        (Some(prefix), None) => Some(prefix),
+        _ => None,
+    }
+}
+
+/// How the target may spell the IR name `symbol` in its symbol table: with
+/// `prefix`, or, when that is undecided, with each one a target may use.
+fn spellings(symbol: &str, prefix: Option<&str>) -> Vec<String> {
+    if let Some(verbatim) = symbol.strip_prefix(VERBATIM_NAME) {
+        return vec![verbatim.to_string()];
+    }
+    match prefix {
+        Some(prefix) => vec![format!("{prefix}{symbol}")],
+        None => GLOBAL_PREFIXES
+            .iter()
+            .map(|prefix| format!("{prefix}{symbol}"))
+            .collect(),
+    }
+}
+
 /// The tool named `name` in `llvm_link`'s directory.
 fn sibling(llvm_link: &Path, name: &str) -> Result<PathBuf, Error> {
     let tool = llvm_link.with_file_name(name);
@@ -362,6 +419,22 @@ mod tests {
                 ('U', "_leaf".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn the_prefix_is_read_off_the_listing() {
+        let cut = BTreeSet::from(["fa".to_string(), "\u{1}-[Foo bar:]".to_string()]);
+        let macho = BTreeSet::from(["_fa".to_string(), "-[Foo bar:]".to_string()]);
+        assert_eq!(global_prefix(&cut, &macho), Some("_"));
+        assert_eq!(spellings("pf", Some("_")), ["_pf"]);
+        let elf = BTreeSet::from(["fa".to_string(), "-[Foo bar:]".to_string()]);
+        assert_eq!(global_prefix(&cut, &elf), Some(""));
+        assert_eq!(spellings("\u{1}-[Foo baz]", Some("_")), ["-[Foo baz]"]);
+
+        // Both spellings listed, or neither: undecided, so both are kept.
+        let both = BTreeSet::from(["fa".to_string(), "_fa".to_string()]);
+        assert_eq!(global_prefix(&cut, &both), None);
+        assert_eq!(spellings("pf", None), ["pf", "_pf"]);
     }
 
     #[test]
