@@ -26,9 +26,10 @@ dependence, do not start; completing a whole program is rarely the goal.
    (`ops@8`: record and byte offset), `field_name`, `signature`, `sites`, and
    `candidates`: functions stored into that field, each with its
    `assignments` and whether `signature_matches`.
-2. For each group, read the source of every assignment (`at` with the
-   assignment's `file` and `line`, or the file itself). Confirm the member is `field_name` and
-   the struct is the record type, not a same-named field of another struct.
+2. For each group, read the source of every assignment: `at` (with the
+   assignment's `file` and `line`) shows what runs at that line; read the
+   file itself for the source. Confirm the member is `field_name` and the
+   struct is the record type, not a same-named field of another struct.
    `uses` on a candidate lists every place its address is taken.
 3. Decide the targets. A candidate is not a target until you have read the
    assignment. `single_candidate` is a hint to check, not an answer.
