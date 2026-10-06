@@ -5,7 +5,8 @@
 Source-level questions about bitcode captured by
 [rllvm](https://crates.io/crates/rllvm): where a symbol is defined, who calls
 it, what it reaches, and what the captured program's boundary is. Also serves
-the same ten queries over MCP stdio for an agent to use.
+the same twelve queries over MCP stdio for an agent to use, with tools that
+keep the agent's resolved indirect calls in a call-graph overlay.
 
 ```bash
 cargo install rllvm-query   # needs LLVM_SYS_231_PREFIX if llvm-config is not on PATH
