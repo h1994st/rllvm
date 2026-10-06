@@ -938,7 +938,7 @@ fn tool_for(query: &Query) -> Value {
         .and_then(Value::as_object_mut)
     {
         properties.insert("catalog".into(), catalog_property());
-        if matches!(query, Query::Reach { .. } | Query::Closure { .. }) {
+        if query.takes_overlay() {
             for (name, property) in overlay_properties() {
                 properties.insert(name.into(), property);
             }
