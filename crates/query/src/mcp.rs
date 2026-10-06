@@ -789,13 +789,8 @@ fn records_argument(arguments: &Value) -> Result<Vec<Record>, String> {
         .iter()
         .enumerate()
         .map(|(index, record)| {
-            record.to_string().parse::<Record>().map_err(|error| {
-                let reason = match error {
-                    Error::InvalidArguments(reason) => reason,
-                    other => other.to_string(),
-                };
-                Error::InvalidArguments(format!("record {}: {reason}", index + 1)).to_string()
-            })
+            Record::parse_labeled(&record.to_string(), format_args!("record {}", index + 1))
+                .map_err(|error| error.to_string())
         })
         .collect()
 }

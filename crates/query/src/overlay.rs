@@ -207,6 +207,14 @@ impl std::str::FromStr for Record {
     }
 }
 
+impl Record {
+    /// [`Record::from_str`], with an error prefixed by where the record came
+    /// from, such as `line 3` or `record 2`.
+    pub fn parse_labeled(text: &str, label: impl fmt::Display) -> Result<Record, Error> {
+        parse_record(text).map_err(|reason| Error::InvalidArguments(format!("{label}: {reason}")))
+    }
+}
+
 /// [`Record::from_str`], with the reason bare so a load can prefix its
 /// `path:line`.
 fn parse_record(line: &str) -> Result<Record, String> {
