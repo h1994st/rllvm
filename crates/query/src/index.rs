@@ -7,6 +7,10 @@
 //! `CallTarget::Indirect` edge with no bound (uncertainty, never traversed).
 //! The heuristic address-taken inventory recorded in `ProgramFacts::uses` is
 //! not an edge source at all and is never consulted here.
+//!
+//! An overlay of agent-proposed edges is walked only when a caller passes an
+//! [`OverlayView`], and every step through one is a [`PathStep::Agent`]:
+//! a hypothesis about an unbounded site, never proof.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
@@ -17,14 +21,17 @@ use serde::Serialize;
 
 use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
 
-use crate::CacheReport;
+use crate::{
+    CacheReport,
+    overlay::{Confidence, EdgeKey, OverlayView, Verdict},
+};
 
 use super::{
     bind::{BindingStatus, SymbolBinding},
     extract::demangle,
     facts::{
         CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, ModuleReport,
-        ProgramFacts, UseFact,
+        ProgramFacts, SourceLocation, UseFact,
     },
 };
 
@@ -116,6 +123,21 @@ pub enum PathStep {
     Alias {
         alias: FunctionId,
         target: FunctionId,
+    },
+    /// An edge an agent proposed for an unresolved indirect call. A
+    /// hypothesis: the path holds only if the call can take `chosen`.
+    Agent {
+        site: CallSiteId,
+        chosen: FunctionId,
+        /// The call's source location, so a reader can check the claim.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        location: Option<SourceLocation>,
+        key: EdgeKey,
+        confidence: Confidence,
+        /// Why the agent claimed the edge, quoted from the record.
+        provenance: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        verdict: Option<Verdict>,
     },
 }
 
@@ -508,6 +530,14 @@ impl Session {
     /// is recorded in `frontier` rather than guessed through. A visited set
     /// guarantees termination on a cycle.
     pub fn reach(&self, from: &str, to: &str) -> ReachResult {
+        self.reach_with(from, to, None)
+    }
+
+    /// [`Session::reach`], also walking `overlay`'s agent edges when given.
+    /// A function's direct edges come before its own agent edges, but the
+    /// walk is breadth-first across functions, so it can return a path
+    /// through agent edges as short as, or shorter than, a resolved one.
+    pub fn reach_with(&self, from: &str, to: &str, overlay: Option<&OverlayView>) -> ReachResult {
         // A mere declaration is not a reached function: only a definition
         // among the functions named `to` counts as the destination.
         let targets: HashSet<FunctionId> = self
@@ -534,7 +564,7 @@ impl Session {
                 };
             }
 
-            let (edges, ambiguous) = self.successors(&current);
+            let (edges, ambiguous) = self.successors(&current, overlay);
             // One entry per symbol. A symbol declared in several modules is
             // reached once per declaration, and the binding is the same
             // record each time; pushing it repeatedly would report one
@@ -563,6 +593,16 @@ impl Session {
     /// collecting every function reached (never including the start set
     /// itself).
     pub fn closure(&self, name: &str, direction: Direction) -> Vec<FunctionId> {
+        self.closure_with(name, direction, None)
+    }
+
+    /// [`Session::closure`], also walking `overlay`'s agent edges when given.
+    pub fn closure_with(
+        &self,
+        name: &str,
+        direction: Direction,
+        overlay: Option<&OverlayView>,
+    ) -> Vec<FunctionId> {
         let mut visited: HashSet<FunctionId> = HashSet::new();
         let mut queue: VecDeque<FunctionId> = VecDeque::new();
         for start in self.ids_by_name(name) {
@@ -574,8 +614,8 @@ impl Session {
         let mut reached = Vec::new();
         while let Some(current) = queue.pop_front() {
             let neighbors = match direction {
-                Direction::Out => self.successors(&current).0,
-                Direction::In => self.predecessors(&current),
+                Direction::Out => self.successors(&current, overlay).0,
+                Direction::In => self.predecessors(&current, overlay),
             };
             for (next, _step) in neighbors {
                 if visited.insert(next.clone()) {
@@ -620,11 +660,15 @@ impl Session {
             })
     }
 
-    /// Forward edges out of `id`: a definition's resolved call sites, or a
-    /// declaration's `Unique` binding. Also returns the binding at `id` when
-    /// it is `Ambiguous`, so callers can record it in a `frontier` without
-    /// treating it as an edge.
-    fn successors(&self, id: &FunctionId) -> (Vec<(FunctionId, PathStep)>, Option<SymbolBinding>) {
+    /// Forward edges out of `id`: a definition's resolved call sites, then
+    /// its agent edges from `overlay`, or a declaration's `Unique` binding.
+    /// Also returns the binding at `id` when it is `Ambiguous`, so callers
+    /// can record it in a `frontier` without treating it as an edge.
+    fn successors(
+        &self,
+        id: &FunctionId,
+        overlay: Option<&OverlayView>,
+    ) -> (Vec<(FunctionId, PathStep)>, Option<SymbolBinding>) {
         if !self.is_definition(id) {
             return match self.binding_for_declaration(id).cloned() {
                 Some(binding) => match binding.status {
@@ -683,13 +727,21 @@ impl Session {
                 | CallTarget::InlineAsm => {}
             }
         }
+        if let Some(overlay) = overlay {
+            edges.extend_from_slice(overlay.successors(id));
+        }
         (edges, None)
     }
 
     /// Reverse edges into `id`: call sites resolving to it, and any `Unique`
     /// binding for which it is the one candidate, walked back to the
-    /// declaration(s) that resolve to it.
-    fn predecessors(&self, id: &FunctionId) -> Vec<(FunctionId, PathStep)> {
+    /// declaration(s) that resolve to it; then agent edges into it from
+    /// `overlay`.
+    fn predecessors(
+        &self,
+        id: &FunctionId,
+        overlay: Option<&OverlayView>,
+    ) -> Vec<(FunctionId, PathStep)> {
         let mut edges = Vec::new();
         for &site_idx in self.callers_by_function.get(id).into_iter().flatten() {
             let site = &self.facts.call_sites[site_idx];
@@ -725,6 +777,9 @@ impl Session {
                 target: id.clone(),
             };
             edges.push((alias.clone(), step));
+        }
+        if let Some(overlay) = overlay {
+            edges.extend_from_slice(overlay.predecessors(id));
         }
         edges
     }

@@ -1,6 +1,6 @@
 use std::{
     io::{IsTerminal, Read},
-    path::Path,
+    path::{Path, PathBuf},
     process::ExitCode,
 };
 
@@ -11,11 +11,13 @@ use rllvm_core::{
     utils::{print_stdout, split_response_arguments},
 };
 use rllvm_query::{
-    Color, FactsCache, Overlay, OverlaySummary, Query, Record, TextMode,
-    cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand},
+    Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session, TextMode,
+    cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
     default_overlay_path,
     index::Direction,
-    llvm_version, mcp, open_with_cache, run,
+    llvm_version, mcp, open_with_cache,
+    overlay::verdict_label,
+    run_with_overlay,
 };
 use tracing_subscriber::FmtSubscriber;
 
@@ -33,20 +35,32 @@ use tracing_subscriber::FmtSubscriber;
 /// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
 /// fails to compile there instead, until this file is updated to drive it
 /// from the command line.
-fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
+fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Query> {
+    let QueryModifiers {
+        heuristics,
+        include_overlay,
+        min_confidence,
+    } = modifiers;
     Some(match command {
         QueryCommand::Defs { name } => Query::Defs { name },
         QueryCommand::At { file, line } => Query::At { file, line },
         QueryCommand::Callers { name } => Query::Callers { name },
         QueryCommand::Callees { name } => Query::Callees { name },
         QueryCommand::Uses { name } => Query::Uses { name },
-        QueryCommand::Reach { from, to } => Query::Reach { from, to },
+        QueryCommand::Reach { from, to } => Query::Reach {
+            from,
+            to,
+            include_overlay,
+            min_confidence,
+        },
         QueryCommand::Closure { name, direction } => Query::Closure {
             name,
             direction: match direction {
                 ClosureDirection::In => Direction::In,
                 ClosureDirection::Out => Direction::Out,
             },
+            include_overlay,
+            min_confidence,
         },
         QueryCommand::Externals => Query::Externals,
         QueryCommand::FfiExports => Query::FfiExports,
@@ -62,13 +76,14 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
 }
 
 /// One line of stdin: a query subcommand, written as it would follow
-/// `rllvm-query --catalog <catalog>`. Only `--heuristics` may accompany it;
-/// the output format and the catalog belong to the whole run.
+/// `rllvm-query --catalog <catalog>`. Only the [`QueryModifiers`] flags may
+/// accompany it; the output format, the catalog and the overlay file belong
+/// to the whole run.
 #[derive(Parser)]
 #[command(name = "rllvm-query", no_binary_name = true)]
 struct QueryLine {
-    #[arg(long, global = true)]
-    heuristics: bool,
+    #[command(flatten)]
+    modifiers: QueryModifiers,
 
     #[command(subcommand)]
     command: QueryCommand,
@@ -77,7 +92,7 @@ struct QueryLine {
 /// Parses and validates every query on stdin, before any catalog is read,
 /// so a typo on the last line costs a diagnostic rather than a full load.
 /// Each query is returned with its line as written, which heads its answer.
-fn parse_queries(input: &str, heuristics: bool) -> Result<Vec<(String, Query)>, Error> {
+fn parse_queries(input: &str, modifiers: QueryModifiers) -> Result<Vec<(String, Query)>, Error> {
     let mut queries = Vec::new();
     for (index, line) in input.lines().enumerate() {
         let line = line.trim();
@@ -95,7 +110,7 @@ fn parse_queries(input: &str, heuristics: bool) -> Result<Vec<(String, Query)>, 
         let arguments = split_response_arguments(line);
         let parsed =
             QueryLine::try_parse_from(&arguments).map_err(|error| at_line(error.to_string()))?;
-        let query = to_query(parsed.command, heuristics || parsed.heuristics)
+        let query = to_query(parsed.command, modifiers.with(parsed.modifiers))
             .ok_or_else(|| at_line(format!("`{}` names a mode, not a query", arguments[0])))?;
         query.validate().map_err(|error| match error {
             Error::InvalidArguments(reason) => at_line(reason),
@@ -173,6 +188,39 @@ fn parse_records(input: &str) -> Result<Vec<(usize, Record)>, Error> {
     Ok(records)
 }
 
+/// The overlay file: `--overlay`, or the default beside the catalog.
+fn overlay_path(catalog: &Path, overlay: Option<&Path>) -> PathBuf {
+    overlay.map_or_else(|| default_overlay_path(catalog), Path::to_path_buf)
+}
+
+/// The overlay `query` walks, opened against `session` when it asks for one
+/// and `opened` holds none yet: at most once per run. A file that cannot be
+/// read is an error, never a silent direct-only answer. A missing file is an
+/// empty overlay at the default path, where nothing may be recorded yet, but
+/// an error when `--overlay` named it: that is a mistyped path.
+fn overlay_for<'o>(
+    opened: &'o mut Option<Overlay>,
+    session: &Session,
+    catalog: &Path,
+    named: Option<&Path>,
+    query: &Query,
+) -> Result<Option<&'o Overlay>, Error> {
+    if query.walks_overlay() && opened.is_none() {
+        let path = overlay_path(catalog, named);
+        if named.is_some()
+            && let Err(error) = std::fs::metadata(&path)
+            && error.kind() == std::io::ErrorKind::NotFound
+        {
+            return Err(Error::InvalidArguments(format!(
+                "{}: no such overlay; --overlay names an existing file for a walk to read",
+                path.display()
+            )));
+        }
+        *opened = Some(Overlay::open(session, &path)?);
+    }
+    Ok(opened.as_ref())
+}
+
 /// `rllvm-query --catalog <catalog> overlay record|list|compact`. The
 /// overlay file defaults to one beside the catalog.
 fn run_overlay(
@@ -184,7 +232,7 @@ fn run_overlay(
     let catalog = catalog.ok_or_else(|| {
         Error::InvalidArguments("--catalog is required for the overlay command".to_string())
     })?;
-    let path = overlay.map_or_else(|| default_overlay_path(catalog), Path::to_path_buf);
+    let path = overlay_path(catalog, overlay);
     // Before the catalog loads, as with piped queries, so a malformed line
     // costs a diagnostic rather than a full load.
     let records = match action {
@@ -237,11 +285,13 @@ fn overlay_table(summary: &OverlaySummary) -> String {
         .edges
         .iter()
         .map(|entry| {
-            let verdict = entry
-                .edge
-                .verification
-                .as_ref()
-                .map_or_else(|| "unverified".to_string(), |v| v.verdict.to_string());
+            let verdict = verdict_label(
+                entry
+                    .edge
+                    .verification
+                    .as_ref()
+                    .map(|verification| verification.verdict),
+            );
             format!(
                 "{}  {}  {verdict}  {} site(s)\n",
                 entry.edge.key, entry.edge.confidence, entry.sites
@@ -253,7 +303,12 @@ fn overlay_table(summary: &OverlaySummary) -> String {
 /// Answers the queries piped on stdin from one load of `catalog`. Reading
 /// a terminal would wait for input nobody knows to type, so that is an
 /// error; empty stdin answers nothing.
-fn run_stdin_queries(catalog: &Path, heuristics: bool, format: Format) -> Result<(), Error> {
+fn run_stdin_queries(
+    catalog: &Path,
+    overlay: Option<&Path>,
+    modifiers: QueryModifiers,
+    format: Format,
+) -> Result<(), Error> {
     let mut stdin = std::io::stdin();
     if stdin.is_terminal() {
         return Err(Error::InvalidArguments(
@@ -262,14 +317,17 @@ fn run_stdin_queries(catalog: &Path, heuristics: bool, format: Format) -> Result
     }
     let mut input = String::new();
     stdin.read_to_string(&mut input)?;
-    let queries = parse_queries(&input, heuristics)?;
+    let queries = parse_queries(&input, modifiers)?;
     if queries.is_empty() {
         return Ok(());
     }
     init_logging()?;
     let session = open_with_cache(catalog, facts_cache()?.as_ref())?;
+    let named = overlay;
+    let mut opened = None;
     for (line, query) in queries {
-        let result = run(&session, &query)?;
+        let overlay = overlay_for(&mut opened, &session, catalog, named, &query)?;
+        let result = run_with_overlay(&session, overlay, &query)?;
         let answer = match format {
             Format::Json => serde_json::to_string(&result)
                 .map(|json| format!("{json}\n"))
@@ -322,7 +380,9 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     let Some(command) = args.command else {
         // With a catalog and no query, the queries arrive on stdin.
         return match &args.catalog {
-            Some(catalog) => run_stdin_queries(catalog, args.heuristics, format),
+            Some(catalog) => {
+                run_stdin_queries(catalog, args.overlay.as_deref(), args.modifiers, format)
+            }
             None => Ok(()),
         };
     };
@@ -375,7 +435,7 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     // Unreachable through the match above, which returns for every command
     // `to_query` answers `None` for. An error rather than a panic: a binary
     // that mis-dispatches should say so, not abort.
-    let Some(query) = to_query(command, args.heuristics) else {
+    let Some(query) = to_query(command, args.modifiers) else {
         return Err(Error::InvalidArguments(
             "this command names a mode, not a query".to_string(),
         ));
@@ -387,7 +447,16 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     let catalog = args.catalog.ok_or_else(|| {
         Error::InvalidArguments("--catalog is required to run a query".to_string())
     })?;
-    let result = run(&open_with_cache(&catalog, facts_cache()?.as_ref())?, &query)?;
+    let session = open_with_cache(&catalog, facts_cache()?.as_ref())?;
+    let mut opened = None;
+    let overlay = overlay_for(
+        &mut opened,
+        &session,
+        &catalog,
+        args.overlay.as_deref(),
+        &query,
+    )?;
+    let result = run_with_overlay(&session, overlay, &query)?;
 
     match format {
         Format::Json => {
@@ -466,6 +535,7 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rllvm_query::Confidence;
 
     /// The reverse of `to_query`'s exhaustiveness: every [`Query`]
     /// variant must appear here, with no wildcard arm. A `Query` variant
@@ -483,11 +553,13 @@ mod tests {
             Query::Callers { name } => QueryCommand::Callers { name: name.clone() },
             Query::Callees { name } => QueryCommand::Callees { name: name.clone() },
             Query::Uses { name } => QueryCommand::Uses { name: name.clone() },
-            Query::Reach { from, to } => QueryCommand::Reach {
+            Query::Reach { from, to, .. } => QueryCommand::Reach {
                 from: from.clone(),
                 to: to.clone(),
             },
-            Query::Closure { name, direction } => QueryCommand::Closure {
+            Query::Closure {
+                name, direction, ..
+            } => QueryCommand::Closure {
                 name: name.clone(),
                 direction: match direction {
                     Direction::In => ClosureDirection::In,
@@ -505,7 +577,7 @@ mod tests {
     fn each_line_of_stdin_is_one_query_in_command_line_syntax() {
         let queries = parse_queries(
             "callees quiche_accept\n\n  defs 'int twice<int>(int)'\nindirect-targets t.c:4 --heuristics\n",
-            false,
+            QueryModifiers::default(),
         )
         .unwrap();
         let lines: Vec<&str> = queries.iter().map(|(line, _)| line.as_str()).collect();
@@ -537,7 +609,11 @@ mod tests {
 
     #[test]
     fn heuristics_on_the_command_line_reach_every_stdin_query() {
-        let queries = parse_queries("indirect-targets t.c:4\n", true).unwrap();
+        let heuristics = QueryModifiers {
+            heuristics: true,
+            ..QueryModifiers::default()
+        };
+        let queries = parse_queries("indirect-targets t.c:4\n", heuristics).unwrap();
         assert!(matches!(
             queries[0].1,
             Query::IndirectTargets {
@@ -545,6 +621,34 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_stdin_line_may_ask_for_the_overlay() {
+        let queries = parse_queries(
+            "reach main handler --include-overlay --min-confidence medium\nreach main handler\n",
+            QueryModifiers::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            queries[0].1,
+            Query::Reach {
+                include_overlay: true,
+                min_confidence: Some(Confidence::Medium),
+                ..
+            }
+        ));
+        assert!(queries[0].1.walks_overlay());
+        assert!(!queries[1].1.walks_overlay(), "each line asks for itself");
+
+        let error = parse_queries(
+            "reach main handler --min-confidence high\n",
+            QueryModifiers::default(),
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("line 1:"), "{error}");
     }
 
     #[test]
@@ -557,7 +661,7 @@ mod tests {
             ("completions bash\n", "line 1:"),
             ("callees a\ncallees b\nindirect-targets main.c\n", "line 3:"),
         ] {
-            let error = parse_queries(input, false)
+            let error = parse_queries(input, QueryModifiers::default())
                 .map(|_| ())
                 .expect_err(input)
                 .to_string();
@@ -568,15 +672,23 @@ mod tests {
 
     #[test]
     fn empty_stdin_names_no_query() {
-        assert!(parse_queries("", false).unwrap().is_empty());
-        assert!(parse_queries("\n  \n", false).unwrap().is_empty());
+        assert!(
+            parse_queries("", QueryModifiers::default())
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            parse_queries("\n  \n", QueryModifiers::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// `to_query` maps `QueryCommand::Mcp` to `None`, since it selects a
     /// mode rather than naming a query.
     #[test]
     fn the_mcp_command_has_no_query() {
-        assert!(to_query(QueryCommand::Mcp, false).is_none());
+        assert!(to_query(QueryCommand::Mcp, QueryModifiers::default()).is_none());
     }
 
     /// Same for `Completions`: the binary answers it before a query could
@@ -586,7 +698,7 @@ mod tests {
         let command = QueryCommand::Completions {
             shell: clap_complete::Shell::Bash,
         };
-        assert!(to_query(command, false).is_none());
+        assert!(to_query(command, QueryModifiers::default()).is_none());
     }
 
     #[test]
@@ -594,7 +706,7 @@ mod tests {
         let command = QueryCommand::Overlay {
             action: OverlayAction::List,
         };
-        assert!(to_query(command, false).is_none());
+        assert!(to_query(command, QueryModifiers::default()).is_none());
     }
 
     #[test]
@@ -620,7 +732,11 @@ mod tests {
     /// both happen to be exhaustive.
     #[test]
     fn every_query_variant_round_trips_through_the_cli_command_mapping() {
-        let heuristics = true;
+        let modifiers = QueryModifiers {
+            heuristics: true,
+            include_overlay: true,
+            min_confidence: Some(Confidence::High),
+        };
         let queries = [
             Query::Defs { name: "f".into() },
             Query::At {
@@ -633,26 +749,32 @@ mod tests {
             Query::Reach {
                 from: "a".into(),
                 to: "b".into(),
+                include_overlay: true,
+                min_confidence: Some(Confidence::High),
             },
             Query::Closure {
                 name: "f".into(),
                 direction: Direction::In,
+                include_overlay: true,
+                min_confidence: Some(Confidence::High),
             },
             Query::Closure {
                 name: "f".into(),
                 direction: Direction::Out,
+                include_overlay: true,
+                min_confidence: Some(Confidence::High),
             },
             Query::Externals,
             Query::FfiExports,
             Query::IndirectTargets {
                 at: "t.c:4".into(),
-                heuristics,
+                heuristics: true,
             },
         ];
         for query in queries {
             let command = cli_command_for(&query);
             let round_tripped =
-                to_query(command, heuristics).expect("every QueryCommand but Mcp names a query");
+                to_query(command, modifiers).expect("every QueryCommand but Mcp names a query");
             assert_eq!(
                 format!("{round_tripped:?}"),
                 format!("{query:?}"),

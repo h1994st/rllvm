@@ -432,7 +432,20 @@ rllvm-query that numbers call sites differently, and a write refuses if
 another writer changed the file since it was read. To start again after a
 refusal, move or delete the file, or name another with `--overlay` (MCP:
 `path`). Overlay edges are hypotheses, never proof, and no answer uses them
-unless asked.
+unless asked:
+
+```bash
+rllvm-query --catalog catalog.json reach main handler --include-overlay
+rllvm-query --catalog catalog.json closure handler in --include-overlay --min-confidence medium
+```
+
+`--include-overlay` makes `reach` and `closure` also walk overlay edges, never
+refuted ones, and `--min-confidence low|medium|high` (default `low`) drops
+weaker ones. Each step through one is labeled `agent` with the edge's
+provenance, a path using one ends `not proven`, and `closure` lists what only
+agent edges reach apart. An overlay file that cannot be read is an error,
+never a direct-only answer, as is a missing file that `--overlay` names. See
+the [call-graph overlay example](examples/callgraph-overlay/).
 
 ### MCP server
 

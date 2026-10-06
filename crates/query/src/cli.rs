@@ -10,7 +10,9 @@
 
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{Args, Parser, ValueEnum};
+
+use crate::Confidence;
 
 /// Arguments for `rllvm-query`.
 ///
@@ -35,13 +37,8 @@ pub struct QueryArgs {
     #[arg(long)]
     pub catalog: Option<PathBuf>,
 
-    /// Include the heuristic address-taken inventory in `indirect-targets` answers
-    ///
-    /// Global so it may trail its subcommand -- `indirect-targets t.c:8
-    /// --heuristics` -- which is how the README writes it and the only
-    /// placement that reads naturally for a flag that modifies one query.
-    #[arg(long, global = true)]
-    pub heuristics: bool,
+    #[command(flatten)]
+    pub modifiers: QueryModifiers,
 
     /// Print the raw JSON answer envelope instead of text
     ///
@@ -61,6 +58,41 @@ pub struct QueryArgs {
 
     #[command(subcommand)]
     pub command: Option<QueryCommand>,
+}
+
+/// The flags that modify a query rather than name one. Shared by the command
+/// line and each line of stdin, which may carry them too.
+#[derive(Args, Clone, Copy, Debug, Default)]
+pub struct QueryModifiers {
+    /// Include the heuristic address-taken inventory in `indirect-targets` answers
+    ///
+    /// Global so it may trail its subcommand -- `indirect-targets t.c:8
+    /// --heuristics` -- which is how the README writes it and the only
+    /// placement that reads naturally for a flag that modifies one query.
+    #[arg(long, global = true)]
+    pub heuristics: bool,
+
+    /// Also walk agent-authored overlay edges in `reach` and `closure`; never proof
+    ///
+    /// Global, like `--heuristics`. Every step through an overlay edge is
+    /// labeled `agent`, and an answer that used one says it is not proven.
+    #[arg(long, global = true)]
+    pub include_overlay: bool,
+
+    /// The weakest overlay edge `--include-overlay` walks [default: low]
+    #[arg(long, global = true, value_enum, value_name = "LEVEL")]
+    pub min_confidence: Option<Confidence>,
+}
+
+impl QueryModifiers {
+    /// These flags with `line`'s added: a flag set in either is set.
+    pub fn with(self, line: QueryModifiers) -> QueryModifiers {
+        QueryModifiers {
+            heuristics: self.heuristics || line.heuristics,
+            include_overlay: self.include_overlay || line.include_overlay,
+            min_confidence: line.min_confidence.or(self.min_confidence),
+        }
+    }
 }
 
 /// Direction for the `closure` query.
