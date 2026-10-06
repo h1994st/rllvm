@@ -111,7 +111,7 @@ import pathlib, re, sys
 
 plugin = pathlib.Path(sys.argv[1])
 skills = sorted((plugin / "skills").glob("*/SKILL.md"))
-expected = {"setup", "capture", "query"}
+expected = {"setup", "capture", "query", "complete-callgraph"}
 found = {skill.parent.name for skill in skills}
 if found != expected:
     sys.exit(f"skills: expected {sorted(expected)}, found {sorted(found)}")
@@ -140,6 +140,26 @@ for skill in skills:
     for script in resolved:
         if not (skill.parent / script).resolve().is_file():
             sys.exit(f"{skill}: {script} does not exist")
+PY
+python3 - "$PLUGIN" "$OUT/tools.json" <<'PY'
+import json, pathlib, re, sys
+
+plugin = pathlib.Path(sys.argv[1])
+command = plugin / "commands" / "complete-callgraph.md"
+if not command.is_file():
+    sys.exit(f"{command} does not exist")
+header = re.match(r"---\n(.*?)\n---\n", command.read_text(), re.S)
+if not header or "description:" not in header.group(1) or "argument-hint:" not in header.group(1):
+    sys.exit(f"{command}: frontmatter needs description and argument-hint")
+# Every tool the completion skill tells an agent to call must be served.
+tools = {t["name"] for t in json.load(open(sys.argv[2]))["result"]["tools"]}
+skill = (plugin / "skills/complete-callgraph/SKILL.md").read_text()
+for name in ("resolution_candidates", "load_overlay", "record_edges", "save_overlay",
+             "list_overlay", "reach", "closure", "slice", "uses", "at"):
+    if name not in tools:
+        sys.exit(f"tools/list omits {name}, which complete-callgraph needs")
+    if f"`{name}`" not in skill:
+        sys.exit(f"complete-callgraph no longer names {name}")
 PY
 echo "ok: every skill is named, described, self-contained, and its scripts exist"
 

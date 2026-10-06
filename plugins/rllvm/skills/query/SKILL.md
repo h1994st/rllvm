@@ -57,6 +57,9 @@ find the exact symbol with `at`, `callers` or `callees`, then query that.
 
 ## Recording resolved indirect calls
 
+To close gaps in a call graph, use the `complete-callgraph` skill; it runs
+the loop below.
+
 When you resolve an unresolved indirect call by reading the code, record it
 in the call-graph overlay. The overlay is a file beside the catalog,
 `<catalog stem>.overlay.jsonl` unless another is named; the catalog is never
