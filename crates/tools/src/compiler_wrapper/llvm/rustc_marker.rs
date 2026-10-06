@@ -7,8 +7,8 @@
 //! objects of every dependency and of the prebuilt sysroot; those are not
 //! compiled from this crate's bitcode and keep whatever they already record.
 //! Neither is rustc's allocator shim, which is named after the crate but
-//! generated outside its bitcode, so a member is patched only when it defines
-//! something the bitcode defines.
+//! generated outside its bitcode, so a member that defines globals is patched
+//! only when it defines something the bitcode defines.
 
 use std::{collections::HashSet, fs, path::Path, process::Command};
 
@@ -69,15 +69,23 @@ fn bitcode_definitions(llvm_ar: &Path, bitcode: &Path) -> Result<HashSet<String>
         .collect())
 }
 
-/// Whether the object `data` defines any symbol in `definitions`, i.e. holds
-/// code compiled from that module. rustc's allocator shim defines only
-/// `__rust_alloc` and its siblings, which no crate's bitcode defines.
+/// Whether the object `data` was compiled from the module defining
+/// `definitions`: it defines one of them, or no global symbol at all, as a
+/// codegen unit of a crate with only generic code does. rustc's allocator
+/// shim defines `__rust_alloc` and its siblings, globals no crate's bitcode
+/// defines, so it is neither.
 fn compiled_from(data: &[u8], definitions: &HashSet<String>) -> bool {
-    object::File::parse(data).is_ok_and(|object| {
-        object.symbols().any(|symbol| {
-            symbol.is_definition() && symbol.name().is_ok_and(|name| definitions.contains(name))
-        })
-    })
+    let Ok(object) = object::File::parse(data) else {
+        return false;
+    };
+    let mut defines_global = false;
+    for symbol in object.symbols().filter(|symbol| symbol.is_definition()) {
+        if symbol.name().is_ok_and(|name| definitions.contains(name)) {
+            return true;
+        }
+        defines_global |= symbol.is_global();
+    }
+    !defines_global
 }
 
 /// Embed the bitcode path into each of the crate's own object members.
@@ -89,7 +97,7 @@ fn compiled_from(data: &[u8], definitions: &HashSet<String>) -> bool {
 /// `compiler_builtins` -- are left alone: their code is not in this crate's
 /// bitcode, and a member that records nothing is how extraction learns a
 /// part of the archive has no bitcode. So is a member named after the crate
-/// that defines nothing the bitcode defines, such as the allocator shim.
+/// whose globals the bitcode does not define, such as the allocator shim.
 ///
 /// Returns the number of members patched.
 pub(crate) fn patch_archive(
@@ -182,9 +190,15 @@ mod tests {
         bitcode
     }
 
+    /// A fixture member defining one function, named after its position.
+    fn defining(index: usize) -> String {
+        format!("int member{index}(void) {{ return {index}; }}\n")
+    }
+
     /// An archive shaped like a staticlib: object members named as rustc
-    /// names them, plus one that is not an object, which must be left alone.
-    fn build_fixture_archive(dir: &Path, objects: &[&str]) -> PathBuf {
+    /// names them, each compiled from its C source, plus one that is not an
+    /// object, which must be left alone.
+    fn build_fixture_archive(dir: &Path, objects: &[(&str, String)]) -> PathBuf {
         // Inferred from LLVM, never the user's config: `rllvm-core` resolves
         // the configuration once per process, and this is the only test here
         // that reads it.
@@ -193,13 +207,9 @@ mod tests {
         let llvm_ar = config.llvm_ar_filepath().clone();
 
         let mut members = Vec::new();
-        for (index, name) in objects.iter().enumerate() {
+        for (index, (name, code)) in objects.iter().enumerate() {
             let source = dir.join(format!("member{index}.c"));
-            fs::write(
-                &source,
-                format!("int member{index}(void) {{ return {index}; }}\n"),
-            )
-            .expect("failed to write a fixture source");
+            fs::write(&source, code).expect("failed to write a fixture source");
             let object = dir.join(name);
             let status = Command::new(&clang)
                 .arg("-c")
@@ -259,7 +269,14 @@ mod tests {
         // its codegen units, so none of its code is in the crate's bitcode.
         let shim = "fixture.awrgbl1ahkncdry3idj4cpuvm.rcgu.o";
         let foreign = "compiler_builtins-51dc6f60309b0c2f.compiler_builtins.1a788e7-cgu.000.rcgu.o";
-        let archive = build_fixture_archive(tmp.path(), &[own[0], shim, foreign]);
+        let archive = build_fixture_archive(
+            tmp.path(),
+            &[
+                (own[0], defining(0)),
+                (shim, defining(1)),
+                (foreign, defining(2)),
+            ],
+        );
         let bitcode = crate_bitcode(tmp.path(), 0);
 
         let patched = patch_archive(&archive, &bitcode, &member_prefixes("fixture", "", None))
@@ -283,6 +300,30 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_codegen_unit_defining_nothing_keeps_the_crate_path() {
+        // A crate of only generic code compiles to a codegen unit and a
+        // bitcode module that both define nothing. The member claims no code
+        // the module lacks, so it records the crate like any other unit
+        // rather than reading as a member without bitcode.
+        let tmp = tempfile::tempdir().unwrap();
+        let own = "generic-0a1b2c3d4e5f6071.generic.57163820d3278ffa-cgu.0.rcgu.o";
+        let archive = build_fixture_archive(
+            tmp.path(),
+            &[(own, "static int unused(void) { return 0; }\n".to_string())],
+        );
+        let bitcode = crate_bitcode(tmp.path(), 0);
+
+        let prefixes = member_prefixes("generic", "-0a1b2c3d4e5f6071", None);
+        let patched = patch_archive(&archive, &bitcode, &prefixes).expect("patched");
+        assert_eq!(
+            patched, 1,
+            "the empty codegen unit is still the crate's own"
+        );
+        let recorded = recorded_paths(&archive);
+        assert_eq!(recorded, vec![(own.to_string(), vec![bitcode])]);
     }
 
     #[test]
