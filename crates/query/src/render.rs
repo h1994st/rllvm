@@ -13,6 +13,7 @@ use crate::{
     EdgeKey, PathStep, QueryResult, QueryResults,
     bind::BindingStatus,
     facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, SourceLocation},
+    overlay::verdict_label,
 };
 
 /// How much of the envelope to print.
@@ -936,10 +937,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                             ),
                             EdgeKey::Site { .. } => String::new(),
                         };
-                        let verdict = verdict.map_or_else(
-                            || "unverified".to_string(),
-                            |verdict| verdict.to_string(),
-                        );
+                        let verdict = verdict_label(*verdict);
                         out.push_str(&format!(
                             "{}             {} -> {} at {}{via} {}\n",
                             paint("agent", ctx.color, Paint::Uncertain),

@@ -46,6 +46,9 @@ const AGENT_SOURCE: &str = "agent";
 /// never skipped: `annotate` is reserved for a later version.
 const KNOWN_OPS: &[&str] = &["add", "verify", "retract"];
 
+/// What text shows for an edge no `verify` has judged.
+const UNVERIFIED: &str = "unverified";
+
 /// Appended to the catalog's file stem for the default overlay path.
 const DEFAULT_OVERLAY_SUFFIX: &str = "overlay.jsonl";
 
@@ -81,6 +84,12 @@ pub enum Verdict {
     Confirmed,
     Refuted,
     Inconclusive,
+}
+
+/// How text names an edge's verdict: the verdict, or `unverified` while it
+/// has none.
+pub fn verdict_label(verdict: Option<Verdict>) -> String {
+    verdict.map_or_else(|| UNVERIFIED.to_string(), |verdict| verdict.to_string())
 }
 
 impl fmt::Display for Verdict {

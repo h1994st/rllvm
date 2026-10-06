@@ -15,7 +15,9 @@ use rllvm_query::{
     cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
     default_overlay_path,
     index::Direction,
-    llvm_version, mcp, open_with_cache, run_with_overlay,
+    llvm_version, mcp, open_with_cache,
+    overlay::verdict_label,
+    run_with_overlay,
 };
 use tracing_subscriber::FmtSubscriber;
 
@@ -283,11 +285,13 @@ fn overlay_table(summary: &OverlaySummary) -> String {
         .edges
         .iter()
         .map(|entry| {
-            let verdict = entry
-                .edge
-                .verification
-                .as_ref()
-                .map_or_else(|| "unverified".to_string(), |v| v.verdict.to_string());
+            let verdict = verdict_label(
+                entry
+                    .edge
+                    .verification
+                    .as_ref()
+                    .map(|verification| verification.verdict),
+            );
             format!(
                 "{}  {}  {verdict}  {} site(s)\n",
                 entry.edge.key, entry.edge.confidence, entry.sites
