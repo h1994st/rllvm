@@ -16,7 +16,8 @@ and the answer says it is not proven.
 ```
 
 It checks the candidate, the path with and without the overlay, a retraction,
-and compaction.
+compaction, and the same loop over MCP: `record_edges`, `reach` with
+`include_overlay`, then `save_overlay`.
 
 ## What it does
 

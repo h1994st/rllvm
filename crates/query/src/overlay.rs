@@ -597,6 +597,11 @@ impl Overlay {
         self.path.as_deref()
     }
 
+    /// The [`fingerprint`] of the build this overlay is bound to.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
     pub fn summary(&self, session: &Session) -> OverlaySummary {
         let mut covered: BTreeSet<&CallSiteId> = BTreeSet::new();
         let edges = self
