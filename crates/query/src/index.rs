@@ -534,8 +534,9 @@ impl Session {
     }
 
     /// [`Session::reach`], also walking `overlay`'s agent edges when given.
-    /// A function's direct edges come before its agent edges, so at equal
-    /// depth a resolved path wins.
+    /// A function's direct edges come before its own agent edges, but the
+    /// walk is breadth-first across functions, so it can return a path
+    /// through agent edges as short as, or shorter than, a resolved one.
     pub fn reach_with(&self, from: &str, to: &str, overlay: Option<&OverlayView>) -> ReachResult {
         // A mere declaration is not a reached function: only a definition
         // among the functions named `to` counts as the destination.
