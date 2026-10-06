@@ -1577,6 +1577,273 @@ fn assert_unresolved_indirect_site(facts: &rllvm_query::ModuleFacts, message: &s
     );
 }
 
+/// Function pointers reached through record fields, in every shape the
+/// field evidence distinguishes: a plain field, a nested one, an anonymous
+/// typedef'd record, initializers of named and literal IR type, and a plain
+/// function-pointer variable that names no field at all.
+const FIELD_SOURCE: &str = r#"
+typedef void (*cb_t)(void *, long);
+struct ops { int tag; cb_t on_event; cb_t on_close; };
+typedef struct { int tag; cb_t on_event; } anon_ops;
+struct inner { cb_t a; cb_t b; };
+struct outer { int x; struct inner in; };
+static void h1(void *p, long n) {}
+static void h2(void *p, long n) {}
+static void h3(void *p, long n) {}
+const struct ops table = { 1, h1, h2 };
+struct outer nested = { 1, { h1, h2 } };
+void init(struct ops *o) { o->on_event = h3; }
+void dispatch(struct ops *o, void *p) { o->on_event(p, 4); }
+void set_anon(anon_ops *o) { o->on_event = h1; }
+void call_anon(anon_ops *o) { o->on_event(0, 1); }
+void set_inner(struct outer *o) { o->in.b = h1; }
+void call_inner(struct outer *o) { o->in.b(0, 1); }
+void call_plain(cb_t f) { f(0, 1); }
+"#;
+
+fn field(record: &str, offset: u64) -> rllvm_query::FieldRef {
+    rllvm_query::FieldRef {
+        record: record.into(),
+        offset,
+    }
+}
+
+/// The field evidence on the one indirect call site in `function`. Panics
+/// unless there is exactly one, so a `None` expectation cannot pass because
+/// the site vanished.
+fn site_field(
+    facts: &rllvm_query::ModuleFacts,
+    function: &str,
+) -> Option<rllvm_query::FieldEvidence> {
+    let fields: Vec<_> = facts
+        .call_sites
+        .iter()
+        .filter(|site| site.id.function.symbol == function)
+        .filter_map(|site| match &site.target {
+            CallTarget::Indirect { via_field, .. } => Some(via_field.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fields.len(), 1, "{function} must hold one indirect site");
+    fields.into_iter().next().unwrap()
+}
+
+/// The field evidence on every use of `used` held by `holder`, a function
+/// or a global, of `kind`. Panics when there is none.
+fn use_fields(
+    facts: &rllvm_query::ModuleFacts,
+    used: &str,
+    holder: &str,
+    kind: rllvm_query::UseKind,
+) -> Vec<Option<rllvm_query::FieldEvidence>> {
+    let fields: Vec<_> = facts
+        .uses
+        .iter()
+        .filter(|use_fact| use_fact.used.symbol == used && use_fact.kind == kind)
+        .filter(|use_fact| {
+            use_fact.in_global.as_deref() == Some(holder)
+                || use_fact
+                    .in_function
+                    .as_ref()
+                    .is_some_and(|function| function.symbol == holder)
+        })
+        .map(|use_fact| use_fact.field.clone())
+        .collect();
+    assert!(!fields.is_empty(), "no {kind:?} use of {used} in {holder}");
+    fields
+}
+
+/// The one field a use names, with the evidence it came from.
+fn one_use_field(
+    facts: &rllvm_query::ModuleFacts,
+    used: &str,
+    holder: &str,
+    kind: rllvm_query::UseKind,
+) -> rllvm_query::FieldEvidence {
+    match use_fields(facts, used, holder, kind).as_slice() {
+        [Some(evidence)] => evidence.clone(),
+        other => panic!("{used} in {holder}: expected one field, got {other:?}"),
+    }
+}
+
+/// -O0 addresses the field with a typed GEP; -O2 erases the type and leaves
+/// a byte offset with a TBAA tag. Both must name the same field, or a store
+/// compiled at one level never meets a call compiled at the other.
+#[test]
+fn a_field_dispatch_names_the_same_field_at_every_optimization_level() {
+    use rllvm_query::FieldBasis;
+    for (level, basis) in [("-O0", FieldBasis::StructGep), ("-O2", FieldBasis::Tbaa)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level, "-g"]);
+        let evidence = site_field(&facts, "dispatch").unwrap_or_else(|| panic!("{level}"));
+        assert_eq!(evidence.field, field("ops", 8), "{level}");
+        assert_eq!(evidence.basis, basis, "{level}");
+        assert_eq!(evidence.name.as_deref(), Some("on_event"), "{level}");
+    }
+}
+
+#[test]
+fn a_store_and_an_initializer_name_the_field_the_call_reads() {
+    use rllvm_query::{FieldBasis, UseKind};
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0", "-g"]);
+
+    let stored = one_use_field(&facts, "h3", "init", UseKind::StoredToMemory);
+    assert_eq!(stored.field, field("ops", 8));
+    assert_eq!(stored.basis, FieldBasis::StructGep);
+
+    // `table` has literal IR type for its padding, so its record comes from
+    // the global's debug-info type.
+    let first = one_use_field(&facts, "h1", "table", UseKind::GlobalInitializer);
+    assert_eq!(first.field, field("ops", 8));
+    assert_eq!(first.basis, FieldBasis::DebugInfo);
+    assert_eq!(first.name.as_deref(), Some("on_event"));
+    let second = one_use_field(&facts, "h2", "table", UseKind::GlobalInitializer);
+    assert_eq!(second.field, field("ops", 16));
+    assert_eq!(second.basis, FieldBasis::DebugInfo);
+    assert_eq!(second.name.as_deref(), Some("on_close"));
+
+    // `nested` is literal outside, but its inner record is a named IR struct.
+    for (used, offset, name) in [("h1", 0, "a"), ("h2", 8, "b")] {
+        let evidence = one_use_field(&facts, used, "nested", UseKind::GlobalInitializer);
+        assert_eq!(evidence.field, field("inner", offset), "{used}");
+        assert_eq!(evidence.basis, FieldBasis::Initializer, "{used}");
+        assert_eq!(evidence.name.as_deref(), Some(name), "{used}");
+    }
+}
+
+#[test]
+fn a_nested_field_names_its_innermost_record() {
+    use rllvm_query::UseKind;
+    for level in ["-O0", "-O2"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level]);
+        let site = site_field(&facts, "call_inner").unwrap_or_else(|| panic!("{level}"));
+        assert_eq!(site.field, field("inner", 8), "{level}");
+        let stored = one_use_field(&facts, "h1", "set_inner", UseKind::StoredToMemory);
+        assert_eq!(stored.field, field("inner", 8), "{level}");
+    }
+}
+
+/// Clang names the IR type of a typedef'd anonymous struct after the
+/// typedef, but its TBAA type node is unnamed. The -O2 site therefore names
+/// no field, rather than one borrowed from debug info.
+#[test]
+fn an_anonymous_record_is_named_by_its_typedef_only_where_the_ir_says_so() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0", "-g"]);
+    let evidence = site_field(&facts, "call_anon").expect("-O0 names the typed GEP");
+    assert_eq!(evidence.field, field("anon_ops", 8));
+
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O2", "-g"]);
+    assert_eq!(site_field(&facts, "call_anon"), None);
+}
+
+#[test]
+fn a_plain_function_pointer_names_no_field() {
+    for level in ["-O0", "-O2"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level, "-g"]);
+        assert_eq!(site_field(&facts, "call_plain"), None, "{level}");
+    }
+}
+
+#[test]
+fn an_initializer_without_debug_info_names_no_literal_field() {
+    use rllvm_query::UseKind;
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0"]);
+    for used in ["h1", "h2"] {
+        assert_eq!(
+            use_fields(&facts, used, "table", UseKind::GlobalInitializer),
+            [None],
+            "{used}: a literal type names no record without debug info"
+        );
+    }
+    let evidence = one_use_field(&facts, "h2", "nested", UseKind::GlobalInitializer);
+    assert_eq!(evidence.field, field("inner", 8));
+    assert_eq!(evidence.name, None, "member names come from debug info");
+}
+
+/// C++ spells the record `%"struct.n::S"` in IR and `_ZTSN1n1SE` in TBAA;
+/// both must read as `n::S`. The member name comes from the debug-info
+/// record found by that same identifier.
+#[test]
+fn a_cxx_record_reads_the_same_through_gep_and_tbaa() {
+    use rllvm_query::FieldBasis;
+    let source = "namespace n { struct S { void (*f)(int); }; }\n\
+                  void c(n::S* s){ s->f(1); }\n";
+    for (level, basis) in [("-O0", FieldBasis::StructGep), ("-O2", FieldBasis::Tbaa)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_named(&scratch, "t.cpp", source, &[level, "-g"]);
+        let evidence = site_field(&facts, "_Z1cPN1n1SE").unwrap_or_else(|| panic!("{level}"));
+        assert_eq!(evidence.field, field("n::S", 0), "{level}");
+        assert_eq!(evidence.basis, basis, "{level}");
+        assert_eq!(evidence.name.as_deref(), Some("f"), "{level}");
+    }
+}
+
+/// A C++ global of a record in an anonymous namespace, given the literal IR
+/// type padding produces. Debug info names the record plain `S` with no
+/// identifier, while IR and TBAA call it `(anonymous namespace)::S`; taking
+/// `S` would join it with an unrelated `::S`. The scope `{SCOPE}` is
+/// substituted: the namespace, or the file as a C record would have.
+const ANONYMOUS_NAMESPACE_TABLE: &str = r#"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+target triple = "arm64-apple-macosx26.0.0"
+
+@_ZL5table = internal constant { i32, [4 x i8], ptr } { i32 1, [4 x i8] zeroinitializer, ptr @_ZL1hi }, align 8, !dbg !0
+@llvm.used = appending global [1 x ptr] [ptr @_ZL5table], section "llvm.metadata"
+
+define internal void @_ZL1hi(i32 %0) {
+  ret void
+}
+
+!llvm.module.flags = !{!15}
+!llvm.dbg.cu = !{!2}
+
+!0 = !DIGlobalVariableExpression(var: !1, expr: !DIExpression())
+!1 = distinct !DIGlobalVariable(name: "table", linkageName: "_ZL5table", scope: !2, file: !3, line: 3, type: !5, isLocal: true, isDefinition: true)
+!2 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !3, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, globals: !4)
+!3 = !DIFile(filename: "anon.cpp", directory: "/tmp")
+!4 = !{!0}
+!5 = !DIDerivedType(tag: DW_TAG_const_type, baseType: !6)
+!6 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "S", scope: {SCOPE}, file: !3, line: 2, size: 128, flags: DIFlagTypePassByValue, elements: !8)
+!7 = !DINamespace(scope: null)
+!8 = !{!9, !11}
+!9 = !DIDerivedType(tag: DW_TAG_member, name: "tag", scope: !6, file: !3, line: 2, baseType: !10, size: 32)
+!10 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
+!11 = !DIDerivedType(tag: DW_TAG_member, name: "f", scope: !6, file: !3, line: 2, baseType: !12, size: 64, offset: 64)
+!12 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !13, size: 64)
+!13 = !DISubroutineType(types: !14)
+!14 = !{null, !10}
+!15 = !{i32 2, !"Debug Info Version", i32 3}
+"#;
+
+#[test]
+fn a_scoped_cxx_record_without_an_identifier_names_no_literal_field() {
+    use rllvm_query::UseKind;
+    let table_field = |scope: &str| {
+        let scratch = tempfile::tempdir().unwrap();
+        let ir = ANONYMOUS_NAMESPACE_TABLE.replace("{SCOPE}", scope);
+        let facts = extract_module(&assemble_ir(&scratch, &ir));
+        use_fields(&facts, "_ZL1hi", "_ZL5table", UseKind::GlobalInitializer)
+    };
+    assert_eq!(
+        table_field("!7"),
+        [None],
+        "a namespaced record's plain name is not the IR's"
+    );
+    // The same node at file scope, as C writes it, does name the field: the
+    // refusal above is the scope's doing, not a failed read.
+    let file_scope = table_field("!3");
+    let [Some(evidence)] = file_scope.as_slice() else {
+        panic!("a file-scope record names its field: {file_scope:?}");
+    };
+    assert_eq!(evidence.field, field("S", 8));
+    assert_eq!(evidence.basis, rllvm_query::FieldBasis::DebugInfo);
+}
+
 /// A source clang compiles into one named function, and the category that
 /// function's linkage must arrive as.
 struct LinkageCase {
@@ -2618,13 +2885,15 @@ fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
 /// record the new pair here, or old cache entries will be served as if they
 /// were current.
 const FACTS_GUARD: (u32, &str) = (
-    2,
-    "d9109a8587a4b3e0d43a11589257a4191553138723761a9c1148117f5d16410f",
+    3,
+    "32ff5d8f633b74d546a2dbcb727969112ab415a0f45d7c721384f42394cd846b",
 );
 
 /// Extracts the neutral facts from `fixtures/facts-guard.ll`: indirect calls,
-/// dispatch-table uses, declarations and an alias that the smaller
-/// equivalence fixtures above do not exercise.
+/// dispatch-table uses, declarations, an alias, and the record fields an
+/// indirect call, a store and named and literal-typed initializers name --
+/// through a typed GEP, a C TBAA tag and a C++ (`_ZTS`) one -- none of which
+/// the smaller equivalence fixtures above exercise.
 fn guard_module_facts(scratch: &tempfile::TempDir) -> rllvm_query::ModuleFacts {
     let ir = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/facts-guard.ll"),
@@ -2665,6 +2934,37 @@ fn the_guard_fixtures_facts_round_trip_through_the_cache() {
     assert_eq!(
         serde_json::to_value(&facts).unwrap(),
         serde_json::to_value(&read_back).unwrap()
+    );
+
+    // The entry carries field evidence of each basis the fixture produces,
+    // so the comparison above covers it rather than passing on absences.
+    let sites = read_back
+        .call_sites
+        .iter()
+        .filter_map(|site| match &site.target {
+            CallTarget::Indirect { via_field, .. } => via_field.as_ref(),
+            _ => None,
+        });
+    let uses = read_back
+        .uses
+        .iter()
+        .filter_map(|use_fact| use_fact.field.as_ref());
+    let evidence: Vec<_> = sites.chain(uses).collect();
+    let bases: Vec<_> = evidence.iter().map(|evidence| evidence.basis).collect();
+    for basis in [
+        rllvm_query::FieldBasis::StructGep,
+        rllvm_query::FieldBasis::Tbaa,
+        rllvm_query::FieldBasis::Initializer,
+        rllvm_query::FieldBasis::DebugInfo,
+    ] {
+        assert!(bases.contains(&basis), "no {basis:?} field in {bases:?}");
+    }
+    // A C++ TBAA name (`_ZTSN1n3opsE`) reads as the record the IR names.
+    assert!(
+        evidence
+            .iter()
+            .any(|evidence| evidence.field.record == "n::ops"),
+        "no `_ZTS` record normalized in {evidence:?}"
     );
 }
 

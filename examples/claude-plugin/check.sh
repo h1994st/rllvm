@@ -156,11 +156,15 @@ tools = json.load(open(sys.argv[3]))["result"]["tools"]
 mcp = {t["name"] for t in tools}
 mcp |= {k for t in tools for k in t["inputSchema"].get("properties", {})}
 config_keys = set(re.findall(r"^\| `([a-z_]+)` \| (?:Yes|No) \|", readme, re.M))
+sources = [*(repo / "crates/query/src").glob("*.rs"), repo / "crates/core/src/catalog.rs"]
 fields = {
-    name
-    for source in [*(repo / "crates/query/src").glob("*.rs"), repo / "crates/core/src/catalog.rs"]
-    for name in re.findall(r"pub ([a-z_]+):", source.read_text())
+    name for source in sources for name in re.findall(r"pub ([a-z_]+):", source.read_text())
 }
+# Fields of struct-like enum variants are not `pub`, so also take the
+# `name:` lines inside an enum body, which ends at its column-0 brace.
+for source in sources:
+    for body in re.findall(r"^(?:pub(?:\([^)]*\))? )?enum \w+[^{]*\{\n(.*?)^\}", source.read_text(), re.M | re.S):
+        fields |= set(re.findall(r"^\s+([a-z_]+):", body, re.M))
 helps = {}
 
 def help_text(command, sub):

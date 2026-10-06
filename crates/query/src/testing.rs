@@ -103,6 +103,7 @@ pub(crate) fn indirect_call(
         target: CallTarget::Indirect {
             signature: "i32 (i32, i32)".into(),
             llvm_target_bound,
+            via_field: None,
         },
     }
 }
@@ -258,6 +259,7 @@ pub(crate) fn session_with_address_taken_function() -> Session {
             in_global: None,
             location: None,
             kind: UseKind::StoredToMemory,
+            field: None,
         })
         .collect();
     Session::new(base, Vec::new())

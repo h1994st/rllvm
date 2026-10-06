@@ -883,6 +883,7 @@ fn indirect_targets(
             let CallTarget::Indirect {
                 signature,
                 llvm_target_bound,
+                ..
             } = &site.target
             else {
                 return None;
