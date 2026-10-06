@@ -5,7 +5,7 @@
 //! untouched: `--json` still serializes [`QueryResult`] directly, and MCP
 //! never reaches this module at all.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use owo_colors::OwoColorize;
 
@@ -808,7 +808,8 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
         }
         QueryResults::Closure(functions) => {
             let agent_reached = &result.uncertainty.agent_reached;
-            for function in functions.iter().filter(|id| !agent_reached.contains(id)) {
+            let only_agent: HashSet<_> = agent_reached.iter().collect();
+            for function in functions.iter().filter(|id| !only_agent.contains(id)) {
                 out.push_str(&format!("{}\n", name(symbols, &function.symbol, ctx)));
             }
             if !agent_reached.is_empty() {
