@@ -1052,8 +1052,21 @@ fn a_static_function_named_like_another_module_s_variable_is_not_emitted() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "a module was emitted: {stderr}");
-    assert!(stderr.contains("g` is static in module"), "{stderr}");
+    assert!(
+        stderr.contains(&format!("`{}` is static in module", spelled("g"))),
+        "{stderr}"
+    );
     assert!(!out.exists());
+}
+
+/// How the host target spells a C symbol in a symbol table: Mach-O adds a
+/// leading `_`. The fixtures here compile for the host.
+fn spelled(symbol: &str) -> String {
+    if cfg!(target_vendor = "apple") {
+        format!("_{symbol}")
+    } else {
+        symbol.to_string()
+    }
 }
 
 /// A private function never appears in its own module's symbol listing, yet
@@ -1157,7 +1170,23 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
     .unwrap();
     std::fs::set_permissions(&llvm_link, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let session = rllvm_query::open(&catalog).unwrap();
+    let out = scratch.path().join("slice.bc");
+    match emit_main_to_add(&catalog, &llvm_link, &out) {
+        Err(rllvm_core::error::Error::ExecutionFailure(message)) => {
+            assert!(message.contains("refusing to link today"), "{message}")
+        }
+        other => panic!("expected an execution failure, got {other:?}"),
+    }
+    assert!(!out.exists());
+}
+
+/// Emits `slice main add` through the library, linking with `llvm_link`.
+fn emit_main_to_add(
+    catalog: &Path,
+    llvm_link: &Path,
+    out: &Path,
+) -> Result<rllvm_query::EmittedModule, rllvm_core::error::Error> {
+    let session = rllvm_query::open(catalog).unwrap();
     let query = rllvm_query::Query::Slice {
         from: "main".into(),
         to: "add".into(),
@@ -1165,14 +1194,31 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
         min_confidence: None,
     };
     let answer = rllvm_query::run(&session, &query).unwrap();
-    let out = scratch.path().join("slice.bc");
-    match rllvm_query::emit_slice(&session, &catalog, &answer, &llvm_link, &out) {
-        Err(rllvm_core::error::Error::ExecutionFailure(message)) => {
-            assert!(message.contains("refusing to link today"), "{message}")
+    rllvm_query::emit_slice(&session, catalog, &answer, llvm_link, out)
+}
+
+/// Every tool beside `llvm-link` that emitting needs is checked for, and a
+/// missing one is named rather than run.
+#[cfg(unix)]
+#[test]
+fn a_missing_tool_beside_llvm_link_is_named() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    for (present, missing) in [("llvm-extract", "llvm-nm"), ("llvm-nm", "llvm-extract")] {
+        let tools = scratch.path().join(format!("without-{missing}"));
+        std::fs::create_dir(&tools).unwrap();
+        for tool in ["llvm-link", present] {
+            std::os::unix::fs::symlink(llvm_bin(tool), tools.join(tool)).unwrap();
         }
-        other => panic!("expected an execution failure, got {other:?}"),
+        let out = scratch.path().join("slice.bc");
+        match emit_main_to_add(&catalog, &tools.join("llvm-link"), &out) {
+            Err(rllvm_core::error::Error::MissingFile(message)) => {
+                assert!(message.contains(missing), "{message}")
+            }
+            other => panic!("expected {missing} to be missing, got {other:?}"),
+        }
+        assert!(!out.exists());
     }
-    assert!(!out.exists());
 }
 
 #[test]
