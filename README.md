@@ -449,9 +449,9 @@ lists what only agent edges reach apart. An overlay file that cannot be read is
 an error, never a direct-only answer, as is a missing file that `--overlay`
 names. To check an edge in scope,
 `slice --emit-module` writes the slice's definitions as one small module, cut
-out with the `llvm-extract` beside the configured `llvm-link`; an alias comes
-with the function it stands for, and an empty slice writes nothing. See the [call-graph overlay
-example](examples/callgraph-overlay/).
+out with the `llvm-extract` and `llvm-nm` beside the configured `llvm-link`;
+an alias comes with the function it stands for, and an empty slice writes
+nothing. See the [call-graph overlay example](examples/callgraph-overlay/).
 
 ### MCP server
 

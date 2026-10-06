@@ -980,7 +980,7 @@ fn a_static_that_would_bind_another_module_s_call_is_not_emitted() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "a module was emitted: {stderr}");
-    assert!(stderr.contains("`helper` is static in module"), "{stderr}");
+    assert!(stderr.contains("helper` is static in module"), "{stderr}");
     assert!(!out.exists());
 }
 
@@ -1019,8 +1019,78 @@ fn a_static_off_the_path_that_would_bind_to_another_definition_is_not_emitted() 
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "a module was emitted: {stderr}");
-    assert!(stderr.contains("`note` is static in module"), "{stderr}");
+    assert!(stderr.contains("note` is static in module"), "{stderr}");
     assert!(!out.exists());
+}
+
+/// `a.c`'s static function `g` is on the path; `b.c`'s `leaf` reads a
+/// global variable also named `g`. Cut out, the read would bind to the
+/// function.
+#[test]
+fn a_static_function_named_like_another_module_s_variable_is_not_emitted() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(
+        &scratch,
+        "data",
+        &[
+            (
+                "a.c",
+                "int leaf(void);\nstatic int g(void){return leaf();}\nint fa(void){return g();}\n",
+            ),
+            ("b.c", "int g;\nint leaf(void){return g;}\n"),
+            ("main.c", "int fa(void);\nint main(void){return fa();}\n"),
+        ],
+    );
+    let out = scratch.path().join("slice.bc");
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["slice", "main", "leaf", "--emit-module"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a module was emitted: {stderr}");
+    assert!(stderr.contains("g` is static in module"), "{stderr}");
+    assert!(!out.exists());
+}
+
+/// Both modules keep a `static usage`, but only off-path functions use it,
+/// so neither copy reaches the emitted module and nothing collides.
+#[test]
+fn statics_that_stay_out_of_every_piece_do_not_block_the_module() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(
+        &scratch,
+        "usage",
+        &[
+            (
+                "add.c",
+                "static int usage(void){return 1;}\nint add(int a,int b){return a+b;}\nint sub(void){return usage();}\n",
+            ),
+            (
+                "main.c",
+                "static int usage(void){return 2;}\nint other(void){return usage();}\nint add(int a,int b);\nint main(void){return add(2,3);}\n",
+            ),
+        ],
+    );
+    let out = scratch.path().join("slice.bc");
+    query_json(
+        &scratch,
+        &catalog,
+        &[
+            "slice",
+            "main",
+            "add",
+            "--emit-module",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        defined_symbols(&out),
+        BTreeSet::from(["add".to_string(), "main".to_string()])
+    );
 }
 
 #[test]

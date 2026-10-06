@@ -6,7 +6,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
@@ -16,12 +16,19 @@ use rllvm_core::{catalog::ArchiveCache, error::Error, utils::execute_llvm_tool_i
 
 use crate::{
     Query, QueryResult, QueryResults, Session,
-    facts::{FunctionId, Linkage},
+    facts::FunctionId,
     load::{load_catalog, read_module},
 };
 
 /// `llvm-extract`'s file name, looked for beside the configured `llvm-link`.
 const LLVM_EXTRACT: &str = "llvm-extract";
+
+/// `llvm-nm`'s file name, looked for beside the configured `llvm-link`.
+const LLVM_NM: &str = "llvm-nm";
+
+/// The `llvm-nm` type letters of a symbol local to its module: a `static`
+/// function, variable or constant. Lowercase `w`, `v` and `u` are not local.
+const LOCAL_SYMBOL_TYPES: &[char] = &['t', 'd', 'b', 'r', 's'];
 
 /// What [`emit_module`] wrote.
 #[derive(Debug, Serialize)]
@@ -36,24 +43,27 @@ pub struct EmittedModule {
 /// Writes one module holding the slice's definitions: each source module's
 /// slice functions are cut out with `llvm-extract --func` (`--alias` for an
 /// alias), then the pieces are joined with `llvm-link`. Other functions
-/// stay as declarations. `llvm-extract` is the sibling of the configured
-/// `llvm-link`.
+/// stay as declarations. `llvm-extract` and `llvm-nm` are the siblings of
+/// the configured `llvm-link`.
 ///
 /// `session` is the one `functions` came from, loaded from `catalog`: it says
-/// which members are definitions, which are aliases, and which functions
-/// each module names, so no module is parsed again here. A slice member that
-/// is only a declaration contributes nothing: the definition it binds to is
-/// a member of its own. An alias has no body, so it comes with the function
+/// which members are definitions and which are aliases, so no module is
+/// parsed again here. A slice member that is only a declaration contributes
+/// nothing: the definition it binds to is a member of its own. An alias has no body, so it comes with the function
 /// it stands for, on the path or not. Module bytes are read and hash-checked
 /// as a query reads them, archive members included, and written to a
 /// temporary directory under their position in the catalog, never under a
 /// module id, which is free text.
 ///
-/// `llvm-extract` makes every `static` it touches external, so a module
-/// whose `static` function shares a name with a function another
-/// contributing module names is refused rather than linked. Same-named
-/// `static` globals that extracted functions reference are not checked: they
-/// stay declarations, merged into one external declaration.
+/// `llvm-extract` makes every `static` that stays in a piece external, as a
+/// definition or as a declaration a kept function still uses, and
+/// `llvm-link` then binds it by name. So every piece's symbols, functions
+/// and data, defined and undefined, are listed with the `llvm-nm` beside
+/// `llvm-link`, and a `static` of one module that stays in its piece under a
+/// name another piece also holds is refused rather than linked. What remains
+/// is compiler-private data such as string literals, which `llvm-nm` does
+/// not list for its source module: it too becomes an external declaration,
+/// and same-named ones from two pieces merge into one declaration.
 pub fn emit_module(
     session: &Session,
     catalog: &Path,
@@ -61,13 +71,8 @@ pub fn emit_module(
     llvm_link: &Path,
     out: &Path,
 ) -> Result<EmittedModule, Error> {
-    let llvm_extract = llvm_link.with_file_name(LLVM_EXTRACT);
-    if !llvm_extract.is_file() {
-        return Err(Error::MissingFile(format!(
-            "`{LLVM_EXTRACT}` is needed beside the configured llvm-link, at {}",
-            llvm_extract.display()
-        )));
-    }
+    let llvm_extract = sibling(llvm_link, LLVM_EXTRACT)?;
+    let llvm_nm = sibling(llvm_link, LLVM_NM)?;
 
     let mut plans = plan_pieces(session, functions);
     if plans.is_empty() {
@@ -75,12 +80,11 @@ pub fn emit_module(
             "the slice holds no definition; nothing to emit".to_string(),
         ));
     }
-    refuse_colliding_statics(&plans)?;
 
     let loaded = load_catalog(catalog)?;
     let scratch = tempfile::TempDir::new()?;
     let mut archives = ArchiveCache::default();
-    let mut pieces: Vec<(PathBuf, PathBuf, Plan)> = Vec::new();
+    let mut pieces: Vec<Piece> = Vec::new();
     for (index, pending) in loaded.pending.iter().enumerate() {
         let Some(plan) = plans.remove(pending.id.as_str()) else {
             continue;
@@ -100,10 +104,16 @@ pub fn emit_module(
             )));
         }
         let module = read_module(pending, &mut archives)?;
-        let input = scratch.path().join(format!("{index}.bc"));
-        let output = scratch.path().join(format!("{index}.slice.bc"));
-        std::fs::write(&input, &module.bytes)?;
-        pieces.push((input, output, plan));
+        let piece = Piece {
+            module: pending.id.clone(),
+            input: scratch.path().join(format!("{index}.bc")),
+            output: scratch.path().join(format!("{index}.slice.bc")),
+            plan,
+            promoted: BTreeSet::new(),
+            symbols: BTreeSet::new(),
+        };
+        std::fs::write(&piece.input, &module.bytes)?;
+        pieces.push(piece);
     }
     drop(archives);
     if let Some(module) = plans.into_keys().next() {
@@ -114,14 +124,34 @@ pub fn emit_module(
     }
 
     let environment = inherited_environment();
-    for (input, output, plan) in &pieces {
+    for piece in &mut pieces {
         let mut arguments: Vec<OsString> = Vec::new();
-        for (flag, symbol) in &plan.definitions {
+        for (flag, symbol) in &piece.plan.definitions {
             arguments.extend([OsString::from(flag), OsString::from(symbol)]);
         }
-        arguments.extend(["-o".into(), output.clone().into(), input.clone().into()]);
+        arguments.extend([
+            "-o".into(),
+            piece.output.clone().into(),
+            piece.input.clone().into(),
+        ]);
         run_tool(&llvm_extract, &arguments, scratch.path(), &environment)?;
+
+        let list = |file: &Path| {
+            run_tool(&llvm_nm, &[file.as_os_str()], scratch.path(), &environment)
+                .map(|stdout| symbol_table(&String::from_utf8_lossy(&stdout)))
+        };
+        let statics: BTreeSet<String> = list(&piece.input)?
+            .into_iter()
+            .filter(|(kind, _)| LOCAL_SYMBOL_TYPES.contains(kind))
+            .map(|(_, name)| name)
+            .collect();
+        piece.symbols = list(&piece.output)?
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        piece.promoted = piece.symbols.intersection(&statics).cloned().collect();
     }
+    refuse_colliding_statics(&pieces)?;
 
     // The tools run in the scratch directory, so a relative `out` would
     // land there and vanish with it.
@@ -129,7 +159,7 @@ pub fn emit_module(
     arguments.extend(
         pieces
             .iter()
-            .map(|(_, output, _)| output.clone().into_os_string()),
+            .map(|piece| piece.output.clone().into_os_string()),
     );
     run_tool(llvm_link, &arguments, scratch.path(), &environment)?;
     Ok(EmittedModule {
@@ -137,7 +167,7 @@ pub fn emit_module(
         modules: pieces.len(),
         functions: pieces
             .iter()
-            .map(|(_, _, plan)| plan.definitions.len())
+            .map(|piece| piece.plan.definitions.len())
             .sum(),
     })
 }
@@ -196,14 +226,6 @@ fn plan_pieces(session: &Session, functions: &[FunctionId]) -> BTreeMap<String, 
                 .and_then(|target| session.function(target));
         }
     }
-    for function in session.functions() {
-        if let Some(plan) = plans.get_mut(&function.id.module_id) {
-            plan.named.insert(function.id.symbol.clone());
-            if function.linkage == Linkage::Internal {
-                plan.statics.insert(function.id.symbol.clone());
-            }
-        }
-    }
     plans
 }
 
@@ -215,33 +237,36 @@ struct Plan {
     definitions: Vec<(&'static str, String)>,
     /// The symbols in `definitions`.
     cut: BTreeSet<String>,
-    /// Every `static` function the module defines, cut out or not:
-    /// `llvm-extract` turns one it drops into an external declaration, which
-    /// a kept caller still calls.
-    statics: BTreeSet<String>,
-    /// Every function the module defines or declares.
-    named: BTreeSet<String>,
 }
 
-/// `llvm-extract` makes every local function it touches external: one it
-/// keeps becomes an external definition, one it drops an external
-/// declaration that a kept caller still calls. Either would be linked to a
-/// same-named function another piece defines or calls: a module that binds
-/// calls the program never makes. Refused, naming both modules.
-///
-/// Conservative: it compares every function each module names, not only what
-/// survives in its piece.
-fn refuse_colliding_statics(plans: &BTreeMap<String, Plan>) -> Result<(), Error> {
-    for (module, plan) in plans {
-        for symbol in &plan.statics {
-            if let Some((other, _)) = plans
+/// One source module's share of the slice, as files.
+struct Piece {
+    module: String,
+    /// The module's bytes, named after its position in the catalog.
+    input: PathBuf,
+    output: PathBuf,
+    plan: Plan,
+    /// Every symbol `llvm-nm` lists in `output`, as it spells them.
+    symbols: BTreeSet<String>,
+    /// The symbols in `symbols` that were `static` in `input`.
+    promoted: BTreeSet<String>,
+}
+
+/// A `static` that `llvm-extract` made external would be linked to a
+/// same-named function or variable in another piece: a module that binds
+/// calls, or reads, the program never makes. Refused, naming both modules.
+fn refuse_colliding_statics(pieces: &[Piece]) -> Result<(), Error> {
+    for piece in pieces {
+        for symbol in &piece.promoted {
+            if let Some(other) = pieces
                 .iter()
-                .find(|(other, other_plan)| *other != module && other_plan.named.contains(symbol))
+                .find(|other| other.module != piece.module && other.symbols.contains(symbol))
             {
                 return Err(Error::InvalidArguments(format!(
-                    "cannot emit the slice as one module: `{symbol}` is static in module \
-                     {module} and also named in module {other}, and llvm-extract makes a \
-                     static external"
+                    "cannot emit the slice as one module: `{symbol}` is static in module {} \
+                     and also named by module {}'s part, and llvm-extract makes a static it \
+                     keeps external",
+                    piece.module, other.module
                 )));
             }
         }
@@ -249,17 +274,47 @@ fn refuse_colliding_statics(plans: &BTreeMap<String, Plan>) -> Result<(), Error>
     Ok(())
 }
 
+/// `llvm-nm`'s plain listing as `(type letter, name)` pairs. A line is an
+/// optional value, the letter and the name; anything else is skipped.
+fn symbol_table(listing: &str) -> Vec<(char, String)> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace().rev();
+            let name = fields.next()?;
+            let mut letter = fields.next()?.chars();
+            match (letter.next(), letter.next()) {
+                (Some(kind), None) => Some((kind, name.to_string())),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// The tool named `name` in `llvm_link`'s directory.
+fn sibling(llvm_link: &Path, name: &str) -> Result<PathBuf, Error> {
+    let tool = llvm_link.with_file_name(name);
+    if tool.is_file() {
+        return Ok(tool);
+    }
+    Err(Error::MissingFile(format!(
+        "`{name}` is needed beside the configured llvm-link, at {}",
+        tool.display()
+    )))
+}
+
 /// Runs one LLVM tool through the shared transport, which moves a long
-/// argument list into a response file, and fails with its stderr.
-fn run_tool(
+/// argument list into a response file. Answers its stdout, or fails with its
+/// stderr.
+fn run_tool<S: AsRef<OsStr>>(
     tool: &Path,
-    arguments: &[OsString],
+    arguments: &[S],
     directory: &Path,
     environment: &BTreeMap<String, String>,
-) -> Result<(), Error> {
+) -> Result<Vec<u8>, Error> {
     let output = execute_llvm_tool_in_for_output(tool, arguments, directory, environment)?;
     if output.status.success() {
-        return Ok(());
+        return Ok(output.stdout);
     }
     Err(Error::ExecutionFailure(format!(
         "{} failed ({}): {}",
@@ -276,4 +331,24 @@ fn inherited_environment() -> BTreeMap<String, String> {
     std::env::vars_os()
         .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_listing_reads_as_type_letters_and_names() {
+        let listing = "---------------- t _g\n                 U _leaf\n\
+                       ---------------- d _counter\n0000000000000000 T main\n\nlib.a:\n";
+        assert_eq!(
+            symbol_table(listing),
+            [
+                ('t', "_g".to_string()),
+                ('U', "_leaf".to_string()),
+                ('d', "_counter".to_string()),
+                ('T', "main".to_string()),
+            ]
+        );
+    }
 }
