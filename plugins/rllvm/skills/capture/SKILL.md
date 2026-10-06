@@ -28,7 +28,9 @@ A fresh build directory avoids reusing objects compiled without the wrappers.
 `rllvm-compdb` describes the current source tree, not what a real link
 contained; prefer wrapper capture when that matters. `cargo check` and
 procedural-macro crates are not captured, and the Rust standard library is not
-rebuilt: it is prebuilt, so its functions never appear in the module.
+rebuilt: it is prebuilt, so its functions never appear in the module. Nor do
+the allocator shim's (`__rust_alloc` and its siblings) in a staticlib; the
+catalog lists that member as carrying no bitcode.
 
 ## 2. What needs care
 

@@ -6,8 +6,13 @@
 //! contributes the whole crate's bitcode path. A staticlib also bundles the
 //! objects of every dependency and of the prebuilt sysroot; those are not
 //! compiled from this crate's bitcode and keep whatever they already record.
+//! Neither is rustc's allocator shim, which is named after the crate but
+//! generated outside its bitcode, so a member is patched only when it defines
+//! something the bitcode defines.
 
-use std::{fs, path::Path, process::Command};
+use std::{collections::HashSet, fs, path::Path, process::Command};
+
+use object::{Object, ObjectSymbol};
 
 use rllvm_core::{
     config::try_rllvm_config, error::Error, utils::embed_bitcode_filepath_to_object_file,
@@ -41,6 +46,40 @@ fn owns(prefixes: &[String], member: &str) -> bool {
         .any(|prefix| member.starts_with(prefix.as_str()))
 }
 
+/// The symbols the crate's bitcode module defines, read with the `llvm-nm`
+/// beside the configured `llvm-ar`. Spelled as the target spells them, the
+/// way an object member's symbol table does.
+fn bitcode_definitions(llvm_ar: &Path, bitcode: &Path) -> Result<HashSet<String>, Error> {
+    let llvm_nm = llvm_ar.with_file_name("llvm-nm");
+    let output = Command::new(&llvm_nm)
+        .args(["--defined-only", "--just-symbol-name"])
+        .arg(bitcode)
+        .output()?;
+    if !output.status.success() {
+        return Err(Error::ExecutionFailure(format!(
+            "Failed to list the symbols of {bitcode:?} with {llvm_nm:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// Whether the object `data` defines any symbol in `definitions`, i.e. holds
+/// code compiled from that module. rustc's allocator shim defines only
+/// `__rust_alloc` and its siblings, which no crate's bitcode defines.
+fn compiled_from(data: &[u8], definitions: &HashSet<String>) -> bool {
+    object::File::parse(data).is_ok_and(|object| {
+        object.symbols().any(|symbol| {
+            symbol.is_definition() && symbol.name().is_ok_and(|name| definitions.contains(name))
+        })
+    })
+}
+
 /// Embed the bitcode path into each of the crate's own object members.
 ///
 /// Every own member carries the same crate-level path, which is correct: the
@@ -49,7 +88,8 @@ fn owns(prefixes: &[String], member: &str) -> bool {
 /// dependency's objects, or the sysroot's prebuilt `std` and
 /// `compiler_builtins` -- are left alone: their code is not in this crate's
 /// bitcode, and a member that records nothing is how extraction learns a
-/// part of the archive has no bitcode.
+/// part of the archive has no bitcode. So is a member named after the crate
+/// that defines nothing the bitcode defines, such as the allocator shim.
 ///
 /// Returns the number of members patched.
 pub(crate) fn patch_archive(
@@ -72,6 +112,8 @@ pub(crate) fn patch_archive(
         )));
     }
 
+    let definitions = bitcode_definitions(&llvm_ar, bitcode)?;
+
     let mut patched = Vec::new();
     for entry in fs::read_dir(workspace.path())? {
         let member = entry?.path();
@@ -83,7 +125,7 @@ pub(crate) fn patch_archive(
         }
         // An rlib carries `lib.rmeta` and `lib.rmeta-link` beside its objects.
         let data = fs::read(&member)?;
-        if object::File::parse(&*data).is_err() {
+        if !compiled_from(&data, &definitions) {
             continue;
         }
         embed_bitcode_filepath_to_object_file::<&Path>(bitcode, &member, None)?;
@@ -121,11 +163,22 @@ mod tests {
         config::pin_inferred_config, utils::extract_bitcode_filepaths_from_parsed_objects,
     };
 
-    /// A placeholder bitcode file. Embedding canonicalizes the path, so the
-    /// file has to exist, but nothing ever reads its contents.
-    fn placeholder_bitcode(dir: &Path) -> PathBuf {
+    /// The crate's bitcode module: the code of fixture member `index`, the
+    /// way rustc's bitcode holds the code of the crate's own codegen units.
+    fn crate_bitcode(dir: &Path, index: usize) -> PathBuf {
+        let clang = pin_inferred_config()
+            .expect("no usable LLVM configuration")
+            .clang_filepath()
+            .clone();
         let bitcode = dir.join("crate.bc");
-        fs::write(&bitcode, b"placeholder").expect("failed to write the placeholder bitcode");
+        let status = Command::new(clang)
+            .args(["-c", "-emit-llvm"])
+            .arg(dir.join(format!("member{index}.c")))
+            .arg("-o")
+            .arg(&bitcode)
+            .status()
+            .expect("failed to run clang");
+        assert!(status.success(), "compiling the crate bitcode failed");
         bitcode
     }
 
@@ -201,19 +254,19 @@ mod tests {
         // compiled from the crate's bitcode; stamping its path on the others
         // would claim a module that does not hold their code.
         let tmp = tempfile::tempdir().unwrap();
-        let own = [
-            "fixture.fixture.2e58d64bd285cc71-cgu.0.rcgu.o",
-            "fixture.awrgbl1ahkncdry3idj4cpuvm.rcgu.o",
-        ];
+        let own = ["fixture.fixture.2e58d64bd285cc71-cgu.0.rcgu.o"];
+        // rustc's allocator shim: named after the crate, but generated beside
+        // its codegen units, so none of its code is in the crate's bitcode.
+        let shim = "fixture.awrgbl1ahkncdry3idj4cpuvm.rcgu.o";
         let foreign = "compiler_builtins-51dc6f60309b0c2f.compiler_builtins.1a788e7-cgu.000.rcgu.o";
-        let archive = build_fixture_archive(tmp.path(), &[own[0], own[1], foreign]);
-        let bitcode = placeholder_bitcode(tmp.path());
+        let archive = build_fixture_archive(tmp.path(), &[own[0], shim, foreign]);
+        let bitcode = crate_bitcode(tmp.path(), 0);
 
         let patched = patch_archive(&archive, &bitcode, &member_prefixes("fixture", "", None))
             .expect("patched");
         assert_eq!(
-            patched, 2,
-            "only the crate's own object members are patched"
+            patched, 1,
+            "only members compiled from the crate's bitcode are patched"
         );
 
         for (name, paths) in recorded_paths(&archive) {

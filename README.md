@@ -142,7 +142,9 @@ rllvm-rustc main.rs -o app && rllvm-get-bc app
 ```
 
 `cargo check` and procedural-macro crates pass through without capture, and
-prebuilt dependencies — including the standard library — are not rebuilt. Your
+prebuilt dependencies — including the standard library — are not rebuilt.
+Neither is the allocator shim rustc adds to a staticlib (`__rust_alloc` and its
+siblings); `rllvm-info` lists such members as carrying no bitcode. Your
 LLVM readers must be compatible with the version `rustc -vV` reports. Use
 `RLLVM_LOG_LEVEL=3` for diagnostics under Cargo.
 
