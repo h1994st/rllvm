@@ -89,7 +89,7 @@ pub use render::{Color, TextMode, render};
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// One of the ten source-level queries. Serializes with a `kind` tag, e.g.
+/// One of the eleven source-level queries. Serializes with a `kind` tag, e.g.
 /// `{"kind": "callers", "name": "parse_frame"}`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -123,6 +123,10 @@ pub enum Query {
     /// `!callees` at a call site, when CVP produced it; otherwise
     /// unresolved. `at` is a `file:line` location, e.g. `"t.c:4"`.
     IndirectTargets { at: String, heuristics: bool },
+    /// Unresolved indirect call sites grouped by the record field they
+    /// dispatch through, with the functions stored into that field. A join
+    /// of facts: candidates, never edges.
+    ResolutionCandidates,
 }
 
 /// One definition of a queried symbol.
@@ -178,6 +182,43 @@ pub struct IndirectTargetsResult {
     pub assumptions: Vec<String>,
 }
 
+/// Unresolved indirect sites that share a dispatch, and the functions that
+/// could be what they call. Never an edge: `reach` and `closure` ignore it.
+#[derive(Debug, Serialize)]
+pub struct CandidateGroup {
+    /// The field every site in the group dispatches through; `None` groups
+    /// unresolved sites whose pointer was not traced to a field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field: Option<FieldRef>,
+    /// Display only: the member name, when any site or assignment knew it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub field_name: Option<String>,
+    /// The function type the sites call through.
+    pub signature: String,
+    pub sites: Vec<CandidateSite>,
+    pub candidates: Vec<Candidate>,
+    /// Exactly one candidate, assigned at exactly one place. A hint for the
+    /// reader; never applied as an edge.
+    pub single_candidate: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CandidateSite {
+    pub site: CallSiteId,
+    pub location: Option<SourceLocation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Candidate {
+    pub function: FunctionId,
+    /// Field groups: the stores and initializers that put this function's
+    /// address into the field. The no-field group: every recorded use.
+    pub assignments: Vec<UseFact>,
+    /// The candidate's own type equals the group's `signature`. False is
+    /// reported, not filtered: casting function pointers is routine in C.
+    pub signature_matches: bool,
+}
+
 /// The per-query result list. Untagged: each query's own shape serializes
 /// directly as the `results` array, with no wrapper variant name.
 #[derive(Debug, Serialize)]
@@ -198,6 +239,7 @@ pub enum QueryResults {
     Externals(Vec<SymbolBinding>),
     FfiExports(Vec<DefEntry>),
     IndirectTargets(Vec<IndirectTargetsResult>),
+    ResolutionCandidates(Vec<CandidateGroup>),
 }
 
 impl QueryResults {
@@ -216,6 +258,7 @@ impl QueryResults {
             QueryResults::Externals(items) => items.is_empty(),
             QueryResults::FfiExports(items) => items.is_empty(),
             QueryResults::IndirectTargets(items) => items.is_empty(),
+            QueryResults::ResolutionCandidates(items) => items.is_empty(),
         }
     }
 }
@@ -538,6 +581,9 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
         Query::IndirectTargets { at, heuristics } => {
             QueryResults::IndirectTargets(indirect_targets(session, at, *heuristics)?)
         }
+        Query::ResolutionCandidates => {
+            QueryResults::ResolutionCandidates(resolution_candidates(session))
+        }
     };
 
     // Reach reports exactly the ambiguous bindings its own walk hit, which
@@ -659,6 +705,21 @@ impl QueryResults {
             QueryResults::Externals(bindings) => {
                 for binding in bindings {
                     collect_binding(binding, into);
+                }
+            }
+            QueryResults::ResolutionCandidates(groups) => {
+                for group in groups {
+                    for site in &group.sites {
+                        collect_function(&site.site.function, into);
+                    }
+                    for candidate in &group.candidates {
+                        collect_function(&candidate.function, into);
+                        for assignment in &candidate.assignments {
+                            if let Some(id) = &assignment.in_function {
+                                collect_function(id, into);
+                            }
+                        }
+                    }
                 }
             }
             QueryResults::IndirectTargets(entries) => {
@@ -927,6 +988,128 @@ fn address_taken_inventory(session: &Session) -> Vec<FunctionId> {
     inventory
 }
 
+/// Joins each unresolved indirect site to the functions stored into the field
+/// it dispatches through. A site with no traced field falls back to the
+/// address-taken functions of its signature.
+fn resolution_candidates(session: &Session) -> Vec<CandidateGroup> {
+    let mut grouped: BTreeMap<(Option<FieldRef>, String), Vec<&CallSiteFact>> = BTreeMap::new();
+    for site in session.call_sites() {
+        if let CallTarget::Indirect {
+            signature,
+            llvm_target_bound: None,
+            via_field,
+        } = &site.target
+        {
+            let field = via_field.as_ref().map(|evidence| evidence.field.clone());
+            grouped
+                .entry((field, signature.clone()))
+                .or_default()
+                .push(site);
+        }
+    }
+
+    // `None` sorts first in an `Option` key; the no-field groups go last.
+    let (without_field, with_field): (Vec<_>, Vec<_>) = grouped
+        .into_iter()
+        .partition(|((field, _), _)| field.is_none());
+    with_field
+        .into_iter()
+        .chain(without_field)
+        .map(|((field, signature), mut sites)| {
+            sites.sort_by(|left, right| left.id.cmp(&right.id));
+            let mut candidates = match &field {
+                Some(field) => field_candidates(session, field, &signature),
+                None => signature_candidates(session, &signature),
+            };
+            candidates.sort_by(|left, right| left.function.cmp(&right.function));
+            let field_name = sites
+                .iter()
+                .find_map(|site| match &site.target {
+                    CallTarget::Indirect { via_field, .. } => via_field
+                        .as_ref()
+                        .and_then(|evidence| evidence.name.clone()),
+                    _ => None,
+                })
+                .or_else(|| {
+                    candidates
+                        .iter()
+                        .flat_map(|candidate| &candidate.assignments)
+                        .find_map(|assignment| {
+                            assignment
+                                .field
+                                .as_ref()
+                                .and_then(|evidence| evidence.name.clone())
+                        })
+                });
+            let single_candidate = candidates.len() == 1 && candidates[0].assignments.len() == 1;
+            CandidateGroup {
+                field,
+                field_name,
+                signature,
+                sites: sites
+                    .into_iter()
+                    .map(|site| CandidateSite {
+                        site: site.id.clone(),
+                        location: site.location.clone(),
+                    })
+                    .collect(),
+                candidates,
+                single_candidate,
+            }
+        })
+        .collect()
+}
+
+/// Every function with a use that puts its address into `field`, under any
+/// `kind`.
+fn field_candidates(session: &Session, field: &FieldRef, signature: &str) -> Vec<Candidate> {
+    let mut by_function: BTreeMap<FunctionId, Vec<UseFact>> = BTreeMap::new();
+    for use_fact in session.uses() {
+        if use_fact
+            .field
+            .as_ref()
+            .is_some_and(|evidence| &evidence.field == field)
+        {
+            by_function
+                .entry(use_fact.used.clone())
+                .or_default()
+                .push(use_fact.clone());
+        }
+    }
+    by_function
+        .into_iter()
+        .map(|(function, assignments)| Candidate {
+            signature_matches: session
+                .function(&function)
+                .is_some_and(|fact| fact.signature == signature),
+            function,
+            assignments,
+        })
+        .collect()
+}
+
+/// The address-taken functions whose type is `signature`, with every use.
+fn signature_candidates(session: &Session, signature: &str) -> Vec<Candidate> {
+    address_taken_inventory(session)
+        .into_iter()
+        .filter(|id| {
+            session
+                .function(id)
+                .is_some_and(|fact| fact.signature == signature)
+        })
+        .map(|function| Candidate {
+            assignments: session
+                .uses()
+                .iter()
+                .filter(|use_fact| use_fact.used == function)
+                .cloned()
+                .collect(),
+            function,
+            signature_matches: true,
+        })
+        .collect()
+}
+
 impl Query {
     /// The symbol names this query takes, in the order it takes them.
     ///
@@ -945,7 +1128,8 @@ impl Query {
             Query::At { .. }
             | Query::Externals
             | Query::FfiExports
-            | Query::IndirectTargets { .. } => Vec::new(),
+            | Query::IndirectTargets { .. }
+            | Query::ResolutionCandidates => Vec::new(),
         }
     }
 
@@ -1619,5 +1803,150 @@ mod tests {
         let catalog_path = scratch.path().join("catalog.json");
         write_catalog(&catalog_path, &catalog).unwrap();
         catalog_path
+    }
+
+    fn ops(offset: u64) -> FieldRef {
+        FieldRef {
+            record: "ops".into(),
+            offset,
+        }
+    }
+
+    /// `h` stored into `field` at `t.c:line`, from `in_function`.
+    fn store_into(
+        h: &FunctionFact,
+        in_function: &FunctionFact,
+        line: u32,
+        field: FieldRef,
+    ) -> UseFact {
+        UseFact {
+            used: h.id.clone(),
+            in_function: Some(in_function.id.clone()),
+            in_global: None,
+            location: Some(source_location("t.c", line)),
+            kind: UseKind::StoredToMemory,
+            field: Some(FieldEvidence {
+                field,
+                basis: FieldBasis::StructGep,
+                name: None,
+            }),
+        }
+    }
+
+    fn candidates_of(session: &Session) -> Vec<CandidateGroup> {
+        match run(session, &Query::ResolutionCandidates).unwrap().results {
+            QueryResults::ResolutionCandidates(groups) => groups,
+            other => panic!("expected resolution candidates, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn candidates_group_sites_by_the_field_they_dispatch_through() {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let sites = vec![
+            indirect_call_through(&caller, 1, Some(ops(8))),
+            indirect_call_through(&caller, 2, Some(ops(8))),
+            indirect_call_through(&caller, 3, Some(ops(16))),
+        ];
+        let session = Session::new(facts(vec![caller], sites), Vec::new());
+        let groups = candidates_of(&session);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].field, Some(ops(8)));
+        assert_eq!(groups[0].sites.len(), 2);
+        assert_eq!(groups[1].field, Some(ops(16)));
+        assert_eq!(groups[1].sites.len(), 1);
+    }
+
+    #[test]
+    fn a_bounded_site_is_not_a_resolution_candidate() {
+        let session = session_with_bounded_indirect();
+        assert!(candidates_of(&session).is_empty());
+        let result = run(&session, &Query::ResolutionCandidates).unwrap();
+        assert!(result.results.is_empty());
+    }
+
+    #[test]
+    fn a_function_stored_into_the_field_is_its_candidate() {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let h1 = function("m", "h1", true, Linkage::Internal);
+        let h2 = function("m", "h2", true, Linkage::Internal);
+        let mut base = facts(
+            vec![caller.clone(), h1.clone(), h2.clone()],
+            vec![indirect_call_through(&caller, 1, Some(ops(8)))],
+        );
+        base.uses = vec![
+            store_into(&h1, &caller, 20, ops(8)),
+            store_into(&h2, &caller, 21, ops(16)),
+        ];
+        let groups = candidates_of(&Session::new(base, Vec::new()));
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].candidates.len(), 1);
+        let candidate = &groups[0].candidates[0];
+        assert_eq!(candidate.function, h1.id);
+        assert_eq!(candidate.assignments.len(), 1);
+        assert_eq!(candidate.assignments[0].location.as_ref().unwrap().line, 20);
+        assert!(candidate.signature_matches);
+    }
+
+    #[test]
+    fn a_signature_mismatch_is_reported_not_filtered() {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let odd = FunctionFact {
+            signature: "void (ptr)".into(),
+            ..function("m", "odd", true, Linkage::Internal)
+        };
+        let mut base = facts(
+            vec![caller.clone(), odd.clone()],
+            vec![indirect_call_through(&caller, 1, Some(ops(8)))],
+        );
+        base.uses = vec![store_into(&odd, &caller, 20, ops(8))];
+        let groups = candidates_of(&Session::new(base, Vec::new()));
+        assert_eq!(groups[0].candidates.len(), 1);
+        assert!(!groups[0].candidates[0].signature_matches);
+    }
+
+    #[test]
+    fn one_candidate_assigned_once_is_hinted_never_applied() {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let h1 = function("m", "h1", true, Linkage::Internal);
+        let mut base = facts(
+            vec![caller.clone(), h1.clone()],
+            vec![indirect_call_through(&caller, 1, Some(ops(8)))],
+        );
+        base.uses = vec![store_into(&h1, &caller, 20, ops(8))];
+        let session = Session::new(base, Vec::new());
+        assert!(candidates_of(&session)[0].single_candidate);
+        assert!(session.reach("caller", "h1").path.is_none());
+    }
+
+    #[test]
+    fn sites_without_a_field_group_by_signature_with_address_taken_candidates() {
+        let session = session_with_address_taken_function();
+        let groups = candidates_of(&session);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].field, None);
+        assert_eq!(groups[0].signature, "i32 (i32, i32)");
+        let symbols: Vec<_> = groups[0]
+            .candidates
+            .iter()
+            .map(|candidate| candidate.function.symbol.as_str())
+            .collect();
+        assert_eq!(symbols, ["add"]);
+        assert!(groups[0].candidates[0].signature_matches);
+    }
+
+    #[test]
+    fn the_field_name_falls_back_to_an_assignment_when_the_site_has_none() {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let h1 = function("m", "h1", true, Linkage::Internal);
+        let mut base = facts(
+            vec![caller.clone(), h1.clone()],
+            vec![indirect_call_through(&caller, 1, Some(ops(8)))],
+        );
+        let mut store = store_into(&h1, &caller, 20, ops(8));
+        store.field.as_mut().unwrap().name = Some("on_event".into());
+        base.uses = vec![store];
+        let groups = candidates_of(&Session::new(base, Vec::new()));
+        assert_eq!(groups[0].field_name.as_deref(), Some("on_event"));
     }
 }

@@ -203,6 +203,12 @@ fn location(location: Option<&SourceLocation>, ctx: Ctx) -> String {
 
 /// Comma-joined readable names, for a bound of resolved indirect-call
 /// targets.
+/// `1 site`, `2 sites`.
+fn count(n: usize, noun: &str) -> String {
+    let plural = if n == 1 { "" } else { "s" };
+    format!("{n} {noun}{plural}")
+}
+
 fn symbol_list(symbols: &BTreeMap<String, String>, ids: &[FunctionId], ctx: Ctx) -> String {
     ids.iter()
         .map(|id| name(symbols, &id.symbol, ctx))
@@ -362,6 +368,13 @@ fn shown_in(results: &QueryResults) -> Shown {
             // than the row.
             shown.indirect_call_site = !entries.is_empty();
         }
+        QueryResults::ResolutionCandidates(groups) => {
+            shown.missing_location = groups
+                .iter()
+                .any(|group| group.sites.iter().any(|site| site.location.is_none()));
+            // Every group is made of unresolved indirect call sites.
+            shown.indirect_call_site = !groups.is_empty();
+        }
         // Neither prints a location nor a call site: `closure` prints bare
         // names, `externals` a symbol and its binding status.
         QueryResults::Closure(_) | QueryResults::Externals(_) => {}
@@ -393,7 +406,8 @@ fn walks_call_edges(results: &QueryResults) -> bool {
         | QueryResults::Uses(_)
         | QueryResults::Externals(_)
         | QueryResults::FfiExports(_)
-        | QueryResults::IndirectTargets(_) => false,
+        | QueryResults::IndirectTargets(_)
+        | QueryResults::ResolutionCandidates(_) => false,
     }
 }
 
@@ -414,6 +428,9 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         QueryResults::Uses(_) => "no non-call use of the target was found in the selected scope",
         QueryResults::Closure(_) => {
             "no functions were found in the selected scope for that direction"
+        }
+        QueryResults::ResolutionCandidates(_) => {
+            "no unresolved indirect call site in the selected scope"
         }
         // Accurate for `Defs`, `At` and `IndirectTargets`: each takes a name
         // or a location and an empty result there really does mean nothing
@@ -854,6 +871,54 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                 }
             }
         }
+        QueryResults::ResolutionCandidates(groups) => {
+            for group in groups {
+                let subject = match &group.field {
+                    Some(field) => format!(
+                        "field {field}{}",
+                        group
+                            .field_name
+                            .as_ref()
+                            .map(|name| format!(" ({name})"))
+                            .unwrap_or_default()
+                    ),
+                    None => format!("no field, {}", group.signature),
+                };
+                let hint = if group.single_candidate {
+                    format!(" {}", paint("[single]", ctx.color, Paint::Uncertain))
+                } else {
+                    String::new()
+                };
+                out.push_str(&format!(
+                    "{} \u{2014} {}, {}{hint}\n",
+                    paint(&subject, ctx.color, Paint::Heading),
+                    count(group.sites.len(), "site"),
+                    count(group.candidates.len(), "candidate"),
+                ));
+                for site in &group.sites {
+                    out.push_str(&format!(
+                        "  site {} {}\n",
+                        name(symbols, &site.site.function.symbol, ctx),
+                        location(site.location.as_ref(), ctx)
+                    ));
+                }
+                for candidate in &group.candidates {
+                    for assignment in &candidate.assignments {
+                        let holder = match (&assignment.in_function, &assignment.in_global) {
+                            (Some(id), _) => name(symbols, &id.symbol, ctx),
+                            (None, Some(global)) => name(symbols, global, ctx),
+                            (None, None) => paint("global", ctx.color, Paint::Muted),
+                        };
+                        out.push_str(&format!(
+                            "  candidate {} assigned in {} {}\n",
+                            name(symbols, &candidate.function.symbol, ctx),
+                            holder,
+                            location(assignment.location.as_ref(), ctx)
+                        ));
+                    }
+                }
+            }
+        }
         QueryResults::IndirectTargets(results) => {
             for entry in results {
                 out.push_str(&format!(
@@ -902,8 +967,8 @@ mod tests {
     use crate::{
         CacheReport, Query,
         facts::{
-            FieldBasis, FieldRef, FunctionFact, Language, Linkage, ModuleAnalysis, ModuleReport,
-            UseFact, UseKind,
+            FieldBasis, FieldEvidence, FieldRef, FunctionFact, Language, Linkage, ModuleAnalysis,
+            ModuleReport, UseFact, UseKind,
         },
         index::{Direction, Session},
         run,
@@ -1180,6 +1245,98 @@ mod tests {
         // Nothing was bounded here, so there is no bound to qualify.
         assert!(
             !text.contains("only within the captured scope"),
+            "got: {text}"
+        );
+    }
+
+    /// `ops@8` dispatched twice, stored into by `init` (a function) and by
+    /// the global `table`; `on_event` is named only by the stores.
+    fn candidates_text(second_candidate: bool) -> String {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let h1 = function("m", "h1", true, Linkage::Internal);
+        let h3 = function("m", "h3", true, Linkage::Internal);
+        let field = FieldRef {
+            record: "ops".into(),
+            offset: 8,
+        };
+        let evidence = FieldEvidence {
+            field: field.clone(),
+            basis: FieldBasis::StructGep,
+            name: Some("on_event".into()),
+        };
+        let mut base = facts(
+            vec![caller.clone(), h1.clone(), h3.clone()],
+            vec![
+                indirect_call_through(&caller, 1, Some(field.clone())),
+                indirect_call_through(&caller, 2, Some(field)),
+            ],
+        );
+        base.uses = vec![UseFact {
+            used: h1.id.clone(),
+            in_function: None,
+            in_global: Some("table".into()),
+            location: Some(source_location("t.c", 9)),
+            kind: UseKind::GlobalInitializer,
+            field: Some(evidence.clone()),
+        }];
+        if second_candidate {
+            base.uses.push(UseFact {
+                used: h3.id.clone(),
+                in_function: Some(caller.id.clone()),
+                in_global: None,
+                location: Some(source_location("t.c", 12)),
+                kind: UseKind::StoredToMemory,
+                field: Some(evidence),
+            });
+        }
+        let result = run(
+            &Session::new(base, Vec::new()),
+            &Query::ResolutionCandidates,
+        )
+        .unwrap();
+        render(&result, TextMode::Adaptive, Color::Never)
+    }
+
+    #[test]
+    fn resolution_candidates_header_counts_sites_and_candidates() {
+        let text = candidates_text(true);
+        assert!(
+            text.contains("field ops@8 (on_event) \u{2014} 2 sites, 2 candidates\n"),
+            "got: {text}"
+        );
+        assert!(!text.contains("[single]"), "got: {text}");
+        assert!(text.contains("  site caller t.c:1\n"), "got: {text}");
+    }
+
+    #[test]
+    fn a_single_candidate_header_is_singular_and_marked() {
+        let text = candidates_text(false);
+        assert!(
+            text.contains("field ops@8 (on_event) \u{2014} 2 sites, 1 candidate [single]\n"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_candidate_line_names_a_function_or_global_holder() {
+        let text = candidates_text(true);
+        assert!(
+            text.contains("  candidate h1 assigned in table t.c:9\n"),
+            "got: {text}"
+        );
+        assert!(
+            text.contains("  candidate h3 assigned in caller t.c:12\n"),
+            "got: {text}"
+        );
+    }
+
+    #[test]
+    fn a_group_without_a_field_is_headed_by_its_signature() {
+        let session = session_with_address_taken_function();
+        let result = run(&session, &Query::ResolutionCandidates).unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(
+            text.contains("no field, i32 (i32, i32) \u{2014} 1 site, 1 candidate [single]\n"),
             "got: {text}"
         );
     }

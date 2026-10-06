@@ -42,6 +42,7 @@ When a warning about the facts cache appears, offer `rllvm-query cache clear
 | Where is X's address taken? | `uses` |
 | Who can call X through a pointer? | `uses` for address-taken sites, then `indirect_targets` at each |
 | What can this indirect call reach? | `indirect_targets` at the call site (`heuristics: true` adds the address-taken inventory) |
+| Which functions could an unresolved indirect call reach, grouped by the record field it dispatches through? | `resolution_candidates` (`resolution-candidates`): candidates, never edges; `reach` and `closure` ignore them |
 | Can A reach B — for example, is a vulnerable function reachable? | `reach`; if it finds no path, `closure` to see where the search stopped |
 | Everything that reaches X, or that X reaches | `closure` with `direction` `in` or `out` |
 | What does the program call outside itself? | `externals` |

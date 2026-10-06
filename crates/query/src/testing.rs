@@ -11,9 +11,9 @@ use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
 use crate::{
     bind::{BindingCandidate, BindingStatus, SymbolBinding},
     facts::{
-        CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, Language, LanguageBasis,
-        Linkage, ModuleAnalysis, ModuleReport, ProgramFacts, SourceLanguage, SourceLocation,
-        SourceStatus, UseFact, UseKind,
+        CallSiteFact, CallSiteId, CallTarget, FieldBasis, FieldEvidence, FieldRef, FunctionFact,
+        FunctionId, Language, LanguageBasis, Linkage, ModuleAnalysis, ModuleReport, ProgramFacts,
+        SourceLanguage, SourceLocation, SourceStatus, UseFact, UseKind,
     },
     index::Session,
 };
@@ -106,6 +106,24 @@ pub(crate) fn indirect_call(
             via_field: None,
         },
     }
+}
+
+/// An unbounded indirect call in `caller` at `t.c:line`, dispatching through
+/// `field` when the pointer was traced to one.
+pub(crate) fn indirect_call_through(
+    caller: &FunctionFact,
+    line: u32,
+    field: Option<FieldRef>,
+) -> CallSiteFact {
+    let mut site = indirect_call(caller, line, Some(source_location("t.c", line)), None);
+    if let CallTarget::Indirect { via_field, .. } = &mut site.target {
+        *via_field = field.map(|field| FieldEvidence {
+            field,
+            basis: FieldBasis::StructGep,
+            name: None,
+        });
+    }
+    site
 }
 
 /// A module report with only its id and status set; fixtures override the

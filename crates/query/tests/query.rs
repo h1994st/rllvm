@@ -2575,11 +2575,11 @@ mod mcp {
         );
     }
 
-    /// One tool over the wire. That every one of the ten is listed under a
+    /// One tool over the wire. That every one of the eleven is listed under a
     /// name `query_from_call` resolves is `mcp.rs`'s own
     /// `every_query_variant_is_listed_and_resolves_through_a_call`, which
     /// checks it against a match the compiler forces to stay exhaustive --
-    /// driving the same ten through a subprocess here proves nothing extra
+    /// driving the same eleven through a subprocess here proves nothing extra
     /// about the transport this test already covers.
     #[test]
     fn a_modern_tool_call_returns_a_call_tool_result() {
@@ -3566,4 +3566,38 @@ fn an_alias_is_a_definition_that_forwards_to_its_target() {
         callers.contains(&"main") && callers.contains(&"local_caller"),
         "calls through an alias are calls to its target: {callers:?}"
     );
+}
+
+#[test]
+fn resolution_candidates_join_a_dispatch_to_its_stores() {
+    let scratch = tempfile::tempdir().unwrap();
+    std::fs::write(scratch.path().join("t.c"), FIELD_SOURCE).unwrap();
+    let module = compile_bitcode_file(&scratch.path().join("t.c"), &["-O0", "-g"]);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+
+    let value = query_json(&scratch, &catalog, &["resolution-candidates"]);
+    let groups = value["results"].as_array().unwrap();
+    let group = groups
+        .iter()
+        .find(|group| group["field"] == serde_json::json!({ "record": "ops", "offset": 8 }))
+        .unwrap_or_else(|| panic!("no ops@8 group: {value}"));
+
+    assert_eq!(group["field_name"], "on_event");
+    let sites: Vec<_> = group["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|site| site["site"]["function"]["symbol"].as_str().unwrap())
+        .collect();
+    assert_eq!(sites, ["dispatch"]);
+
+    let candidates: Vec<_> = group["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["function"]["symbol"].as_str().unwrap())
+        .collect();
+    assert!(candidates.contains(&"h1"), "{candidates:?}");
+    assert!(candidates.contains(&"h3"), "{candidates:?}");
+    assert!(!candidates.contains(&"h2"), "{candidates:?}");
 }
