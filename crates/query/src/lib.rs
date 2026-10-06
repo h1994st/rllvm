@@ -1934,4 +1934,19 @@ mod tests {
         assert_eq!(symbols, ["add"]);
         assert!(groups[0].candidates[0].signature_matches);
     }
+
+    #[test]
+    fn the_field_name_falls_back_to_an_assignment_when_the_site_has_none() {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let h1 = function("m", "h1", true, Linkage::Internal);
+        let mut base = facts(
+            vec![caller.clone(), h1.clone()],
+            vec![indirect_call_through(&caller, 1, Some(ops(8)))],
+        );
+        let mut store = store_into(&h1, &caller, 20, ops(8));
+        store.field.as_mut().unwrap().name = Some("on_event".into());
+        base.uses = vec![store];
+        let groups = candidates_of(&Session::new(base, Vec::new()));
+        assert_eq!(groups[0].field_name.as_deref(), Some("on_event"));
+    }
 }

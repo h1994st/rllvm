@@ -75,7 +75,7 @@ pub enum ClosureDirection {
 /// The eleven source-level queries `rllvm-query` answers, plus `Mcp` to serve
 /// them over MCP stdio instead of running one and exiting, `Completions` to
 /// print a shell completion script, and `Cache` to inspect or prune the
-/// per-module facts cache -- thirteen variants in all.
+/// per-module facts cache -- fourteen variants in all.
 ///
 /// The eleven query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
