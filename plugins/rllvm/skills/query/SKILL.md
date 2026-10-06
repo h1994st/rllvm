@@ -73,7 +73,9 @@ is never changed.
   bounded or direct site is rejected.
 - `overlay list` shows edges and the sites they cover; `overlay compact`
   rewrites the file as the current edges.
-- After a rebuild the overlay refuses to load, naming both fingerprints.
+- After a rebuild the overlay refuses to load, naming both fingerprints. It
+  also refuses one written by an rllvm-query that numbers call sites
+  differently.
   To start again, move or delete the file, or name another with
   `--overlay` (MCP: `path`).
 - A save or compaction refuses when another writer changed the file since

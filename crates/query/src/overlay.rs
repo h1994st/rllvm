@@ -28,6 +28,7 @@ use rllvm_core::{catalog::hash_bytes, error::Error};
 
 use crate::{
     bind::collapse_odr_duplicates,
+    cache::FACTS_FORMAT,
     facts::{
         CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, Linkage,
         ModuleAnalysis,
@@ -230,6 +231,21 @@ impl OverlayEdge {
 struct Header {
     v: u32,
     fingerprint: String,
+    /// The `FACTS_FORMAT` whose extraction numbered the call sites records
+    /// name: another format may number them differently. `None` only in a
+    /// file written before the header carried it, which is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    facts: Option<u32>,
+}
+
+impl Header {
+    fn current(fingerprint: &str) -> Header {
+        Header {
+            v: OVERLAY_VERSION,
+            fingerprint: fingerprint.to_string(),
+            facts: Some(FACTS_FORMAT),
+        }
+    }
 }
 
 /// How to get past an overlay file that refuses to load as a whole.
@@ -322,7 +338,8 @@ impl Overlay {
                     1,
                     format!(
                         "no overlay header; the first line must be \
-                         {{\"v\":{OVERLAY_VERSION},\"fingerprint\":\"...\"}}"
+                         {{\"v\":{OVERLAY_VERSION},\"fingerprint\":\"...\",\
+                         \"facts\":{FACTS_FORMAT}}}"
                     ),
                 )
             })?;
@@ -332,6 +349,19 @@ impl Overlay {
                 format!(
                     "overlay version {}; this rllvm-query reads version {OVERLAY_VERSION}",
                     header.v
+                ),
+            ));
+        }
+        if header.facts != Some(FACTS_FORMAT) {
+            let recorded = header.facts.map_or("no facts format".to_string(), |facts| {
+                format!("facts format {facts}")
+            });
+            return Err(at(
+                1,
+                format!(
+                    "recorded under {recorded}, and this rllvm-query numbers call sites by \
+                     facts format {FACTS_FORMAT}; {}",
+                    fresh_overlay_hint(path)
                 ),
             ));
         }
@@ -431,10 +461,7 @@ impl Overlay {
                 .create_new(true)
                 .open(&path)
                 .map_err(|error| Error::file(&path, error))?;
-            let header = json_line(&Header {
-                v: OVERLAY_VERSION,
-                fingerprint: self.fingerprint.clone(),
-            })?;
+            let header = json_line(&Header::current(&self.fingerprint))?;
             file.write_all(header.as_bytes())
                 .map_err(|error| Error::file(&path, error))?;
             file
@@ -474,10 +501,7 @@ impl Overlay {
             Error::InvalidArguments("this overlay has no file to compact".to_string())
         })?;
         self.check_unchanged(&path)?;
-        let mut text = json_line(&Header {
-            v: OVERLAY_VERSION,
-            fingerprint: self.fingerprint.clone(),
-        })?;
+        let mut text = json_line(&Header::current(&self.fingerprint))?;
         for edge in self.edges.values() {
             text.push_str(&json_line(&add_record(
                 &edge.key,
@@ -905,6 +929,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        cache::FACTS_FORMAT,
         facts::{CallSiteId, FieldRef, FunctionId, Linkage, ProgramFacts},
         index::Session,
         testing::{facts_with_overlay_sites, function},
@@ -988,7 +1013,7 @@ mod tests {
 
     fn header(session: &Session) -> String {
         format!(
-            "{{\"v\":1,\"fingerprint\":\"{}\"}}\n",
+            "{{\"v\":1,\"fingerprint\":\"{}\",\"facts\":{FACTS_FORMAT}}}\n",
             fingerprint(session).unwrap()
         )
     }
@@ -1183,6 +1208,38 @@ mod tests {
             )),
             "{error}"
         );
+    }
+
+    #[test]
+    fn an_overlay_from_another_facts_format_refuses_to_load() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = overlay_path(&scratch);
+        let session = session();
+        let mut overlay = Overlay::open(&session, &path).unwrap();
+        overlay.record(&session, vec![add_field(8, "h3")]).unwrap();
+        overlay.save().unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let current = format!(",\"facts\":{FACTS_FORMAT}}}");
+        assert!(
+            written.lines().next().unwrap().ends_with(&current),
+            "{written}"
+        );
+
+        let later = format!(",\"facts\":{}}}", FACTS_FORMAT + 1);
+        std::fs::write(&path, written.replacen(&current, &later, 1)).unwrap();
+        let error = open_error(&session, &path);
+        assert!(error.contains(":1:"), "{error}");
+        assert!(
+            error.contains(&format!("facts format {}", FACTS_FORMAT + 1)),
+            "{error}"
+        );
+        assert_names_a_way_forward(&error, &path);
+
+        std::fs::write(&path, written.replacen(&current, "}", 1)).unwrap();
+        let error = open_error(&session, &path);
+        assert!(error.contains(":1:"), "{error}");
+        assert!(error.contains("no facts format"), "{error}");
+        assert_names_a_way_forward(&error, &path);
     }
 
     #[test]
