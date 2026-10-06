@@ -215,7 +215,10 @@ handle leaves it.
 Answers never claim more than they know. `scope` is quoted from the catalog and
 never shrinks; what was actually read is reported under `analysis`. `!callees`
 is an upper bound, not a reachable set. The address-taken inventory is a
-heuristic: opt-in, and never a graph edge. An empty `reach` is not
+heuristic: opt-in, and never a graph edge. Overlay edges are agent-authored
+hypotheses: walked only when a query asks, every step labeled `agent`, and a
+path through one is never proof. They attach only to unresolved indirect
+sites, and the catalog is never mutated. An empty `reach` is not
 unreachability.
 
 ODR copies of a symbol are one definition: C++ emits a template or `inline`

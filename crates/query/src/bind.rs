@@ -69,9 +69,10 @@ fn is_visible_definition(function: &FunctionFact) -> bool {
 /// Only candidates that are *all* ODR collapse. A plain `weak` definition
 /// promises nothing about its copies, and an `external` definition beside an
 /// ODR one is a real conflict -- both stay, and stay ambiguous.
-fn collapse_odr_duplicates(
-    mut candidates: Vec<(Linkage, BindingCandidate)>,
-) -> Vec<BindingCandidate> {
+///
+/// The copy kept is the first given. Every caller passes definitions in the
+/// session's function order, so the binder and the overlay keep the same one.
+pub(crate) fn collapse_odr_duplicates<T>(mut candidates: Vec<(Linkage, T)>) -> Vec<T> {
     if candidates.len() > 1
         && candidates
             .iter()

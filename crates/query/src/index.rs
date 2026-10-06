@@ -23,8 +23,8 @@ use super::{
     bind::{BindingStatus, SymbolBinding},
     extract::demangle,
     facts::{
-        CallSiteFact, CallSiteId, CallTarget, FunctionFact, FunctionId, ModuleReport, ProgramFacts,
-        UseFact,
+        CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, ModuleReport,
+        ProgramFacts, UseFact,
     },
 };
 
@@ -142,6 +142,11 @@ pub struct Session {
     /// Call sites that resolve to a function, directly or as a member of an
     /// LLVM-bounded indirect call's bound, i.e. the calls made to it.
     callers_by_function: HashMap<FunctionId, Vec<usize>>,
+    /// Every call site by identity, for an overlay record naming one.
+    site_index: HashMap<CallSiteId, usize>,
+    /// Unresolved indirect sites (no LLVM bound) keyed by the field they
+    /// dispatch through: the sites an overlay field edge attaches to.
+    unresolved_by_field: HashMap<FieldRef, Vec<usize>>,
     /// Bindings keyed by symbol, for resolving a declaration forward to its
     /// candidates.
     bindings_by_symbol: HashMap<String, Vec<usize>>,
@@ -194,7 +199,10 @@ impl Session {
 
         let mut callees_by_function: HashMap<FunctionId, Vec<usize>> = HashMap::new();
         let mut callers_by_function: HashMap<FunctionId, Vec<usize>> = HashMap::new();
+        let mut site_index: HashMap<CallSiteId, usize> = HashMap::new();
+        let mut unresolved_by_field: HashMap<FieldRef, Vec<usize>> = HashMap::new();
         for (idx, site) in facts.call_sites.iter().enumerate() {
+            site_index.insert(site.id.clone(), idx);
             callees_by_function
                 .entry(site.id.function.clone())
                 .or_default()
@@ -219,10 +227,17 @@ impl Session {
                 }
                 CallTarget::Indirect {
                     llvm_target_bound: None,
+                    via_field,
                     ..
+                } => {
+                    if let Some(evidence) = via_field {
+                        unresolved_by_field
+                            .entry(evidence.field.clone())
+                            .or_default()
+                            .push(idx);
+                    }
                 }
-                | CallTarget::Intrinsic { .. }
-                | CallTarget::InlineAsm => {}
+                CallTarget::Intrinsic { .. } | CallTarget::InlineAsm => {}
             }
         }
 
@@ -273,6 +288,8 @@ impl Session {
             function_index,
             callees_by_function,
             callers_by_function,
+            site_index,
+            unresolved_by_field,
             bindings_by_symbol,
             bindings_by_candidate,
             aliases_by_target,
@@ -420,6 +437,27 @@ impl Session {
     /// must see every indirect site regardless of which function query ran.
     pub(crate) fn call_sites(&self) -> &[CallSiteFact] {
         &self.facts.call_sites
+    }
+
+    /// One call site, by identity. Not public API: internal plumbing for
+    /// validating an overlay record that names a site.
+    pub(crate) fn call_site(&self, id: &CallSiteId) -> Option<&CallSiteFact> {
+        self.site_index
+            .get(id)
+            .map(|&idx| &self.facts.call_sites[idx])
+    }
+
+    /// Unresolved indirect call sites -- no LLVM bound -- that dispatch
+    /// through `field`. Not public API: internal plumbing for the overlay,
+    /// whose field edges attach to exactly these sites and never to a
+    /// bounded one.
+    pub(crate) fn unresolved_sites_through(&self, field: &FieldRef) -> Vec<&CallSiteFact> {
+        self.unresolved_by_field
+            .get(field)
+            .into_iter()
+            .flatten()
+            .map(|&idx| &self.facts.call_sites[idx])
+            .collect()
     }
 
     /// Call sites recorded at exactly `file:line`, in any function. Not

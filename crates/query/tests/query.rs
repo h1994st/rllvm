@@ -3601,3 +3601,65 @@ fn resolution_candidates_join_a_dispatch_to_its_stores() {
     assert!(candidates.contains(&"h3"), "{candidates:?}");
     assert!(!candidates.contains(&"h2"), "{candidates:?}");
 }
+
+#[test]
+fn the_overlay_cli_records_lists_and_compacts() {
+    let scratch = tempfile::tempdir().unwrap();
+    std::fs::write(scratch.path().join("t.c"), FIELD_SOURCE).unwrap();
+    let module = compile_bitcode_file(&scratch.path().join("t.c"), &["-O0", "-g"]);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let overlay = scratch.path().join("plain-catalog.overlay.jsonl");
+    let record = |input: String| {
+        let output = query_stdin(&scratch, &catalog, &["overlay", "record"], &input);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        (
+            output.status.success(),
+            String::from_utf8(output.stdout).unwrap(),
+            stderr,
+        )
+    };
+
+    let add = r#"{"op":"add","via_field":{"record":"ops","offset":8},"to":"h3","confidence":"high","provenance":["init: o->on_event = h3"]}"#;
+    let (success, stdout, stderr) = record(format!("{add}\n"));
+    assert!(success, "{stderr}");
+    assert_eq!(
+        stdout,
+        format!("recorded 1, saved 1 to {}\n", overlay.display())
+    );
+
+    // One ungrounded record fails the whole batch, named by its stdin line
+    // as a malformed one would be: blank lines count.
+    let ungrounded = add.replace("\"offset\":8", "\"offset\":16");
+    let before = std::fs::read(&overlay).unwrap();
+    let (success, _, stderr) = record(format!("\n{add}\n{ungrounded}\n"));
+    assert!(!success);
+    assert!(stderr.contains("line 3: "), "{stderr}");
+    assert_eq!(std::fs::read(&overlay).unwrap(), before);
+
+    let listed = query_json(&scratch, &catalog, &["overlay", "list"]);
+    let edges = listed["edges"].as_array().unwrap();
+    assert_eq!(edges.len(), 1, "{listed}");
+    assert_eq!(edges[0]["sites"], 1, "{listed}");
+    assert_eq!(edges[0]["key"]["to"]["symbol"], "h3", "{listed}");
+    let text = query_text(&scratch, &catalog, &["overlay", "list"]);
+    assert!(text.starts_with("ops@8 -> h3 ["), "{text}");
+    assert!(text.ends_with("]  high  unverified  1 site(s)\n"), "{text}");
+
+    let retract = serde_json::json!({
+        "op": "retract",
+        "edge": edges[0]["key"],
+        "reason": "init is never called",
+    });
+    let (success, _, stderr) = record(format!("{retract}\n"));
+    assert!(success, "{stderr}");
+    assert_eq!(
+        query_text(&scratch, &catalog, &["overlay", "compact"]),
+        format!("compacted {}: 0 edges\n", overlay.display())
+    );
+    let written = std::fs::read_to_string(&overlay).unwrap();
+    assert_eq!(written.lines().count(), 1, "{written}");
+    assert!(
+        written.starts_with("{\"v\":1,\"fingerprint\":"),
+        "{written}"
+    );
+}

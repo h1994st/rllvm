@@ -81,6 +81,12 @@ pub struct CacheReport {
 pub mod index;
 pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Session};
 
+pub mod overlay;
+pub use overlay::{
+    Confidence, EdgeKey, OVERLAY_VERSION, Overlay, OverlayCoverage, OverlayEdge, OverlaySummary,
+    Record, SummaryEdge, TargetSpec, Verdict, Verification, default_overlay_path,
+};
+
 pub mod mcp;
 
 pub mod render;
