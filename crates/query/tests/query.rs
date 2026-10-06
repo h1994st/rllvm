@@ -1093,6 +1093,46 @@ fn statics_that_stay_out_of_every_piece_do_not_block_the_module() {
     );
 }
 
+/// A tool that runs and fails is reported with what it printed, never as a
+/// module.
+#[cfg(unix)]
+#[test]
+fn a_failing_link_is_an_execution_failure_with_its_stderr() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let tools = scratch.path().join("tools");
+    std::fs::create_dir(&tools).unwrap();
+    for tool in ["llvm-extract", "llvm-nm"] {
+        symlink(llvm_bin(tool), tools.join(tool)).unwrap();
+    }
+    let llvm_link = tools.join("llvm-link");
+    std::fs::write(
+        &llvm_link,
+        "#!/bin/sh\necho 'refusing to link today' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&llvm_link, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let session = rllvm_query::open(&catalog).unwrap();
+    let query = rllvm_query::Query::Slice {
+        from: "main".into(),
+        to: "add".into(),
+        include_overlay: false,
+        min_confidence: None,
+    };
+    let answer = rllvm_query::run(&session, &query).unwrap();
+    let out = scratch.path().join("slice.bc");
+    match rllvm_query::emit_slice(&session, &catalog, &answer, &llvm_link, &out) {
+        Err(rllvm_core::error::Error::ExecutionFailure(message)) => {
+            assert!(message.contains("refusing to link today"), "{message}")
+        }
+        other => panic!("expected an execution failure, got {other:?}"),
+    }
+    assert!(!out.exists());
+}
+
 #[test]
 fn the_text_answer_says_what_the_slice_module_holds() {
     let scratch = tempfile::tempdir().unwrap();
