@@ -53,6 +53,12 @@ pub struct QueryArgs {
     #[arg(long, global = true)]
     pub full: bool,
 
+    /// Overlay file of agent-authored call-graph edges [default: `<catalog stem>.overlay.jsonl`]
+    ///
+    /// Global, like `--json`, so it may trail the `overlay` subcommand.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub overlay: Option<PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<QueryCommand>,
 }
@@ -74,14 +80,15 @@ pub enum ClosureDirection {
 
 /// The eleven source-level queries `rllvm-query` answers, plus `Mcp` to serve
 /// them over MCP stdio instead of running one and exiting, `Completions` to
-/// print a shell completion script, and `Cache` to inspect or prune the
-/// per-module facts cache -- fourteen variants in all.
+/// print a shell completion script, `Cache` to inspect or prune the
+/// per-module facts cache, and `Overlay` to keep agent-authored call-graph
+/// edges.
 ///
 /// The eleven query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
 /// converts a parsed variant into a [`crate::Query`] before running it;
-/// `Mcp` and `Completions` have no counterpart there -- they name a mode,
-/// and `to_query` answers `None` for both.
+/// `Mcp`, `Completions`, `Cache` and `Overlay` have no counterpart there --
+/// they name a mode, and `to_query` answers `None` for each.
 ///
 /// This mirror can drift: `to_query` in `rllvm_query.rs` is exhaustive over
 /// this type, so a variant added here without an arm there fails to compile,
@@ -163,6 +170,22 @@ pub enum QueryCommand {
         #[command(subcommand)]
         action: Option<CacheAction>,
     },
+    /// Record, list or compact agent-authored call-graph edges, kept in a file beside the catalog. No query reads them unless asked.
+    Overlay {
+        #[command(subcommand)]
+        action: OverlayAction,
+    },
+}
+
+/// What `rllvm-query overlay` does.
+#[derive(clap::Subcommand, Debug)]
+pub enum OverlayAction {
+    /// Read records from stdin, one JSON object per line, and append them all or none
+    Record,
+    /// List the current edges and the unresolved sites they cover
+    List,
+    /// Rewrite the file as the current edges, dropping their history
+    Compact,
 }
 
 /// What `rllvm-query cache` does besides reporting.

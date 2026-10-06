@@ -410,6 +410,26 @@ rllvm-query --catalog catalog.json defs twice
 
 See the [name resolution example](examples/name-resolution/).
 
+### Completing the call graph
+
+An agent that resolves an indirect call (from `resolution-candidates`, say)
+records it in an overlay: a JSON-lines file beside the catalog,
+`<catalog stem>.overlay.jsonl` unless `--overlay PATH` names another. The
+catalog itself is never changed.
+
+```bash
+echo '{"op":"add","via_field":{"record":"ops","offset":8},"to":"h3","confidence":"high","provenance":["init: o->on_event = h3"]}' \
+  | rllvm-query --catalog catalog.json overlay record  # validate and append, all or none
+rllvm-query --catalog catalog.json overlay list        # edges, verdicts, sites covered
+rllvm-query --catalog catalog.json overlay compact     # rewrite as the current edges
+```
+
+An `add` names a field (`via_field`, every unresolved site through it) or one
+`site`, and attaches only where LLVM left the call unbounded. `verify` and
+`retract` name an edge's key. The file is bound to one build: after a rebuild
+it refuses to load, naming both fingerprints. Overlay edges are hypotheses,
+never proof, and no answer uses them unless asked.
+
 ### MCP server
 
 ```bash

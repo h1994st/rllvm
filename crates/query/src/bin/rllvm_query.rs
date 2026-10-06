@@ -11,8 +11,9 @@ use rllvm_core::{
     utils::{print_stdout, split_response_arguments},
 };
 use rllvm_query::{
-    Color, FactsCache, Query, TextMode,
-    cli::{CacheAction, ClosureDirection, QueryArgs, QueryCommand},
+    Color, FactsCache, Overlay, OverlaySummary, Query, Record, TextMode,
+    cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand},
+    default_overlay_path,
     index::Direction,
     llvm_version, mcp, open_with_cache, run,
 };
@@ -55,6 +56,7 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
         // is here so adding a mode variant cannot compile without a decision.
         QueryCommand::Completions { .. } => return None,
         QueryCommand::Cache { .. } => return None,
+        QueryCommand::Overlay { .. } => return None,
     })
 }
 
@@ -147,6 +149,102 @@ fn run_cache(action: Option<&CacheAction>, format: Format) -> Result<(), Error> 
             }
         }
     }
+}
+
+/// Parses the overlay records piped on stdin, one JSON object per line,
+/// naming the line of the first bad one. Blank lines are skipped.
+fn parse_records(input: &str) -> Result<Vec<Record>, Error> {
+    let mut records = Vec::new();
+    for (index, line) in input.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        records.push(line.parse::<Record>().map_err(|error| {
+            let reason = match error {
+                Error::InvalidArguments(reason) => reason,
+                other => other.to_string(),
+            };
+            Error::InvalidArguments(format!("line {}: {reason}", index + 1))
+        })?);
+    }
+    Ok(records)
+}
+
+/// `rllvm-query --catalog <catalog> overlay record|list|compact`. The
+/// overlay file defaults to one beside the catalog.
+fn run_overlay(
+    action: &OverlayAction,
+    catalog: Option<&Path>,
+    overlay: Option<&Path>,
+    format: Format,
+) -> Result<(), Error> {
+    let catalog = catalog.ok_or_else(|| {
+        Error::InvalidArguments("--catalog is required for the overlay command".to_string())
+    })?;
+    let path = overlay.map_or_else(|| default_overlay_path(catalog), Path::to_path_buf);
+    // Before the catalog loads, as with piped queries, so a malformed line
+    // costs a diagnostic rather than a full load.
+    let records = match action {
+        OverlayAction::Record => {
+            let mut stdin = std::io::stdin();
+            if stdin.is_terminal() {
+                return Err(Error::InvalidArguments(
+                    "no records given: pipe them on stdin, one JSON object per line".to_string(),
+                ));
+            }
+            let mut input = String::new();
+            stdin.read_to_string(&mut input)?;
+            parse_records(&input)?
+        }
+        OverlayAction::List | OverlayAction::Compact => Vec::new(),
+    };
+
+    let session = open_with_cache(catalog, facts_cache()?.as_ref())?;
+    let mut overlay = Overlay::open(&session, &path)?;
+    let text = match action {
+        OverlayAction::Record => {
+            let recorded = records.len();
+            overlay.record(&session, records)?;
+            let saved = overlay.save()?;
+            format!("recorded {recorded}, saved {saved} to {}\n", path.display())
+        }
+        OverlayAction::List => overlay_table(&overlay.summary(&session)),
+        OverlayAction::Compact => {
+            overlay.compact()?;
+            format!(
+                "compacted {}: {} edges\n",
+                path.display(),
+                overlay.edges().count()
+            )
+        }
+    };
+    match format {
+        Format::Json => print_stdout(&format!(
+            "{}\n",
+            serde_json::to_string_pretty(&overlay.summary(&session))
+                .map_err(|error| Error::InvalidArguments(error.to_string()))?
+        )),
+        Format::Text(_) => print_stdout(&text),
+    }
+}
+
+/// One line per edge: `<key>  <confidence>  <verdict|unverified>  <n> site(s)`.
+fn overlay_table(summary: &OverlaySummary) -> String {
+    summary
+        .edges
+        .iter()
+        .map(|entry| {
+            let verdict = entry
+                .edge
+                .verification
+                .as_ref()
+                .map_or_else(|| "unverified".to_string(), |v| v.verdict.to_string());
+            format!(
+                "{}  {}  {verdict}  {} site(s)\n",
+                entry.edge.key, entry.edge.confidence, entry.sites
+            )
+        })
+        .collect()
 }
 
 /// Answers the queries piped on stdin from one load of `catalog`. Reading
@@ -249,6 +347,14 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
                 ));
             }
             return run_cache(action.as_ref(), format);
+        }
+        QueryCommand::Overlay { action } => {
+            return run_overlay(
+                action,
+                args.catalog.as_deref(),
+                args.overlay.as_deref(),
+                format,
+            );
         }
         QueryCommand::Defs { .. }
         | QueryCommand::At { .. }
@@ -478,6 +584,30 @@ mod tests {
             shell: clap_complete::Shell::Bash,
         };
         assert!(to_query(command, false).is_none());
+    }
+
+    #[test]
+    fn the_overlay_command_has_no_query() {
+        let command = QueryCommand::Overlay {
+            action: OverlayAction::List,
+        };
+        assert!(to_query(command, false).is_none());
+    }
+
+    #[test]
+    fn a_bad_record_on_stdin_is_reported_by_its_number() {
+        let good = r#"{"op":"retract","edge":{"via_field":{"record":"ops","offset":8},"to":{"module_id":"m","symbol":"h3"}},"reason":"r"}"#;
+        assert_eq!(
+            parse_records(&format!("{good}\n\n{good}\n")).unwrap().len(),
+            2
+        );
+        for (input, expected) in [
+            (format!("{good}\n{{\n"), "line 2:"),
+            (format!("\n{good}\n{{\"op\":\"annotate\"}}\n"), "line 3:"),
+        ] {
+            let error = parse_records(&input).map(|_| ()).unwrap_err().to_string();
+            assert!(error.contains(expected), "{input:?} gave {error:?}");
+        }
     }
 
     /// Not just a compile-time fence: proves `to_query` and `cli_command_for`

@@ -362,6 +362,57 @@ pub(crate) fn session_with_cxx_symbols() -> Session {
     Session::new(facts(functions, Vec::new()), Vec::new())
 }
 
+/// Two hashed, analyzed modules for the overlay. `mod_a` holds an unresolved
+/// site through `ops@8` in `dispatch` (`t.c:4`), an unresolved site with no
+/// field in `call_plain` (`t.c:5`), a site CVP bounded to `{h1}` in
+/// `bounded` (`t.c:6`), a direct call from `init` to `h3`, and the handlers
+/// `h1` and `h3`. Both modules define a static `helper`.
+pub(crate) fn facts_with_overlay_sites() -> ProgramFacts {
+    let dispatch = function("mod_a", "dispatch", true, Linkage::External);
+    let call_plain = function("mod_a", "call_plain", true, Linkage::External);
+    let bounded = function("mod_a", "bounded", true, Linkage::External);
+    let init = function("mod_a", "init", true, Linkage::External);
+    let h1 = function("mod_a", "h1", true, Linkage::Internal);
+    let h3 = function("mod_a", "h3", true, Linkage::Internal);
+    let call_sites = vec![
+        indirect_call_through(
+            &dispatch,
+            4,
+            Some(FieldRef {
+                record: "ops".into(),
+                offset: 8,
+            }),
+        ),
+        indirect_call_through(&call_plain, 5, None),
+        indirect_call(
+            &bounded,
+            6,
+            Some(source_location("t.c", 6)),
+            Some(vec![h1.id.clone()]),
+        ),
+        direct_call(&init, &h3, 7),
+    ];
+    let functions = vec![
+        dispatch,
+        call_plain,
+        bounded,
+        init,
+        h1,
+        h3,
+        function("mod_a", "helper", true, Linkage::Internal),
+        function("mod_b", "helper", true, Linkage::Internal),
+    ];
+    let mut base = facts(functions, call_sites);
+    base.modules = [("mod_a", "aa"), ("mod_b", "bb")]
+        .into_iter()
+        .map(|(id, hash)| ModuleReport {
+            content_sha256: Some(hash.into()),
+            ..report(id, ModuleAnalysis::Analyzed)
+        })
+        .collect();
+    base
+}
+
 /// One module the loader verified and extraction never saw, so
 /// `analysis.verified` is the only non-zero count.
 pub(crate) fn facts_with_one_verified_module() -> ProgramFacts {

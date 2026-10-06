@@ -54,6 +54,28 @@ it as a whole identifier; a C symbol has no reading, so a bare C name
 resolves only to its own exact symbol. When a bare name matches nothing,
 find the exact symbol with `at`, `callers` or `callees`, then query that.
 
+## Recording resolved indirect calls
+
+When you resolve an unresolved indirect call by reading the code, record it
+in the call-graph overlay: pipe JSON lines to `rllvm-query --catalog
+catalog.json overlay record`. The overlay is a file beside the catalog,
+`<catalog stem>.overlay.jsonl` unless `--overlay PATH` is given; the catalog
+is never changed.
+
+- `{"op":"add","via_field":{"record":"ops","offset":8},"to":"h3","confidence":"high","provenance":["init: o->handler = h3"]}`
+  attaches to every unresolved site through `ops@8`; `"site": <call site
+  id>` instead names one. `to` is an exact symbol naming one definition, or
+  `{"module_id", "symbol"}`. `provenance` is required.
+- `{"op":"verify","edge":<key>,"tool":...,"verdict":"confirmed|refuted|inconclusive"}`
+  and `{"op":"retract","edge":<key>,"reason":...}` name an edge's key.
+- A batch applies all or none; an error names the bad record. An edge on a
+  bounded or direct site is rejected.
+- `overlay list` shows edges and the sites they cover; `overlay compact`
+  rewrites the file as the current edges.
+- After a rebuild the overlay refuses to load, naming both fingerprints.
+
+Overlay edges are hypotheses, never proof: no answer uses them unless asked.
+
 ## Is a vulnerable function present and reachable?
 
 Ask per build: features and configurations change what is compiled in.
