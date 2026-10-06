@@ -620,6 +620,7 @@ impl Overlay {
 /// A field edge becomes one edge per unresolved site through the field, from
 /// the function that makes the call to the edge's target, each step labeled
 /// [`PathStep::Agent`] so a path through it can never read as proof.
+#[derive(Debug)]
 pub struct OverlayView {
     successors: HashMap<FunctionId, Vec<(FunctionId, PathStep)>>,
     predecessors: HashMap<FunctionId, Vec<(FunctionId, PathStep)>>,
