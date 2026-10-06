@@ -44,6 +44,7 @@ rllvm to reading an answer:
 | `capture` skill | Chooses how to capture your build — C, C++, Objective-C, Rust, mixed, a compilation database, cross, WebAssembly, eBPF — and what to extract |
 | `query` skill | Picks the query that answers your question and reports what the answer does not cover |
 | `complete-callgraph` skill, `/rllvm:complete-callgraph` | Resolves unresolved indirect calls into a labeled call-graph overlay, never reported as proven |
+| Overlay view, `/overlay-view` | A read-only pane showing each unresolved field, its candidates, and the overlay's edges with confidence and verification, unsaved ones included, for the catalog that last answered |
 | MCP server | `rllvm-query mcp`, configured automatically |
 | Cache warning | A `PostToolUse` hook notes once per session when the facts cache passes `query_cache_warn_mb`; needs `jq` |
 
