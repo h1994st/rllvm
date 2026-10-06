@@ -13,7 +13,7 @@ use rllvm_core::{
 use rllvm_query::{
     Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session, TextMode,
     cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
-    default_overlay_path,
+    default_overlay_path, emit_slice,
     index::Direction,
     llvm_version, mcp, open_with_cache,
     overlay::verdict_label,
@@ -48,6 +48,14 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Query> {
         QueryCommand::Callees { name } => Query::Callees { name },
         QueryCommand::Uses { name } => Query::Uses { name },
         QueryCommand::Reach { from, to } => Query::Reach {
+            from,
+            to,
+            include_overlay,
+            min_confidence,
+        },
+        // `--emit-module` acts on the answer rather than shaping the query,
+        // so `run_query` reads it before the command is consumed here.
+        QueryCommand::Slice { from, to, .. } => Query::Slice {
             from,
             to,
             include_overlay,
@@ -110,6 +118,16 @@ fn parse_queries(input: &str, modifiers: QueryModifiers) -> Result<Vec<(String, 
         let arguments = split_response_arguments(line);
         let parsed =
             QueryLine::try_parse_from(&arguments).map_err(|error| at_line(error.to_string()))?;
+        if let QueryCommand::Slice {
+            emit_module: Some(_),
+            ..
+        } = parsed.command
+        {
+            return Err(at_line(
+                "`--emit-module` writes a file for one slice: run it on the command line"
+                    .to_string(),
+            ));
+        }
         let query = to_query(parsed.command, modifiers.with(parsed.modifiers))
             .ok_or_else(|| at_line(format!("`{}` names a mode, not a query", arguments[0])))?;
         query.validate().map_err(|error| match error {
@@ -419,6 +437,7 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         | QueryCommand::Callees { .. }
         | QueryCommand::Uses { .. }
         | QueryCommand::Reach { .. }
+        | QueryCommand::Slice { .. }
         | QueryCommand::Closure { .. }
         | QueryCommand::Externals
         | QueryCommand::FfiExports
@@ -426,6 +445,10 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         | QueryCommand::ResolutionCandidates => {}
     }
 
+    let emit_module = match &command {
+        QueryCommand::Slice { emit_module, .. } => emit_module.clone(),
+        _ => None,
+    };
     // Unreachable through the match above, which returns for every command
     // `to_query` answers `None` for. An error rather than a panic: a binary
     // that mis-dispatches should say so, not abort.
@@ -451,15 +474,42 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         &query,
     )?;
     let result = run_with_overlay(&session, overlay, &query)?;
+    // Before anything is printed, so a failed emit leaves no answer that
+    // reads as though the module were written.
+    let emitted = match &emit_module {
+        Some(out) => Some(emit_slice(
+            &catalog,
+            &result,
+            try_rllvm_config()?.llvm_link_filepath(),
+            out,
+        )?),
+        None => None,
+    };
 
     match format {
         Format::Json => {
-            let json = serde_json::to_string_pretty(&result)
+            let mut answer = serde_json::to_value(&result)
+                .map_err(|error| Error::InvalidArguments(error.to_string()))?;
+            if let Some(emitted) = &emitted {
+                answer["emitted"] = serde_json::json!(emitted);
+            }
+            let json = serde_json::to_string_pretty(&answer)
                 .map_err(|error| Error::InvalidArguments(error.to_string()))?;
             print_stdout(&format!("{json}\n"))?;
         }
         Format::Text(mode) => {
-            print_stdout(&rllvm_query::render(&result, mode, stdout_color()))?;
+            // First, so the answer's own last line -- `not proven`, when an
+            // agent edge was walked -- stays last.
+            let mut text = emitted.map_or_else(String::new, |emitted| {
+                format!(
+                    "wrote {}: {} functions from {} modules\n",
+                    emitted.path.display(),
+                    emitted.functions,
+                    emitted.modules
+                )
+            });
+            text.push_str(&rllvm_query::render(&result, mode, stdout_color()));
+            print_stdout(&text)?;
         }
     }
     Ok(())
@@ -490,7 +540,8 @@ fn stdout_color() -> Color {
 /// the command line should hear that it could not be read, not discover it
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
-    let mut registry = mcp::Registry::with_cache(facts_cache()?);
+    let mut registry = mcp::Registry::with_cache(facts_cache()?)
+        .with_llvm_link(try_rllvm_config()?.llvm_link_filepath().clone());
     if let Some(catalog) = catalog {
         registry.load(catalog)?;
     }
@@ -550,6 +601,11 @@ mod tests {
             Query::Reach { from, to, .. } => QueryCommand::Reach {
                 from: from.clone(),
                 to: to.clone(),
+            },
+            Query::Slice { from, to, .. } => QueryCommand::Slice {
+                from: from.clone(),
+                to: to.clone(),
+                emit_module: None,
             },
             Query::Closure {
                 name, direction, ..
@@ -643,6 +699,35 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("line 1:"), "{error}");
+    }
+
+    #[test]
+    fn a_stdin_slice_may_not_emit_a_module() {
+        let queries = parse_queries(
+            "slice main handler --include-overlay\n",
+            QueryModifiers::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            queries[0].1,
+            Query::Slice {
+                include_overlay: true,
+                ..
+            }
+        ));
+        assert!(queries[0].1.walks_overlay());
+
+        let error = parse_queries(
+            "callees a\nslice main handler --emit-module out.bc\n",
+            QueryModifiers::default(),
+        )
+        .map(|_| ())
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("line 2:") && error.contains("--emit-module"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -741,6 +826,12 @@ mod tests {
             Query::Callees { name: "f".into() },
             Query::Uses { name: "f".into() },
             Query::Reach {
+                from: "a".into(),
+                to: "b".into(),
+                include_overlay: true,
+                min_confidence: Some(Confidence::High),
+            },
+            Query::Slice {
                 from: "a".into(),
                 to: "b".into(),
                 include_overlay: true,

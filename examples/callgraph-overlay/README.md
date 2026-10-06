@@ -15,9 +15,10 @@ and the answer says it is not proven.
 ./check.sh
 ```
 
-It checks the candidate, the path with and without the overlay, a retraction,
-compaction, and the same loop over MCP: `record_edges`, `reach` with
-`include_overlay`, then `save_overlay`.
+It checks the candidate, the path with and without the overlay, the slice
+through the edge and the module emitted from it, a retraction, compaction, and
+the same loop over MCP: `record_edges`, `reach` with `include_overlay`, then
+`save_overlay`.
 
 ## What it does
 
@@ -26,8 +27,11 @@ rllvm-query --catalog build/catalog.json resolution-candidates  # ops@8: handler
 echo '{"op":"add","via_field":{"record":"ops","offset":8},"to":"handler","confidence":"high","provenance":["ops.c:8: o->on_event = handler"]}' \
   | rllvm-query --catalog build/catalog.json overlay record
 rllvm-query --catalog build/catalog.json reach main handler --include-overlay
+rllvm-query --catalog build/catalog.json slice main handler --include-overlay --emit-module build/slice.bc
 ```
 
 The path's last step is `agent`, `dispatch -> handler at ops.c:10 via ops@8
 [high, unverified]`, and the answer ends `not proven: this path uses 1 agent
-edge(s)`. Without `--include-overlay`, `reach` never reads the overlay.
+edge(s)`. The slice is `main`, `dispatch` and `handler`, and `build/slice.bc`
+defines those three and nothing else. Without `--include-overlay`, neither
+query reads the overlay.

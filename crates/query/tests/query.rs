@@ -865,6 +865,155 @@ fn empty_stdin_answers_nothing() {
     assert!(output.stdout.is_empty());
 }
 
+/// `main` calls `add` across two archive members; `sub` and `unused` sit in
+/// those same modules, off the path.
+const SLICE_SOURCES: &[(&str, &str)] = &[
+    (
+        "add.c",
+        "int add(int a,int b){return a+b;}\nint sub(int a,int b){return a-b;}\n",
+    ),
+    (
+        "main.c",
+        "int add(int a,int b);\nint unused(void){return 7;}\nint main(void){ return add(2,3); }\n",
+    ),
+];
+
+/// Every symbol a module defines, read back through extraction.
+fn defined_symbols(module: &Path) -> BTreeSet<String> {
+    extract_module(module)
+        .functions
+        .into_iter()
+        .filter(|function| function.is_definition)
+        .map(|function| function.id.symbol)
+        .collect()
+}
+
+#[test]
+fn an_emitted_slice_module_defines_the_slice_and_nothing_else() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let out = scratch.path().join("slice.bc");
+    let answer = query_json(
+        &scratch,
+        &catalog,
+        &[
+            "slice",
+            "main",
+            "add",
+            "--emit-module",
+            out.to_str().unwrap(),
+        ],
+    );
+
+    let mut members: Vec<String> = answer["results"]["functions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id["symbol"].as_str().unwrap().to_string())
+        .collect();
+    members.sort();
+    assert_eq!(
+        members,
+        ["add", "add", "main"],
+        "main, add's declaration beside it, and add's definition"
+    );
+    assert_eq!(answer["emitted"]["modules"], 2, "{answer}");
+    assert_eq!(answer["emitted"]["functions"], 2, "{answer}");
+
+    assert_eq!(
+        defined_symbols(&out),
+        BTreeSet::from(["add".to_string(), "main".to_string()]),
+        "the slice's definitions, and neither `sub` nor `unused`"
+    );
+}
+
+#[test]
+fn an_empty_slice_emits_nothing_and_says_so() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let out = scratch.path().join("slice.bc");
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["slice", "add", "main", "--emit-module"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success());
+    assert!(
+        stderr.contains("no path from add to main; nothing to emit"),
+        "{stderr}"
+    );
+    assert!(!out.exists(), "no empty module is written");
+}
+
+/// `a.c`'s static `helper` is on the path from `main` to `leaf`, and `leaf`
+/// in `b.c` calls some other, external `helper` the program never defines.
+#[test]
+fn a_static_that_would_bind_another_module_s_call_is_not_emitted() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(
+        &scratch,
+        "statics",
+        &[
+            (
+                "a.c",
+                "int leaf(void);\nstatic int helper(void){return leaf();}\nint fa(void){return helper();}\n",
+            ),
+            (
+                "b.c",
+                "int helper(void);\nint leaf(void){return helper();}\n",
+            ),
+            ("main.c", "int fa(void);\nint main(void){return fa();}\n"),
+        ],
+    );
+    let out = scratch.path().join("slice.bc");
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["slice", "main", "leaf", "--emit-module"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a module was emitted: {stderr}");
+    assert!(stderr.contains("`helper` is static in module"), "{stderr}");
+    assert!(!out.exists());
+}
+
+#[test]
+fn the_text_answer_says_what_the_slice_module_holds() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let out = scratch.path().join("slice.bc");
+    // Plain whatever the caller's terminal asks for: a forced colour puts
+    // escapes between the words looked for here.
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .env_remove("FORCE_COLOR")
+        .env_remove("CLICOLOR_FORCE")
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["slice", "main", "add", "--emit-module"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("main -> add (call)\n"), "{text}");
+    assert!(text.contains("add -> add (binding)\n"), "{text}");
+    assert!(
+        text.starts_with(&format!(
+            "wrote {}: 2 functions from 2 modules\n",
+            out.display()
+        )),
+        "{text}"
+    );
+}
+
 #[test]
 fn a_use_in_a_global_initializer_names_the_global() {
     // A dispatch table stores the address inside an aggregate constant, so
@@ -2536,6 +2685,25 @@ mod mcp {
         assert_eq!(cli["results"], mcp["results"]);
         assert_eq!(cli["analysis"], mcp["analysis"]);
         assert_eq!(cli["uncertainty"], mcp["uncertainty"]);
+    }
+
+    #[test]
+    fn an_mcp_slice_emits_the_module_it_answers_for() {
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = super::archive_catalog_of(&scratch, "slice", super::SLICE_SOURCES);
+        let out = scratch.path().join("mcp-slice.bc");
+        let answer = mcp_tool_call(
+            &catalog,
+            "slice",
+            serde_json::json!({ "from": "main", "to": "add", "emit_module": out.to_str().unwrap() }),
+        );
+        assert_eq!(answer["results"]["functions"].as_array().unwrap().len(), 3);
+        assert_eq!(answer["emitted"]["path"], out.to_str().unwrap());
+        assert_eq!(answer["emitted"]["functions"], 2);
+        assert_eq!(
+            super::defined_symbols(&out),
+            BTreeSet::from(["add".to_string(), "main".to_string()])
+        );
     }
 
     #[test]

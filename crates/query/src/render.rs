@@ -320,6 +320,21 @@ struct Shown {
     indirect_call_site: bool,
 }
 
+/// Only an agent step prints a location. Its site and a bounded one are a
+/// walk's indirect steps.
+fn shown_in_steps<'s>(steps: impl Iterator<Item = &'s PathStep>, shown: &mut Shown) {
+    for step in steps {
+        match step {
+            PathStep::BoundedIndirect { .. } => shown.indirect_call_site = true,
+            PathStep::Agent { location, .. } => {
+                shown.indirect_call_site = true;
+                shown.missing_location |= location.is_none();
+            }
+            PathStep::Call(_) | PathStep::Binding(_) | PathStep::Alias { .. } => {}
+        }
+    }
+}
+
 fn shown_in_sites(sites: &[CallSiteFact], shown: &mut Shown) {
     for site in sites {
         shown.missing_location |= site.location.is_none();
@@ -354,19 +369,9 @@ fn shown_in(results: &QueryResults) -> Shown {
                 .iter()
                 .any(|use_fact| use_fact.in_function.is_some() && use_fact.location.is_none());
         }
-        QueryResults::Reach(path) => {
-            // Only an agent step prints a location. Its site and a bounded
-            // one are the path's indirect steps.
-            for step in path.iter().flatten() {
-                match step {
-                    PathStep::BoundedIndirect { .. } => shown.indirect_call_site = true,
-                    PathStep::Agent { location, .. } => {
-                        shown.indirect_call_site = true;
-                        shown.missing_location |= location.is_none();
-                    }
-                    PathStep::Call(_) | PathStep::Binding(_) | PathStep::Alias { .. } => {}
-                }
-            }
+        QueryResults::Reach(path) => shown_in_steps(path.iter().flatten(), &mut shown),
+        QueryResults::Slice(slice) => {
+            shown_in_steps(slice.edges.iter().map(|edge| &edge.step), &mut shown)
         }
         QueryResults::IndirectTargets(entries) => {
             shown.missing_location = entries.iter().any(|entry| entry.location.is_none());
@@ -406,7 +411,10 @@ fn shown_in(results: &QueryResults) -> Shown {
 /// to state whether it walks edges rather than inherit "no".
 fn walks_call_edges(results: &QueryResults) -> bool {
     match results {
-        QueryResults::Callers(_) | QueryResults::Closure(_) | QueryResults::Reach(_) => true,
+        QueryResults::Callers(_)
+        | QueryResults::Closure(_)
+        | QueryResults::Reach(_)
+        | QueryResults::Slice(_) => true,
         QueryResults::Defs(_)
         | QueryResults::At(_)
         | QueryResults::Callees(_)
@@ -423,7 +431,9 @@ fn walks_call_edges(results: &QueryResults) -> bool {
 /// differ: an empty `reach` is not the same claim as an empty `defs`.
 fn empty_meaning(results: &QueryResults) -> &'static str {
     match results {
-        QueryResults::Reach(_) => "no path over resolved edges; not proof of unreachability",
+        QueryResults::Reach(_) | QueryResults::Slice(_) => {
+            "no path over resolved edges; not proof of unreachability"
+        }
         QueryResults::Callees(_) => "the target defined no outgoing call sites",
         QueryResults::Externals(_) => "every symbol in scope bound to a definition",
         QueryResults::FfiExports(_) => "no function attributed to Rust exports an unmangled symbol",
@@ -787,8 +797,12 @@ pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
         if !out.is_empty() {
             out.push('\n');
         }
+        let walked = match result.results {
+            QueryResults::Slice(_) => "slice",
+            _ => "path",
+        };
         out.push_str(&format!(
-            "{} this path uses {agent_steps} agent edge(s)\n",
+            "{} this {walked} uses {agent_steps} agent edge(s)\n",
             paint("not proven:", color, Paint::Uncertain)
         ));
     }
@@ -961,6 +975,26 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                         }
                     }
                 }
+            }
+        }
+        QueryResults::Slice(slice) => {
+            for function in &slice.functions {
+                out.push_str(&format!("{}\n", name(symbols, &function.symbol, ctx)));
+            }
+            for edge in &slice.edges {
+                let (kind, tint) = match &edge.step {
+                    PathStep::Call(_) => ("call", Paint::Resolved),
+                    PathStep::BoundedIndirect { .. } => ("bounded-indirect", Paint::Uncertain),
+                    PathStep::Binding(_) => ("binding", Paint::Resolved),
+                    PathStep::Alias { .. } => ("alias", Paint::Resolved),
+                    PathStep::Agent { .. } => ("agent", Paint::Uncertain),
+                };
+                out.push_str(&format!(
+                    "{} -> {} ({})\n",
+                    name(symbols, &edge.from.symbol, ctx),
+                    name(symbols, &edge.to.symbol, ctx),
+                    paint(kind, ctx.color, tint)
+                ));
             }
         }
         QueryResults::ResolutionCandidates(groups) => {
