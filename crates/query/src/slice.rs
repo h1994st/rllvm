@@ -57,11 +57,11 @@ pub struct EmittedModule {
 /// `session` is the one `functions` came from, loaded from `catalog`: it says
 /// which members are definitions and which are aliases, so no module is
 /// parsed again here. A slice member that is only a declaration contributes
-/// nothing: the definition it binds to is a member of its own. An alias has no body, so it comes with the function
-/// it stands for, on the path or not. Module bytes are read and hash-checked
-/// as a query reads them, archive members included, and written to a
-/// temporary directory under their position in the catalog, never under a
-/// module id, which is free text.
+/// nothing: the definition it binds to is a member of its own. An alias has
+/// no body, so it comes with the function it stands for, on the path or not.
+/// Module bytes are read and hash-checked as a query reads them, archive
+/// members included, and written to a temporary directory under their
+/// position in the catalog, never under a module id, which is free text.
 ///
 /// `llvm-extract` makes every `static` that stays in a piece external, as a
 /// definition or as a declaration a kept function still uses, and
