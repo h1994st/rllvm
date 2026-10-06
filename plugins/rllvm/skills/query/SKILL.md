@@ -90,7 +90,8 @@ Over MCP:
   unsaved records.
 - Unloading a catalog drops its overlay and reports how many unsaved records
   went with it; reloading a rebuilt catalog drops an overlay bound to the
-  old build. Save before either.
+  old build. Save before unloading, reloading, or ending the session;
+  unsaved records are not written on exit.
 
 On the command line, pipe them as JSON lines to `rllvm-query --catalog
 catalog.json overlay record`, which saves at once; `--overlay PATH` names

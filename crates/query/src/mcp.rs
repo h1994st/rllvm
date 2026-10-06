@@ -706,7 +706,7 @@ management_tool_surface! {
             }
         });
     RecordEdges => "record_edges",
-        "Record agent hypotheses about unresolved indirect calls in the catalog's overlay, all or none: `add`, `verify` or `retract`, in the JSON form `rllvm-query overlay record` reads. Each is checked only for being grounded in the catalog, never judged, and an error names the bad record by its 1-based index. With no overlay attached, first attaches the one beside the catalog. Records are walked at once but stay in memory until `save_overlay`, and are never proof.",
+        "Record agent hypotheses about unresolved indirect calls in the catalog's overlay, all or none: `add`, `verify` or `retract`, in the JSON form `rllvm-query overlay record` reads. Each is checked only for being grounded in the catalog, never judged, and an error names the bad record by its 1-based index. With no overlay attached, first attaches the one beside the catalog. Records are walked at once, stay in memory until `save_overlay`, and are never proof; unsaved records are not written on exit.",
         json!({
             "type": "object",
             "properties": {
