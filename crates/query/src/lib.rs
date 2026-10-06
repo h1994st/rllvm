@@ -1234,13 +1234,18 @@ impl Query {
 
     /// Whether this query walks the overlay, and so needs one opened.
     pub fn walks_overlay(&self) -> bool {
-        matches!(self.overlay_request(), Ok(Some(_)))
+        matches!(self.overlay_fields(), Some((true, _)))
     }
 
-    /// The weakest overlay edge a walk takes, when it asked for the overlay
-    /// at all. A minimum without the overlay is an error rather than a
-    /// filter that silently does nothing.
-    fn overlay_request(&self) -> Result<Option<Confidence>, Error> {
+    /// Whether this kind of query can walk the overlay, asked to or not:
+    /// what decides which tools take the overlay arguments.
+    pub fn takes_overlay(&self) -> bool {
+        self.overlay_fields().is_some()
+    }
+
+    /// `include_overlay` and `min_confidence`, for the queries that carry
+    /// them: the one list of queries that can walk the overlay.
+    fn overlay_fields(&self) -> Option<(bool, Option<Confidence>)> {
         match self {
             Query::Reach {
                 include_overlay,
@@ -1251,15 +1256,21 @@ impl Query {
                 include_overlay,
                 min_confidence,
                 ..
-            } => match (include_overlay, min_confidence) {
-                (true, minimum) => Ok(Some(minimum.unwrap_or(Confidence::Low))),
-                (false, None) => Ok(None),
-                (false, Some(_)) => Err(Error::InvalidArguments(
-                    "`min_confidence` filters overlay edges; it needs `include_overlay`"
-                        .to_string(),
-                )),
-            },
-            _ => Ok(None),
+            } => Some((*include_overlay, *min_confidence)),
+            _ => None,
+        }
+    }
+
+    /// The weakest overlay edge a walk takes, when it asked for the overlay
+    /// at all. A minimum without the overlay is an error rather than a
+    /// filter that silently does nothing.
+    fn overlay_request(&self) -> Result<Option<Confidence>, Error> {
+        match self.overlay_fields() {
+            Some((true, minimum)) => Ok(Some(minimum.unwrap_or(Confidence::Low))),
+            Some((false, Some(_))) => Err(Error::InvalidArguments(
+                "`min_confidence` filters overlay edges; it needs `include_overlay`".to_string(),
+            )),
+            Some((false, None)) | None => Ok(None),
         }
     }
 }

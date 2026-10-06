@@ -2854,6 +2854,80 @@ mod mcp {
                 .unwrap_or_else(|_| panic!("non-protocol output on stdout: {line}"));
         }
     }
+
+    /// An agent's whole overlay loop in one server process: find the
+    /// candidates, record an edge, walk it before saving, then save. Only the
+    /// save writes, and it writes the header and the one record.
+    #[test]
+    fn an_mcp_session_records_saves_and_walks_an_overlay() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("t.c"), FIELD_SOURCE).unwrap();
+        let module = compile_bitcode_file(&scratch.path().join("t.c"), &["-O0", "-g"]);
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let overlay = scratch.path().join("plain-catalog.overlay.jsonl");
+        let add = serde_json::json!({
+            "op": "add",
+            "via_field": { "record": "ops", "offset": 8 },
+            "to": "h3",
+            "confidence": "high",
+            "provenance": ["init: o->on_event = h3"],
+        });
+        let call = |id: &str, name: &str, arguments: serde_json::Value| {
+            modern_request(
+                id,
+                "tools/call",
+                serde_json::json!({ "name": name, "arguments": arguments }),
+            )
+        };
+
+        let responses = mcp_session(
+            &scratch,
+            None,
+            &[
+                &call(
+                    "load",
+                    "load_catalog",
+                    serde_json::json!({ "path": catalog.to_str().unwrap() }),
+                ),
+                &call("candidates", "resolution_candidates", serde_json::json!({})),
+                &call(
+                    "record",
+                    "record_edges",
+                    serde_json::json!({ "records": [add] }),
+                ),
+                &call(
+                    "reach",
+                    "reach",
+                    serde_json::json!({ "from": "dispatch", "to": "h3", "include_overlay": true }),
+                ),
+                &call("save", "save_overlay", serde_json::json!({})),
+            ],
+        );
+        assert_eq!(responses.len(), 5, "{responses:?}");
+        for response in &responses {
+            assert_eq!(response["result"]["isError"], false, "{response}");
+        }
+
+        let candidates = tool_payload(&responses[1]);
+        assert!(
+            candidates["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|group| {
+                    group["field"] == serde_json::json!({ "record": "ops", "offset": 8 })
+                }),
+            "{candidates}"
+        );
+        assert_eq!(tool_payload(&responses[2])["pending"], 1);
+        let reach = tool_payload(&responses[3]);
+        assert_eq!(reach["uncertainty"]["agent_path_steps"], 1, "{reach}");
+        let saved = tool_payload(&responses[4]);
+        assert_eq!(saved["saved"], 1, "{saved}");
+
+        let written = std::fs::read_to_string(&overlay).unwrap();
+        assert_eq!(written.lines().count(), 2, "header and one add: {written}");
+    }
 } // mod mcp
 
 #[test]

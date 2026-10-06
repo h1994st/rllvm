@@ -78,3 +78,55 @@ lines=$(wc -l <"$OVERLAY" | tr -d ' ')
 [ "$lines" = 1 ] || fail "compaction left $lines lines, expected 1"
 
 echo "ok: an overlay edge completes reach main handler only when asked, labeled not proven, and retracts cleanly"
+
+# 7. The same loop over MCP, in one server process: record, walk before
+#    saving, then save. Every stdout line must be a protocol frame.
+python3 - "$OUT/catalog.json" <<'PY'
+import json, subprocess, sys
+
+catalog = sys.argv[1]
+meta = {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {},
+}
+calls = [
+    ("load_catalog", {"path": catalog}),
+    ("record_edges", {"records": [{
+        "op": "add", "via_field": {"record": "ops", "offset": 8}, "to": "handler",
+        "confidence": "high", "provenance": ["ops.c:8: o->on_event = handler"],
+    }]}),
+    ("reach", {"from": "main", "to": "handler", "include_overlay": True}),
+    ("save_overlay", {}),
+]
+stdin = "".join(
+    json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                "params": {"_meta": meta, "name": name, "arguments": arguments}}) + "\n"
+    for i, (name, arguments) in enumerate(calls)
+)
+out = subprocess.run(["rllvm-query", "mcp"], input=stdin, capture_output=True,
+                     text=True, check=True).stdout
+answers = {}
+for line in filter(str.strip, out.splitlines()):
+    try:
+        frame = json.loads(line)
+    except json.JSONDecodeError:
+        sys.exit(f"stdout carried a non-protocol line: {line!r}")
+    if "error" in frame:
+        sys.exit(f"{calls[frame['id']][0]} was a protocol error: {frame['error']}")
+    result = frame["result"]
+    if result.get("isError"):
+        sys.exit(f"{calls[frame['id']][0]} failed: {result['content'][0]['text']}")
+    answers[calls[frame["id"]][0]] = json.loads(result["content"][0]["text"])
+steps = answers["reach"]["uncertainty"].get("agent_path_steps")
+if steps != 1:
+    sys.exit(f"reach over MCP used {steps} agent steps, expected 1")
+agent = [s for s in answers["reach"]["results"] if s["kind"] == "agent"]
+if [s["provenance"] for s in agent] != [["ops.c:8: o->on_event = handler"]]:
+    sys.exit(f"the agent step did not carry the recorded provenance: {agent}")
+if answers["save_overlay"]["saved"] != 1:
+    sys.exit(f"save_overlay wrote {answers['save_overlay']}, expected 1 record")
+PY
+lines=$(wc -l <"$OVERLAY" | tr -d ' ')
+[ "$lines" = 2 ] || fail "save_overlay left $lines lines, expected the header and one add"
+
+echo "ok: over MCP, a recorded edge is walked before it is saved, and save_overlay appends it"

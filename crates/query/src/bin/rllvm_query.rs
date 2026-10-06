@@ -176,13 +176,7 @@ fn parse_records(input: &str) -> Result<Vec<(usize, Record)>, Error> {
         if line.trim().is_empty() {
             continue;
         }
-        let record = line.parse::<Record>().map_err(|error| {
-            let reason = match error {
-                Error::InvalidArguments(reason) => reason,
-                other => other.to_string(),
-            };
-            Error::InvalidArguments(format!("line {}: {reason}", index + 1))
-        })?;
+        let record = Record::parse_labeled(line, format_args!("line {}", index + 1))?;
         records.push((index + 1, record));
     }
     Ok(records)

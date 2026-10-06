@@ -1,6 +1,6 @@
 //! MCP stdio server: the eleven source-level queries as JSON-RPC 2.0 tools,
 //! newline-delimited over stdin/stdout, plus four that decide which catalogs
-//! they run against.
+//! they run against and four that keep a call-graph overlay beside each.
 //!
 //! The catalog is chosen by the client, not by the command line. A server
 //! pinned to one catalog at startup could not switch programs, compare two
@@ -30,6 +30,11 @@
 //! never needs a handshake at all (see
 //! `a_modern_request_is_served_without_a_handshake` in `tests/query.rs`).
 //!
+//! The overlay tools are the only ones that change anything. Records an
+//! agent sends are held in memory, where `reach` and `closure` can already
+//! walk them, and only `save_overlay` writes them to disk; the catalog is
+//! never written at all.
+//!
 //! stdout carries protocol frames only, the same rule the compiler wrappers
 //! follow for their own stdout: every diagnostic belongs on stderr, and
 //! `serve` itself never writes anything but one JSON-RPC response line per
@@ -43,7 +48,7 @@
 //! ties them together.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{BufRead, Write},
     path::{Path, PathBuf},
 };
@@ -53,8 +58,9 @@ use serde_json::{Value, json};
 use rllvm_core::error::Error;
 
 use super::{
-    Confidence, Direction, FactsCache, Query, Session, analysis_of, open_catalog_with_cache,
-    open_with_cache, run_with_overlay,
+    Confidence, Direction, FactsCache, Overlay, Query, Record, Session, analysis_of,
+    default_overlay_path, open_catalog_with_cache, open_with_cache, overlay::fingerprint,
+    run_with_overlay,
 };
 
 /// The modern protocol revision this server has been checked against.
@@ -64,6 +70,16 @@ const LEGACY: &str = "2025-06-18";
 
 const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+/// What `list_overlay`, `save_overlay` and a walk asking for the overlay
+/// answer for a catalog with no overlay.
+const NO_OVERLAY: &str = "no overlay is loaded for this catalog: call `load_overlay`, or \
+                          `record_edges` to start the default one";
+
+/// What overlay tools answer for an `inventory` artifact with no overlay.
+const ARTIFACT_NEEDS_PATH: &str = "no overlay is loaded for this catalog, and an artifact \
+                                   loaded by `inventory` has no catalog file to keep one \
+                                   beside: call `load_overlay` with a `path` first";
 
 /// The catalogs one MCP session has loaded, keyed by the canonical path they
 /// came from: the catalog JSON for `load_catalog`, the artifact itself for
@@ -76,6 +92,12 @@ const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabiliti
 #[derive(Default)]
 pub struct Registry {
     sessions: BTreeMap<PathBuf, Session>,
+    /// The overlay attached to a catalog, under its session's key. Records
+    /// it holds are walked at once and reach disk only on `save_overlay`.
+    overlays: BTreeMap<PathBuf, Overlay>,
+    /// The keys `inventory` loaded: artifacts, with no catalog file for a
+    /// default overlay to sit beside.
+    artifacts: BTreeSet<PathBuf>,
     /// The facts cache every load reads and fills; `None` when disabled.
     cache: Option<FactsCache>,
 }
@@ -99,7 +121,7 @@ impl Registry {
     pub fn load(&mut self, path: &Path) -> Result<Value, Error> {
         let key = path.canonicalize()?;
         let session = open_with_cache(&key, self.cache.as_ref())?;
-        Ok(self.insert(key, session))
+        Ok(self.insert(key, session, false))
     }
 
     /// Inventories a captured binary, archive or `.bc` and loads the catalog
@@ -110,7 +132,7 @@ impl Registry {
         let catalog = rllvm_core::catalog::inventory(&key, bitcode_root, None)?;
         let directory = key.parent().unwrap_or(Path::new(".")).to_path_buf();
         let session = open_catalog_with_cache(catalog, &directory, self.cache.as_ref())?;
-        Ok(self.insert(key, session))
+        Ok(self.insert(key, session, true))
     }
 
     /// A registry holding sessions under names of the test's choosing, since
@@ -126,17 +148,56 @@ impl Registry {
         }
     }
 
-    fn insert(&mut self, key: PathBuf, session: Session) -> Value {
-        let summary = catalog_summary(&key, &session);
+    /// Makes `session` queryable under `key`, replacing any earlier load.
+    ///
+    /// An overlay attached to the earlier load stays only while it is bound
+    /// to this build: after a rebuild its edges name call sites that may no
+    /// longer exist, so it is dropped, and the answer says how many unsaved
+    /// records went with it.
+    fn insert(&mut self, key: PathBuf, session: Session, artifact: bool) -> Value {
+        let mut summary = catalog_summary(&key, &session);
+        let current = fingerprint(&session).ok();
+        let stale = self
+            .overlays
+            .get(&key)
+            .is_some_and(|overlay| current.as_deref() != Some(overlay.fingerprint()));
+        if stale
+            && let Some(dropped) = self.overlays.remove(&key)
+            && let Some(map) = summary.as_object_mut()
+        {
+            map.insert(
+                "dropped_overlay".into(),
+                json!({ "pending": dropped.pending() }),
+            );
+        }
+        if artifact {
+            self.artifacts.insert(key.clone());
+        } else {
+            self.artifacts.remove(&key);
+        }
         self.sessions.insert(key, session);
         summary
     }
 
+    /// Drops a catalog and its overlay. Unsaved records are lost, so the
+    /// answer counts them rather than letting them vanish silently.
     fn unload(&mut self, requested: &str) -> Result<Value, String> {
         match self.key_for(requested) {
             Some(key) => {
                 self.sessions.remove(&key);
-                Ok(json!({ "unloaded": key.display().to_string(), "loaded": self.loaded() }))
+                self.artifacts.remove(&key);
+                let dropped = self
+                    .overlays
+                    .remove(&key)
+                    .map_or(0, |overlay| overlay.pending());
+                let mut answer =
+                    json!({ "unloaded": key.display().to_string(), "loaded": self.loaded() });
+                if dropped > 0
+                    && let Some(map) = answer.as_object_mut()
+                {
+                    map.insert("dropped_unsaved_records".into(), json!(dropped));
+                }
+                Ok(answer)
             }
             None => Err(self.not_loaded(requested)),
         }
@@ -152,25 +213,35 @@ impl Registry {
         })
     }
 
-    /// The session a call names, or the only one loaded.
+    /// The session a call names, or the only one loaded, with the overlay
+    /// attached to it.
+    fn session(&self, requested: Option<&str>) -> Result<(&Session, Option<&Overlay>), String> {
+        let key = self.catalog_key(requested)?;
+        Ok((self.session_at(&key)?, self.overlays.get(&key)))
+    }
+
+    /// The session loaded under `key`.
+    fn session_at(&self, key: &Path) -> Result<&Session, String> {
+        self.sessions
+            .get(key)
+            .ok_or_else(|| self.not_loaded(&key.display().to_string()))
+    }
+
+    /// The key of the catalog a call names, or of the only one loaded.
     ///
     /// `catalog` is optional exactly while one catalog is loaded, which keeps
     /// the common single-program session free of ceremony. With none loaded
     /// or several, the message names what to do rather than guessing: picking
     /// one of several would answer confidently about the wrong program.
-    fn session(&self, requested: Option<&str>) -> Result<&Session, String> {
+    fn catalog_key(&self, requested: Option<&str>) -> Result<PathBuf, String> {
         if let Some(requested) = requested {
-            return match self
+            return self
                 .key_for(requested)
-                .and_then(|key| self.sessions.get(&key))
-            {
-                Some(session) => Ok(session),
-                None => Err(self.not_loaded(requested)),
-            };
+                .ok_or_else(|| self.not_loaded(requested));
         }
-        let mut loaded = self.sessions.values();
+        let mut loaded = self.sessions.keys();
         match (loaded.next(), loaded.next()) {
-            (Some(only), None) => Ok(only),
+            (Some(only), None) => Ok(only.clone()),
             (None, _) => Err(
                 "no catalog is loaded: call `load_catalog` with a catalog JSON, or `inventory` \
                  with a captured binary, archive or .bc file"
@@ -202,6 +273,102 @@ impl Registry {
             .collect()
     }
 
+    /// Where a catalog's overlay lives unless a call names a file: beside
+    /// the catalog JSON. An `inventory` artifact has no catalog file, so
+    /// it has no default.
+    fn default_overlay(&self, key: &Path) -> Option<PathBuf> {
+        (!self.artifacts.contains(key)).then(|| default_overlay_path(key))
+    }
+
+    /// Attaches the overlay at `path`, or the catalog's default one,
+    /// replacing any attached before. Unsaved records in that one are
+    /// dropped only when the caller says so; a file that does not open
+    /// leaves the current overlay attached.
+    fn load_overlay(
+        &mut self,
+        requested: Option<&str>,
+        path: Option<&str>,
+        discard_pending: bool,
+    ) -> Result<Value, String> {
+        let key = self.catalog_key(requested)?;
+        let path = match path {
+            Some(path) => PathBuf::from(path),
+            None => self
+                .default_overlay(&key)
+                .ok_or_else(|| ARTIFACT_NEEDS_PATH.to_string())?,
+        };
+        let pending = self.overlays.get(&key).map_or(0, Overlay::pending);
+        if pending > 0 && !discard_pending {
+            return Err(format!(
+                "the loaded overlay has {pending} unsaved record(s): call `save_overlay` first, \
+                 or pass `discard_pending: true` to drop them"
+            ));
+        }
+        let session = self.session_at(&key)?;
+        let overlay = Overlay::open(session, &path).map_err(|error| error.to_string())?;
+        let summary = summary_of(&overlay, session)?;
+        self.overlays.insert(key, overlay);
+        Ok(summary)
+    }
+
+    /// Applies `records` to the catalog's overlay, all or none, first
+    /// attaching the default one when none is. An overlay attached here is
+    /// kept only if the records applied, so a refused call changes nothing.
+    fn record_edges(
+        &mut self,
+        requested: Option<&str>,
+        records: Vec<Record>,
+    ) -> Result<Value, String> {
+        let key = self.catalog_key(requested)?;
+        // Through the field, not `session_at`, so the overlays stay free to
+        // take the attached overlay out while the session is borrowed.
+        let session = self
+            .sessions
+            .get(&key)
+            .ok_or_else(|| self.not_loaded(&key.display().to_string()))?;
+        let (mut overlay, attached) = match self.overlays.remove(&key) {
+            Some(overlay) => (overlay, true),
+            None => {
+                let path = self
+                    .default_overlay(&key)
+                    .ok_or_else(|| ARTIFACT_NEEDS_PATH.to_string())?;
+                let overlay = Overlay::open(session, &path).map_err(|error| error.to_string())?;
+                (overlay, false)
+            }
+        };
+        let recorded = overlay
+            .record(session, records)
+            .map_err(|error| error.to_string())
+            .and_then(|()| summary_of(&overlay, session));
+        if attached || recorded.is_ok() {
+            self.overlays.insert(key, overlay);
+        }
+        recorded
+    }
+
+    /// Appends the overlay's unsaved records to its file.
+    fn save_overlay(&mut self, requested: Option<&str>) -> Result<Value, String> {
+        let key = self.catalog_key(requested)?;
+        let overlay = self
+            .overlays
+            .get_mut(&key)
+            .ok_or_else(|| NO_OVERLAY.to_string())?;
+        let saved = overlay.save().map_err(|error| error.to_string())?;
+        Ok(json!({
+            "saved": saved,
+            "path": overlay.path().map(|path| path.display().to_string()),
+        }))
+    }
+
+    fn list_overlay(&self, requested: Option<&str>) -> Result<Value, String> {
+        let key = self.catalog_key(requested)?;
+        let overlay = self
+            .overlays
+            .get(&key)
+            .ok_or_else(|| NO_OVERLAY.to_string())?;
+        summary_of(overlay, self.session_at(&key)?)
+    }
+
     fn not_loaded(&self, requested: &str) -> String {
         format!(
             "no catalog loaded as `{requested}`; loaded: {}",
@@ -222,6 +389,11 @@ fn catalog_summary(key: &Path, session: &Session) -> Value {
         "scope": session.scope(),
         "analysis": analysis_of(session.modules(), session.cache_report()),
     })
+}
+
+/// An overlay's summary, as the overlay tools answer with it.
+fn summary_of(overlay: &Overlay, session: &Session) -> Result<Value, String> {
+    serde_json::to_value(overlay.summary(session)).map_err(|error| error.to_string())
 }
 
 /// Which era a request was classified into, and therefore which result
@@ -436,8 +608,9 @@ fn tools_list_result() -> Value {
 /// never reports.
 macro_rules! management_tool_surface {
     ($($variant:ident => $name:literal, $description:literal, $schema:expr;)+) => {
-        /// A tool that decides which catalogs are loaded, as opposed to the
-        /// eleven that ask a question of one.
+        /// A tool that decides which catalogs are loaded, or keeps the
+        /// overlay beside one, as opposed to the eleven that ask a question
+        /// of one.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum Management { $($variant),+ }
 
@@ -515,6 +688,43 @@ management_tool_surface! {
             },
             "required": ["catalog"]
         });
+    LoadOverlay => "load_overlay",
+        "Attach a call-graph overlay to a loaded catalog: agent hypotheses about indirect calls LLVM left unresolved, kept in a file beside the catalog (`<catalog stem>.overlay.jsonl`) unless `path` names another; a catalog loaded by `inventory` must name `path`. Refuses a file recorded against another build of the catalog, and refuses to replace an overlay holding unsaved records unless `discard_pending` is true. The edges are never proof: only `reach` and `closure` with `include_overlay` walk them, labeled `agent`.",
+        json!({
+            "type": "object",
+            "properties": {
+                "catalog": catalog_property(),
+                "path": {
+                    "type": "string",
+                    "description": "Overlay file (default: `<catalog stem>.overlay.jsonl` beside the catalog; required for an `inventory` artifact). Relative to the server's working directory; a missing file is an empty overlay."
+                },
+                "discard_pending": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Replace an overlay that holds unsaved records, dropping them"
+                }
+            }
+        });
+    RecordEdges => "record_edges",
+        "Record agent hypotheses about unresolved indirect calls in the catalog's overlay, all or none: `add`, `verify` or `retract`, in the JSON form `rllvm-query overlay record` reads. Each is checked only for being grounded in the catalog, never judged, and an error names the bad record by its 1-based index. With no overlay attached, first attaches the one beside the catalog. Records are walked at once, stay in memory until `save_overlay`, and are never proof; unsaved records are not written on exit.",
+        json!({
+            "type": "object",
+            "properties": {
+                "catalog": catalog_property(),
+                "records": {
+                    "type": "array",
+                    "items": { "type": "object" },
+                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it."
+                }
+            },
+            "required": ["records"]
+        });
+    SaveOverlay => "save_overlay",
+        "Append the overlay's unsaved records to its file, beside the catalog unless `load_overlay` named another: the only overlay tool that writes to disk, and the catalog itself is never written. Refuses when another writer changed the file since it was read. Saved records stay agent hypotheses, never proof.",
+        json!({ "type": "object", "properties": { "catalog": catalog_property() } });
+    ListOverlay => "list_overlay",
+        "The catalog's overlay as it stands, unsaved records included: each edge with its confidence, provenance, verdict and the unresolved sites it attaches to, and how many unresolved sites the overlay covers. Edges are agent hypotheses kept beside the catalog, never proof.",
+        json!({ "type": "object", "properties": { "catalog": catalog_property() } });
 }
 
 /// Runs one catalog-management call. Every failure here is a message the
@@ -541,6 +751,50 @@ fn management_outcome(
         }
         Management::List => Ok(registry.list()),
         Management::Unload => registry.unload(&string_argument(arguments, "catalog")?),
+        Management::LoadOverlay => registry.load_overlay(
+            catalog_argument(arguments),
+            arguments.get("path").and_then(Value::as_str),
+            flag_argument(arguments, "discard_pending")?,
+        ),
+        Management::RecordEdges => {
+            registry.record_edges(catalog_argument(arguments), records_argument(arguments)?)
+        }
+        Management::SaveOverlay => registry.save_overlay(catalog_argument(arguments)),
+        Management::ListOverlay => registry.list_overlay(catalog_argument(arguments)),
+    }
+}
+
+/// The optional `catalog` argument, as queries and the overlay tools take it.
+fn catalog_argument(arguments: &Value) -> Option<&str> {
+    arguments.get("catalog").and_then(Value::as_str)
+}
+
+/// `record_edges`' `records`, each parsed as one line of `rllvm-query
+/// overlay record` input would be. All are parsed before any applies, and a
+/// bad one is named by its 1-based index, as validation names one.
+fn records_argument(arguments: &Value) -> Result<Vec<Record>, String> {
+    let records = arguments
+        .get("records")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing or non-array argument `records`".to_string())?;
+    records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            Record::parse_labeled(&record.to_string(), format_args!("record {}", index + 1))
+                .map_err(|error| error.to_string())
+        })
+        .collect()
+}
+
+/// An optional boolean argument, false when absent. Any other type is an
+/// error, never read as false.
+fn flag_argument(arguments: &Value, key: &str) -> Result<bool, String> {
+    match arguments.get(key) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("non-boolean argument `{key}`")),
     }
 }
 
@@ -617,7 +871,7 @@ fn overlay_properties() -> [(&'static str, Value); 2] {
             json!({
                 "type": "boolean",
                 "default": false,
-                "description": "Also walk agent-proposed edges from the loaded overlay. Never proof: the answer labels them."
+                "description": "Also walk agent-proposed edges from the overlay `load_overlay` or `record_edges` attached to the catalog. Never proof: the answer labels them."
             }),
         ),
         (
@@ -633,12 +887,7 @@ fn overlay_properties() -> [(&'static str, Value); 2] {
 
 /// `include_overlay` and `min_confidence`, as [`overlay_properties`] declares them.
 fn overlay_arguments(arguments: &Value) -> Result<(bool, Option<Confidence>), String> {
-    let include_overlay = match arguments.get("include_overlay") {
-        None => false,
-        Some(value) => value
-            .as_bool()
-            .ok_or_else(|| "non-boolean argument `include_overlay`".to_string())?,
-    };
+    let include_overlay = flag_argument(arguments, "include_overlay")?;
     let min_confidence = match arguments.get("min_confidence") {
         None => None,
         Some(value) => Some(serde_json::from_value(value.clone()).map_err(|_| {
@@ -661,13 +910,14 @@ fn symbol_tool(name: &str, description: &str) -> Value {
     })
 }
 
-/// Which loaded catalog a query runs against. Added to all eleven schemas at
-/// one point below rather than written into each: eleven copies of an optional
-/// argument drift, and a client reads the drift as a real difference.
+/// Which loaded catalog a query or an overlay tool uses. Added to all eleven
+/// query schemas at one point below rather than written into each: eleven
+/// copies of an optional argument drift, and a client reads the drift as a
+/// real difference.
 fn catalog_property() -> Value {
     json!({
         "type": "string",
-        "description": "Loaded catalog to query, named as `load_catalog` reported it. Optional while exactly one catalog is loaded."
+        "description": "Loaded catalog to use, named as `load_catalog` reported it. Optional while exactly one catalog is loaded."
     })
 }
 
@@ -681,7 +931,7 @@ fn tool_for(query: &Query) -> Value {
         .and_then(Value::as_object_mut)
     {
         properties.insert("catalog".into(), catalog_property());
-        if matches!(query, Query::Reach { .. } | Query::Closure { .. }) {
+        if query.takes_overlay() {
             for (name, property) in overlay_properties() {
                 properties.insert(name.into(), property);
             }
@@ -817,18 +1067,23 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Ok(query) => query,
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
-    let session = match registry.session(arguments.get("catalog").and_then(Value::as_str)) {
-        Ok(session) => session,
+    let (session, overlay) = match registry.session(catalog_argument(&arguments)) {
+        Ok(loaded) => loaded,
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
 
     // A query the session could not interpret -- an `indirect_targets`
     // location that does not parse -- is a tool error the client can
     // display, not a protocol error, and never an empty `results` list that
-    // would read as a valid answer.
-    // No overlay is loaded over MCP yet, so `include_overlay` is a tool
-    // error naming that, never a direct-only answer.
-    let result = match run_with_overlay(session, None, &query) {
+    // would read as a valid answer. So is `include_overlay` with no overlay
+    // attached to the catalog: never a direct-only answer, and named here
+    // rather than by `run_with_overlay` so the message says which tools
+    // attach one. Any other `overlay_request` error is left to the run.
+    if overlay.is_none() && matches!(query.overlay_request(), Ok(Some(_))) {
+        let message = format!("`include_overlay` needs an overlay: {NO_OVERLAY}");
+        return Outcome::Result(call_tool_result(true, &message), false);
+    }
+    let result = match run_with_overlay(session, overlay, &query) {
         Ok(result) => result,
         Err(error) => return Outcome::Result(call_tool_result(true, &error.to_string()), false),
     };
@@ -931,7 +1186,7 @@ fn success_response(id: Value, result: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testing::session_from;
+    use crate::testing::{facts_with_overlay_sites, session_from};
 
     fn one_catalog() -> Registry {
         Registry::with_sessions(vec![("first", session_from(&[("a", "b")]))])
@@ -1084,8 +1339,8 @@ mod tests {
         );
     }
 
-    /// The walks take the overlay arguments; until an overlay can be loaded
-    /// over MCP, asking for it is a tool error rather than a direct-only
+    /// The walks take the overlay arguments; with no overlay attached to the
+    /// catalog, asking for it is a tool error rather than a direct-only
     /// answer that would read as though the overlay had been walked.
     #[test]
     fn a_walk_asking_for_the_overlay_parses_and_says_none_is_loaded() {
@@ -1108,6 +1363,10 @@ mod tests {
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(text.contains("include_overlay"), "{text}");
+        assert!(
+            text.contains("load_overlay") && text.contains("record_edges"),
+            "the error must name the tools that attach an overlay: {text}"
+        );
 
         for tool in tools_list_result()["tools"].as_array().unwrap() {
             let walks = matches!(tool["name"].as_str(), Some("reach" | "closure"));
@@ -1274,6 +1533,333 @@ mod tests {
             .expect("a request with an id must be answered");
         assert_eq!(response["error"]["code"], -32600);
         assert_eq!(response["id"], 1);
+    }
+
+    /// The overlay fixture loaded as `catalog.json` in `scratch`, so its
+    /// default overlay sits in the scratch directory and nowhere else.
+    fn overlay_registry(scratch: &tempfile::TempDir) -> (Registry, PathBuf) {
+        let catalog = scratch.path().join("catalog.json");
+        let registry = Registry::with_sessions(vec![(
+            catalog.to_str().unwrap(),
+            Session::new(facts_with_overlay_sites(), Vec::new()),
+        )]);
+        (registry, catalog)
+    }
+
+    /// The fixture after a rebuild: `mod_b`'s content changed.
+    fn rebuilt_session() -> Session {
+        let mut facts = facts_with_overlay_sites();
+        facts.modules[1].content_sha256 = Some("cc".into());
+        Session::new(facts, Vec::new())
+    }
+
+    /// An `add` through `ops@<offset>` to `to`, as an agent would send it.
+    fn add_through(offset: u64, to: &str) -> Value {
+        json!({
+            "op": "add",
+            "via_field": { "record": "ops", "offset": offset },
+            "to": to,
+            "confidence": "high",
+            "provenance": ["init: o->on_event = h3"],
+        })
+    }
+
+    /// A successful call's payload, decoded.
+    fn answer(registry: &mut Registry, name: &str, arguments: Value) -> Value {
+        let result = call(registry, name, arguments);
+        assert_eq!(result["isError"], false, "`{name}` failed: {result}");
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    /// A failed call's message.
+    fn tool_error(registry: &mut Registry, name: &str, arguments: Value) -> String {
+        let result = call(registry, name, arguments);
+        assert_eq!(result["isError"], true, "`{name}` must fail: {result}");
+        result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    fn edge_targets(summary: &Value) -> Vec<String> {
+        summary["edges"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no edges in {summary}"))
+            .iter()
+            .map(|edge| edge["key"]["to"]["symbol"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn recorded_edges_answer_before_they_are_saved() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, catalog) = overlay_registry(&scratch);
+
+        let recorded = answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        assert_eq!(recorded["pending"], 1, "{recorded}");
+
+        let reach = answer(
+            &mut registry,
+            "reach",
+            json!({ "from": "dispatch", "to": "h3", "include_overlay": true }),
+        );
+        assert!(reach["results"].is_array(), "{reach}");
+        assert_eq!(reach["uncertainty"]["agent_path_steps"], 1, "{reach}");
+        let direct = answer(
+            &mut registry,
+            "reach",
+            json!({ "from": "dispatch", "to": "h3" }),
+        );
+        assert!(
+            direct["results"].is_null(),
+            "not asked, not walked: {direct}"
+        );
+
+        let listed = answer(&mut registry, "list_overlay", json!({}));
+        assert_eq!(listed["pending"], 1, "{listed}");
+        assert_eq!(edge_targets(&listed), ["h3"]);
+        assert!(
+            !default_overlay_path(&catalog).exists(),
+            "only save_overlay writes to disk"
+        );
+    }
+
+    #[test]
+    fn saving_appends_and_a_reload_sees_only_saved_records() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, catalog) = overlay_registry(&scratch);
+        let path = default_overlay_path(&catalog);
+
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        let saved = answer(&mut registry, "save_overlay", json!({}));
+        assert_eq!(saved["saved"], 1, "{saved}");
+        assert_eq!(saved["path"], path.display().to_string(), "{saved}");
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h1")] }),
+        );
+
+        let refused = tool_error(&mut registry, "load_overlay", json!({}));
+        assert!(
+            refused.contains("1 unsaved") && refused.contains("discard_pending"),
+            "{refused}"
+        );
+        assert_eq!(
+            answer(&mut registry, "list_overlay", json!({}))["pending"],
+            1,
+            "a refused load keeps the overlay it refused to replace"
+        );
+
+        let reloaded = answer(
+            &mut registry,
+            "load_overlay",
+            json!({ "discard_pending": true }),
+        );
+        assert_eq!(reloaded["pending"], 0, "{reloaded}");
+        assert_eq!(edge_targets(&reloaded), ["h3"]);
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written.lines().count(), 2, "header and one add: {written}");
+
+        let nothing = answer(&mut registry, "save_overlay", json!({}));
+        assert_eq!(nothing["saved"], 0, "{nothing}");
+    }
+
+    #[test]
+    fn one_bad_record_fails_the_whole_call() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, _) = overlay_registry(&scratch);
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        let before = answer(&mut registry, "list_overlay", json!({}));
+
+        let ungrounded = tool_error(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(16, "h3"), add_through(8, "h1")] }),
+        );
+        assert!(ungrounded.contains("record 1: "), "{ungrounded}");
+        assert!(ungrounded.contains("ops@16"), "{ungrounded}");
+
+        let malformed = tool_error(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h1"), { "op": "annotate" }] }),
+        );
+        assert!(malformed.contains("record 2: "), "{malformed}");
+        assert!(malformed.contains("unknown op"), "{malformed}");
+
+        let missing = tool_error(&mut registry, "record_edges", json!({}));
+        assert!(missing.contains("`records`"), "{missing}");
+
+        assert_eq!(answer(&mut registry, "list_overlay", json!({})), before);
+    }
+
+    #[test]
+    fn unloading_reports_unsaved_records_dropped() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, catalog) = overlay_registry(&scratch);
+        let key = catalog.to_str().unwrap();
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        answer(&mut registry, "save_overlay", json!({}));
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h1")] }),
+        );
+        let unloaded = answer(&mut registry, "unload_catalog", json!({ "catalog": key }));
+        assert_eq!(unloaded["dropped_unsaved_records"], 1, "{unloaded}");
+
+        // A fresh load reads only what was saved.
+        let (mut registry, _) = overlay_registry(&scratch);
+        let reloaded = answer(&mut registry, "load_overlay", json!({}));
+        assert_eq!(edge_targets(&reloaded), ["h3"]);
+
+        // Nothing unsaved, nothing reported.
+        let unloaded = answer(&mut registry, "unload_catalog", json!({ "catalog": key }));
+        assert!(
+            unloaded.get("dropped_unsaved_records").is_none(),
+            "{unloaded}"
+        );
+    }
+
+    #[test]
+    fn a_stale_overlay_refuses_to_load() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, catalog) = overlay_registry(&scratch);
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        answer(&mut registry, "save_overlay", json!({}));
+        let recorded =
+            crate::overlay::fingerprint(&Session::new(facts_with_overlay_sites(), Vec::new()))
+                .unwrap();
+
+        let rebuilt = rebuilt_session();
+        let current = crate::overlay::fingerprint(&rebuilt).unwrap();
+        let mut registry = Registry::with_sessions(vec![(catalog.to_str().unwrap(), rebuilt)]);
+        let error = tool_error(&mut registry, "load_overlay", json!({}));
+        assert!(
+            error.contains(&recorded) && error.contains(&current),
+            "the error must name both fingerprints: {error}"
+        );
+        // Nothing attached, so a walk asking for the overlay does not run.
+        let walk = tool_error(
+            &mut registry,
+            "reach",
+            json!({ "from": "dispatch", "to": "h3", "include_overlay": true }),
+        );
+        assert!(walk.contains("include_overlay"), "{walk}");
+        // Recording would attach the same stale file, and refuses too.
+        let error = tool_error(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h1")] }),
+        );
+        assert!(error.contains(&recorded), "{error}");
+    }
+
+    #[test]
+    fn an_inventoried_artifact_names_its_overlay_file() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, catalog) = overlay_registry(&scratch);
+        registry.artifacts.insert(catalog.clone());
+
+        let error = tool_error(&mut registry, "load_overlay", json!({}));
+        assert!(error.contains("`path`"), "{error}");
+        let error = tool_error(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        assert!(
+            error.contains("load_overlay") && error.contains("`path`"),
+            "{error}"
+        );
+
+        let path = scratch.path().join("chosen.jsonl");
+        answer(
+            &mut registry,
+            "load_overlay",
+            json!({ "path": path.to_str().unwrap() }),
+        );
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        let saved = answer(&mut registry, "save_overlay", json!({}));
+        assert_eq!(saved["path"], path.display().to_string(), "{saved}");
+        assert!(!default_overlay_path(&catalog).exists());
+    }
+
+    #[test]
+    fn reloading_a_catalog_keeps_its_overlay_only_for_the_same_build() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, catalog) = overlay_registry(&scratch);
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+
+        let same = Session::new(facts_with_overlay_sites(), Vec::new());
+        let loaded = registry.insert(catalog.clone(), same, false);
+        assert!(loaded.get("dropped_overlay").is_none(), "{loaded}");
+        assert_eq!(
+            answer(&mut registry, "list_overlay", json!({}))["pending"],
+            1
+        );
+
+        let loaded = registry.insert(catalog, rebuilt_session(), false);
+        assert_eq!(loaded["dropped_overlay"]["pending"], 1, "{loaded}");
+        let error = tool_error(&mut registry, "list_overlay", json!({}));
+        assert!(error.contains("no overlay is loaded"), "{error}");
+    }
+
+    #[test]
+    fn overlay_tools_with_none_loaded_say_so() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, _) = overlay_registry(&scratch);
+        for tool in ["list_overlay", "save_overlay"] {
+            let error = tool_error(&mut registry, tool, json!({}));
+            assert!(error.contains("no overlay is loaded"), "{tool}: {error}");
+        }
+    }
+
+    #[test]
+    fn overlay_tools_say_their_records_are_hypotheses() {
+        for name in [
+            "load_overlay",
+            "record_edges",
+            "save_overlay",
+            "list_overlay",
+        ] {
+            let tool = Management::from_name(name)
+                .unwrap_or_else(|| panic!("`{name}` is not a tool"))
+                .tool();
+            let description = tool["description"].as_str().unwrap();
+            for claim in ["hypothes", "beside the catalog", "never proof"] {
+                assert!(description.contains(claim), "`{name}`: {description}");
+            }
+        }
     }
 
     #[test]

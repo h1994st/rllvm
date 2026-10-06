@@ -470,6 +470,15 @@ The client chooses what to analyze with `load_catalog` (a catalog JSON) or
 `inventory` (a binary, archive or `.bc`), and can keep several loaded at once.
 Each is analyzed once and answers from memory after that.
 
+Four tools keep the [call-graph overlay](#completing-the-call-graph) over MCP.
+`record_edges` takes the records `overlay record` reads, all or none, attaching
+the overlay beside the catalog first if none is; `reach` and `closure` walk them
+at once with `include_overlay` (and `min_confidence`). Only `save_overlay`
+writes, appending to the file. `load_overlay` attaches the default file or
+`path` (required after `inventory`) and refuses to drop unsaved records unless
+`discard_pending` is set; `list_overlay` shows the edges, saved or not.
+`unload_catalog` reports any unsaved records it dropped.
+
 See the [MCP example](examples/mcp/). In Claude Code, the
 [plugin](#claude-code-plugin) configures this server for you.
 

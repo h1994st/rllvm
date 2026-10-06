@@ -57,10 +57,9 @@ find the exact symbol with `at`, `callers` or `callees`, then query that.
 ## Recording resolved indirect calls
 
 When you resolve an unresolved indirect call by reading the code, record it
-in the call-graph overlay: pipe JSON lines to `rllvm-query --catalog
-catalog.json overlay record`. The overlay is a file beside the catalog,
-`<catalog stem>.overlay.jsonl` unless `--overlay PATH` is given; the catalog
-is never changed.
+in the call-graph overlay. The overlay is a file beside the catalog,
+`<catalog stem>.overlay.jsonl` unless another is named; the catalog is never
+changed. Records are the same over MCP and the command line:
 
 - `{"op":"add","via_field":{"record":"ops","offset":8},"to":"h3","confidence":"high","provenance":["init: o->handler = h3"]}`
   attaches to every unresolved site through `ops@8`; `"site": <call site
@@ -71,22 +70,41 @@ is never changed.
   and `{"op":"retract","edge":<key>,"reason":...}` name an edge's key.
 - A batch applies all or none; an error names the bad record. An edge on a
   bounded or direct site is rejected.
-- `overlay list` shows edges and the sites they cover; `overlay compact`
-  rewrites the file as the current edges.
 - After a rebuild the overlay refuses to load, naming both fingerprints. It
   also refuses one written by an rllvm-query that numbers call sites
-  differently.
-  To start again, move or delete the file, or name another with
-  `--overlay` (MCP: `path`).
+  differently. To start again, move or delete the file, or name another
+  with `--overlay` (MCP: `path`).
 - A save or compaction refuses when another writer changed the file since
   it was opened; reopen it and record again.
+
+Over MCP:
+
+- `record_edges` takes them as `records`, attaching the overlay beside the
+  catalog first if none is loaded. They are walked at once but stay in
+  memory until `save_overlay`, the only tool that writes: it appends them
+  and reports how many were `saved`.
+- `load_overlay` attaches the default file, or `path` — required for a
+  program loaded with `inventory`. It refuses to replace an overlay holding
+  unsaved records unless `discard_pending` is true.
+- `list_overlay` shows the edges, the sites they cover, and `pending`
+  unsaved records.
+- Unloading a catalog drops its overlay and reports how many unsaved records
+  went with it; reloading a rebuilt catalog drops an overlay bound to the
+  old build. Save before unloading, reloading, or ending the session;
+  unsaved records are not written on exit.
+
+On the command line, pipe them as JSON lines to `rllvm-query --catalog
+catalog.json overlay record`, which saves at once; `--overlay PATH` names
+another file. `overlay list` shows edges and the sites they cover; `overlay
+compact` rewrites the file as the current edges.
 
 Overlay edges are hypotheses, never proof: no answer uses them unless asked.
 `reach` and `closure` walk them with `include_overlay` (`--include-overlay`),
 skipping refuted edges and any below `min_confidence` (`--min-confidence
 low|medium|high`, default `low`). A file `--overlay` names must exist for
-a walk to read it. Over MCP no overlay can be loaded yet, so
-`include_overlay` there is an error.
+a walk to read it. Over MCP they need an overlay that `load_overlay` or
+`record_edges` attached; without one, `include_overlay` is an error, never a
+direct-only answer.
 
 - Every step through one is `kind: agent` with its `confidence`,
   `provenance` and `verdict`; quote the provenance when reporting it.
