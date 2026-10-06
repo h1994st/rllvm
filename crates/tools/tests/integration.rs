@@ -3450,6 +3450,78 @@ int main(int argc, char **argv) {
     }
 }
 
+/// rustc puts an allocator shim (`__rust_alloc` and friends) in a staticlib,
+/// named after the crate but generated outside its bitcode. The member must
+/// record nothing, so the catalog reports it instead of hiding its functions
+/// behind a module that does not define them.
+#[test]
+fn a_staticlib_allocator_shim_records_no_bitcode() {
+    use object::{Object, ObjectSymbol};
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let src = root.join("shim.rs");
+    fs::write(
+        &src,
+        "#[unsafe(no_mangle)]\npub extern \"C\" fn boxed(x: i32) -> i32 { *Box::new(x) }\n",
+    )
+    .unwrap();
+    let output = rllvm("rllvm-rustc")
+        .arg(which("rustc").unwrap())
+        .args(["--crate-name=shim", "--crate-type=staticlib", "--out-dir"])
+        .arg(&root)
+        .arg(&src)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "staticlib compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let archive = root.join("libshim.a");
+    let data = fs::read(&archive).unwrap();
+    let parsed = object::read::archive::ArchiveFile::parse(&*data).unwrap();
+    let defines_alloc = |member: &[u8]| {
+        object::File::parse(member).is_ok_and(|object| {
+            object.symbols().any(|symbol| {
+                symbol.is_definition() && symbol.name().is_ok_and(|n| n.contains("__rust_alloc"))
+            })
+        })
+    };
+    let shim: Vec<String> = parsed
+        .members()
+        .filter_map(Result::ok)
+        .filter(|member| member.data(&*data).is_ok_and(defines_alloc))
+        .map(|member| String::from_utf8_lossy(member.name()).into_owned())
+        .filter(|name| name.starts_with("shim."))
+        .collect();
+    assert_eq!(
+        shim.len(),
+        1,
+        "expected one allocator shim member, got {shim:?}"
+    );
+
+    let info = rllvm("rllvm-info")
+        .arg(&archive)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert!(
+        info.status.success(),
+        "rllvm-info failed: {}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    let catalog = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        catalog.contains(&format!(
+            "archive object {} contains no recorded module references",
+            shim[0]
+        )),
+        "the allocator shim must be reported as carrying no bitcode: {catalog}"
+    );
+}
+
 fn assert_rustc_relative_output(out_dir: bool, relative_record: bool) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
