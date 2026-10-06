@@ -232,6 +232,14 @@ struct Header {
     fingerprint: String,
 }
 
+/// How to get past an overlay file that refuses to load as a whole.
+fn fresh_overlay_hint(path: &Path) -> String {
+    format!(
+        "move or delete {} to start a new overlay, or name another with --overlay (MCP: path)",
+        path.display()
+    )
+}
+
 /// What an overlay last saw of its file, to tell its own writes from another
 /// writer's: an append changes the length, and a compaction or a rewrite by
 /// an editor replaces the inode.
@@ -331,8 +339,11 @@ impl Overlay {
             return Err(at(
                 1,
                 format!(
-                    "recorded against a different build of this catalog (overlay {}, catalog {})",
-                    header.fingerprint, overlay.fingerprint
+                    "recorded against a different build of this catalog (overlay {}, catalog \
+                     {}); {}",
+                    header.fingerprint,
+                    overlay.fingerprint,
+                    fresh_overlay_hint(path)
                 ),
             ));
         }
@@ -1159,6 +1170,19 @@ mod tests {
         assert!(error.contains("different build"), "{error}");
         assert!(error.contains(&fingerprint(&session).unwrap()), "{error}");
         assert!(error.contains(&fingerprint(&rebuilt).unwrap()), "{error}");
+        assert_names_a_way_forward(&error, &path);
+    }
+
+    /// The guidance every refusal of a whole file ends with.
+    fn assert_names_a_way_forward(error: &str, path: &Path) {
+        assert!(
+            error.ends_with(&format!(
+                "move or delete {} to start a new overlay, or name another with --overlay \
+                 (MCP: path)",
+                path.display()
+            )),
+            "{error}"
+        );
     }
 
     #[test]
