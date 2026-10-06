@@ -26,8 +26,8 @@ dependence, do not start; completing a whole program is rarely the goal.
    (`ops@8`: record and byte offset), `field_name`, `signature`, `sites`, and
    `candidates`: functions stored into that field, each with its
    `assignments` and whether `signature_matches`.
-2. For each group, read the source of every assignment (`at` on its
-   `file:line`, or the file itself). Confirm the member is `field_name` and
+2. For each group, read the source of every assignment (`at` with the
+   assignment's `file` and `line`, or the file itself). Confirm the member is `field_name` and
    the struct is the record type, not a same-named field of another struct.
    `uses` on a candidate lists every place its address is taken.
 3. Decide the targets. A candidate is not a target until you have read the
@@ -105,8 +105,11 @@ A `confirmed` verdict from `reread` is still your judgment, not proof.
 `record_edges` takes these as `records`; `rllvm-query overlay record` takes
 them as JSON lines on stdin.
 
+The `edge` of a `verify` or `retract` is the `key` object of an edge in
+`list_overlay`, either `{via_field, to}` or `{site, to}`; copy it verbatim.
+
 ```json
 {"op":"add","via_field":{"record":"ops","offset":8},"to":"handler","confidence":"high","provenance":["ops.c:8: o->cb = handler"]}
-{"op":"verify","edge":"<key from list_overlay>","tool":"reread","verdict":"confirmed"}
-{"op":"retract","edge":"<key from list_overlay>","reason":"re-read: the assignment is dead code"}
+{"op":"verify","edge":{"via_field":{"record":"ops","offset":8},"to":{"module_id":"<id>","symbol":"handler"}},"tool":"reread","verdict":"confirmed"}
+{"op":"retract","edge":{"via_field":{"record":"ops","offset":8},"to":{"module_id":"<id>","symbol":"handler"}},"reason":"re-read: the assignment is dead code"}
 ```
