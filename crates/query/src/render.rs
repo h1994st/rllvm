@@ -918,6 +918,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                         location: at,
                         key,
                         confidence,
+                        provenance,
                         verdict,
                     } => {
                         let via = match key {
@@ -943,6 +944,15 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                                 Paint::Uncertain
                             )
                         ));
+                        // Why the edge was claimed, nested under it like a
+                        // function's call sites, so the claim is never read
+                        // without its grounds.
+                        for entry in provenance {
+                            out.push_str(&format!(
+                                "{CALL_SITE_INDENT}{} {entry}\n",
+                                paint("because", ctx.color, Paint::Muted)
+                            ));
+                        }
                     }
                 }
             }
@@ -1344,7 +1354,7 @@ mod tests {
             let text = render(&result, mode, Color::Never);
             assert!(
                 text.contains(
-                    "agent             dispatch -> h3 at t.c:4 via ops@8 [high, unverified]\n"
+                    "agent             dispatch -> h3 at t.c:4 via ops@8 [high, unverified]\n    because init: o->on_event = h3\n"
                 ),
                 "got: {text}"
             );

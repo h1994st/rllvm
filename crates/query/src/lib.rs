@@ -2187,10 +2187,19 @@ mod tests {
                         verdict: None,
                         chosen,
                         site,
+                        provenance,
                         ..
-                    }) if chosen.symbol == "h3" && site.function.symbol == "dispatch"
+                    }) if chosen.symbol == "h3"
+                        && site.function.symbol == "dispatch"
+                        && provenance == &["init: o->on_event = h3"]
                 ),
                 "{path:?}"
+            );
+            let json = serde_json::to_value(&result).unwrap();
+            assert_eq!(
+                json["results"].as_array().unwrap().last().unwrap()["provenance"],
+                serde_json::json!(["init: o->on_event = h3"]),
+                "the grounds reach a JSON reader too"
             );
             assert_eq!(result.uncertainty.agent_path_steps, 1);
             assert_eq!(result.uncertainty.conditional_path_steps, 0);

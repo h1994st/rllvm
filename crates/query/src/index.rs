@@ -134,6 +134,8 @@ pub enum PathStep {
         location: Option<SourceLocation>,
         key: EdgeKey,
         confidence: Confidence,
+        /// Why the agent claimed the edge, quoted from the record.
+        provenance: Vec<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         verdict: Option<Verdict>,
     },

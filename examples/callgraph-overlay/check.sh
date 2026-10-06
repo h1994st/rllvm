@@ -49,9 +49,15 @@ defines "$(cat "$OUT/record.txt")" '^recorded 1, saved 1 ' \
 steps=$(query reach main handler --include-overlay --json |
     field 'a["uncertainty"]["agent_path_steps"]')
 [ "$steps" = 1 ] || fail "reach --include-overlay used $steps agent steps, expected 1"
+grounds=$(query reach main handler --include-overlay --json |
+    field '[s["provenance"] for s in a["results"] if s["kind"] == "agent"]')
+[ "$grounds" = "[['ops.c:8: o->on_event = handler']]" ] ||
+    fail "the agent step carried provenance $grounds, expected the recorded one"
 text=$(query reach main handler --include-overlay)
 defines "$text" '^agent +dispatch -> handler at .*ops\.c:10 via ops@8 \[high, unverified\]$' \
     "the agent step was not labeled: $text"
+defines "$text" '^    because ops\.c:8: o->on_event = handler$' \
+    "the agent step did not say why it was claimed: $text"
 defines "$text" '^not proven: this path uses 1 agent edge\(s\)$' \
     "the answer did not say it is not proven: $text"
 # Not asked for, the overlay is not walked.

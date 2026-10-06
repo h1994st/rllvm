@@ -87,8 +87,9 @@ skipping refuted edges and any below `min_confidence` (`--min-confidence
 low|medium|high`, default `low`). Over MCP no overlay can be loaded yet, so
 `include_overlay` there is an error.
 
-- Every step through one is `kind: agent` with its `confidence` and
-  `verdict`; `uncertainty.agent_path_steps` counts them. Non-zero means the
+- Every step through one is `kind: agent` with its `confidence`,
+  `provenance` and `verdict`; quote the provenance when reporting it.
+  `uncertainty.agent_path_steps` counts them. Non-zero means the
   path is not proven: report it as a hypothesis, never as reachability.
 - `closure` lists functions reached only through agent edges in
   `uncertainty.agent_reached`; `uncertainty.overlay` gives `covered_sites` of

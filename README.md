@@ -441,10 +441,11 @@ rllvm-query --catalog catalog.json closure handler in --include-overlay --min-co
 
 `--include-overlay` makes `reach` and `closure` also walk overlay edges, never
 refuted ones, and `--min-confidence low|medium|high` (default `low`) drops
-weaker ones. Each step through one is labeled `agent`, a path using one ends
-`not proven`, and `closure` lists what only agent edges reach apart. An
-overlay file that cannot be read is an error, never a direct-only answer. See
-the [call-graph overlay example](examples/callgraph-overlay/).
+weaker ones. Each step through one is labeled `agent` with the edge's
+provenance, a path using one ends `not proven`, and `closure` lists what only
+agent edges reach apart. An overlay file that cannot be read is an error,
+never a direct-only answer. See the [call-graph overlay
+example](examples/callgraph-overlay/).
 
 ### MCP server
 

@@ -644,6 +644,7 @@ impl OverlayView {
                     location: site.location.clone(),
                     key: edge.key.clone(),
                     confidence: edge.confidence,
+                    provenance: edge.provenance.clone(),
                     verdict: edge.verification.as_ref().map(|v| v.verdict),
                 };
                 let caller = &site.id.function;
