@@ -3849,6 +3849,32 @@ fn an_alias_is_a_definition_that_forwards_to_its_target() {
     );
 }
 
+/// An alias has no body of its own, so a slice member that is an alias is
+/// emitted with the function it stands for, even when that function is not
+/// itself on the path; anything else stays out.
+#[test]
+fn an_emitted_alias_brings_the_body_it_stands_for() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = aliased_catalog(&scratch);
+    for (to, defined) in [
+        ("exported", &["exported", "impl", "main"][..]),
+        ("leaf", &["exported", "impl", "leaf", "main"][..]),
+    ] {
+        let out = scratch.path().join(format!("{to}.bc"));
+        let answer = query_json(
+            &scratch,
+            &catalog,
+            &["slice", "main", to, "--emit-module", out.to_str().unwrap()],
+        );
+        assert_eq!(answer["emitted"]["functions"], defined.len(), "{answer}");
+        assert_eq!(
+            defined_symbols(&out),
+            defined.iter().map(|symbol| symbol.to_string()).collect(),
+            "slice main {to}"
+        );
+    }
+}
+
 #[test]
 fn resolution_candidates_join_a_dispatch_to_its_stores() {
     let scratch = tempfile::tempdir().unwrap();

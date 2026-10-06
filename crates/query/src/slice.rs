@@ -43,7 +43,8 @@ pub struct EmittedModule {
 /// which members are definitions, which are aliases, and which functions
 /// each module names, so no module is parsed again here. A slice member that
 /// is only a declaration contributes nothing: the definition it binds to is
-/// a member of its own. Module bytes are read and hash-checked
+/// a member of its own. An alias has no body, so it comes with the function
+/// it stands for, on the path or not. Module bytes are read and hash-checked
 /// as a query reads them, archive members included, and written to a
 /// temporary directory under their position in the catalog, never under a
 /// module id, which is free text.
@@ -175,13 +176,24 @@ fn plan_pieces(session: &Session, functions: &[FunctionId]) -> BTreeMap<String, 
             continue;
         };
         let plan = plans.entry(id.module_id.clone()).or_default();
-        let flag = if function.alias_of.is_some() {
-            "--alias"
-        } else {
-            "--func"
-        };
-        if plan.cut.insert(function.id.symbol.clone()) {
+        // An alias, then what it stands for, until a function with a body:
+        // `llvm-extract` keeps an alias whose aliasee it cut away as a
+        // declaration, which no linker accepts.
+        let mut next = Some(function);
+        while let Some(function) = next {
+            let flag = if function.alias_of.is_some() {
+                "--alias"
+            } else {
+                "--func"
+            };
+            if !plan.cut.insert(function.id.symbol.clone()) {
+                break;
+            }
             plan.definitions.push((flag, function.id.symbol.clone()));
+            next = function
+                .alias_of
+                .as_ref()
+                .and_then(|target| session.function(target));
         }
     }
     for function in session.functions() {
