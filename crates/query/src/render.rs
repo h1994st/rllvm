@@ -711,10 +711,17 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
         out.push_str(&format!("  functions_of_unknown_language: {unknown}\n"));
     }
     // Only for a walk that included the overlay: without it they say nothing.
+    // A closure takes no path, so it counts what agent edges reached.
     if let Some(overlay) = &uncertainty.overlay {
+        let agent = match result.results {
+            QueryResults::Closure(_) => {
+                format!("agent_reached: {}", uncertainty.agent_reached.len())
+            }
+            _ => format!("agent_path_steps: {}", uncertainty.agent_path_steps),
+        };
         out.push_str(&format!(
-            "  agent_path_steps: {}\n  overlay: {} of {} unresolved site(s) covered\n",
-            uncertainty.agent_path_steps, overlay.covered_sites, overlay.unresolved_sites
+            "  {agent}\n  overlay: {} of {} unresolved site(s) covered\n",
+            overlay.covered_sites, overlay.unresolved_sites
         ));
     }
     // Every ambiguous binding `ambiguous_bindings` only counts: for `reach`
@@ -1386,6 +1393,12 @@ mod tests {
             !text.contains("not proven"),
             "a closure has no path: {text}"
         );
+
+        // A closure takes no path, so `--full` counts what agent edges
+        // reached rather than reporting zero agent steps.
+        let full = render(&result, TextMode::Full, Color::Never);
+        assert!(full.contains("\n  agent_reached: 1\n"), "got: {full}");
+        assert!(!full.contains("agent_path_steps"), "got: {full}");
     }
 
     #[test]
