@@ -15,8 +15,7 @@ use serde::Serialize;
 use rllvm_core::{catalog::ArchiveCache, error::Error, utils::execute_llvm_tool_in_for_output};
 
 use crate::{
-    Query, QueryResult, QueryResults,
-    extract::extract_neutral,
+    Query, QueryResult, QueryResults, Session,
     facts::{FunctionId, Linkage},
     load::{load_catalog, read_module},
 };
@@ -40,12 +39,20 @@ pub struct EmittedModule {
 /// stay as declarations. `llvm-extract` is the sibling of the configured
 /// `llvm-link`.
 ///
-/// A slice member that is only a declaration in its module contributes
-/// nothing: the definition it binds to is a member of its own. Module bytes
-/// are read and hash-checked as a query reads them, archive members
-/// included, and written to a temporary directory under their position in
-/// the catalog, never under a module id, which is free text.
+/// `session` is the one `functions` came from, loaded from `catalog`: it says
+/// which members are definitions, which are aliases, and which functions
+/// each module names, so no module is parsed again here. A slice member that
+/// is only a declaration contributes nothing: the definition it binds to is
+/// a member of its own. Module bytes are read and hash-checked
+/// as a query reads them, archive members included, and written to a
+/// temporary directory under their position in the catalog, never under a
+/// module id, which is free text.
+///
+/// `llvm-extract` makes every `static` it keeps external, so a `static` cut
+/// out that shares a name with a function another contributing module names
+/// is refused rather than linked.
 pub fn emit_module(
+    session: &Session,
     catalog: &Path,
     functions: &[FunctionId],
     llvm_link: &Path,
@@ -59,86 +66,57 @@ pub fn emit_module(
         )));
     }
 
-    let mut wanted: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
-    for id in functions {
-        wanted
-            .entry(id.module_id.as_str())
-            .or_default()
-            .insert(id.symbol.as_str());
-    }
-
-    let loaded = load_catalog(catalog)?;
-    let scratch = tempfile::TempDir::new()?;
-    let mut archives = ArchiveCache::default();
-    let mut pieces: Vec<Piece> = Vec::new();
-    for (index, pending) in loaded.pending.iter().enumerate() {
-        let Some(symbols) = wanted.remove(pending.id.as_str()) else {
-            continue;
-        };
-        let module = read_module(pending, &mut archives)?;
-        // Which members this module defines, and which of those are
-        // aliases: `llvm-extract` names the two kinds with different flags,
-        // and a declaration is not cut out at all.
-        let facts = extract_neutral(&module)?;
-        let mut piece = Piece {
-            module: pending.id.clone(),
-            input: scratch.path().join(format!("{index}.bc")),
-            output: scratch.path().join(format!("{index}.slice.bc")),
-            definitions: Vec::new(),
-            statics: Vec::new(),
-            named: facts
-                .functions
-                .iter()
-                .map(|function| function.id.symbol.clone())
-                .collect(),
-        };
-        for function in facts
-            .functions
-            .iter()
-            .filter(|function| function.is_definition)
-            .filter(|function| symbols.contains(function.id.symbol.as_str()))
-        {
-            let flag = if function.alias_of.is_some() {
-                "--alias"
-            } else {
-                "--func"
-            };
-            piece.definitions.push((flag, function.id.symbol.clone()));
-            if function.linkage == Linkage::Internal {
-                piece.statics.push(function.id.symbol.clone());
-            }
-        }
-        if !piece.definitions.is_empty() {
-            std::fs::write(&piece.input, &module.bytes)?;
-            pieces.push(piece);
-        }
-    }
-    drop(archives);
-
-    if let Some((module, _)) = wanted.into_iter().next() {
-        return Err(Error::InvalidArguments(format!(
-            "module {module} holds slice functions but was not read from {}",
-            catalog.display()
-        )));
-    }
-    if pieces.is_empty() {
+    let mut plans = plan_pieces(session, functions);
+    if plans.is_empty() {
         return Err(Error::InvalidArguments(
             "the slice holds no definition; nothing to emit".to_string(),
         ));
     }
-    refuse_colliding_statics(&pieces)?;
+    refuse_colliding_statics(&plans)?;
+
+    let loaded = load_catalog(catalog)?;
+    let scratch = tempfile::TempDir::new()?;
+    let mut archives = ArchiveCache::default();
+    let mut pieces: Vec<(PathBuf, PathBuf, Plan)> = Vec::new();
+    for (index, pending) in loaded.pending.iter().enumerate() {
+        let Some(plan) = plans.remove(pending.id.as_str()) else {
+            continue;
+        };
+        // The facts above describe the bytes the session read; a catalog
+        // rewritten since names other bytes, which they do not describe.
+        let analyzed = session
+            .modules()
+            .iter()
+            .find(|report| report.id == pending.id)
+            .and_then(|report| report.content_sha256.as_ref());
+        if analyzed.is_some() && analyzed != pending.record.content_sha256.as_ref() {
+            return Err(Error::InvalidArguments(format!(
+                "module {} changed in {} since the query read it",
+                pending.id,
+                catalog.display()
+            )));
+        }
+        let module = read_module(pending, &mut archives)?;
+        let input = scratch.path().join(format!("{index}.bc"));
+        let output = scratch.path().join(format!("{index}.slice.bc"));
+        std::fs::write(&input, &module.bytes)?;
+        pieces.push((input, output, plan));
+    }
+    drop(archives);
+    if let Some(module) = plans.into_keys().next() {
+        return Err(Error::InvalidArguments(format!(
+            "module {module} holds slice definitions but was not read from {}",
+            catalog.display()
+        )));
+    }
 
     let environment = inherited_environment();
-    for piece in &pieces {
+    for (input, output, plan) in &pieces {
         let mut arguments: Vec<OsString> = Vec::new();
-        for (flag, symbol) in &piece.definitions {
+        for (flag, symbol) in &plan.definitions {
             arguments.extend([OsString::from(flag), OsString::from(symbol)]);
         }
-        arguments.extend([
-            "-o".into(),
-            piece.output.clone().into(),
-            piece.input.clone().into(),
-        ]);
+        arguments.extend(["-o".into(), output.clone().into(), input.clone().into()]);
         run_tool(&llvm_extract, &arguments, scratch.path(), &environment)?;
     }
 
@@ -148,19 +126,23 @@ pub fn emit_module(
     arguments.extend(
         pieces
             .iter()
-            .map(|piece| piece.output.clone().into_os_string()),
+            .map(|(_, output, _)| output.clone().into_os_string()),
     );
     run_tool(llvm_link, &arguments, scratch.path(), &environment)?;
     Ok(EmittedModule {
         path: out.to_path_buf(),
         modules: pieces.len(),
-        functions: pieces.iter().map(|piece| piece.definitions.len()).sum(),
+        functions: pieces
+            .iter()
+            .map(|(_, _, plan)| plan.definitions.len())
+            .sum(),
     })
 }
 
-/// [`emit_module`] for a `slice` answer. A slice that found no path is an
-/// error, never an empty module.
+/// [`emit_module`] for a `slice` answer `session` gave. A slice that found
+/// no path is an error, never an empty module.
 pub fn emit_slice(
+    session: &Session,
     catalog: &Path,
     answer: &QueryResult,
     llvm_link: &Path,
@@ -173,7 +155,7 @@ pub fn emit_slice(
                     "no path from {from} to {to}; nothing to emit"
                 )));
             }
-            emit_module(catalog, &slice.functions, llvm_link, out)
+            emit_module(session, catalog, &slice.functions, llvm_link, out)
         }
         _ => Err(Error::InvalidArguments(
             "only a `slice` answer emits a module".to_string(),
@@ -181,17 +163,46 @@ pub fn emit_slice(
     }
 }
 
-/// One source module's share of the slice, before `llvm-extract` runs.
-struct Piece {
-    module: String,
-    /// The module's bytes, named after its position in the catalog.
-    input: PathBuf,
-    output: PathBuf,
+/// What one source module contributes, decided from the session's facts
+/// before any bytes are read. Keyed by module id; a module whose members are
+/// all declarations has no entry.
+fn plan_pieces(session: &Session, functions: &[FunctionId]) -> BTreeMap<String, Plan> {
+    let mut plans: BTreeMap<String, Plan> = BTreeMap::new();
+    for id in functions {
+        let Some(function) = session.function(id).filter(|f| f.is_definition) else {
+            continue;
+        };
+        let plan = plans.entry(id.module_id.clone()).or_default();
+        let flag = if function.alias_of.is_some() {
+            "--alias"
+        } else {
+            "--func"
+        };
+        if plan.cut.insert(function.id.symbol.clone()) {
+            plan.definitions.push((flag, function.id.symbol.clone()));
+        }
+    }
+    for function in session.functions() {
+        if let Some(plan) = plans.get_mut(&function.id.module_id) {
+            plan.named.insert(function.id.symbol.clone());
+            if function.linkage == Linkage::Internal && plan.cut.contains(&function.id.symbol) {
+                plan.statics.insert(function.id.symbol.clone());
+            }
+        }
+    }
+    plans
+}
+
+/// One source module's share of the slice.
+#[derive(Default)]
+struct Plan {
     /// Each definition cut out, with the `llvm-extract` flag that names it:
     /// `--func`, or `--alias` for an alias.
     definitions: Vec<(&'static str, String)>,
+    /// The symbols in `definitions`.
+    cut: BTreeSet<String>,
     /// The definitions cut out that were `static`.
-    statics: Vec<String>,
+    statics: BTreeSet<String>,
     /// Every function the module defines or declares.
     named: BTreeSet<String>,
 }
@@ -200,18 +211,20 @@ struct Piece {
 /// `static` cut out of one module would be linked as the definition of any
 /// same-named function another piece defines or calls: a module that binds
 /// calls the program never makes. Refused, naming both modules.
-fn refuse_colliding_statics(pieces: &[Piece]) -> Result<(), Error> {
-    for piece in pieces {
-        for symbol in &piece.statics {
-            if let Some(other) = pieces
+///
+/// Conservative: it compares every function each module names, not only what
+/// survives in its piece.
+fn refuse_colliding_statics(plans: &BTreeMap<String, Plan>) -> Result<(), Error> {
+    for (module, plan) in plans {
+        for symbol in &plan.statics {
+            if let Some((other, _)) = plans
                 .iter()
-                .find(|other| other.module != piece.module && other.named.contains(symbol))
+                .find(|(other, other_plan)| *other != module && other_plan.named.contains(symbol))
             {
                 return Err(Error::InvalidArguments(format!(
-                    "cannot emit the slice as one module: `{symbol}` is static in module {} \
-                     and also named in module {}, and llvm-extract makes a static it keeps \
-                     external",
-                    piece.module, other.module
+                    "cannot emit the slice as one module: `{symbol}` is static in module \
+                     {module} and also named in module {other}, and llvm-extract makes a \
+                     static external"
                 )));
             }
         }

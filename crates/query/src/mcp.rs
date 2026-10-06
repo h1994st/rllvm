@@ -1147,7 +1147,7 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
             let message = "`emit_module` needs llvm-link, and this server has none configured";
             return Outcome::Result(call_tool_result(true, message), false);
         };
-        match emit_slice(&key, &result, llvm_link, &out) {
+        match emit_slice(session, &key, &result, llvm_link, &out) {
             Ok(emitted) => payload["emitted"] = json!(emitted),
             Err(error) => {
                 return Outcome::Result(call_tool_result(true, &error.to_string()), false);

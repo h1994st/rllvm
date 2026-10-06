@@ -478,6 +478,7 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     // reads as though the module were written.
     let emitted = match &emit_module {
         Some(out) => Some(emit_slice(
+            &session,
             &catalog,
             &result,
             try_rllvm_config()?.llvm_link_filepath(),
