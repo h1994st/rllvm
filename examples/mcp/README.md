@@ -4,7 +4,8 @@
 
 ## Requirements
 
-`rllvm-query`, a separate crate that is not built by a default `cargo build`.
+`rllvm-cc` to capture the fixture, and `rllvm-query` — a separate crate that a
+default `cargo build` does not build.
 
 ## Build and verify
 
@@ -12,19 +13,31 @@
 ./check.sh
 ```
 
-It sends one `tools/list` request and checks the reply lists the tools — and
-that stdout carried protocol frames and nothing else.
+It captures `lib.c`, then `mcp_session.py` runs two full sessions over stdio —
+one per protocol era the server supports. Each session discovers the server,
+lists its tools, loads the captured module with `inventory`, and asks `defs`
+where `helper` is defined. The check confirms the answer (`lib.c:1`), that the
+modern session's cache envelope is well formed (`cacheScope` is `public` or
+`private`), and that stdout carried protocol frames and nothing else.
 
-## What it does
+## What a session looks like
+
+A client keeps one connection open and sends newline-delimited requests:
 
 ```bash
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | rllvm-query mcp
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"server/discover"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inventory","arguments":{"artifact":"lib.o"}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"defs","arguments":{"name":"helper"}}}' |
+    rllvm-query mcp
 ```
 
-A real client keeps the session open, chooses what to analyze with
-`load_catalog` (a catalog JSON) or `inventory` (a binary, archive or `.bc`),
-and can keep several loaded at once. Each is analyzed once and answers from
-memory after that.
+It chooses what to analyze with `inventory` (a binary, archive or `.bc`) or
+`load_catalog` (a catalog JSON), and can keep several loaded at once; each is
+analyzed once and answers from memory after that. A modern client adds an
+`_meta` block naming the protocol version it speaks; `server/discover` lists
+the versions the server supports.
 
 ## Pointing a client at it
 
@@ -42,5 +55,5 @@ memory after that.
 ## Stdout is the protocol
 
 Diagnostics go to stderr. Anything else on stdout would corrupt the frame
-stream for a client reading it, which is why this example checks every line
-parses as JSON.
+stream for a client reading it, which is why the check parses every line as
+JSON.
