@@ -120,6 +120,9 @@ for line in filter(str.strip, out.splitlines()):
 steps = answers["reach"]["uncertainty"].get("agent_path_steps")
 if steps != 1:
     sys.exit(f"reach over MCP used {steps} agent steps, expected 1")
+agent = [s for s in answers["reach"]["results"] if s["kind"] == "agent"]
+if [s["provenance"] for s in agent] != [["ops.c:8: o->on_event = handler"]]:
+    sys.exit(f"the agent step did not carry the recorded provenance: {agent}")
 if answers["save_overlay"]["saved"] != 1:
     sys.exit(f"save_overlay wrote {answers['save_overlay']}, expected 1 record")
 PY
