@@ -19,7 +19,7 @@ use rllvm_query::{
 use tracing_subscriber::FmtSubscriber;
 
 /// Converts a parsed subcommand into the [`Query`] it names, or `None` for
-/// the two variants that name a mode rather than one of the ten queries:
+/// the two variants that name a mode rather than one of the eleven queries:
 /// `Mcp` (serve over MCP stdio) and `Completions` (print a completion
 /// script), both of which this binary has already handled by the time a
 /// query would run.
@@ -49,6 +49,7 @@ fn to_query(command: QueryCommand, heuristics: bool) -> Option<Query> {
         QueryCommand::Externals => Query::Externals,
         QueryCommand::FfiExports => Query::FfiExports,
         QueryCommand::IndirectTargets { at } => Query::IndirectTargets { at, heuristics },
+        QueryCommand::ResolutionCandidates => Query::ResolutionCandidates,
         QueryCommand::Mcp => return None,
         // `main` answers this one before `run_query` is ever called; the arm
         // is here so adding a mode variant cannot compile without a decision.
@@ -258,7 +259,8 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         | QueryCommand::Closure { .. }
         | QueryCommand::Externals
         | QueryCommand::FfiExports
-        | QueryCommand::IndirectTargets { .. } => {}
+        | QueryCommand::IndirectTargets { .. }
+        | QueryCommand::ResolutionCandidates => {}
     }
 
     // Unreachable through the match above, which returns for every command
@@ -386,6 +388,7 @@ mod tests {
             Query::Externals => QueryCommand::Externals,
             Query::FfiExports => QueryCommand::FfiExports,
             Query::IndirectTargets { at, .. } => QueryCommand::IndirectTargets { at: at.clone() },
+            Query::ResolutionCandidates => QueryCommand::ResolutionCandidates,
         }
     }
 

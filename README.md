@@ -359,6 +359,7 @@ rllvm-query --catalog catalog.json closure parse_frame in      # everything that
 rllvm-query --catalog catalog.json externals                   # unbound symbols
 rllvm-query --catalog catalog.json ffi-exports                 # Rust functions C can call
 rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an indirect call
+rllvm-query --catalog catalog.json resolution-candidates       # indirect calls grouped by field, with candidates
 ```
 
 An indirect call site, and an address stored or placed in a table, names the

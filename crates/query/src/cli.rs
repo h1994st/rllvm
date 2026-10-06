@@ -72,12 +72,12 @@ pub enum ClosureDirection {
     Out,
 }
 
-/// The ten source-level queries `rllvm-query` answers, plus `Mcp` to serve
+/// The eleven source-level queries `rllvm-query` answers, plus `Mcp` to serve
 /// them over MCP stdio instead of running one and exiting, `Completions` to
 /// print a shell completion script, and `Cache` to inspect or prune the
 /// per-module facts cache -- thirteen variants in all.
 ///
-/// The ten query variants mirror [`crate::Query`] field-for-field, for the
+/// The eleven query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
 /// converts a parsed variant into a [`crate::Query`] before running it;
 /// `Mcp` and `Completions` have no counterpart there -- they name a mode,
@@ -144,7 +144,9 @@ pub enum QueryCommand {
         /// `file:line` location, e.g. `t.c:4`
         at: String,
     },
-    /// Serve the ten queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
+    /// Unresolved indirect call sites grouped by the record field they dispatch through, with the functions stored into that field. Candidates, not edges.
+    ResolutionCandidates,
+    /// Serve the eleven queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
     Mcp,
     /// Print a shell completion script for `rllvm-query`
     ///

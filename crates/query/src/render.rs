@@ -362,6 +362,13 @@ fn shown_in(results: &QueryResults) -> Shown {
             // than the row.
             shown.indirect_call_site = !entries.is_empty();
         }
+        QueryResults::ResolutionCandidates(groups) => {
+            shown.missing_location = groups
+                .iter()
+                .any(|group| group.sites.iter().any(|site| site.location.is_none()));
+            // Every group is made of unresolved indirect call sites.
+            shown.indirect_call_site = !groups.is_empty();
+        }
         // Neither prints a location nor a call site: `closure` prints bare
         // names, `externals` a symbol and its binding status.
         QueryResults::Closure(_) | QueryResults::Externals(_) => {}
@@ -393,7 +400,8 @@ fn walks_call_edges(results: &QueryResults) -> bool {
         | QueryResults::Uses(_)
         | QueryResults::Externals(_)
         | QueryResults::FfiExports(_)
-        | QueryResults::IndirectTargets(_) => false,
+        | QueryResults::IndirectTargets(_)
+        | QueryResults::ResolutionCandidates(_) => false,
     }
 }
 
@@ -414,6 +422,9 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         QueryResults::Uses(_) => "no non-call use of the target was found in the selected scope",
         QueryResults::Closure(_) => {
             "no functions were found in the selected scope for that direction"
+        }
+        QueryResults::ResolutionCandidates(_) => {
+            "no unresolved indirect call site in the selected scope"
         }
         // Accurate for `Defs`, `At` and `IndirectTargets`: each takes a name
         // or a location and an empty result there really does mean nothing
@@ -851,6 +862,55 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                         name(symbols, &alias.symbol, ctx),
                         name(symbols, &target.symbol, ctx)
                     )),
+                }
+            }
+        }
+        QueryResults::ResolutionCandidates(groups) => {
+            for group in groups {
+                let subject = match &group.field {
+                    Some(field) => format!(
+                        "field {field}{}",
+                        group
+                            .field_name
+                            .as_ref()
+                            .map(|name| format!(" ({name})"))
+                            .unwrap_or_default()
+                    ),
+                    None => format!("no field, {}", group.signature),
+                };
+                let hint = if group.single_candidate {
+                    " [single]"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "{} \u{2014} {} site(s), {} candidate(s){}\n",
+                    paint(&subject, ctx.color, Paint::Heading),
+                    group.sites.len(),
+                    group.candidates.len(),
+                    paint(hint, ctx.color, Paint::Uncertain)
+                ));
+                for site in &group.sites {
+                    out.push_str(&format!(
+                        "  site {} {}\n",
+                        name(symbols, &site.site.function.symbol, ctx),
+                        location(site.location.as_ref(), ctx)
+                    ));
+                }
+                for candidate in &group.candidates {
+                    for assignment in &candidate.assignments {
+                        let holder = match (&assignment.in_function, &assignment.in_global) {
+                            (Some(id), _) => name(symbols, &id.symbol, ctx),
+                            (None, Some(global)) => name(symbols, global, ctx),
+                            (None, None) => paint("global", ctx.color, Paint::Muted),
+                        };
+                        out.push_str(&format!(
+                            "  candidate {} assigned in {} {}\n",
+                            name(symbols, &candidate.function.symbol, ctx),
+                            holder,
+                            location(assignment.location.as_ref(), ctx)
+                        ));
+                    }
                 }
             }
         }
