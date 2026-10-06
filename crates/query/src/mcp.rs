@@ -71,7 +71,8 @@ const LEGACY: &str = "2025-06-18";
 const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 
-/// What `list_overlay` and `save_overlay` answer for a catalog with no overlay.
+/// What `list_overlay`, `save_overlay` and a walk asking for the overlay
+/// answer for a catalog with no overlay.
 const NO_OVERLAY: &str = "no overlay is loaded for this catalog: call `load_overlay`, or \
                           `record_edges` to start the default one";
 
@@ -1082,7 +1083,13 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
     // location that does not parse -- is a tool error the client can
     // display, not a protocol error, and never an empty `results` list that
     // would read as a valid answer. So is `include_overlay` with no overlay
-    // attached to the catalog: never a direct-only answer.
+    // attached to the catalog: never a direct-only answer, and named here
+    // rather than by `run_with_overlay` so the message says which tools
+    // attach one. Any other `overlay_request` error is left to the run.
+    if overlay.is_none() && matches!(query.overlay_request(), Ok(Some(_))) {
+        let message = format!("`include_overlay` needs an overlay: {NO_OVERLAY}");
+        return Outcome::Result(call_tool_result(true, &message), false);
+    }
     let result = match run_with_overlay(session, overlay, &query) {
         Ok(result) => result,
         Err(error) => return Outcome::Result(call_tool_result(true, &error.to_string()), false),
@@ -1363,6 +1370,10 @@ mod tests {
         assert_eq!(result["isError"], true);
         let text = result["content"][0]["text"].as_str().unwrap_or_default();
         assert!(text.contains("include_overlay"), "{text}");
+        assert!(
+            text.contains("load_overlay") && text.contains("record_edges"),
+            "the error must name the tools that attach an overlay: {text}"
+        );
 
         for tool in tools_list_result()["tools"].as_array().unwrap() {
             let walks = matches!(tool["name"].as_str(), Some("reach" | "closure"));
