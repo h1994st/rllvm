@@ -117,10 +117,12 @@ an error, never a direct-only answer.
 - A `slice` counts its agent edges the same way. To check one edge in scope,
   `emit_module` writes the slice's definitions, cut out with the
   `llvm-extract` beside the configured `llvm-link`, as one small `.bc` to
-  verify or re-read; the answer gains `emitted`. It needs a program loaded
-  with `load_catalog`, writes nothing for an empty slice, and refuses when a
-  `static` it would cut out shares its name with a function in another
-  module of the slice.
+  verify or re-read; the answer gains `emitted`. An alias comes with the
+  function it stands for. It needs a program loaded with `load_catalog`,
+  writes nothing for an empty slice, and refuses when a `static` function in
+  a contributing module shares its name with a function another contributing
+  module names. Same-named `static` globals the slice references become one
+  external declaration.
 
 ## Is a vulnerable function present and reachable?
 

@@ -30,10 +30,11 @@
 //! never needs a handshake at all (see
 //! `a_modern_request_is_served_without_a_handshake` in `tests/query.rs`).
 //!
-//! The overlay tools are the only ones that change anything. Records an
-//! agent sends are held in memory, where `reach`, `closure` and `slice` can already
-//! walk them, and only `save_overlay` writes them to disk; the catalog is
-//! never written at all.
+//! The overlay tools change state, and two calls write files. Records an
+//! agent sends are held in memory, where `reach`, `closure` and `slice` can
+//! already walk them, and only `save_overlay` writes them to disk. The one
+//! other write is `slice` with `emit_module`, which writes the new module it
+//! names. The catalog is never written at all.
 //!
 //! stdout carries protocol frames only, the same rule the compiler wrappers
 //! follow for their own stdout: every diagnostic belongs on stderr, and
