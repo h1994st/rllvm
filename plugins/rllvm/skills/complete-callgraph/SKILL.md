@@ -86,7 +86,8 @@ of `unresolved_sites`: say how many sites remain unresolved.
 before reloading, and before the session ends; unsaved records are not
 written on exit. `load_overlay` refuses to replace one holding unsaved
 records unless `discard_pending` is true. After a rebuild the overlay refuses
-to load, naming both fingerprints; record again.
+to load, naming both fingerprints: move or delete the file, or name another
+with `--overlay` (MCP: `path`), and record again.
 
 ## Verification
 
