@@ -20,10 +20,11 @@ use rllvm_query::{
 use tracing_subscriber::FmtSubscriber;
 
 /// Converts a parsed subcommand into the [`Query`] it names, or `None` for
-/// the two variants that name a mode rather than one of the eleven queries:
-/// `Mcp` (serve over MCP stdio) and `Completions` (print a completion
-/// script), both of which this binary has already handled by the time a
-/// query would run.
+/// the four variants that name a mode rather than a query: `Mcp` (serve
+/// over MCP stdio), `Completions` (print a completion script), `Cache`
+/// (inspect or prune the facts cache) and `Overlay` (keep agent-authored
+/// edges), all of which this binary has already handled by the time a query
+/// would run.
 ///
 /// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
 /// arm here fails to compile. That alone does not catch the opposite drift --
@@ -152,20 +153,22 @@ fn run_cache(action: Option<&CacheAction>, format: Format) -> Result<(), Error> 
 }
 
 /// Parses the overlay records piped on stdin, one JSON object per line,
-/// naming the line of the first bad one. Blank lines are skipped.
-fn parse_records(input: &str) -> Result<Vec<Record>, Error> {
+/// each kept with its 1-based line so a record that fails validation later
+/// is named by its line too. Blank lines are skipped.
+fn parse_records(input: &str) -> Result<Vec<(usize, Record)>, Error> {
     let mut records = Vec::new();
     for (index, line) in input.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        records.push(line.parse::<Record>().map_err(|error| {
+        let record = line.parse::<Record>().map_err(|error| {
             let reason = match error {
                 Error::InvalidArguments(reason) => reason,
                 other => other.to_string(),
             };
             Error::InvalidArguments(format!("line {}: {reason}", index + 1))
-        })?);
+        })?;
+        records.push((index + 1, record));
     }
     Ok(records)
 }
@@ -204,7 +207,7 @@ fn run_overlay(
     let text = match action {
         OverlayAction::Record => {
             let recorded = records.len();
-            overlay.record(&session, records)?;
+            overlay.record_lines(&session, records)?;
             let saved = overlay.save()?;
             format!("recorded {recorded}, saved {saved} to {}\n", path.display())
         }
@@ -597,10 +600,12 @@ mod tests {
     #[test]
     fn a_bad_record_on_stdin_is_reported_by_its_number() {
         let good = r#"{"op":"retract","edge":{"via_field":{"record":"ops","offset":8},"to":{"module_id":"m","symbol":"h3"}},"reason":"r"}"#;
-        assert_eq!(
-            parse_records(&format!("{good}\n\n{good}\n")).unwrap().len(),
-            2
-        );
+        let lines: Vec<usize> = parse_records(&format!("\n{good}\n\n{good}\n"))
+            .unwrap()
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect();
+        assert_eq!(lines, [2, 4], "each record keeps its line for validation");
         for (input, expected) in [
             (format!("{good}\n{{\n"), "line 2:"),
             (format!("\n{good}\n{{\"op\":\"annotate\"}}\n"), "line 3:"),

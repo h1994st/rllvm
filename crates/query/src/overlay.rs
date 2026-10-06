@@ -27,7 +27,11 @@ use serde::{Deserialize, Serialize};
 use rllvm_core::{catalog::hash_bytes, error::Error};
 
 use crate::{
-    facts::{CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionId, ModuleAnalysis},
+    bind::collapse_odr_duplicates,
+    facts::{
+        CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, Linkage,
+        ModuleAnalysis,
+    },
     index::{NameMatch, NameResolution, Session},
 };
 
@@ -86,8 +90,11 @@ impl fmt::Display for Verdict {
 
 /// What an agent edge is keyed by: a field-to-target pattern that applies
 /// to every unresolved site dispatching through the field, or one site.
+///
+/// `deny_unknown_fields` makes a key naming both a field and a site an
+/// error, rather than silently read as the field form.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(untagged)]
+#[serde(untagged, deny_unknown_fields)]
 pub enum EdgeKey {
     Field { via_field: FieldRef, to: FunctionId },
     Site { site: CallSiteId, to: FunctionId },
@@ -225,6 +232,28 @@ struct Header {
     fingerprint: String,
 }
 
+/// What an overlay last saw of its file, to tell its own writes from another
+/// writer's: an append changes the length, and a compaction or a rewrite by
+/// an editor replaces the inode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DiskState {
+    len: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl DiskState {
+    fn of(metadata: &std::fs::Metadata) -> DiskState {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        DiskState {
+            len: metadata.len(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        }
+    }
+}
+
 /// The folded overlay, bound to one build of one catalog.
 pub struct Overlay {
     /// Where `save` and `compact` write; `None` for one never saved.
@@ -234,9 +263,10 @@ pub struct Overlay {
     edges: BTreeMap<EdgeKey, OverlayEdge>,
     /// Applied records not yet appended to the file, `to` resolved.
     pending: Vec<Record>,
-    /// Whether the file exists with this overlay's header, so `save`
-    /// appends rather than creating it.
-    on_disk: bool,
+    /// The file as this overlay last read or wrote it, or `None` while
+    /// there is none: `save` appends to it, or creates it with the header.
+    /// A file that no longer matches has another writer, and is refused.
+    disk: Option<DiskState>,
 }
 
 impl Overlay {
@@ -247,7 +277,7 @@ impl Overlay {
             fingerprint: fingerprint(session)?,
             edges: BTreeMap::new(),
             pending: Vec::new(),
-            on_disk: false,
+            disk: None,
         })
     }
 
@@ -256,11 +286,17 @@ impl Overlay {
     /// the path and the 1-based line.
     pub fn open(session: &Session, path: &Path) -> Result<Overlay, Error> {
         let mut overlay = Overlay::empty(session, Some(path.to_path_buf()))?;
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
+        let mut file = match std::fs::File::open(path) {
+            Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(overlay),
             Err(error) => return Err(Error::file(path, error)),
         };
+        // From the handle the text is read through, so the state recorded
+        // is the one folded even if another writer appends meanwhile.
+        let disk = DiskState::of(&file.metadata().map_err(|error| Error::file(path, error))?);
+        let mut text = String::new();
+        file.read_to_string(&mut text)
+            .map_err(|error| Error::file(path, error))?;
         let at = |line: usize, reason: String| {
             Error::InvalidArguments(format!("{}:{line}: {reason}", path.display()))
         };
@@ -306,22 +342,56 @@ impl Overlay {
             let record = parse_record(line).map_err(|reason| at(number, reason))?;
             apply(&mut overlay.edges, session, record).map_err(|reason| at(number, reason))?;
         }
-        overlay.on_disk = true;
+        overlay.disk = Some(disk);
         Ok(overlay)
     }
 
     /// Validates every record against `session` first, then applies all of
-    /// them, or none. Applied records are pending until `save`.
+    /// them, or none. Applied records are pending until `save`. An error
+    /// names the bad record by its 1-based index: `record 2: ...`.
     ///
     /// Records are validated in order against the state the earlier ones
     /// leave, so one batch may add an edge and verify it.
     pub fn record(&mut self, session: &Session, records: Vec<Record>) -> Result<(), Error> {
+        self.record_labeled(
+            session,
+            records
+                .into_iter()
+                .enumerate()
+                .map(|(index, record)| (format!("record {}", index + 1), record)),
+        )
+    }
+
+    /// [`Overlay::record`] for records read from lines of text, each paired
+    /// with its 1-based line number, which an error names instead of the
+    /// record's index: `line 3: ...`.
+    pub fn record_lines(
+        &mut self,
+        session: &Session,
+        records: Vec<(usize, Record)>,
+    ) -> Result<(), Error> {
+        self.record_labeled(
+            session,
+            records
+                .into_iter()
+                .map(|(line, record)| (format!("line {line}"), record)),
+        )
+    }
+
+    /// All or none, as [`Overlay::record`]; an error is prefixed with the
+    /// failing record's label.
+    fn record_labeled(
+        &mut self,
+        session: &Session,
+        records: impl Iterator<Item = (String, Record)>,
+    ) -> Result<(), Error> {
         let mut edges = self.edges.clone();
-        let mut applied = Vec::with_capacity(records.len());
-        for (index, record) in records.into_iter().enumerate() {
-            applied.push(apply(&mut edges, session, record).map_err(|reason| {
-                Error::InvalidArguments(format!("record {}: {reason}", index + 1))
-            })?);
+        let mut applied = Vec::new();
+        for (label, record) in records {
+            applied.push(
+                apply(&mut edges, session, record)
+                    .map_err(|reason| Error::InvalidArguments(format!("{label}: {reason}")))?,
+            );
         }
         self.edges = edges;
         self.pending.extend(applied);
@@ -329,7 +399,8 @@ impl Overlay {
     }
 
     /// Appends pending records (writing the header first for a new file).
-    /// Returns how many were written.
+    /// Returns how many were written. Refuses when the file changed on disk
+    /// since this overlay read or wrote it.
     pub fn save(&mut self) -> Result<usize, Error> {
         if self.pending.is_empty() {
             return Ok(0);
@@ -337,7 +408,8 @@ impl Overlay {
         let path = self.path.clone().ok_or_else(|| {
             Error::InvalidArguments("this overlay has no file to save to".to_string())
         })?;
-        let mut file = if self.on_disk {
+        self.check_unchanged(&path)?;
+        let mut file = if self.disk.is_some() {
             append_to(&path)?
         } else {
             // `create_new`, not `create`: a file that appeared since `open`
@@ -353,7 +425,6 @@ impl Overlay {
             })?;
             file.write_all(header.as_bytes())
                 .map_err(|error| Error::file(&path, error))?;
-            self.on_disk = true;
             file
         };
 
@@ -366,6 +437,11 @@ impl Overlay {
                 return Err(Error::file(&path, error));
             }
         }
+        // Left stale on a failed write above, so a partial line refuses the
+        // next save until the file is reopened and its damage reported.
+        self.disk = Some(DiskState::of(
+            &file.metadata().map_err(|error| Error::file(&path, error))?,
+        ));
         let written = self.pending.len();
         self.pending.clear();
         Ok(written)
@@ -373,7 +449,8 @@ impl Overlay {
 
     /// Rewrites the file as the header plus one `add` (and one `verify`) per
     /// current edge, atomically (temp file in the same directory, then
-    /// rename). Refuses while records are pending.
+    /// rename), keeping the file's permissions. Refuses while records are
+    /// pending, and when the file changed on disk as for `save`.
     pub fn compact(&mut self) -> Result<(), Error> {
         if !self.pending.is_empty() {
             return Err(Error::InvalidArguments(format!(
@@ -384,6 +461,7 @@ impl Overlay {
         let path = self.path.clone().ok_or_else(|| {
             Error::InvalidArguments("this overlay has no file to compact".to_string())
         })?;
+        self.check_unchanged(&path)?;
         let mut text = json_line(&Header {
             v: OVERLAY_VERSION,
             fingerprint: self.fingerprint.clone(),
@@ -410,13 +488,44 @@ impl Overlay {
             .unwrap_or(Path::new("."));
         let mut temporary = tempfile::NamedTempFile::new_in(directory)
             .map_err(|error| Error::file(directory, error))?;
-        temporary
-            .write_all(text.as_bytes())
-            .map_err(|error| Error::file(temporary.path(), error))?;
+        let fail = |error| Error::file(directory, error);
+        temporary.write_all(text.as_bytes()).map_err(fail)?;
+        // The rename replaces the file, which would otherwise take the temp
+        // file's private mode.
+        if self.disk.is_some() {
+            let permissions = std::fs::metadata(&path)
+                .map_err(|error| Error::file(&path, error))?
+                .permissions();
+            temporary
+                .as_file()
+                .set_permissions(permissions)
+                .map_err(fail)?;
+        }
+        temporary.as_file().sync_all().map_err(fail)?;
+        // Taken before the rename, which keeps both the length and the inode.
+        let disk = DiskState::of(&temporary.as_file().metadata().map_err(fail)?);
         temporary
             .persist(&path)
             .map_err(|error| Error::file(&path, error.error))?;
-        self.on_disk = true;
+        self.disk = Some(disk);
+        Ok(())
+    }
+
+    /// Refuses to write when the file is not as this overlay last saw it:
+    /// another writer appended, compacted, created or removed it, and
+    /// writing over that would lose its records or misplace these.
+    fn check_unchanged(&self, path: &Path) -> Result<(), Error> {
+        let current = match std::fs::metadata(path) {
+            Ok(metadata) => Some(DiskState::of(&metadata)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(Error::file(path, error)),
+        };
+        if current != self.disk {
+            return Err(Error::InvalidArguments(format!(
+                "{}: the overlay changed on disk since it was opened; reopen it",
+                path.display()
+            )));
+        }
         Ok(())
     }
 
@@ -676,56 +785,83 @@ fn apply(
     }
 }
 
-/// The one function `to` names. A symbol is matched exactly, never by its
-/// demangled reading or an identifier search, and must leave exactly one
-/// candidate once definitions are preferred over declarations.
+/// The one function `to` names, canonical so one function never yields two
+/// edge keys. A symbol is matched exactly, never by its demangled reading
+/// or an identifier search, and must leave exactly one target candidate.
+/// An id names itself, except that an ODR copy stands for the copy the
+/// binder keeps.
 fn resolve_target(session: &Session, to: &TargetSpec) -> Result<FunctionId, String> {
     let symbol = match to {
         TargetSpec::Id(id) => {
-            return session
+            let function = session
                 .function(id)
-                .map(|function| function.id.clone())
-                .ok_or_else(|| format!("no function {}", function_label(id)));
+                .ok_or_else(|| format!("no function {}", function_label(id)))?;
+            return match function.linkage {
+                Linkage::AvailableExternally => Err(format!(
+                    "{} is available_externally, a body no object file emits; name a copy \
+                     that is emitted",
+                    function_label(id)
+                )),
+                Linkage::Odr => match target_candidates(session, &id.symbol).as_slice() {
+                    [kept] => Ok(kept.clone()),
+                    _ => Ok(id.clone()),
+                },
+                _ => Ok(id.clone()),
+            };
         }
         TargetSpec::Symbol(symbol) => symbol,
     };
+    let mut candidates = target_candidates(session, symbol);
+    match candidates.as_slice() {
+        [] => Err(format!(
+            "no function has the symbol {symbol:?}; `to` takes an exact symbol"
+        )),
+        [one] => Ok(one.clone()),
+        _ => {
+            candidates.sort();
+            Err(format!(
+                "{symbol:?} names {} functions, in modules {}; give `to` as \
+                 {{\"module_id\": ..., \"symbol\": ...}}",
+                candidates.len(),
+                candidates
+                    .iter()
+                    .map(|id| id.module_id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    }
+}
+
+/// The functions an edge to `symbol` may target, matched exactly. An
+/// `available_externally` body is never one. Definitions are preferred over
+/// declarations, and ODR copies collapse to the one the binder keeps, while
+/// static and plain `weak` duplicates stay apart.
+fn target_candidates(session: &Session, symbol: &str) -> Vec<FunctionId> {
     let Some(NameResolution {
         matched: NameMatch::Mangled,
         ids,
     }) = session.resolve(symbol)
     else {
-        return Err(format!(
-            "no function has the symbol {symbol:?}; `to` takes an exact symbol"
-        ));
+        return Vec::new();
     };
-    let definitions: Vec<FunctionId> = ids
+    let functions: Vec<&FunctionFact> = ids
         .iter()
-        .filter(|id| {
-            session
-                .function(id)
-                .is_some_and(|function| function.is_definition)
-        })
-        .cloned()
+        .filter_map(|id| session.function(id))
+        .filter(|function| function.linkage != Linkage::AvailableExternally)
         .collect();
-    let mut candidates = if definitions.is_empty() {
-        ids
+    let definitions: Vec<(Linkage, FunctionId)> = functions
+        .iter()
+        .filter(|function| function.is_definition)
+        .map(|function| (function.linkage, function.id.clone()))
+        .collect();
+    if definitions.is_empty() {
+        functions
+            .into_iter()
+            .map(|function| function.id.clone())
+            .collect()
     } else {
-        definitions
-    };
-    candidates.sort();
-    candidates.dedup();
-    match candidates.as_slice() {
-        [one] => Ok(one.clone()),
-        _ => Err(format!(
-            "{symbol:?} names {} functions, in modules {}; give `to` as \
-             {{\"module_id\": ..., \"symbol\": ...}}",
-            candidates.len(),
-            candidates
-                .iter()
-                .map(|id| id.module_id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
+        collapse_odr_duplicates(definitions)
     }
 }
 
@@ -757,9 +893,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        facts::{CallSiteId, FieldRef, FunctionId, ProgramFacts},
+        facts::{CallSiteId, FieldRef, FunctionId, Linkage, ProgramFacts},
         index::Session,
-        testing::facts_with_overlay_sites,
+        testing::{facts_with_overlay_sites, function},
     };
 
     fn ops(offset: u64) -> FieldRef {
@@ -1247,5 +1383,156 @@ mod tests {
             default_overlay_path(Path::new("build/catalog.json")),
             Path::new("build/catalog.overlay.jsonl")
         );
+    }
+
+    /// The overlay fixture plus `inl`, an ODR function emitted into both
+    /// modules, and `ae`, an `available_externally` body in `mod_a` beside
+    /// its one real definition in `mod_b`.
+    fn session_with_odr_targets() -> Session {
+        let mut facts = facts_with_overlay_sites();
+        facts.functions.extend([
+            function("mod_a", "inl", true, Linkage::Odr),
+            function("mod_b", "inl", true, Linkage::Odr),
+            function("mod_a", "ae", true, Linkage::AvailableExternally),
+            function("mod_b", "ae", true, Linkage::External),
+            function("mod_a", "only_ae", true, Linkage::AvailableExternally),
+        ]);
+        Session::new(facts, Vec::new())
+    }
+
+    #[test]
+    fn odr_copies_are_one_target_by_symbol_or_either_id() {
+        let session = session_with_odr_targets();
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        overlay
+            .record(
+                &session,
+                vec![
+                    add_field(8, "inl"),
+                    add(Some(ops(8)), None, TargetSpec::Id(id("mod_a", "inl"))),
+                    add(Some(ops(8)), None, TargetSpec::Id(id("mod_b", "inl"))),
+                ],
+            )
+            .unwrap();
+        let keys: Vec<_> = overlay.edges().map(|edge| edge.key.clone()).collect();
+        assert_eq!(
+            keys,
+            [EdgeKey::Field {
+                via_field: ops(8),
+                to: id("mod_a", "inl"),
+            }],
+            "the copy the binder keeps"
+        );
+    }
+
+    #[test]
+    fn an_available_externally_copy_is_never_a_target() {
+        let session = session_with_odr_targets();
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        overlay.record(&session, vec![add_field(8, "ae")]).unwrap();
+        assert_eq!(
+            overlay.edges().next().unwrap().key,
+            EdgeKey::Field {
+                via_field: ops(8),
+                to: id("mod_b", "ae"),
+            }
+        );
+
+        let error = record_error(
+            &session,
+            vec![add(Some(ops(8)), None, TargetSpec::Id(id("mod_a", "ae")))],
+        );
+        assert!(error.contains("available_externally"), "{error}");
+        let error = record_error(&session, vec![add_field(8, "only_ae")]);
+        assert!(error.contains("only_ae"), "{error}");
+    }
+
+    #[test]
+    fn a_rejected_record_is_named_by_its_source_line() {
+        let session = session();
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        let error = message(
+            overlay
+                .record_lines(
+                    &session,
+                    vec![(2, add_field(8, "h3")), (3, add_field(16, "h3"))],
+                )
+                .unwrap_err(),
+        );
+        assert!(error.starts_with("line 3: "), "{error}");
+        assert_eq!(overlay.edges().count(), 0);
+    }
+
+    #[test]
+    fn a_second_writer_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = overlay_path(&scratch);
+        let session = session();
+
+        // Both opened on a missing file; the first save creates it.
+        let mut first = Overlay::open(&session, &path).unwrap();
+        let mut second = Overlay::open(&session, &path).unwrap();
+        first.record(&session, vec![add_field(8, "h3")]).unwrap();
+        first.save().unwrap();
+        second.record(&session, vec![add_field(8, "h1")]).unwrap();
+        let error = message(second.save().unwrap_err());
+        assert!(
+            error.contains("changed on disk since it was opened"),
+            "{error}"
+        );
+
+        // Both opened on the existing file; the first appends.
+        let mut first = Overlay::open(&session, &path).unwrap();
+        let mut second = Overlay::open(&session, &path).unwrap();
+        let mut idle = Overlay::open(&session, &path).unwrap();
+        first.record(&session, vec![add_field(8, "h1")]).unwrap();
+        first.save().unwrap();
+        first.compact().unwrap();
+        second.record(&session, vec![add_field(8, "h1")]).unwrap();
+        let error = message(second.save().unwrap_err());
+        assert!(
+            error.contains("changed on disk since it was opened"),
+            "{error}"
+        );
+        let error = message(idle.compact().unwrap_err());
+        assert!(
+            error.contains("changed on disk since it was opened"),
+            "{error}"
+        );
+
+        // The writer's own saves and compactions never trip it.
+        first.record(&session, vec![add_field(8, "h3")]).unwrap();
+        first.save().unwrap();
+        assert_eq!(Overlay::open(&session, &path).unwrap().edges().count(), 2);
+    }
+
+    #[test]
+    fn an_edge_key_names_a_field_or_a_site_never_both() {
+        let session = session();
+        let site = site_in(&session, "call_plain");
+        let both = serde_json::json!({
+            "via_field": ops(8),
+            "site": site,
+            "to": id("mod_a", "h1"),
+        });
+        assert!(serde_json::from_value::<EdgeKey>(both.clone()).is_err());
+        let line = serde_json::json!({ "op": "retract", "edge": both, "reason": "r" });
+        assert!(line.to_string().parse::<Record>().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compaction_keeps_the_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let path = overlay_path(&scratch);
+        let session = session();
+        let mut overlay = Overlay::open(&session, &path).unwrap();
+        overlay.record(&session, vec![add_field(8, "h3")]).unwrap();
+        overlay.save().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        overlay.compact().unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o640);
     }
 }

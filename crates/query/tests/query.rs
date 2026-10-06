@@ -3627,12 +3627,13 @@ fn the_overlay_cli_records_lists_and_compacts() {
         format!("recorded 1, saved 1 to {}\n", overlay.display())
     );
 
-    // One ungrounded record fails the whole batch, naming it.
+    // One ungrounded record fails the whole batch, named by its stdin line
+    // as a malformed one would be: blank lines count.
     let ungrounded = add.replace("\"offset\":8", "\"offset\":16");
     let before = std::fs::read(&overlay).unwrap();
-    let (success, _, stderr) = record(format!("{add}\n{ungrounded}\n"));
+    let (success, _, stderr) = record(format!("\n{add}\n{ungrounded}\n"));
     assert!(!success);
-    assert!(stderr.contains("record 2: "), "{stderr}");
+    assert!(stderr.contains("line 3: "), "{stderr}");
     assert_eq!(std::fs::read(&overlay).unwrap(), before);
 
     let listed = query_json(&scratch, &catalog, &["overlay", "list"]);

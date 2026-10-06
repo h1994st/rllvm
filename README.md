@@ -427,8 +427,9 @@ rllvm-query --catalog catalog.json overlay compact     # rewrite as the current 
 An `add` names a field (`via_field`, every unresolved site through it) or one
 `site`, and attaches only where LLVM left the call unbounded. `verify` and
 `retract` name an edge's key. The file is bound to one build: after a rebuild
-it refuses to load, naming both fingerprints. Overlay edges are hypotheses,
-never proof, and no answer uses them unless asked.
+it refuses to load, naming both fingerprints, and a write refuses if another
+writer changed the file since it was read. Overlay edges are hypotheses, never
+proof, and no answer uses them unless asked.
 
 ### MCP server
 

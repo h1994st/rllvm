@@ -64,8 +64,9 @@ is never changed.
 
 - `{"op":"add","via_field":{"record":"ops","offset":8},"to":"h3","confidence":"high","provenance":["init: o->handler = h3"]}`
   attaches to every unresolved site through `ops@8`; `"site": <call site
-  id>` instead names one. `to` is an exact symbol naming one definition, or
-  `{"module_id", "symbol"}`. `provenance` is required.
+  id>` instead names one. `to` is an exact symbol naming one definition
+  (ODR copies count as one), or `{"module_id", "symbol"}`. `provenance` is
+  required.
 - `{"op":"verify","edge":<key>,"tool":...,"verdict":"confirmed|refuted|inconclusive"}`
   and `{"op":"retract","edge":<key>,"reason":...}` name an edge's key.
 - A batch applies all or none; an error names the bad record. An edge on a
@@ -73,6 +74,8 @@ is never changed.
 - `overlay list` shows edges and the sites they cover; `overlay compact`
   rewrites the file as the current edges.
 - After a rebuild the overlay refuses to load, naming both fingerprints.
+- A save or compaction refuses when another writer changed the file since
+  it was opened; reopen it and record again.
 
 Overlay edges are hypotheses, never proof: no answer uses them unless asked.
 
