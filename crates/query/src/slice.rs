@@ -48,9 +48,11 @@ pub struct EmittedModule {
 /// temporary directory under their position in the catalog, never under a
 /// module id, which is free text.
 ///
-/// `llvm-extract` makes every `static` it keeps external, so a `static` cut
-/// out that shares a name with a function another contributing module names
-/// is refused rather than linked.
+/// `llvm-extract` makes every `static` it touches external, so a module
+/// whose `static` function shares a name with a function another
+/// contributing module names is refused rather than linked. Same-named
+/// `static` globals that extracted functions reference are not checked: they
+/// stay declarations, merged into one external declaration.
 pub fn emit_module(
     session: &Session,
     catalog: &Path,
@@ -185,7 +187,7 @@ fn plan_pieces(session: &Session, functions: &[FunctionId]) -> BTreeMap<String, 
     for function in session.functions() {
         if let Some(plan) = plans.get_mut(&function.id.module_id) {
             plan.named.insert(function.id.symbol.clone());
-            if function.linkage == Linkage::Internal && plan.cut.contains(&function.id.symbol) {
+            if function.linkage == Linkage::Internal {
                 plan.statics.insert(function.id.symbol.clone());
             }
         }
@@ -201,14 +203,17 @@ struct Plan {
     definitions: Vec<(&'static str, String)>,
     /// The symbols in `definitions`.
     cut: BTreeSet<String>,
-    /// The definitions cut out that were `static`.
+    /// Every `static` function the module defines, cut out or not:
+    /// `llvm-extract` turns one it drops into an external declaration, which
+    /// a kept caller still calls.
     statics: BTreeSet<String>,
     /// Every function the module defines or declares.
     named: BTreeSet<String>,
 }
 
-/// `llvm-extract` makes every local function it keeps external, so a
-/// `static` cut out of one module would be linked as the definition of any
+/// `llvm-extract` makes every local function it touches external: one it
+/// keeps becomes an external definition, one it drops an external
+/// declaration that a kept caller still calls. Either would be linked to a
 /// same-named function another piece defines or calls: a module that binds
 /// calls the program never makes. Refused, naming both modules.
 ///

@@ -984,6 +984,45 @@ fn a_static_that_would_bind_another_module_s_call_is_not_emitted() {
     assert!(!out.exists());
 }
 
+/// `a.c`'s static `note` is off the path from `main` to `leaf`, but `fa`, on
+/// the path, still calls it; `b.c`'s external `note` is on the path. Cut
+/// out, `fa`'s call would bind to `b.c`'s `note`.
+#[test]
+fn a_static_off_the_path_that_would_bind_to_another_definition_is_not_emitted() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(
+        &scratch,
+        "offpath",
+        &[
+            (
+                "a.c",
+                "int leaf(void);\nstatic int note(void){return 1;}\nint fa(void){note();return leaf();}\n",
+            ),
+            (
+                "b.c",
+                "int leaf(void){return 0;}\nint note(void){return leaf();}\n",
+            ),
+            (
+                "main.c",
+                "int fa(void);\nint note(void);\nint main(void){return fa()+note();}\n",
+            ),
+        ],
+    );
+    let out = scratch.path().join("slice.bc");
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["slice", "main", "leaf", "--emit-module"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "a module was emitted: {stderr}");
+    assert!(stderr.contains("`note` is static in module"), "{stderr}");
+    assert!(!out.exists());
+}
+
 #[test]
 fn the_text_answer_says_what_the_slice_module_holds() {
     let scratch = tempfile::tempdir().unwrap();
