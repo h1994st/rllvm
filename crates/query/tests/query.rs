@@ -1766,7 +1766,8 @@ fn an_initializer_without_debug_info_names_no_literal_field() {
 }
 
 /// C++ spells the record `%"struct.n::S"` in IR and `_ZTSN1n1SE` in TBAA;
-/// both must read as `n::S`.
+/// both must read as `n::S`. The member name comes from the debug-info
+/// record found by that same identifier.
 #[test]
 fn a_cxx_record_reads_the_same_through_gep_and_tbaa() {
     use rllvm_query::FieldBasis;
@@ -1774,11 +1775,73 @@ fn a_cxx_record_reads_the_same_through_gep_and_tbaa() {
                   void c(n::S* s){ s->f(1); }\n";
     for (level, basis) in [("-O0", FieldBasis::StructGep), ("-O2", FieldBasis::Tbaa)] {
         let scratch = tempfile::tempdir().unwrap();
-        let facts = extract_named(&scratch, "t.cpp", source, &[level]);
+        let facts = extract_named(&scratch, "t.cpp", source, &[level, "-g"]);
         let evidence = site_field(&facts, "_Z1cPN1n1SE").unwrap_or_else(|| panic!("{level}"));
         assert_eq!(evidence.field, field("n::S", 0), "{level}");
         assert_eq!(evidence.basis, basis, "{level}");
+        assert_eq!(evidence.name.as_deref(), Some("f"), "{level}");
     }
+}
+
+/// A C++ global of a record in an anonymous namespace, given the literal IR
+/// type padding produces. Debug info names the record plain `S` with no
+/// identifier, while IR and TBAA call it `(anonymous namespace)::S`; taking
+/// `S` would join it with an unrelated `::S`. The scope `{SCOPE}` is
+/// substituted: the namespace, or the file as a C record would have.
+const ANONYMOUS_NAMESPACE_TABLE: &str = r#"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+target triple = "arm64-apple-macosx26.0.0"
+
+@_ZL5table = internal constant { i32, [4 x i8], ptr } { i32 1, [4 x i8] zeroinitializer, ptr @_ZL1hi }, align 8, !dbg !0
+@llvm.used = appending global [1 x ptr] [ptr @_ZL5table], section "llvm.metadata"
+
+define internal void @_ZL1hi(i32 %0) {
+  ret void
+}
+
+!llvm.module.flags = !{!15}
+!llvm.dbg.cu = !{!2}
+
+!0 = !DIGlobalVariableExpression(var: !1, expr: !DIExpression())
+!1 = distinct !DIGlobalVariable(name: "table", linkageName: "_ZL5table", scope: !2, file: !3, line: 3, type: !5, isLocal: true, isDefinition: true)
+!2 = distinct !DICompileUnit(language: DW_LANG_C_plus_plus_14, file: !3, producer: "clang", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug, globals: !4)
+!3 = !DIFile(filename: "anon.cpp", directory: "/tmp")
+!4 = !{!0}
+!5 = !DIDerivedType(tag: DW_TAG_const_type, baseType: !6)
+!6 = distinct !DICompositeType(tag: DW_TAG_structure_type, name: "S", scope: {SCOPE}, file: !3, line: 2, size: 128, flags: DIFlagTypePassByValue, elements: !8)
+!7 = !DINamespace(scope: null)
+!8 = !{!9, !11}
+!9 = !DIDerivedType(tag: DW_TAG_member, name: "tag", scope: !6, file: !3, line: 2, baseType: !10, size: 32)
+!10 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
+!11 = !DIDerivedType(tag: DW_TAG_member, name: "f", scope: !6, file: !3, line: 2, baseType: !12, size: 64, offset: 64)
+!12 = !DIDerivedType(tag: DW_TAG_pointer_type, baseType: !13, size: 64)
+!13 = !DISubroutineType(types: !14)
+!14 = !{null, !10}
+!15 = !{i32 2, !"Debug Info Version", i32 3}
+"#;
+
+#[test]
+fn a_scoped_cxx_record_without_an_identifier_names_no_literal_field() {
+    use rllvm_query::UseKind;
+    let table_field = |scope: &str| {
+        let scratch = tempfile::tempdir().unwrap();
+        let ir = ANONYMOUS_NAMESPACE_TABLE.replace("{SCOPE}", scope);
+        let facts = extract_module(&assemble_ir(&scratch, &ir));
+        use_fields(&facts, "_ZL1hi", "_ZL5table", UseKind::GlobalInitializer)
+    };
+    assert_eq!(
+        table_field("!7"),
+        [None],
+        "a namespaced record's plain name is not the IR's"
+    );
+    // The same node at file scope, as C writes it, does name the field: the
+    // refusal above is the scope's doing, not a failed read.
+    let file_scope = table_field("!3");
+    let [Some(evidence)] = file_scope.as_slice() else {
+        panic!("a file-scope record names its field: {file_scope:?}");
+    };
+    assert_eq!(evidence.field, field("S", 8));
+    assert_eq!(evidence.basis, rllvm_query::FieldBasis::DebugInfo);
 }
 
 /// A source clang compiles into one named function, and the category that

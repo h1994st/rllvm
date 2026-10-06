@@ -887,12 +887,13 @@ const DW_TAG_VOLATILE_TYPE: u16 = 0x35;
 const DW_RECORD_TAGS: [u16; 3] = [0x02, 0x13, 0x17];
 
 /// Operand positions in debug-info nodes, read through the generic MDNode
-/// accessors because the C API has no getter for them. Each is reached only
-/// after the node's kind is checked, so a layout change reads as no answer.
-/// In the LLVM this crate links, every `DIType` starts with five operands --
-/// file, scope, name, size and offset -- and its own begin after them.
-/// `DIDerivedType` and `DICompositeType` share the base-type position.
+/// accessors because the C API has no getter for them. Each is read only
+/// after the node's kind is checked. The layout is LLVM 21 and later
+/// (llvm-sys 231): every `DIType` starts with five operands -- file, scope,
+/// name, size and offset -- and its own begin after them. `DIDerivedType`
+/// and `DICompositeType` share the base-type position.
 const DI_TYPE_OPERANDS: usize = 5;
+const DI_SCOPE_OPERAND: usize = 1;
 const DI_BASE_TYPE_OPERAND: usize = DI_TYPE_OPERANDS;
 const DI_COMPOSITE_ELEMENTS_OPERAND: usize = DI_TYPE_OPERANDS + 1;
 const DI_COMPOSITE_IDENTIFIER_OPERAND: usize = DI_TYPE_OPERANDS + 4;
@@ -1414,8 +1415,15 @@ impl FieldReader {
         }
     }
 
-    /// A debug-info record's name: its C++ identifier, else its own name,
-    /// else the typedef it was reached through.
+    /// A debug-info record's name: its C++ identifier when it has one, else,
+    /// for a record at file scope, its own name or the typedef it was
+    /// reached through.
+    ///
+    /// A record without an identifier inside a namespace or another record
+    /// gets none. Its debug-info name is unqualified (`S`), while IR and
+    /// TBAA qualify it (`(anonymous namespace)::S`), so the plain name would
+    /// join it with an unrelated `::S`. Only C, whose records all sit at file
+    /// scope, is named by its plain name.
     ///
     /// # Safety
     /// `record` must be a live `DICompositeType` in this reader's context.
@@ -1424,14 +1432,30 @@ impl FieldReader {
         record: LLVMMetadataRef,
         typedef: Option<String>,
     ) -> Option<String> {
-        // SAFETY: the caller guarantees a live composite type.
+        // SAFETY: the caller guarantees a live composite type; its scope is
+        // live metadata, read only for its kind.
         unsafe {
             let operands = md_node_operands(LLVMMetadataAsValue(self.context, record));
-            operands
+            if let Some(identifier) = operands
                 .get(DI_COMPOSITE_IDENTIFIER_OPERAND)
                 .and_then(|&identifier| operand_string(identifier))
-                .and_then(|identifier| normalize_record(&identifier))
-                .or_else(|| debug_type_name(record).and_then(|name| normalize_record(&name)))
+            {
+                return normalize_record(&identifier);
+            }
+            let at_file_scope = self
+                .node_operand(record, DI_SCOPE_OPERAND)
+                .is_none_or(|scope| {
+                    matches!(
+                        LLVMGetMetadataKind(scope),
+                        LLVMMetadataKind::LLVMDIFileMetadataKind
+                            | LLVMMetadataKind::LLVMDICompileUnitMetadataKind
+                    )
+                });
+            if !at_file_scope {
+                return None;
+            }
+            debug_type_name(record)
+                .and_then(|name| normalize_record(&name))
                 .or(typedef)
         }
     }
