@@ -72,6 +72,26 @@ define void @fire(ptr nofree noundef readonly captures(none) %0, ptr noundef %1)
   ret void, !dbg !133
 }
 
+define void @init_gep(ptr noundef writeonly captures(none) %0) local_unnamed_addr {
+  %2 = getelementptr inbounds %struct.inner, ptr %0, i64 0, i32 1
+  store ptr @h1, ptr %2, align 8
+  ret void
+}
+
+define void @fire_gep(ptr noundef readonly captures(none) %0, ptr noundef %1) local_unnamed_addr {
+  %3 = getelementptr inbounds %struct.inner, ptr %0, i64 0, i32 1
+  %4 = load ptr, ptr %3, align 8
+  tail call void %4(ptr noundef %1, i64 noundef 2)
+  ret void
+}
+
+define void @fire_cxx(ptr noundef readonly captures(none) %0, ptr noundef %1) local_unnamed_addr {
+  %3 = getelementptr inbounds nuw i8, ptr %0, i64 8
+  %4 = load ptr, ptr %3, align 8, !tbaa !135
+  tail call void %4(ptr noundef %1, i64 noundef 6)
+  ret void
+}
+
 @dispatch_alias = alias i32 (i32, i32), ptr @dispatch
 
 attributes #0 = { mustprogress nofree norecurse nosync nounwind ssp willreturn memory(none) uwtable(sync) "frame-pointer"="non-leaf-no-reserve" "no-trapping-math"="true" "stack-protector-buffer-size"="8" "target-cpu"="apple-m1" "target-features"="+aes,+altnzcv,+ccdp,+ccidx,+ccpp,+complxnum,+crc,+dit,+dotprod,+flagm,+fp-armv8,+fp16fml,+fptoint,+fullfp16,+jsconv,+lse,+neon,+pauth,+perfmon,+predres,+ras,+rcpc,+rdm,+sb,+sha2,+sha3,+specrestrict,+ssbs,+v8.1a,+v8.2a,+v8.3a,+v8.4a,+v8a" "tune-cpu"="apple-m5" }
@@ -218,3 +238,5 @@ attributes #3 = { nounwind }
 !131 = !DILocation(line: 9, column: 37, scope: !123)
 !132 = !{!120, !121, i64 8}
 !133 = !DILocation(line: 9, column: 56, scope: !123, atomGroup: 1, atomRank: 1)
+!134 = !{!"_ZTSN1n3opsE", !95, i64 0, !121, i64 8, !121, i64 16}
+!135 = !{!134, !121, i64 8}

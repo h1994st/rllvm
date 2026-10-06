@@ -2886,13 +2886,14 @@ fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
 /// were current.
 const FACTS_GUARD: (u32, &str) = (
     3,
-    "7dd4dc5276f7b0c2bd3f6ef95f070870e68c776823be7e4a555a1d40f8da7c2d",
+    "32ff5d8f633b74d546a2dbcb727969112ab415a0f45d7c721384f42394cd846b",
 );
 
 /// Extracts the neutral facts from `fixtures/facts-guard.ll`: indirect calls,
 /// dispatch-table uses, declarations, an alias, and the record fields an
-/// indirect call, a store and named and literal-typed initializers name,
-/// none of which the smaller equivalence fixtures above exercise.
+/// indirect call, a store and named and literal-typed initializers name --
+/// through a typed GEP, a C TBAA tag and a C++ (`_ZTS`) one -- none of which
+/// the smaller equivalence fixtures above exercise.
 fn guard_module_facts(scratch: &tempfile::TempDir) -> rllvm_query::ModuleFacts {
     let ir = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/facts-guard.ll"),
@@ -2948,14 +2949,23 @@ fn the_guard_fixtures_facts_round_trip_through_the_cache() {
         .uses
         .iter()
         .filter_map(|use_fact| use_fact.field.as_ref());
-    let bases: Vec<_> = sites.chain(uses).map(|evidence| evidence.basis).collect();
+    let evidence: Vec<_> = sites.chain(uses).collect();
+    let bases: Vec<_> = evidence.iter().map(|evidence| evidence.basis).collect();
     for basis in [
+        rllvm_query::FieldBasis::StructGep,
         rllvm_query::FieldBasis::Tbaa,
         rllvm_query::FieldBasis::Initializer,
         rllvm_query::FieldBasis::DebugInfo,
     ] {
         assert!(bases.contains(&basis), "no {basis:?} field in {bases:?}");
     }
+    // A C++ TBAA name (`_ZTSN1n3opsE`) reads as the record the IR names.
+    assert!(
+        evidence
+            .iter()
+            .any(|evidence| evidence.field.record == "n::ops"),
+        "no `_ZTS` record normalized in {evidence:?}"
+    );
 }
 
 /// `entry` calls `outer` through an always-inline helper, so the answers
