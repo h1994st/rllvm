@@ -6,23 +6,26 @@
 //! `cache.rs`: `the_facts_format_names_what_extraction_produces` says how.
 
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     ffi::{CStr, c_char, c_int, c_void},
     path::PathBuf,
 };
 
 use llvm_sys::{
-    LLVMDiagnosticSeverity, LLVMLinkage, LLVMOpcode,
+    LLVMDiagnosticSeverity, LLVMLinkage, LLVMOpcode, LLVMTypeKind,
     bit_reader::LLVMParseBitcodeInContext2,
     core::*,
     debuginfo::{
-        LLVMDIFileGetDirectory, LLVMDIFileGetFilename, LLVMDILocationGetColumn,
+        LLVMDIFileGetDirectory, LLVMDIFileGetFilename, LLVMDIFlagStaticMember,
+        LLVMDIGlobalVariableExpressionGetVariable, LLVMDILocationGetColumn,
         LLVMDILocationGetInlinedAt, LLVMDILocationGetLine, LLVMDILocationGetScope,
-        LLVMDIScopeGetFile, LLVMGetMetadataKind, LLVMGetSubprogram, LLVMInstructionGetDebugLoc,
-        LLVMMetadataKind,
+        LLVMDIScopeGetFile, LLVMDITypeGetFlags, LLVMDITypeGetName, LLVMDITypeGetOffsetInBits,
+        LLVMDITypeGetSizeInBits, LLVMGetDINodeTag, LLVMGetMetadataKind, LLVMGetSubprogram,
+        LLVMInstructionGetDebugLoc, LLVMMetadataKind,
     },
     error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage},
     prelude::*,
+    target::{LLVMABISizeOfType, LLVMGetModuleDataLayout, LLVMOffsetOfElement, LLVMTargetDataRef},
     transforms::pass_builder::{
         LLVMCreatePassBuilderOptions, LLVMDisposePassBuilderOptions, LLVMRunPasses,
     },
@@ -576,6 +579,42 @@ unsafe fn md_node_operands(node: LLVMValueRef) -> Vec<LLVMValueRef> {
     operands
 }
 
+/// A metadata operand as metadata, or `None` when it is absent or a value.
+///
+/// # Safety
+/// `operand` must be null or a live operand of a metadata node.
+unsafe fn operand_metadata(operand: LLVMValueRef) -> Option<LLVMMetadataRef> {
+    // SAFETY: the caller guarantees a live operand. Only one wrapping
+    // metadata is converted; a constant would be wrapped anew instead.
+    (!operand.is_null() && !unsafe { LLVMIsAMDNode(operand) }.is_null())
+        .then(|| unsafe { LLVMValueAsMetadata(operand) })
+}
+
+/// An `MDString` operand's text.
+///
+/// # Safety
+/// `operand` must be null or a live operand of a metadata node.
+unsafe fn operand_string(operand: LLVMValueRef) -> Option<String> {
+    if operand.is_null() {
+        return None;
+    }
+    let mut length = 0;
+    // SAFETY: a live operand; anything but a string answers null.
+    let text = unsafe { LLVMGetMDString(operand, &mut length) };
+    // SAFETY: `text` spans `length` bytes when non-null.
+    (!text.is_null()).then(|| unsafe { owned(text, length as usize) })
+}
+
+/// A constant integer operand, zero-extended.
+///
+/// # Safety
+/// `operand` must be null or a live value.
+unsafe fn operand_integer(operand: LLVMValueRef) -> Option<u64> {
+    // SAFETY: a live value; the integer accessor is reached only for one.
+    (!operand.is_null() && !unsafe { LLVMIsAConstantInt(operand) }.is_null())
+        .then(|| unsafe { LLVMConstIntGetZExtValue(operand) })
+}
+
 /// Every `!llvm.ident` entry, in order.
 ///
 /// # Safety
@@ -590,18 +629,9 @@ unsafe fn read_producers(module: LLVMModuleRef) -> Vec<String> {
     nodes
         .into_iter()
         .filter(|node| !node.is_null())
-        .filter_map(|node| {
-            // SAFETY: a live operand of the named metadata, which is an MDNode.
-            let first = *unsafe { md_node_operands(node) }.first()?;
-            if first.is_null() {
-                return None;
-            }
-            let mut length = 0;
-            // SAFETY: `first` is live; a non-string operand answers null.
-            let text = unsafe { LLVMGetMDString(first, &mut length) };
-            // SAFETY: `text` spans `length` bytes, or is null.
-            (!text.is_null()).then(|| unsafe { owned(text, length as usize) })
-        })
+        // SAFETY: a live operand of the named metadata, which is an MDNode,
+        // whose operands are live.
+        .filter_map(|node| unsafe { operand_string(*md_node_operands(node).first()?) })
         .collect()
 }
 
@@ -740,8 +770,13 @@ unsafe fn indirect_target_bound(
 /// # Safety
 /// `instruction` must be a live call or invoke instruction, and
 /// `callees_kind` must be the "callees" metadata kind ID interned in the
-/// context that owns it.
-unsafe fn call_target(instruction: LLVMValueRef, module_id: &str, callees_kind: u32) -> CallTarget {
+/// context that owns it, and `fields` must read the module that owns it.
+unsafe fn call_target(
+    instruction: LLVMValueRef,
+    module_id: &str,
+    callees_kind: u32,
+    fields: &FieldReader,
+) -> CallTarget {
     // SAFETY: the caller guarantees a call or invoke, which this accessor
     // requires.
     let called = unsafe { LLVMGetCalledValue(instruction) };
@@ -793,6 +828,9 @@ unsafe fn call_target(instruction: LLVMValueRef, module_id: &str, callees_kind: 
         // kind ID. A site CVP could not bound stays `None` rather than
         // claiming a bound nothing established.
         llvm_target_bound: unsafe { indirect_target_bound(instruction, callees_kind, module_id) },
+        // SAFETY: `called` is null or a live value in the module `fields`
+        // reads.
+        via_field: unsafe { fields.loaded_field(called) },
     }
 }
 
@@ -819,6 +857,737 @@ unsafe fn enclosing_function(instruction: LLVMValueRef, module_id: &str) -> Opti
     })
 }
 
+/// The prefixes clang gives an IR record type, of which one is stripped.
+const RECORD_PREFIXES: [&str; 3] = ["struct.", "class.", "union."];
+
+/// Clang's IR name for a record with no name of its own. Not a name to join
+/// on: every anonymous record in a module answers to it.
+const ANONYMOUS_RECORD: &str = "anon";
+
+/// The marker of an Itanium type-name string, which C++ TBAA type nodes are
+/// named by, and what the demangler reads one as.
+const TYPEINFO_NAME_MARKER: &str = "_ZTS";
+const TYPEINFO_NAME_PREFIX: &str = "typeinfo name for ";
+
+/// How deep a TBAA walk goes before giving up. Real type trees are a few
+/// levels; the bound only keeps malformed metadata from looping.
+const MAX_TBAA_DEPTH: usize = 64;
+
+/// How many typedefs, qualifiers and array levels a debug-info type walk
+/// steps through before giving up, for the same reason.
+const MAX_DEBUG_TYPE_DEPTH: usize = 64;
+
+/// DWARF tags the field readers distinguish (DWARF 5, section 7.5.4).
+const DW_TAG_ARRAY_TYPE: u16 = 0x01;
+const DW_TAG_MEMBER: u16 = 0x0d;
+const DW_TAG_TYPEDEF: u16 = 0x16;
+const DW_TAG_CONST_TYPE: u16 = 0x26;
+const DW_TAG_VOLATILE_TYPE: u16 = 0x35;
+/// `class`, `structure` and `union`: the tags a field can belong to.
+const DW_RECORD_TAGS: [u16; 3] = [0x02, 0x13, 0x17];
+
+/// Operand positions in debug-info nodes, read through the generic MDNode
+/// accessors because the C API has no getter for them. Each is reached only
+/// after the node's kind is checked, so a layout change reads as no answer.
+/// In the LLVM this crate links, every `DIType` starts with five operands --
+/// file, scope, name, size and offset -- and its own begin after them.
+/// `DIDerivedType` and `DICompositeType` share the base-type position.
+const DI_TYPE_OPERANDS: usize = 5;
+const DI_BASE_TYPE_OPERAND: usize = DI_TYPE_OPERANDS;
+const DI_COMPOSITE_ELEMENTS_OPERAND: usize = DI_TYPE_OPERANDS + 1;
+const DI_COMPOSITE_IDENTIFIER_OPERAND: usize = DI_TYPE_OPERANDS + 4;
+const DI_SUBROUTINE_TYPES_OPERAND: usize = DI_TYPE_OPERANDS;
+const DI_VARIABLE_TYPE_OPERAND: usize = 3;
+const SUBPROGRAM_TYPE_OPERAND: usize = 4;
+
+/// One record name for every IR spelling of it: `struct.ops`, `struct.ops.12`
+/// (a name `llvm-link` deduplicated) and plain `ops` all read `ops`, and a
+/// C++ TBAA name such as `_ZTSN1n1SE` reads as the IR's `n::S`. `None` for a
+/// record with no name of its own, which must never be joined on.
+fn normalize_record(raw: &str) -> Option<String> {
+    let name = RECORD_PREFIXES
+        .iter()
+        .find_map(|prefix| raw.strip_prefix(prefix))
+        .unwrap_or(raw);
+    let name = match name.rsplit_once('.') {
+        Some((stem, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            stem
+        }
+        _ => name,
+    };
+    let name = match name.strip_prefix(TYPEINFO_NAME_MARKER) {
+        Some(mangled) => {
+            let demangled = demangle(&format!("_Z{mangled}"))?;
+            match demangled.strip_prefix(TYPEINFO_NAME_PREFIX) {
+                Some(stripped) => stripped.to_string(),
+                None => demangled,
+            }
+        }
+        None => name.to_string(),
+    };
+    (!name.is_empty() && name != ANONYMOUS_RECORD).then_some(name)
+}
+
+/// The normalized name of a named IR struct type, `None` for a literal one
+/// or an anonymous record.
+///
+/// # Safety
+/// `ty` must be a live type.
+unsafe fn struct_record(ty: LLVMTypeRef) -> Option<String> {
+    // SAFETY: the caller guarantees a live type; the struct accessors are
+    // reached only for a struct.
+    unsafe {
+        if !matches!(LLVMGetTypeKind(ty), LLVMTypeKind::LLVMStructTypeKind)
+            || LLVMIsLiteralStruct(ty) != 0
+        {
+            return None;
+        }
+        let name = LLVMGetStructName(ty);
+        if name.is_null() {
+            return None;
+        }
+        normalize_record(&CStr::from_ptr(name).to_string_lossy())
+    }
+}
+
+/// Whether `value` is an aggregate constant: a struct, array or vector.
+///
+/// # Safety
+/// `value` must be a live value.
+unsafe fn is_aggregate(value: LLVMValueRef) -> bool {
+    // SAFETY: the caller guarantees a live value, which these accept.
+    unsafe {
+        !LLVMIsAConstantStruct(value).is_null()
+            || !LLVMIsAConstantArray(value).is_null()
+            || !LLVMIsAConstantVector(value).is_null()
+    }
+}
+
+/// The position of `operand` among `user`'s operands.
+///
+/// # Safety
+/// `user` must be a live user and `operand` one of its uses.
+unsafe fn operand_index(user: LLVMValueRef, operand: LLVMUseRef) -> Option<u32> {
+    // SAFETY: the caller guarantees a live user; every index asked for is
+    // below the operand count it reports.
+    let count = unsafe { LLVMGetNumOperands(user) }.max(0) as u32;
+    (0..count).find(|&index| unsafe { LLVMGetOperandUse(user, index) } == operand)
+}
+
+/// The steps an address takes from a function up to whatever holds it:
+/// each wrapping constant, innermost first, with the use of the level below
+/// it among its operands.
+type WrapPath = Vec<(LLVMValueRef, LLVMUseRef)>;
+
+/// Reads which record field a pointer addresses, from the evidence the IR
+/// carries at each optimization level. Built once per module, from handles
+/// that module owns, and dropped with it.
+struct FieldReader {
+    context: LLVMContextRef,
+    layout: LLVMTargetDataRef,
+    tbaa_kind: u32,
+    dbg_kind: u32,
+    /// Source member names by field, from debug info. `None` where two
+    /// members share an offset (a union, a bitfield), so no name is claimed.
+    member_names: HashMap<FieldRef, Option<String>>,
+}
+
+impl FieldReader {
+    /// # Safety
+    /// `context` and `module` must be live, the module in that context.
+    unsafe fn new(context: LLVMContextRef, module: LLVMModuleRef) -> Self {
+        // SAFETY: the caller guarantees a live context and module. The data
+        // layout is the module's own, not a copy to dispose. "tbaa" is 4
+        // bytes and "dbg" 3.
+        let mut reader = unsafe {
+            Self {
+                context,
+                layout: LLVMGetModuleDataLayout(module),
+                tbaa_kind: LLVMGetMDKindIDInContext(context, c"tbaa".as_ptr(), 4),
+                dbg_kind: LLVMGetMDKindIDInContext(context, c"dbg".as_ptr(), 3),
+                member_names: HashMap::new(),
+            }
+        };
+        // SAFETY: as above.
+        reader.member_names = unsafe { reader.read_member_names(module) };
+        reader
+    }
+
+    fn evidence(&self, field: FieldRef, basis: FieldBasis) -> FieldEvidence {
+        let name = self.member_names.get(&field).cloned().flatten();
+        FieldEvidence { field, basis, name }
+    }
+
+    /// The field a called pointer was loaded from. Only a `load` names one:
+    /// a pointer variable, a phi or a select has no field to name.
+    ///
+    /// # Safety
+    /// `called` must be null or a live value in this reader's module.
+    unsafe fn loaded_field(&self, called: LLVMValueRef) -> Option<FieldEvidence> {
+        // SAFETY: a live value; the operand is read only from a load.
+        unsafe {
+            if called.is_null() || LLVMIsALoadInst(called).is_null() {
+                return None;
+            }
+            self.access_field(called, LLVMGetOperand(called, 0))
+        }
+    }
+
+    /// The field a load or store at `pointer` accesses: the typed GEP that
+    /// computed `pointer`, else the TBAA tag on `access`.
+    ///
+    /// # Safety
+    /// `access` must be a live load or store in this reader's module, and
+    /// `pointer` its pointer operand.
+    unsafe fn access_field(
+        &self,
+        access: LLVMValueRef,
+        pointer: LLVMValueRef,
+    ) -> Option<FieldEvidence> {
+        // SAFETY: the caller's guarantee, passed through.
+        if let Some(field) = unsafe { self.gep_field(pointer) } {
+            return Some(self.evidence(field, FieldBasis::StructGep));
+        }
+        // SAFETY: as above.
+        let field = unsafe { self.tbaa_field(access) }?;
+        Some(self.evidence(field, FieldBasis::Tbaa))
+    }
+
+    /// A `getelementptr` over a named struct with constant indices, read
+    /// through the module's data layout. The first index steps over whole
+    /// records and does not move the field.
+    ///
+    /// # Safety
+    /// `pointer` must be a live value in this reader's module.
+    unsafe fn gep_field(&self, pointer: LLVMValueRef) -> Option<FieldRef> {
+        // SAFETY: a live value; the GEP accessors are reached only for a GEP
+        // instruction or expression, and every operand index is below the
+        // count it reports.
+        unsafe {
+            let is_gep = !LLVMIsAGetElementPtrInst(pointer).is_null()
+                || (!LLVMIsAConstantExpr(pointer).is_null()
+                    && matches!(LLVMGetConstOpcode(pointer), LLVMOpcode::LLVMGetElementPtr));
+            if !is_gep {
+                return None;
+            }
+            let source = LLVMGetGEPSourceElementType(pointer);
+            struct_record(source)?;
+            let indices = (2..LLVMGetNumOperands(pointer).max(0) as u32)
+                .map(|index| {
+                    let operand = LLVMGetOperand(pointer, index);
+                    (!LLVMIsAConstantInt(operand).is_null())
+                        .then(|| LLVMConstIntGetSExtValue(operand))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            self.walk_field(source, &indices, None)
+        }
+    }
+
+    /// Steps `indices` into `ty` from offset 0. A named struct level
+    /// restarts the field there; a literal struct or an array level only
+    /// moves it. The answer is the innermost named record, else `record`,
+    /// and the offset since it.
+    ///
+    /// # Safety
+    /// `ty` must be a live sized type in this reader's module.
+    unsafe fn walk_field(
+        &self,
+        mut ty: LLVMTypeRef,
+        indices: &[i64],
+        mut record: Option<String>,
+    ) -> Option<FieldRef> {
+        let mut offset = 0u64;
+        for &index in indices {
+            // SAFETY: `ty` is live and sized; each accessor is reached only
+            // for the type kind it requires, with an in-range element index.
+            unsafe {
+                match LLVMGetTypeKind(ty) {
+                    LLVMTypeKind::LLVMStructTypeKind => {
+                        let element = u32::try_from(index)
+                            .ok()
+                            .filter(|&element| element < LLVMCountStructElementTypes(ty))?;
+                        let element_offset = LLVMOffsetOfElement(self.layout, ty, element);
+                        if LLVMIsLiteralStruct(ty) == 0 {
+                            // An anonymous record restarts the field too: it
+                            // has no name, so nothing below it can be named.
+                            record = struct_record(ty);
+                            offset = element_offset;
+                        } else {
+                            offset = offset.checked_add(element_offset)?;
+                        }
+                        ty = LLVMStructGetTypeAtIndex(ty, element);
+                    }
+                    LLVMTypeKind::LLVMArrayTypeKind => {
+                        let element = LLVMGetElementType(ty);
+                        let step = u64::try_from(index)
+                            .ok()?
+                            .checked_mul(LLVMABISizeOfType(self.layout, element))?;
+                        offset = offset.checked_add(step)?;
+                        ty = element;
+                    }
+                    _ => return None,
+                }
+            }
+        }
+        Some(FieldRef {
+            record: record?,
+            offset,
+        })
+    }
+
+    /// A TBAA struct-path tag `{base, access, offset}`, walked down from the
+    /// base type to the member the access lands on. The record is the last
+    /// struct passed through; a scalar tag, whose base is the access type,
+    /// names none.
+    ///
+    /// # Safety
+    /// `access` must be a live load or store in this reader's module.
+    unsafe fn tbaa_field(&self, access: LLVMValueRef) -> Option<FieldRef> {
+        // SAFETY: a live instruction and a kind interned in its context; an
+        // instruction without the tag answers null.
+        let tag = unsafe { LLVMGetMetadata(access, self.tbaa_kind) };
+        if tag.is_null() {
+            return None;
+        }
+        // SAFETY: `tag` is the live MDNode attached to `access`, and each
+        // operand is read through the guarded accessors above.
+        let (base, access_type, offset) = unsafe {
+            let operands = md_node_operands(tag);
+            (
+                operand_metadata(*operands.first()?)?,
+                operand_metadata(*operands.get(1)?)?,
+                operand_integer(*operands.get(2)?)?,
+            )
+        };
+        // SAFETY: both are live nodes of this module's TBAA tree.
+        let ancestors = unsafe { self.tbaa_ancestors(access_type) };
+        if ancestors.contains(&base) {
+            return None;
+        }
+        let (mut node, mut remaining) = (base, offset);
+        for _ in 0..MAX_TBAA_DEPTH {
+            // SAFETY: `node` is a live node of that tree.
+            let (name, members) = unsafe { self.tbaa_type(node) }?;
+            let &(member, member_offset) = members
+                .iter()
+                .filter(|(_, member_offset)| *member_offset <= remaining)
+                .max_by_key(|(member, member_offset)| {
+                    (*member_offset, ancestors.contains(member))
+                })?;
+            if ancestors.contains(&member) {
+                return Some(FieldRef {
+                    record: normalize_record(&name)?,
+                    offset: remaining,
+                });
+            }
+            node = member;
+            remaining -= member_offset;
+        }
+        None
+    }
+
+    /// A TBAA type node's name and its `(member, offset)` pairs. A scalar
+    /// node lists its parent as its one member at offset 0.
+    ///
+    /// # Safety
+    /// `node` must be live metadata in this reader's context.
+    unsafe fn tbaa_type(
+        &self,
+        node: LLVMMetadataRef,
+    ) -> Option<(String, Vec<(LLVMMetadataRef, u64)>)> {
+        // SAFETY: the caller guarantees live metadata; only an `MDTuple`, the
+        // shape every TBAA node has, is read as one.
+        unsafe {
+            if !matches!(
+                LLVMGetMetadataKind(node),
+                LLVMMetadataKind::LLVMMDTupleMetadataKind
+            ) {
+                return None;
+            }
+            let operands = md_node_operands(LLVMMetadataAsValue(self.context, node));
+            let name = operand_string(*operands.first()?)?;
+            let members = operands[1..]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&[member, offset]| {
+                    Some((operand_metadata(member)?, operand_integer(offset)?))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((name, members))
+        }
+    }
+
+    /// `access_type` and every type above it, up to the TBAA root.
+    ///
+    /// # Safety
+    /// `access_type` must be live metadata in this reader's context.
+    unsafe fn tbaa_ancestors(&self, access_type: LLVMMetadataRef) -> Vec<LLVMMetadataRef> {
+        let mut ancestors = vec![access_type];
+        for _ in 0..MAX_TBAA_DEPTH {
+            let current = ancestors[ancestors.len() - 1];
+            // SAFETY: `current` is a live node of the same tree.
+            let Some((_, members)) = (unsafe { self.tbaa_type(current) }) else {
+                break;
+            };
+            match members.first() {
+                Some(&(parent, _)) if !ancestors.contains(&parent) => ancestors.push(parent),
+                _ => break,
+            }
+        }
+        ancestors
+    }
+
+    /// The field an address goes into when `store` stores it. Only the
+    /// stored value counts, and only the address itself: an aggregate that
+    /// merely contains it occupies a different field.
+    ///
+    /// # Safety
+    /// `store` must be a live store in this reader's module, `operand` the
+    /// use that reached it and `path` the wrapping constants below that.
+    unsafe fn stored_field(
+        &self,
+        store: LLVMValueRef,
+        operand: LLVMUseRef,
+        path: &WrapPath,
+    ) -> Option<FieldEvidence> {
+        // SAFETY: a live store, whose two operands always exist; the path's
+        // constants are live.
+        unsafe {
+            if LLVMGetOperandUse(store, 0) != operand
+                || path.iter().any(|&(wrapper, _)| is_aggregate(wrapper))
+            {
+                return None;
+            }
+            self.access_field(store, LLVMGetOperand(store, 1))
+        }
+    }
+
+    /// The field an address occupies in a global's initializer: the
+    /// innermost named struct around it, else, for an initializer of literal
+    /// type, the record the global's debug info names.
+    ///
+    /// # Safety
+    /// `global` must be a live global variable in this reader's module and
+    /// `path` the wrapping constants from the address up to its initializer.
+    unsafe fn initializer_field(
+        &self,
+        global: LLVMValueRef,
+        path: &WrapPath,
+    ) -> Option<FieldEvidence> {
+        // SAFETY: every constant on the path is live, and each use on it is
+        // one of its wrapper's operands.
+        unsafe {
+            // An expression over the address, such as a `ptrtoint`, can sit
+            // below the aggregates; one between them is not a slot.
+            let lowest = path
+                .iter()
+                .position(|&(wrapper, _)| is_aggregate(wrapper))?;
+            let aggregates = &path[lowest..];
+            if !aggregates.iter().all(|&(wrapper, _)| is_aggregate(wrapper)) {
+                return None;
+            }
+            let indices = aggregates
+                .iter()
+                .map(|&(wrapper, operand)| operand_index(wrapper, operand).map(i64::from))
+                .collect::<Option<Vec<_>>>()?;
+            // From an aggregate at `level` down to the address.
+            let below = |level: usize| indices[..=level].iter().rev().copied().collect::<Vec<_>>();
+            let is_struct = |wrapper| !LLVMIsAConstantStruct(wrapper).is_null();
+
+            if let Some(level) = aggregates.iter().position(|&(wrapper, _)| {
+                is_struct(wrapper) && struct_record(LLVMTypeOf(wrapper)).is_some()
+            }) {
+                let ty = LLVMTypeOf(aggregates[level].0);
+                let field = self.walk_field(ty, &below(level), None)?;
+                return Some(self.evidence(field, FieldBasis::Initializer));
+            }
+
+            let level = aggregates
+                .iter()
+                .position(|&(wrapper, _)| is_struct(wrapper))?;
+            let above = &aggregates[level + 1..];
+            if !above
+                .iter()
+                .all(|&(wrapper, _)| !LLVMIsAConstantArray(wrapper).is_null())
+            {
+                return None;
+            }
+            let ty = LLVMTypeOf(aggregates[level].0);
+            let record = self.debug_info_record(global, above.len(), ty)?;
+            let field = self.walk_field(ty, &below(level), Some(record))?;
+            Some(self.evidence(field, FieldBasis::DebugInfo))
+        }
+    }
+
+    /// The type of a global's `DIGlobalVariable`, when it has one.
+    ///
+    /// # Safety
+    /// `global` must be a live global variable in this reader's module.
+    unsafe fn global_debug_type(&self, global: LLVMValueRef) -> Option<LLVMMetadataRef> {
+        // SAFETY: a live global; the entries are read within their count and
+        // disposed once, and each node is read only after its kind is checked.
+        unsafe {
+            let mut count = 0;
+            let entries = LLVMGlobalCopyAllMetadata(global, &mut count);
+            if entries.is_null() {
+                return None;
+            }
+            let expression = (0..count as u32)
+                .find(|&index| LLVMValueMetadataEntriesGetKind(entries, index) == self.dbg_kind)
+                .map(|index| LLVMValueMetadataEntriesGetMetadata(entries, index));
+            LLVMDisposeValueMetadataEntries(entries);
+            let expression = expression.filter(|&expression| {
+                matches!(
+                    LLVMGetMetadataKind(expression),
+                    LLVMMetadataKind::LLVMDIGlobalVariableExpressionMetadataKind
+                )
+            })?;
+            let variable = LLVMDIGlobalVariableExpressionGetVariable(expression);
+            if variable.is_null()
+                || !matches!(
+                    LLVMGetMetadataKind(variable),
+                    LLVMMetadataKind::LLVMDIGlobalVariableMetadataKind
+                )
+            {
+                return None;
+            }
+            self.node_operand(variable, DI_VARIABLE_TYPE_OPERAND)
+        }
+    }
+
+    /// The record a literal-typed initializer holds, from the global's
+    /// debug-info type: through typedefs and qualifiers, and through one
+    /// array for each of the `arrays` levels above the record in the IR.
+    /// Refused when the debug-info record is not the IR record's size, since
+    /// then the two do not describe the same bytes.
+    ///
+    /// # Safety
+    /// `global` must be a live global variable in this reader's module and
+    /// `literal` a live literal struct type.
+    unsafe fn debug_info_record(
+        &self,
+        global: LLVMValueRef,
+        mut arrays: usize,
+        literal: LLVMTypeRef,
+    ) -> Option<String> {
+        // SAFETY: the caller's guarantees; each node is read only after its
+        // kind is checked, and a DWARF tag only from a debug-info type.
+        unsafe {
+            let mut ty = self.global_debug_type(global)?;
+            let mut typedef = None;
+            for _ in 0..MAX_DEBUG_TYPE_DEPTH {
+                match LLVMGetMetadataKind(ty) {
+                    LLVMMetadataKind::LLVMDIDerivedTypeMetadataKind => match LLVMGetDINodeTag(ty) {
+                        DW_TAG_TYPEDEF => typedef = debug_type_name(ty),
+                        DW_TAG_CONST_TYPE | DW_TAG_VOLATILE_TYPE => {}
+                        _ => return None,
+                    },
+                    LLVMMetadataKind::LLVMDICompositeTypeMetadataKind => match LLVMGetDINodeTag(ty)
+                    {
+                        DW_TAG_ARRAY_TYPE => {
+                            // One debug-info array can stand for several IR
+                            // levels: `a[2][3]` has one node, two subranges.
+                            let dimensions = self
+                                .node_operand(ty, DI_COMPOSITE_ELEMENTS_OPERAND)
+                                .map_or(0, |elements| self.node_elements(elements).len())
+                                .max(1);
+                            arrays = arrays.checked_sub(dimensions)?;
+                            typedef = None;
+                        }
+                        tag if DW_RECORD_TAGS.contains(&tag) => {
+                            let size = LLVMDITypeGetSizeInBits(ty);
+                            if arrays != 0 || size != LLVMABISizeOfType(self.layout, literal) * 8 {
+                                return None;
+                            }
+                            return self.debug_record_name(ty, typedef);
+                        }
+                        _ => return None,
+                    },
+                    _ => return None,
+                }
+                ty = self.node_operand(ty, DI_BASE_TYPE_OPERAND)?;
+            }
+            None
+        }
+    }
+
+    /// A debug-info record's name: its C++ identifier, else its own name,
+    /// else the typedef it was reached through.
+    ///
+    /// # Safety
+    /// `record` must be a live `DICompositeType` in this reader's context.
+    unsafe fn debug_record_name(
+        &self,
+        record: LLVMMetadataRef,
+        typedef: Option<String>,
+    ) -> Option<String> {
+        // SAFETY: the caller guarantees a live composite type.
+        unsafe {
+            let operands = md_node_operands(LLVMMetadataAsValue(self.context, record));
+            operands
+                .get(DI_COMPOSITE_IDENTIFIER_OPERAND)
+                .and_then(|&identifier| operand_string(identifier))
+                .and_then(|identifier| normalize_record(&identifier))
+                .or_else(|| debug_type_name(record).and_then(|name| normalize_record(&name)))
+                .or(typedef)
+        }
+    }
+
+    /// The node at `index` among `node`'s operands.
+    ///
+    /// # Safety
+    /// `node` must be a live MDNode in this reader's context.
+    unsafe fn node_operand(&self, node: LLVMMetadataRef, index: usize) -> Option<LLVMMetadataRef> {
+        // SAFETY: the caller guarantees a live node.
+        unsafe {
+            let operands = md_node_operands(LLVMMetadataAsValue(self.context, node));
+            operand_metadata(*operands.get(index)?)
+        }
+    }
+
+    /// The nodes of a tuple, such as a record's members.
+    ///
+    /// # Safety
+    /// `tuple` must be live metadata in this reader's context.
+    unsafe fn node_elements(&self, tuple: LLVMMetadataRef) -> Vec<LLVMMetadataRef> {
+        // SAFETY: the caller guarantees live metadata; only a tuple is read.
+        unsafe {
+            if !matches!(
+                LLVMGetMetadataKind(tuple),
+                LLVMMetadataKind::LLVMMDTupleMetadataKind
+            ) {
+                return Vec::new();
+            }
+            md_node_operands(LLVMMetadataAsValue(self.context, tuple))
+                .into_iter()
+                .filter_map(|operand| operand_metadata(operand))
+                .collect()
+        }
+    }
+
+    /// Member names for every record debug info describes and a defined
+    /// function's parameters or a global reach, keyed the way fields are.
+    /// Empty without debug info.
+    ///
+    /// # Safety
+    /// `module` must be this reader's live module.
+    unsafe fn read_member_names(&self, module: LLVMModuleRef) -> HashMap<FieldRef, Option<String>> {
+        let mut pending: Vec<(LLVMMetadataRef, Option<String>)> = Vec::new();
+        // SAFETY: a live module; every global and function is live in it,
+        // and each node is read only after its kind is checked.
+        unsafe {
+            let mut function = LLVMGetFirstFunction(module);
+            while !function.is_null() {
+                let subprogram = LLVMGetSubprogram(function);
+                if LLVMIsDeclaration(function) == 0
+                    && !subprogram.is_null()
+                    && matches!(
+                        LLVMGetMetadataKind(subprogram),
+                        LLVMMetadataKind::LLVMDISubprogramMetadataKind
+                    )
+                    && let Some(ty) = self.node_operand(subprogram, SUBPROGRAM_TYPE_OPERAND)
+                {
+                    pending.push((ty, None));
+                }
+                function = LLVMGetNextFunction(function);
+            }
+            let mut global = LLVMGetFirstGlobal(module);
+            while !global.is_null() {
+                if let Some(ty) = self.global_debug_type(global) {
+                    pending.push((ty, None));
+                }
+                global = LLVMGetNextGlobal(global);
+            }
+        }
+
+        let mut names: HashMap<FieldRef, Option<String>> = HashMap::new();
+        let mut visited = HashSet::new();
+        while let Some((ty, typedef)) = pending.pop() {
+            if !visited.insert(ty) {
+                continue;
+            }
+            // SAFETY: `ty` is live metadata reached from the module's debug
+            // info; each accessor is reached only for the kind it requires.
+            unsafe {
+                let base = || self.node_operand(ty, DI_BASE_TYPE_OPERAND);
+                match LLVMGetMetadataKind(ty) {
+                    LLVMMetadataKind::LLVMDISubroutineTypeMetadataKind => {
+                        if let Some(types) = self.node_operand(ty, DI_SUBROUTINE_TYPES_OPERAND) {
+                            pending
+                                .extend(self.node_elements(types).into_iter().map(|ty| (ty, None)));
+                        }
+                    }
+                    LLVMMetadataKind::LLVMDIDerivedTypeMetadataKind => {
+                        let typedef = (LLVMGetDINodeTag(ty) == DW_TAG_TYPEDEF)
+                            .then(|| debug_type_name(ty))
+                            .flatten();
+                        pending.extend(base().map(|base| (base, typedef)));
+                    }
+                    LLVMMetadataKind::LLVMDICompositeTypeMetadataKind => {
+                        let tag = LLVMGetDINodeTag(ty);
+                        if !DW_RECORD_TAGS.contains(&tag) {
+                            pending.extend(base().map(|base| (base, None)));
+                            continue;
+                        }
+                        let record = self.debug_record_name(ty, typedef);
+                        let members = self
+                            .node_operand(ty, DI_COMPOSITE_ELEMENTS_OPERAND)
+                            .map(|elements| self.node_elements(elements))
+                            .unwrap_or_default();
+                        for member in members {
+                            if !matches!(
+                                LLVMGetMetadataKind(member),
+                                LLVMMetadataKind::LLVMDIDerivedTypeMetadataKind
+                            ) {
+                                continue;
+                            }
+                            pending.extend(
+                                self.node_operand(member, DI_BASE_TYPE_OPERAND)
+                                    .map(|base| (base, None)),
+                            );
+                            let is_field = LLVMGetDINodeTag(member) == DW_TAG_MEMBER
+                                && LLVMDITypeGetFlags(member) & LLVMDIFlagStaticMember == 0;
+                            if let (true, Some(record), Some(name)) =
+                                (is_field, &record, debug_type_name(member))
+                            {
+                                let field = FieldRef {
+                                    record: record.clone(),
+                                    offset: LLVMDITypeGetOffsetInBits(member) / 8,
+                                };
+                                names
+                                    .entry(field)
+                                    .and_modify(|known| {
+                                        if known.as_deref() != Some(name.as_str()) {
+                                            *known = None;
+                                        }
+                                    })
+                                    .or_insert(Some(name));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        names
+    }
+}
+
+/// A debug-info type's own name, `None` when it has none.
+///
+/// # Safety
+/// `ty` must be a live debug-info type.
+unsafe fn debug_type_name(ty: LLVMMetadataRef) -> Option<String> {
+    let mut length = 0;
+    // SAFETY: the caller guarantees a live type; the name spans `length`
+    // bytes.
+    let name = unsafe { owned(LLVMDITypeGetName(ty, &mut length), length) };
+    (!name.is_empty()).then_some(name)
+}
+
 /// The constants an address can sit inside on its way to the value that
 /// holds it: an expression over it, or an aggregate such as a table entry.
 const WRAPPING_CONSTANTS: [unsafe extern "C" fn(LLVMValueRef) -> LLVMValueRef; 4] = [
@@ -828,22 +1597,36 @@ const WRAPPING_CONSTANTS: [unsafe extern "C" fn(LLVMValueRef) -> LLVMValueRef; 4
     LLVMIsAConstantVector,
 ];
 
-/// Each use of `value` as a `(value, user)` pair, in use-list order.
+/// One use of an address on the walk out from a function: what is used,
+/// the user, the use itself, and the wrapping constants passed through.
+struct Occurrence {
+    used: LLVMValueRef,
+    user: LLVMValueRef,
+    operand: LLVMUseRef,
+    path: WrapPath,
+}
+
+/// Each use of `value`, in use-list order, reached through `path`.
 ///
 /// # Safety
 /// `value` must be a live value in a live module.
-unsafe fn users_of(value: LLVMValueRef) -> Vec<(LLVMValueRef, LLVMValueRef)> {
+unsafe fn users_of(value: LLVMValueRef, path: &WrapPath) -> Vec<Occurrence> {
     let mut users = Vec::new();
     // SAFETY: the caller guarantees a live value.
     let mut current = unsafe { LLVMGetFirstUse(value) };
     while !current.is_null() {
         // SAFETY: `current` is a live use of that value.
         let user = unsafe { LLVMGetUser(current) };
+        if !user.is_null() {
+            users.push(Occurrence {
+                used: value,
+                user,
+                operand: current,
+                path: path.clone(),
+            });
+        }
         // SAFETY: as above.
         current = unsafe { LLVMGetNextUse(current) };
-        if !user.is_null() {
-            users.push((value, user));
-        }
     }
     users
 }
@@ -854,19 +1637,27 @@ unsafe fn users_of(value: LLVMValueRef) -> Vec<(LLVMValueRef, LLVMValueRef)> {
 ///
 /// A use inside a wrapping constant is followed to whatever uses that
 /// constant, so an address in a dispatch table is attributed to the global
-/// holding the table rather than to an anonymous constant.
+/// holding the table rather than to an anonymous constant. The constants
+/// passed through are kept, so the slot the address occupies can be named.
 ///
 /// # Safety
-/// `function` must be a live function in a live module.
+/// `function` must be a live function in the module `fields` reads.
 unsafe fn collect_uses(
     function: LLVMValueRef,
     id: &FunctionId,
     module_id: &str,
+    fields: &FieldReader,
     uses: &mut Vec<UseFact>,
 ) {
     // SAFETY: the caller guarantees a live function.
-    let mut pending: VecDeque<_> = unsafe { users_of(function) }.into();
-    while let Some((used, user)) = pending.pop_front() {
+    let mut pending: VecDeque<_> = unsafe { users_of(function, &Vec::new()) }.into();
+    while let Some(occurrence) = pending.pop_front() {
+        let Occurrence {
+            used,
+            user,
+            operand,
+            path,
+        } = occurrence;
         // SAFETY: `user` is a live value; `LLVMIsAInstruction` is the guard
         // that makes the instruction-only accessors below legal.
         let is_instruction = !unsafe { LLVMIsAInstruction(user) }.is_null();
@@ -888,8 +1679,10 @@ unsafe fn collect_uses(
                 .iter()
                 .any(|is_a| !unsafe { is_a(user) }.is_null());
         if wraps {
+            let mut path = path;
+            path.push((user, operand));
             // SAFETY: `user` is a live constant.
-            pending.extend(unsafe { users_of(user) });
+            pending.extend(unsafe { users_of(user, &path) });
             continue;
         }
 
@@ -900,6 +1693,13 @@ unsafe fn collect_uses(
             Some(_) => UseKind::Other,
             None if is_global => UseKind::GlobalInitializer,
             None => UseKind::Other,
+        };
+        // SAFETY: a store is a live instruction and a global a live global
+        // variable, each reached through `operand` along `path`.
+        let field = match kind {
+            UseKind::StoredToMemory => unsafe { fields.stored_field(user, operand, &path) },
+            UseKind::GlobalInitializer => unsafe { fields.initializer_field(user, &path) },
+            _ => None,
         };
 
         uses.push(UseFact {
@@ -914,6 +1714,7 @@ unsafe fn collect_uses(
                 .then(|| unsafe { location_of(user) })
                 .flatten(),
             kind,
+            field,
         });
     }
 }
@@ -1027,6 +1828,9 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
     // SAFETY: `context.0` is live; "callees" is 7 bytes, the metadata kind
     // CVP attaches its upper bound under.
     let callees_kind = unsafe { LLVMGetMDKindIDInContext(context.0, c"callees".as_ptr(), 7) };
+    // SAFETY: `parsed` is a module in the live context, and the reader is
+    // not used after the module is dropped below.
+    let fields = unsafe { FieldReader::new(context.0, parsed.0) };
 
     // SAFETY: `parsed` is a module in the live context.
     let producers = unsafe { read_producers(parsed.0) };
@@ -1079,7 +1883,7 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
                         location,
                         // SAFETY: reached only for a call or invoke.
                         target: unsafe {
-                            call_target(instruction, NEUTRAL_MODULE_ID, callees_kind)
+                            call_target(instruction, NEUTRAL_MODULE_ID, callees_kind, &fields)
                         },
                     });
                 }
@@ -1122,7 +1926,7 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
         });
 
         // SAFETY: `function` is live in the module being walked.
-        unsafe { collect_uses(function, &id, NEUTRAL_MODULE_ID, &mut uses) };
+        unsafe { collect_uses(function, &id, NEUTRAL_MODULE_ID, &fields, &mut uses) };
 
         // SAFETY: as above.
         function = unsafe { LLVMGetNextFunction(function) };
@@ -1269,6 +2073,25 @@ mod tests {
             demangle("_ZN4core3fmt5Debug3fmt17h0123456789abcdefE")
                 .is_some_and(|name| name.contains("core::fmt")),
         );
+    }
+
+    /// A record has one name however the IR spells it, or field evidence
+    /// from a typed GEP never meets the same field read through TBAA.
+    #[test]
+    fn record_names_normalize_across_ir_spellings() {
+        for (raw, expected) in [
+            ("struct.ops", Some("ops")),
+            ("struct.ops.12", Some("ops")),
+            ("struct.n::S", Some("n::S")),
+            ("_ZTSN1n1SE", Some("n::S")),
+            ("_ZTS6ns_ops", Some("ns_ops")),
+            ("ops", Some("ops")),
+            ("", None),
+            ("struct.anon", None),
+            ("union.anon.1", None),
+        ] {
+            assert_eq!(normalize_record(raw).as_deref(), expected, "{raw:?}");
+        }
     }
 
     /// Rust's legacy scheme is Itanium-shaped, so it reads back. Pinned

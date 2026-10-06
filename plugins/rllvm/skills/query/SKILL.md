@@ -99,6 +99,11 @@ Report what the answer supports, and say what it does not:
   it could not attribute and did not search — non-zero for code built
   without `-g`, or compiler-generated code such as a Rust binary's C
   `main`. Report it; a per-object catalog avoids it.
+- **A field is evidence, not a target.** An indirect site's `via_field` and a
+  use's `field` name the record field (`ops@8`: record and byte offset) the
+  pointer is loaded from or stored into. No field means the IR proved none,
+  not that there is none. `basis` says which IR evidence spoke; the member
+  `name`, from debug info, is display only.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.

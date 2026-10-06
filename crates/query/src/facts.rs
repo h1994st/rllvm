@@ -7,7 +7,10 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use rllvm_core::catalog::{CatalogOrigin, CatalogScope, DigestOrigin};
+use rllvm_core::{
+    catalog::{CatalogOrigin, CatalogScope, DigestOrigin},
+    error::Error,
+};
 
 /// A function is identified by module and symbol, never by symbol alone: the
 /// catalog preserves separate compilations of one source on purpose.
@@ -127,6 +130,68 @@ pub struct FunctionFact {
     pub alias_of: Option<FunctionId>,
 }
 
+/// A field of a record type, as the IR can prove it: the record's source
+/// name and the field's byte offset within it. The identity two facts are
+/// joined on; a member name, when known, is carried beside it, not in it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct FieldRef {
+    /// Normalized: `ops`, `ns::Foo`. Never empty.
+    pub record: String,
+    pub offset: u64,
+}
+
+impl std::fmt::Display for FieldRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}@{}", self.record, self.offset)
+    }
+}
+
+impl std::str::FromStr for FieldRef {
+    type Err = Error;
+
+    /// Splits on the last `@`, so a record name containing one survives.
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let invalid = || {
+            Error::InvalidArguments(format!(
+                "field `{text}` is not `record@offset`, such as `ops@8`"
+            ))
+        };
+        let (record, offset) = text.rsplit_once('@').ok_or_else(invalid)?;
+        if record.is_empty() {
+            return Err(invalid());
+        }
+        Ok(Self {
+            record: record.to_string(),
+            offset: offset.parse().map_err(|_| invalid())?,
+        })
+    }
+}
+
+/// Which IR evidence named the field. Kept because they prove the same
+/// thing at different optimization levels, and a reader debugging a missing
+/// join needs to know which one spoke.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FieldBasis {
+    /// A struct-typed `getelementptr` with constant indices (-O0).
+    StructGep,
+    /// A `!tbaa` struct-path access tag (-O1 and above).
+    Tbaa,
+    /// The position inside a named struct constant of a global initializer.
+    Initializer,
+    /// A global initializer of literal type, named by the global's debug-info type.
+    DebugInfo,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldEvidence {
+    pub field: FieldRef,
+    pub basis: FieldBasis,
+    /// The source member name at that offset, from debug info. Display only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CallTarget {
@@ -140,6 +205,10 @@ pub enum CallTarget {
         /// outside this set. Not a claim that these targets are reachable.
         #[serde(skip_serializing_if = "Option::is_none")]
         llvm_target_bound: Option<Vec<FunctionId>>,
+        /// The record field the called pointer was loaded from, when the IR
+        /// proves one. A plain pointer variable or a vtable slot has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via_field: Option<FieldEvidence>,
     },
     Intrinsic {
         name: String,
@@ -174,6 +243,12 @@ pub struct UseFact {
     pub in_global: Option<String>,
     pub location: Option<SourceLocation>,
     pub kind: UseKind,
+    /// The record field the address goes into: a store's destination, or
+    /// the slot an initializer puts it in. Only ever set for
+    /// `StoredToMemory` and `GlobalInitializer`, and only when the IR proves
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<FieldEvidence>,
 }
 
 /// Mirrors the catalog's `ModuleStatus` where it applies, and adds what only
@@ -266,5 +341,30 @@ mod tests {
             symbol: "f".into(),
         };
         assert_ne!(left, right, "same symbol in two modules must not collide");
+    }
+
+    #[test]
+    fn a_field_reads_back_from_its_display() {
+        let field = FieldRef {
+            record: "n::S".into(),
+            offset: 0,
+        };
+        assert_eq!(field.to_string(), "n::S@0");
+        assert_eq!(field.to_string().parse::<FieldRef>().unwrap(), field);
+
+        assert_eq!(
+            "a@b@8".parse::<FieldRef>().unwrap(),
+            FieldRef {
+                record: "a@b".into(),
+                offset: 8
+            },
+            "the offset follows the last `@`"
+        );
+        for invalid in ["ops@", "@8", "ops", "ops@-8", "ops@x"] {
+            assert!(
+                matches!(invalid.parse::<FieldRef>(), Err(Error::InvalidArguments(_))),
+                "{invalid}"
+            );
+        }
     }
 }

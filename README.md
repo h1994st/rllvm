@@ -361,6 +361,10 @@ rllvm-query --catalog catalog.json ffi-exports                 # Rust functions 
 rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an indirect call
 ```
 
+An indirect call site, and an address stored or placed in a table, names the
+record field it goes through (`via ops@8 (on_event)`, `into ops@8`) when the
+IR proves one; the member name needs `-g`.
+
 Answers print as text. Add `--json` for the full machine-readable envelope, or
 `--full` to print the scope, analysis, uncertainty and provenance blocks as
 text too. The MCP server always speaks JSON.

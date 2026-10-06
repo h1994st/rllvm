@@ -12,7 +12,7 @@ use owo_colors::OwoColorize;
 use crate::{
     PathStep, QueryResult, QueryResults,
     bind::BindingStatus,
-    facts::{CallSiteFact, CallTarget, FunctionId, SourceLocation},
+    facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, SourceLocation},
 };
 
 /// How much of the envelope to print.
@@ -210,6 +210,24 @@ fn symbol_list(symbols: &BTreeMap<String, String>, ids: &[FunctionId], ctx: Ctx)
         .join(", ")
 }
 
+/// ` via ops@8 (on_event)`: the record field a site loads from or a use
+/// goes into, after `word`, with the member name when debug info gave one.
+/// Empty when the IR proved no field.
+fn field_note(word: &str, evidence: Option<&FieldEvidence>, ctx: Ctx) -> String {
+    let Some(evidence) = evidence else {
+        return String::new();
+    };
+    let name = evidence
+        .name
+        .as_ref()
+        .map(|name| format!(" ({name})"))
+        .unwrap_or_default();
+    format!(
+        " {word} {}{name}",
+        paint(&evidence.field.to_string(), ctx.color, Paint::Symbol)
+    )
+}
+
 /// One call target, named by kind so an indirect or intrinsic site never
 /// reads like a resolved call. The kind word is coloured by how certain it
 /// is, and still printed, so the colour is never the only signal.
@@ -223,17 +241,19 @@ fn call_target(symbols: &BTreeMap<String, String>, target: &CallTarget, ctx: Ctx
         CallTarget::Indirect {
             signature,
             llvm_target_bound,
+            via_field,
         } => {
             let kind = paint("indirect", ctx.color, Paint::Uncertain);
             let signature = paint(signature, ctx.color, Paint::Muted);
+            let field = field_note("via", via_field.as_ref(), ctx);
             match llvm_target_bound {
                 Some(bound) => format!(
-                    "{kind}  {signature}  {} {}",
+                    "{kind}  {signature}  {} {}{field}",
                     paint("bound:", ctx.color, Paint::Resolved),
                     symbol_list(symbols, bound, ctx)
                 ),
                 None => format!(
-                    "{kind}  {signature}  {}",
+                    "{kind}  {signature}  {}{field}",
                     paint("unresolved", ctx.color, Paint::Absent)
                 ),
             }
@@ -772,10 +792,11 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                     (None, None) => paint("<no function>", ctx.color, Paint::Muted),
                 };
                 out.push_str(&format!(
-                    "{}  in {}  at {}\n",
+                    "{}  in {}  at {}{}\n",
                     paint(&serde_name(&use_fact.kind), ctx.color, Paint::Uncertain),
                     holder,
-                    location(use_fact.location.as_ref(), ctx)
+                    location(use_fact.location.as_ref(), ctx),
+                    field_note("into", use_fact.field.as_ref(), ctx)
                 ));
             }
         }
@@ -880,7 +901,10 @@ mod tests {
     use super::*;
     use crate::{
         CacheReport, Query,
-        facts::{FunctionFact, Language, Linkage, ModuleAnalysis, ModuleReport, UseFact, UseKind},
+        facts::{
+            FieldBasis, FieldRef, FunctionFact, Language, Linkage, ModuleAnalysis, ModuleReport,
+            UseFact, UseKind,
+        },
         index::{Direction, Session},
         run,
         testing::*,
@@ -1276,6 +1300,7 @@ mod tests {
             in_global: Some("table".into()),
             location: None,
             kind: UseKind::GlobalInitializer,
+            field: None,
         }];
         let session = Session::new(base, Vec::new());
         let result = run(&session, &Query::Uses { name: "run".into() }).unwrap();
@@ -1292,6 +1317,70 @@ mod tests {
         let result = run(&session, &Query::Uses { name: "add".into() }).unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
         assert!(text.contains("without a source location"), "got: {text:?}");
+    }
+
+    fn ops_field(name: Option<&str>) -> FieldEvidence {
+        FieldEvidence {
+            field: FieldRef {
+                record: "ops".into(),
+                offset: 8,
+            },
+            basis: FieldBasis::Tbaa,
+            name: name.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_indirect_site_names_the_field_it_loads_from() {
+        let caller = function("m", "caller", true, Linkage::Internal);
+        let callees = |name: Option<&str>| {
+            let mut site = indirect_call(&caller, 0, None, None);
+            if let CallTarget::Indirect { via_field, .. } = &mut site.target {
+                *via_field = Some(ops_field(name));
+            }
+            let session = Session::new(facts(vec![caller.clone()], vec![site]), Vec::new());
+            let result = run(
+                &session,
+                &Query::Callees {
+                    name: "caller".into(),
+                },
+            )
+            .unwrap();
+            render(&result, TextMode::Adaptive, Color::Never)
+        };
+
+        let named = callees(Some("on_event"));
+        assert!(
+            named.contains("unresolved via ops@8 (on_event)"),
+            "got: {named:?}"
+        );
+        let unnamed = callees(None);
+        assert!(
+            unnamed.contains("unresolved via ops@8\n"),
+            "got: {unnamed:?}"
+        );
+    }
+
+    #[test]
+    fn a_stored_use_names_the_field_it_goes_into() {
+        let add = function("m", "add", true, Linkage::Internal);
+        let init = function("m", "init", true, Linkage::Internal);
+        let mut base = facts(vec![add.clone(), init.clone()], vec![]);
+        base.uses = vec![UseFact {
+            used: add.id,
+            in_function: Some(init.id),
+            in_global: None,
+            location: Some(source_location("t.c", 3)),
+            kind: UseKind::StoredToMemory,
+            field: Some(ops_field(Some("on_event"))),
+        }];
+        let session = Session::new(base, Vec::new());
+        let result = run(&session, &Query::Uses { name: "add".into() }).unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(
+            text.contains("in init  at t.c:3 into ops@8 (on_event)"),
+            "got: {text:?}"
+        );
     }
 
     #[test]

@@ -1577,6 +1577,210 @@ fn assert_unresolved_indirect_site(facts: &rllvm_query::ModuleFacts, message: &s
     );
 }
 
+/// Function pointers reached through record fields, in every shape the
+/// field evidence distinguishes: a plain field, a nested one, an anonymous
+/// typedef'd record, initializers of named and literal IR type, and a plain
+/// function-pointer variable that names no field at all.
+const FIELD_SOURCE: &str = r#"
+typedef void (*cb_t)(void *, long);
+struct ops { int tag; cb_t on_event; cb_t on_close; };
+typedef struct { int tag; cb_t on_event; } anon_ops;
+struct inner { cb_t a; cb_t b; };
+struct outer { int x; struct inner in; };
+static void h1(void *p, long n) {}
+static void h2(void *p, long n) {}
+static void h3(void *p, long n) {}
+const struct ops table = { 1, h1, h2 };
+struct outer nested = { 1, { h1, h2 } };
+void init(struct ops *o) { o->on_event = h3; }
+void dispatch(struct ops *o, void *p) { o->on_event(p, 4); }
+void set_anon(anon_ops *o) { o->on_event = h1; }
+void call_anon(anon_ops *o) { o->on_event(0, 1); }
+void set_inner(struct outer *o) { o->in.b = h1; }
+void call_inner(struct outer *o) { o->in.b(0, 1); }
+void call_plain(cb_t f) { f(0, 1); }
+"#;
+
+fn field(record: &str, offset: u64) -> rllvm_query::FieldRef {
+    rllvm_query::FieldRef {
+        record: record.into(),
+        offset,
+    }
+}
+
+/// The field evidence on the one indirect call site in `function`. Panics
+/// unless there is exactly one, so a `None` expectation cannot pass because
+/// the site vanished.
+fn site_field(
+    facts: &rllvm_query::ModuleFacts,
+    function: &str,
+) -> Option<rllvm_query::FieldEvidence> {
+    let fields: Vec<_> = facts
+        .call_sites
+        .iter()
+        .filter(|site| site.id.function.symbol == function)
+        .filter_map(|site| match &site.target {
+            CallTarget::Indirect { via_field, .. } => Some(via_field.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(fields.len(), 1, "{function} must hold one indirect site");
+    fields.into_iter().next().unwrap()
+}
+
+/// The field evidence on every use of `used` held by `holder`, a function
+/// or a global, of `kind`. Panics when there is none.
+fn use_fields(
+    facts: &rllvm_query::ModuleFacts,
+    used: &str,
+    holder: &str,
+    kind: rllvm_query::UseKind,
+) -> Vec<Option<rllvm_query::FieldEvidence>> {
+    let fields: Vec<_> = facts
+        .uses
+        .iter()
+        .filter(|use_fact| use_fact.used.symbol == used && use_fact.kind == kind)
+        .filter(|use_fact| {
+            use_fact.in_global.as_deref() == Some(holder)
+                || use_fact
+                    .in_function
+                    .as_ref()
+                    .is_some_and(|function| function.symbol == holder)
+        })
+        .map(|use_fact| use_fact.field.clone())
+        .collect();
+    assert!(!fields.is_empty(), "no {kind:?} use of {used} in {holder}");
+    fields
+}
+
+/// The one field a use names, with the evidence it came from.
+fn one_use_field(
+    facts: &rllvm_query::ModuleFacts,
+    used: &str,
+    holder: &str,
+    kind: rllvm_query::UseKind,
+) -> rllvm_query::FieldEvidence {
+    match use_fields(facts, used, holder, kind).as_slice() {
+        [Some(evidence)] => evidence.clone(),
+        other => panic!("{used} in {holder}: expected one field, got {other:?}"),
+    }
+}
+
+/// -O0 addresses the field with a typed GEP; -O2 erases the type and leaves
+/// a byte offset with a TBAA tag. Both must name the same field, or a store
+/// compiled at one level never meets a call compiled at the other.
+#[test]
+fn a_field_dispatch_names_the_same_field_at_every_optimization_level() {
+    use rllvm_query::FieldBasis;
+    for (level, basis) in [("-O0", FieldBasis::StructGep), ("-O2", FieldBasis::Tbaa)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level, "-g"]);
+        let evidence = site_field(&facts, "dispatch").unwrap_or_else(|| panic!("{level}"));
+        assert_eq!(evidence.field, field("ops", 8), "{level}");
+        assert_eq!(evidence.basis, basis, "{level}");
+        assert_eq!(evidence.name.as_deref(), Some("on_event"), "{level}");
+    }
+}
+
+#[test]
+fn a_store_and_an_initializer_name_the_field_the_call_reads() {
+    use rllvm_query::{FieldBasis, UseKind};
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0", "-g"]);
+
+    let stored = one_use_field(&facts, "h3", "init", UseKind::StoredToMemory);
+    assert_eq!(stored.field, field("ops", 8));
+    assert_eq!(stored.basis, FieldBasis::StructGep);
+
+    // `table` has literal IR type for its padding, so its record comes from
+    // the global's debug-info type.
+    let first = one_use_field(&facts, "h1", "table", UseKind::GlobalInitializer);
+    assert_eq!(first.field, field("ops", 8));
+    assert_eq!(first.basis, FieldBasis::DebugInfo);
+    assert_eq!(first.name.as_deref(), Some("on_event"));
+    let second = one_use_field(&facts, "h2", "table", UseKind::GlobalInitializer);
+    assert_eq!(second.field, field("ops", 16));
+    assert_eq!(second.basis, FieldBasis::DebugInfo);
+    assert_eq!(second.name.as_deref(), Some("on_close"));
+
+    // `nested` is literal outside, but its inner record is a named IR struct.
+    for (used, offset, name) in [("h1", 0, "a"), ("h2", 8, "b")] {
+        let evidence = one_use_field(&facts, used, "nested", UseKind::GlobalInitializer);
+        assert_eq!(evidence.field, field("inner", offset), "{used}");
+        assert_eq!(evidence.basis, FieldBasis::Initializer, "{used}");
+        assert_eq!(evidence.name.as_deref(), Some(name), "{used}");
+    }
+}
+
+#[test]
+fn a_nested_field_names_its_innermost_record() {
+    use rllvm_query::UseKind;
+    for level in ["-O0", "-O2"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level]);
+        let site = site_field(&facts, "call_inner").unwrap_or_else(|| panic!("{level}"));
+        assert_eq!(site.field, field("inner", 8), "{level}");
+        let stored = one_use_field(&facts, "h1", "set_inner", UseKind::StoredToMemory);
+        assert_eq!(stored.field, field("inner", 8), "{level}");
+    }
+}
+
+/// Clang names the IR type of a typedef'd anonymous struct after the
+/// typedef, but its TBAA type node is unnamed. The -O2 site therefore names
+/// no field, rather than one borrowed from debug info.
+#[test]
+fn an_anonymous_record_is_named_by_its_typedef_only_where_the_ir_says_so() {
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0", "-g"]);
+    let evidence = site_field(&facts, "call_anon").expect("-O0 names the typed GEP");
+    assert_eq!(evidence.field, field("anon_ops", 8));
+
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O2", "-g"]);
+    assert_eq!(site_field(&facts, "call_anon"), None);
+}
+
+#[test]
+fn a_plain_function_pointer_names_no_field() {
+    for level in ["-O0", "-O2"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level, "-g"]);
+        assert_eq!(site_field(&facts, "call_plain"), None, "{level}");
+    }
+}
+
+#[test]
+fn an_initializer_without_debug_info_names_no_literal_field() {
+    use rllvm_query::UseKind;
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0"]);
+    for used in ["h1", "h2"] {
+        assert_eq!(
+            use_fields(&facts, used, "table", UseKind::GlobalInitializer),
+            [None],
+            "{used}: a literal type names no record without debug info"
+        );
+    }
+    let evidence = one_use_field(&facts, "h2", "nested", UseKind::GlobalInitializer);
+    assert_eq!(evidence.field, field("inner", 8));
+    assert_eq!(evidence.name, None, "member names come from debug info");
+}
+
+/// C++ spells the record `%"struct.n::S"` in IR and `_ZTSN1n1SE` in TBAA;
+/// both must read as `n::S`.
+#[test]
+fn a_cxx_record_reads_the_same_through_gep_and_tbaa() {
+    use rllvm_query::FieldBasis;
+    let source = "namespace n { struct S { void (*f)(int); }; }\n\
+                  void c(n::S* s){ s->f(1); }\n";
+    for (level, basis) in [("-O0", FieldBasis::StructGep), ("-O2", FieldBasis::Tbaa)] {
+        let scratch = tempfile::tempdir().unwrap();
+        let facts = extract_named(&scratch, "t.cpp", source, &[level]);
+        let evidence = site_field(&facts, "_Z1cPN1n1SE").unwrap_or_else(|| panic!("{level}"));
+        assert_eq!(evidence.field, field("n::S", 0), "{level}");
+        assert_eq!(evidence.basis, basis, "{level}");
+    }
+}
+
 /// A source clang compiles into one named function, and the category that
 /// function's linkage must arrive as.
 struct LinkageCase {
@@ -2618,7 +2822,7 @@ fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
 /// record the new pair here, or old cache entries will be served as if they
 /// were current.
 const FACTS_GUARD: (u32, &str) = (
-    2,
+    3,
     "d9109a8587a4b3e0d43a11589257a4191553138723761a9c1148117f5d16410f",
 );
 
