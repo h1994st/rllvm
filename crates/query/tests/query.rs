@@ -2886,12 +2886,13 @@ fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
 /// were current.
 const FACTS_GUARD: (u32, &str) = (
     3,
-    "d9109a8587a4b3e0d43a11589257a4191553138723761a9c1148117f5d16410f",
+    "7dd4dc5276f7b0c2bd3f6ef95f070870e68c776823be7e4a555a1d40f8da7c2d",
 );
 
 /// Extracts the neutral facts from `fixtures/facts-guard.ll`: indirect calls,
-/// dispatch-table uses, declarations and an alias that the smaller
-/// equivalence fixtures above do not exercise.
+/// dispatch-table uses, declarations, an alias, and the record fields an
+/// indirect call, a store and named and literal-typed initializers name,
+/// none of which the smaller equivalence fixtures above exercise.
 fn guard_module_facts(scratch: &tempfile::TempDir) -> rllvm_query::ModuleFacts {
     let ir = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/facts-guard.ll"),
@@ -2933,6 +2934,28 @@ fn the_guard_fixtures_facts_round_trip_through_the_cache() {
         serde_json::to_value(&facts).unwrap(),
         serde_json::to_value(&read_back).unwrap()
     );
+
+    // The entry carries field evidence of each basis the fixture produces,
+    // so the comparison above covers it rather than passing on absences.
+    let sites = read_back
+        .call_sites
+        .iter()
+        .filter_map(|site| match &site.target {
+            CallTarget::Indirect { via_field, .. } => via_field.as_ref(),
+            _ => None,
+        });
+    let uses = read_back
+        .uses
+        .iter()
+        .filter_map(|use_fact| use_fact.field.as_ref());
+    let bases: Vec<_> = sites.chain(uses).map(|evidence| evidence.basis).collect();
+    for basis in [
+        rllvm_query::FieldBasis::Tbaa,
+        rllvm_query::FieldBasis::Initializer,
+        rllvm_query::FieldBasis::DebugInfo,
+    ] {
+        assert!(bases.contains(&basis), "no {basis:?} field in {bases:?}");
+    }
 }
 
 /// `entry` calls `outer` through an always-inline helper, so the answers
