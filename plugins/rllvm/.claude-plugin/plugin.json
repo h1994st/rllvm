@@ -8,5 +8,6 @@
   },
   "homepage": "https://github.com/h1994st/rllvm",
   "repository": "https://github.com/h1994st/rllvm",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "types": "./types/index.d.ts"
 }

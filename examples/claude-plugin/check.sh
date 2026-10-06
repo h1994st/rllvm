@@ -237,6 +237,9 @@ if command -v jq >/dev/null; then
     hook=$PLUGIN/scripts/cache-check.sh
     jq -e '.hooks.PostToolUse[0].matcher == "mcp__plugin_rllvm_rllvm-query__.*"' \
         "$PLUGIN/hooks/hooks.json" >/dev/null || fail "hooks.json does not match the server's tools"
+    # The overlay view's hooks module shares hooks.json with the command hook.
+    jq -e '.modules == ["./register.tsx"]' "$PLUGIN/hooks/hooks.json" >/dev/null ||
+        fail "hooks.json does not list the overlay view's module"
     answer() { # over_threshold
         jq -cn --argjson over "$1" \
             '{analysis: {cache: {hits: 1, misses: 0, written: 0,
