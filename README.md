@@ -444,8 +444,8 @@ refuted ones, and `--min-confidence low|medium|high` (default `low`) drops
 weaker ones. Each step through one is labeled `agent` with the edge's
 provenance, a path using one ends `not proven`, and `closure` lists what only
 agent edges reach apart. An overlay file that cannot be read is an error,
-never a direct-only answer. See the [call-graph overlay
-example](examples/callgraph-overlay/).
+never a direct-only answer, as is a missing file that `--overlay` names. See
+the [call-graph overlay example](examples/callgraph-overlay/).
 
 ### MCP server
 

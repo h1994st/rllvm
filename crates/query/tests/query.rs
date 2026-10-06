@@ -3602,6 +3602,40 @@ fn resolution_candidates_join_a_dispatch_to_its_stores() {
     assert!(!candidates.contains(&"h2"), "{candidates:?}");
 }
 
+/// A walk over an overlay `--overlay` names reads that file: a missing one
+/// is a mistyped path, not an empty overlay. Only the default path beside
+/// the catalog may be missing, as it is before anything is recorded.
+#[test]
+fn a_walk_over_a_named_overlay_needs_the_file() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = two_module_catalog(&scratch);
+    let missing = scratch.path().join("mistyped.overlay.jsonl");
+    let walk = ["reach", "main", "add", "--include-overlay"];
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .arg("--overlay")
+        .arg(&missing)
+        .args(walk)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(&missing.display().to_string()), "{stderr}");
+
+    let named = ["--overlay", missing.to_str().unwrap()];
+    let output = query_stdin(&scratch, &catalog, &named, &format!("{}\n", walk.join(" ")));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(&missing.display().to_string()), "{stderr}");
+    assert!(!missing.exists(), "a walk never creates the file");
+
+    let answer = query_text(&scratch, &catalog, &walk);
+    assert!(answer.contains("main"), "{answer}");
+}
+
 #[test]
 fn the_overlay_cli_records_lists_and_compacts() {
     let scratch = tempfile::tempdir().unwrap();

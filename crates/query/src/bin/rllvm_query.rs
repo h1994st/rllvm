@@ -193,16 +193,28 @@ fn overlay_path(catalog: &Path, overlay: Option<&Path>) -> PathBuf {
 
 /// The overlay `query` walks, opened against `session` when it asks for one
 /// and `opened` holds none yet: at most once per run. A file that cannot be
-/// read is an error, never a silent direct-only answer; a missing one is an
-/// empty overlay.
+/// read is an error, never a silent direct-only answer. A missing file is an
+/// empty overlay at the default path, where nothing may be recorded yet, but
+/// an error when `--overlay` named it: that is a mistyped path.
 fn overlay_for<'o>(
     opened: &'o mut Option<Overlay>,
     session: &Session,
-    path: &Path,
+    catalog: &Path,
+    named: Option<&Path>,
     query: &Query,
 ) -> Result<Option<&'o Overlay>, Error> {
     if query.walks_overlay() && opened.is_none() {
-        *opened = Some(Overlay::open(session, path)?);
+        let path = overlay_path(catalog, named);
+        if named.is_some()
+            && let Err(error) = std::fs::metadata(&path)
+            && error.kind() == std::io::ErrorKind::NotFound
+        {
+            return Err(Error::InvalidArguments(format!(
+                "{}: no such overlay; --overlay names an existing file for a walk to read",
+                path.display()
+            )));
+        }
+        *opened = Some(Overlay::open(session, &path)?);
     }
     Ok(opened.as_ref())
 }
@@ -307,10 +319,10 @@ fn run_stdin_queries(
     }
     init_logging()?;
     let session = open_with_cache(catalog, facts_cache()?.as_ref())?;
-    let path = overlay_path(catalog, overlay);
+    let named = overlay;
     let mut opened = None;
     for (line, query) in queries {
-        let overlay = overlay_for(&mut opened, &session, &path, &query)?;
+        let overlay = overlay_for(&mut opened, &session, catalog, named, &query)?;
         let result = run_with_overlay(&session, overlay, &query)?;
         let answer = match format {
             Format::Json => serde_json::to_string(&result)
@@ -432,9 +444,14 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         Error::InvalidArguments("--catalog is required to run a query".to_string())
     })?;
     let session = open_with_cache(&catalog, facts_cache()?.as_ref())?;
-    let path = overlay_path(&catalog, args.overlay.as_deref());
     let mut opened = None;
-    let overlay = overlay_for(&mut opened, &session, &path, &query)?;
+    let overlay = overlay_for(
+        &mut opened,
+        &session,
+        &catalog,
+        args.overlay.as_deref(),
+        &query,
+    )?;
     let result = run_with_overlay(&session, overlay, &query)?;
 
     match format {

@@ -84,7 +84,8 @@ is never changed.
 Overlay edges are hypotheses, never proof: no answer uses them unless asked.
 `reach` and `closure` walk them with `include_overlay` (`--include-overlay`),
 skipping refuted edges and any below `min_confidence` (`--min-confidence
-low|medium|high`, default `low`). Over MCP no overlay can be loaded yet, so
+low|medium|high`, default `low`). A file `--overlay` names must exist for
+a walk to read it. Over MCP no overlay can be loaded yet, so
 `include_overlay` there is an error.
 
 - Every step through one is `kind: agent` with its `confidence`,
