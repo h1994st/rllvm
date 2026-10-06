@@ -191,20 +191,6 @@ fn overlay_path(catalog: &Path, overlay: Option<&Path>) -> PathBuf {
     overlay.map_or_else(|| default_overlay_path(catalog), Path::to_path_buf)
 }
 
-/// Whether `query` walks the overlay, and so needs it opened.
-fn wants_overlay(query: &Query) -> bool {
-    matches!(
-        query,
-        Query::Reach {
-            include_overlay: true,
-            ..
-        } | Query::Closure {
-            include_overlay: true,
-            ..
-        }
-    )
-}
-
 /// The overlay `query` walks, opened against `session` when it asks for one
 /// and `opened` holds none yet: at most once per run. A file that cannot be
 /// read is an error, never a silent direct-only answer; a missing one is an
@@ -215,7 +201,7 @@ fn overlay_for<'o>(
     path: &Path,
     query: &Query,
 ) -> Result<Option<&'o Overlay>, Error> {
-    if wants_overlay(query) && opened.is_none() {
+    if query.walks_overlay() && opened.is_none() {
         *opened = Some(Overlay::open(session, path)?);
     }
     Ok(opened.as_ref())
@@ -631,8 +617,8 @@ mod tests {
                 ..
             }
         ));
-        assert!(wants_overlay(&queries[0].1));
-        assert!(!wants_overlay(&queries[1].1), "each line asks for itself");
+        assert!(queries[0].1.walks_overlay());
+        assert!(!queries[1].1.walks_overlay(), "each line asks for itself");
 
         let error = parse_queries(
             "reach main handler --min-confidence high\n",

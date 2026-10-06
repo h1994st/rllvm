@@ -1232,6 +1232,11 @@ impl Query {
         }
     }
 
+    /// Whether this query walks the overlay, and so needs one opened.
+    pub fn walks_overlay(&self) -> bool {
+        matches!(self.overlay_request(), Ok(Some(_)))
+    }
+
     /// The weakest overlay edge a walk takes, when it asked for the overlay
     /// at all. A minimum without the overlay is an error rather than a
     /// filter that silently does nothing.
