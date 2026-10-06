@@ -42,8 +42,9 @@ When a warning about the facts cache appears, offer `rllvm-query cache clear
 | Where is X's address taken? | `uses` |
 | Who can call X through a pointer? | `uses` for address-taken sites, then `indirect_targets` at each |
 | What can this indirect call reach? | `indirect_targets` at the call site (`heuristics: true` adds the address-taken inventory) |
-| Which functions could an unresolved indirect call reach, grouped by the record field it dispatches through? | `resolution_candidates` (`resolution-candidates`): candidates, never edges; `reach` and `closure` ignore them |
+| Which functions could an unresolved indirect call reach, grouped by the record field it dispatches through? | `resolution_candidates` (`resolution-candidates`): candidates, never edges; no walk follows them |
 | Can A reach B — for example, is a vulnerable function reachable? | `reach`; if it finds no path, `closure` to see where the search stopped |
+| Every function on some path from A to B, and the edges among them | `slice`; `emit_module` (`--emit-module OUT.bc`) also writes their definitions as one module |
 | Everything that reaches X, or that X reaches | `closure` with `direction` `in` or `out` |
 | What does the program call outside itself? | `externals` |
 | Which Rust functions can C call — the FFI surface? | `ffi_exports` |
@@ -99,12 +100,12 @@ another file. `overlay list` shows edges and the sites they cover; `overlay
 compact` rewrites the file as the current edges.
 
 Overlay edges are hypotheses, never proof: no answer uses them unless asked.
-`reach` and `closure` walk them with `include_overlay` (`--include-overlay`),
-skipping refuted edges and any below `min_confidence` (`--min-confidence
-low|medium|high`, default `low`). A file `--overlay` names must exist for
-a walk to read it. Over MCP they need an overlay that `load_overlay` or
-`record_edges` attached; without one, `include_overlay` is an error, never a
-direct-only answer.
+`reach`, `closure` and `slice` walk them with `include_overlay`
+(`--include-overlay`), skipping refuted edges and any below `min_confidence`
+(`--min-confidence low|medium|high`, default `low`). A file `--overlay` names
+must exist for a walk to read it. Over MCP they need an overlay that
+`load_overlay` or `record_edges` attached; without one, `include_overlay` is
+an error, never a direct-only answer.
 
 - Every step through one is `kind: agent` with its `confidence`,
   `provenance` and `verdict`; quote the provenance when reporting it.
@@ -113,6 +114,16 @@ direct-only answer.
 - `closure` lists functions reached only through agent edges in
   `uncertainty.agent_reached`; `uncertainty.overlay` gives `covered_sites` of
   `unresolved_sites`.
+- A `slice` counts its agent edges the same way. To check one edge in scope,
+  `emit_module` writes the slice's definitions, cut out with the
+  `llvm-extract` and `llvm-nm` beside the configured `llvm-link`, as one
+  small `.bc` to verify or re-read; the answer gains `emitted`. An alias
+  comes with the function it stands for. It needs a program loaded with
+  `load_catalog`, writes nothing for an empty slice, and refuses when a
+  `static` function or variable that stays in one module's part shares its
+  name with any function or variable another part holds, since cutting it
+  out makes it external. Compiler-private data such as string literals is
+  not checked: same-named copies from two parts merge into one declaration.
 
 ## Is a vulnerable function present and reachable?
 

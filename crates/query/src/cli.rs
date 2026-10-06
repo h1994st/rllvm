@@ -72,7 +72,7 @@ pub struct QueryModifiers {
     #[arg(long, global = true)]
     pub heuristics: bool,
 
-    /// Also walk agent-authored overlay edges in `reach` and `closure`; never proof
+    /// Also walk agent-authored overlay edges in `reach`, `closure` and `slice`; never proof
     ///
     /// Global, like `--heuristics`. Every step through an overlay edge is
     /// labeled `agent`, and an answer that used one says it is not proven.
@@ -110,13 +110,13 @@ pub enum ClosureDirection {
     Out,
 }
 
-/// The eleven source-level queries `rllvm-query` answers, plus `Mcp` to serve
+/// The twelve source-level queries `rllvm-query` answers, plus `Mcp` to serve
 /// them over MCP stdio instead of running one and exiting, `Completions` to
 /// print a shell completion script, `Cache` to inspect or prune the
 /// per-module facts cache, and `Overlay` to keep agent-authored call-graph
 /// edges.
 ///
-/// The eleven query variants mirror [`crate::Query`] field-for-field, for the
+/// The twelve query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
 /// converts a parsed variant into a [`crate::Query`] before running it;
 /// `Mcp`, `Completions`, `Cache` and `Overlay` have no counterpart there --
@@ -166,6 +166,16 @@ pub enum QueryCommand {
         /// Symbol to reach
         to: String,
     },
+    /// Every function on some path from `from` to `to`, with the edges among them.
+    Slice {
+        /// Symbol to start from
+        from: String,
+        /// Symbol to reach
+        to: String,
+        /// Also write the slice's definitions to this bitcode file, linked into one module
+        #[arg(long, value_name = "OUT.bc")]
+        emit_module: Option<PathBuf>,
+    },
     /// The set that can reach the target, or that it can reach.
     Closure {
         /// Mangled symbol, full demangled reading, or a bare identifier
@@ -185,7 +195,7 @@ pub enum QueryCommand {
     },
     /// Unresolved indirect call sites grouped by the record field they dispatch through, with the functions stored into that field. Candidates, not edges.
     ResolutionCandidates,
-    /// Serve the eleven queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
+    /// Serve the twelve queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
     Mcp,
     /// Print a shell completion script for `rllvm-query`
     ///

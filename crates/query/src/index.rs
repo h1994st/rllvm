@@ -151,6 +151,26 @@ pub struct ReachResult {
     pub frontier: Vec<SymbolBinding>,
 }
 
+/// The result of a `Session::slice_with` query: the part of the call graph
+/// that lies on some path from one function to another.
+#[derive(Debug, Serialize)]
+pub struct SliceResult {
+    /// Every function on some path from `from` to `to`: the forward closure
+    /// of `from` (plus `from`) intersected with the backward closure of `to`
+    /// (plus `to`'s definitions). Sorted by id. Empty when no path exists.
+    pub functions: Vec<FunctionId>,
+    /// Every walked edge between two members, with its labeled step.
+    pub edges: Vec<SliceEdge>,
+}
+
+/// One walked edge between two members of a slice.
+#[derive(Debug, Serialize)]
+pub struct SliceEdge {
+    pub from: FunctionId,
+    pub to: FunctionId,
+    pub step: PathStep,
+}
+
 /// Indexes over one program's captured facts, joined with resolved symbol
 /// bindings. `reach` and `closure` walk only resolved edges: direct calls,
 /// and indirect calls CVP bounded to a bound.
@@ -603,9 +623,73 @@ impl Session {
         direction: Direction,
         overlay: Option<&OverlayView>,
     ) -> Vec<FunctionId> {
+        self.closure_from(self.ids_by_name(name), direction, overlay)
+    }
+
+    /// The functions on some path from `from` to `to`, and the edges among
+    /// them: what `reach` would walk, kept whole rather than cut to one path.
+    ///
+    /// A member is reached from `from` and reaches a definition of `to`.
+    /// The backward walk starts from `to`'s definitions alone, as `reach`
+    /// accepts only a definition as the destination, so callers of a
+    /// declaration that an ambiguous binding leaves unresolved stay out.
+    /// `from == to` is the trivial path: its definitions, with no edges.
+    pub fn slice_with(&self, from: &str, to: &str, overlay: Option<&OverlayView>) -> SliceResult {
+        let destinations: Vec<FunctionId> = self
+            .ids_by_name(to)
+            .into_iter()
+            .filter(|id| self.is_definition(id))
+            .collect();
+        if from == to {
+            let mut functions = destinations;
+            functions.sort_unstable();
+            return SliceResult {
+                functions,
+                edges: Vec::new(),
+            };
+        }
+
+        let starts = self.ids_by_name(from);
+        let forward: HashSet<FunctionId> = starts
+            .iter()
+            .cloned()
+            .chain(self.closure_from(starts.clone(), Direction::Out, overlay))
+            .collect();
+        let backward: HashSet<FunctionId> = destinations
+            .iter()
+            .cloned()
+            .chain(self.closure_from(destinations.clone(), Direction::In, overlay))
+            .collect();
+        let mut functions: Vec<FunctionId> = forward.intersection(&backward).cloned().collect();
+        functions.sort_unstable();
+
+        let members: HashSet<&FunctionId> = functions.iter().collect();
+        let mut edges = Vec::new();
+        for member in &functions {
+            for (next, step) in self.successors(member, overlay).0 {
+                if members.contains(&next) {
+                    edges.push(SliceEdge {
+                        from: member.clone(),
+                        to: next,
+                        step,
+                    });
+                }
+            }
+        }
+        SliceResult { functions, edges }
+    }
+
+    /// The closure walk from an explicit start set, never including the
+    /// start set itself.
+    fn closure_from(
+        &self,
+        starts: Vec<FunctionId>,
+        direction: Direction,
+        overlay: Option<&OverlayView>,
+    ) -> Vec<FunctionId> {
         let mut visited: HashSet<FunctionId> = HashSet::new();
         let mut queue: VecDeque<FunctionId> = VecDeque::new();
-        for start in self.ids_by_name(name) {
+        for start in starts {
             if visited.insert(start.clone()) {
                 queue.push_back(start);
             }
@@ -891,6 +975,105 @@ mod tests {
         let session = session_from(&[("a", "b"), ("b", "c")]);
         assert_eq!(session.closure("a", Direction::Out).len(), 2);
         assert_eq!(session.closure("c", Direction::In).len(), 2);
+    }
+
+    fn symbols_of(ids: &[FunctionId]) -> Vec<&str> {
+        ids.iter().map(|id| id.symbol.as_str()).collect()
+    }
+
+    /// `e` is reached from `a` but reaches nothing; `f` reaches `d` but is
+    /// not reached from `a`. Neither is on a path from `a` to `d`.
+    #[test]
+    fn a_slice_holds_exactly_the_functions_on_some_path() {
+        let session = session_from(&[
+            ("a", "b"),
+            ("b", "d"),
+            ("a", "c"),
+            ("c", "d"),
+            ("a", "e"),
+            ("f", "d"),
+        ]);
+        let slice = session.slice_with("a", "d", None);
+        assert_eq!(symbols_of(&slice.functions), ["a", "b", "c", "d"]);
+        let mut edges: Vec<(&str, &str)> = slice
+            .edges
+            .iter()
+            .map(|edge| (edge.from.symbol.as_str(), edge.to.symbol.as_str()))
+            .collect();
+        edges.sort_unstable();
+        assert_eq!(edges, [("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")]);
+        assert!(
+            slice
+                .edges
+                .iter()
+                .all(|edge| matches!(edge.step, PathStep::Call(_))),
+            "{:?}",
+            slice.edges
+        );
+    }
+
+    #[test]
+    fn no_path_slices_to_nothing() {
+        let session = session_from(&[("a", "b"), ("c", "d")]);
+        let slice = session.slice_with("a", "d", None);
+        assert!(slice.functions.is_empty());
+        assert!(slice.edges.is_empty());
+
+        let gap = session_with_indirect_gap();
+        assert!(
+            gap.slice_with("a", "c", None).functions.is_empty(),
+            "an unbounded indirect call is not an edge"
+        );
+    }
+
+    /// The trivial path: the function itself, with no edges, even when a
+    /// cycle runs back through it.
+    #[test]
+    fn a_slice_from_a_function_to_itself_is_its_definition() {
+        let session = session_from(&[("a", "b"), ("b", "a")]);
+        let slice = session.slice_with("a", "a", None);
+        assert_eq!(symbols_of(&slice.functions), ["a"]);
+        assert!(slice.edges.is_empty());
+    }
+
+    /// `caller` reaches the definition of `target` through its declaration,
+    /// so the declaration is on the path too, joined by the binding.
+    #[test]
+    fn a_slice_keeps_the_declaration_a_binding_resolves() {
+        let caller = function("c", "caller", true, Linkage::External);
+        let declaration = function("c", "target", false, Linkage::External);
+        let definition = function("t", "target", true, Linkage::External);
+        let call = direct_call(&caller, &declaration, 0);
+        let binding = SymbolBinding {
+            symbol: "target".into(),
+            declared_in: vec!["c".into()],
+            candidates: vec![crate::bind::BindingCandidate {
+                function: definition.id.clone(),
+                configuration_id: None,
+            }],
+            status: BindingStatus::Unique,
+        };
+        let session = Session::new(
+            facts(vec![caller, declaration, definition], vec![call]),
+            vec![binding],
+        );
+        let slice = session.slice_with("caller", "target", None);
+        let members: Vec<(&str, &str)> = slice
+            .functions
+            .iter()
+            .map(|id| (id.module_id.as_str(), id.symbol.as_str()))
+            .collect();
+        assert_eq!(members, [("c", "caller"), ("c", "target"), ("t", "target")]);
+        assert!(
+            slice
+                .edges
+                .iter()
+                .any(|edge| matches!(edge.step, PathStep::Binding(_))
+                    && edge.from.module_id == "c"
+                    && edge.to.module_id == "t"),
+            "{:?}",
+            slice.edges
+        );
     }
 
     #[test]

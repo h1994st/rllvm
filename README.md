@@ -355,6 +355,7 @@ rllvm-query --catalog catalog.json callers parse_frame         # who calls it
 rllvm-query --catalog catalog.json callees main                # what it calls
 rllvm-query --catalog catalog.json uses parse_frame            # where its address is taken
 rllvm-query --catalog catalog.json reach main parse_frame      # a path between two functions
+rllvm-query --catalog catalog.json slice main parse_frame      # every function on such a path
 rllvm-query --catalog catalog.json closure parse_frame in      # everything that reaches it
 rllvm-query --catalog catalog.json externals                   # unbound symbols
 rllvm-query --catalog catalog.json ffi-exports                 # Rust functions C can call
@@ -437,15 +438,20 @@ unless asked:
 ```bash
 rllvm-query --catalog catalog.json reach main handler --include-overlay
 rllvm-query --catalog catalog.json closure handler in --include-overlay --min-confidence medium
+rllvm-query --catalog catalog.json slice main handler --include-overlay --emit-module slice.bc
 ```
 
-`--include-overlay` makes `reach` and `closure` also walk overlay edges, never
-refuted ones, and `--min-confidence low|medium|high` (default `low`) drops
-weaker ones. Each step through one is labeled `agent` with the edge's
-provenance, a path using one ends `not proven`, and `closure` lists what only
-agent edges reach apart. An overlay file that cannot be read is an error,
-never a direct-only answer, as is a missing file that `--overlay` names. See
-the [call-graph overlay example](examples/callgraph-overlay/).
+`--include-overlay` makes `reach`, `closure` and `slice` also walk overlay
+edges, never refuted ones, and `--min-confidence low|medium|high` (default
+`low`) drops weaker ones. Each step through one is labeled `agent` with the
+edge's provenance, a path or slice using one ends `not proven`, and `closure`
+lists what only agent edges reach apart. An overlay file that cannot be read is
+an error, never a direct-only answer, as is a missing file that `--overlay`
+names. To check an edge in scope, `slice --emit-module` writes the slice's
+definitions as one small module, cut out with the `llvm-extract` and `llvm-nm`
+beside the configured `llvm-link`; an alias comes with the function it stands
+for, and an empty slice writes nothing. See the [call-graph overlay
+example](examples/callgraph-overlay/).
 
 ### MCP server
 
@@ -472,8 +478,9 @@ Each is analyzed once and answers from memory after that.
 
 Four tools keep the [call-graph overlay](#completing-the-call-graph) over MCP.
 `record_edges` takes the records `overlay record` reads, all or none, attaching
-the overlay beside the catalog first if none is; `reach` and `closure` walk them
-at once with `include_overlay` (and `min_confidence`). Only `save_overlay`
+the overlay beside the catalog first if none is; `reach`, `closure` and `slice`
+walk them at once with `include_overlay` (and `min_confidence`), and `slice`'s
+`emit_module` needs a catalog from `load_catalog`. Only `save_overlay`
 writes, appending to the file. `load_overlay` attaches the default file or
 `path` (required after `inventory`) and refuses to drop unsaved records unless
 `discard_pending` is set; `list_overlay` shows the edges, saved or not.

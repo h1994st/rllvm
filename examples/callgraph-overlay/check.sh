@@ -4,7 +4,7 @@
 set -euo pipefail
 source "$(dirname "$0")/../common.sh"
 
-require rllvm-query python3
+require rllvm-query python3 llvm:llvm-nm
 
 mkdir -p "$OUT"
 rllvm-cc -g -O0 -c ops.c -o "$OUT/ops.o"
@@ -63,6 +63,23 @@ defines "$text" '^not proven: this path uses 1 agent edge\(s\)$' \
 # Not asked for, the overlay is not walked.
 path=$(query reach main handler --json | field 'a["results"]')
 [ "$path" = None ] || fail "reach without --include-overlay walked the overlay: $path"
+
+# The slice through the edge is main, dispatch and handler, emitted as one
+# module that defines them and nothing else.
+rm -f "$OUT/slice.bc"
+text=$(query slice main handler --include-overlay --emit-module "$OUT/slice.bc")
+defines "$text" '^dispatch -> handler \(agent\)$' "the slice did not label its agent edge: $text"
+defines "$text" '^not proven: this slice uses 1 agent edge\(s\)$' \
+    "the slice did not say it is not proven: $text"
+defines "$text" '^wrote .*slice\.bc: 3 functions from 2 modules$' \
+    "the slice module was not written: $text"
+symbols=$("$BINDIR/llvm-nm" --defined-only "$OUT/slice.bc")
+for present in main dispatch handler; do
+    defines "$symbols" " [Tt] _?$present\$" "the slice module does not define $present: $symbols"
+done
+if grep -qE ' [Tt] _?install$' <<<"$symbols"; then
+    fail "the slice module defines install, which is off the path: $symbols"
+fi
 
 # 5. Retracted, the edge is gone from every walk.
 query overlay list --json | field 'json.dumps({

@@ -1,4 +1,4 @@
-//! MCP stdio server: the eleven source-level queries as JSON-RPC 2.0 tools,
+//! MCP stdio server: the twelve source-level queries as JSON-RPC 2.0 tools,
 //! newline-delimited over stdin/stdout, plus four that decide which catalogs
 //! they run against and four that keep a call-graph overlay beside each.
 //!
@@ -30,10 +30,11 @@
 //! never needs a handshake at all (see
 //! `a_modern_request_is_served_without_a_handshake` in `tests/query.rs`).
 //!
-//! The overlay tools are the only ones that change anything. Records an
-//! agent sends are held in memory, where `reach` and `closure` can already
-//! walk them, and only `save_overlay` writes them to disk; the catalog is
-//! never written at all.
+//! The overlay tools change state, and two calls write files. Records an
+//! agent sends are held in memory, where `reach`, `closure` and `slice` can
+//! already walk them, and only `save_overlay` writes them to disk. The one
+//! other write is `slice` with `emit_module`, which writes the new module it
+//! names. The catalog is never written at all.
 //!
 //! stdout carries protocol frames only, the same rule the compiler wrappers
 //! follow for their own stdout: every diagnostic belongs on stderr, and
@@ -59,8 +60,8 @@ use rllvm_core::error::Error;
 
 use super::{
     Confidence, Direction, FactsCache, Overlay, Query, Record, Session, analysis_of,
-    default_overlay_path, open_catalog_with_cache, open_with_cache, overlay::fingerprint,
-    run_with_overlay,
+    default_overlay_path, emit_slice, open_catalog_with_cache, open_with_cache,
+    overlay::fingerprint, run_with_overlay,
 };
 
 /// The modern protocol revision this server has been checked against.
@@ -81,6 +82,12 @@ const ARTIFACT_NEEDS_PATH: &str = "no overlay is loaded for this catalog, and an
                                    loaded by `inventory` has no catalog file to keep one \
                                    beside: call `load_overlay` with a `path` first";
 
+/// What `slice` answers when asked to emit a module for an `inventory`
+/// artifact.
+const EMIT_NEEDS_CATALOG: &str = "`emit_module` reads the modules a catalog file names, and an \
+                                  artifact loaded by `inventory` has none: load its catalog \
+                                  with `load_catalog` first";
+
 /// The catalogs one MCP session has loaded, keyed by the canonical path they
 /// came from: the catalog JSON for `load_catalog`, the artifact itself for
 /// `inventory`. Loading the same path twice replaces its entry, which is
@@ -100,6 +107,8 @@ pub struct Registry {
     artifacts: BTreeSet<PathBuf>,
     /// The facts cache every load reads and fills; `None` when disabled.
     cache: Option<FactsCache>,
+    /// The configured `llvm-link`, which `slice` needs to emit a module.
+    llvm_link: Option<PathBuf>,
 }
 
 impl Registry {
@@ -112,6 +121,15 @@ impl Registry {
         Registry {
             cache,
             ..Registry::default()
+        }
+    }
+
+    /// This registry, emitting `slice` modules with `llvm_link` and the
+    /// `llvm-extract` beside it.
+    pub fn with_llvm_link(self, llvm_link: PathBuf) -> Registry {
+        Registry {
+            llvm_link: Some(llvm_link),
+            ..self
         }
     }
 
@@ -213,11 +231,15 @@ impl Registry {
         })
     }
 
-    /// The session a call names, or the only one loaded, with the overlay
-    /// attached to it.
-    fn session(&self, requested: Option<&str>) -> Result<(&Session, Option<&Overlay>), String> {
+    /// The session a call names, or the only one loaded, under its key and
+    /// with the overlay attached to it.
+    fn session(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<(PathBuf, &Session, Option<&Overlay>), String> {
         let key = self.catalog_key(requested)?;
-        Ok((self.session_at(&key)?, self.overlays.get(&key)))
+        let session = self.session_at(&key)?;
+        Ok((key.clone(), session, self.overlays.get(&key)))
     }
 
     /// The session loaded under `key`.
@@ -609,7 +631,7 @@ fn tools_list_result() -> Value {
 macro_rules! management_tool_surface {
     ($($variant:ident => $name:literal, $description:literal, $schema:expr;)+) => {
         /// A tool that decides which catalogs are loaded, or keeps the
-        /// overlay beside one, as opposed to the eleven that ask a question
+        /// overlay beside one, as opposed to the twelve that ask a question
         /// of one.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum Management { $($variant),+ }
@@ -689,7 +711,7 @@ management_tool_surface! {
             "required": ["catalog"]
         });
     LoadOverlay => "load_overlay",
-        "Attach a call-graph overlay to a loaded catalog: agent hypotheses about indirect calls LLVM left unresolved, kept in a file beside the catalog (`<catalog stem>.overlay.jsonl`) unless `path` names another; a catalog loaded by `inventory` must name `path`. Refuses a file recorded against another build of the catalog, and refuses to replace an overlay holding unsaved records unless `discard_pending` is true. The edges are never proof: only `reach` and `closure` with `include_overlay` walk them, labeled `agent`.",
+        "Attach a call-graph overlay to a loaded catalog: agent hypotheses about indirect calls LLVM left unresolved, kept in a file beside the catalog (`<catalog stem>.overlay.jsonl`) unless `path` names another; a catalog loaded by `inventory` must name `path`. Refuses a file recorded against another build of the catalog, and refuses to replace an overlay holding unsaved records unless `discard_pending` is true. The edges are never proof: only `reach`, `closure` and `slice` with `include_overlay` walk them, labeled `agent`.",
         json!({
             "type": "object",
             "properties": {
@@ -845,6 +867,7 @@ query_tool_surface! {
     Query::Callees { .. } => Query::Callees { name: String::new() }, "callees";
     Query::Uses { .. } => Query::Uses { name: String::new() }, "uses";
     Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None }, "reach";
+    Query::Slice { .. } => Query::Slice { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None }, "slice";
     Query::Closure { .. } => Query::Closure { name: String::new(), direction: Direction::In, include_overlay: false, min_confidence: None }, "closure";
     Query::Externals => Query::Externals, "externals";
     Query::FfiExports => Query::FfiExports, "ffi_exports";
@@ -852,7 +875,7 @@ query_tool_surface! {
     Query::ResolutionCandidates => Query::ResolutionCandidates, "resolution_candidates";
 }
 
-/// The `name` argument four of the eleven tools take, identically. Spelled
+/// The `name` argument four of the twelve tools take, identically. Spelled
 /// once: four copies of one schema drift apart, and a client reads the
 /// drifted one as a real difference between the tools.
 fn symbol_property() -> Value {
@@ -862,7 +885,7 @@ fn symbol_property() -> Value {
     })
 }
 
-/// The two overlay arguments `reach` and `closure` take, identically: spelled
+/// The two overlay arguments `reach`, `closure` and `slice` take, identically: spelled
 /// once for the same reason as [`symbol_property`].
 fn overlay_properties() -> [(&'static str, Value); 2] {
     [
@@ -910,8 +933,8 @@ fn symbol_tool(name: &str, description: &str) -> Value {
     })
 }
 
-/// Which loaded catalog a query or an overlay tool uses. Added to all eleven
-/// query schemas at one point below rather than written into each: eleven
+/// Which loaded catalog a query or an overlay tool uses. Added to all twelve
+/// query schemas at one point below rather than written into each: twelve
 /// copies of an optional argument drift, and a client reads the drift as a
 /// real difference.
 fn catalog_property() -> Value {
@@ -982,6 +1005,22 @@ fn query_tool(query: &Query) -> Value {
                 "properties": {
                     "from": { "type": "string", "description": "Symbol to start from; same spellings as `defs` accepts" },
                     "to": { "type": "string", "description": "Symbol to reach; same spellings as `defs` accepts" }
+                },
+                "required": ["from", "to"]
+            }
+        }),
+        Query::Slice { .. } => json!({
+            "name": name,
+            "description": "Every function on some path from `from` to `to`, with the edges among them; empty when no path exists. With `emit_module`, also writes the slice's definitions as one bitcode module, for scoped verification or a closer read.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "from": { "type": "string", "description": "Symbol to start from; same spellings as `defs` accepts" },
+                    "to": { "type": "string", "description": "Symbol to reach; same spellings as `defs` accepts" },
+                    "emit_module": {
+                        "type": "string",
+                        "description": "Write the slice's definitions to this .bc file, relative to the server's working directory; the answer gains `emitted`. Needs a catalog loaded by `load_catalog`."
+                    }
                 },
                 "required": ["from", "to"]
             }
@@ -1067,10 +1106,25 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Ok(query) => query,
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
-    let (session, overlay) = match registry.session(catalog_argument(&arguments)) {
+    let emit_module = match (&query, arguments.get("emit_module")) {
+        (Query::Slice { .. }, Some(value)) => match value.as_str() {
+            Some(path) => Some(PathBuf::from(path)),
+            None => {
+                let message = "non-string argument `emit_module`";
+                return Outcome::Result(call_tool_result(true, message), false);
+            }
+        },
+        _ => None,
+    };
+    let (key, session, overlay) = match registry.session(catalog_argument(&arguments)) {
         Ok(loaded) => loaded,
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
+    // Before the query runs: the modules are read through the catalog file,
+    // which an artifact does not have.
+    if emit_module.is_some() && registry.artifacts.contains(&key) {
+        return Outcome::Result(call_tool_result(true, EMIT_NEEDS_CATALOG), false);
+    }
 
     // A query the session could not interpret -- an `indirect_targets`
     // location that does not parse -- is a tool error the client can
@@ -1087,8 +1141,20 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Ok(result) => result,
         Err(error) => return Outcome::Result(call_tool_result(true, &error.to_string()), false),
     };
-    let payload = serde_json::to_value(&result)
+    let mut payload = serde_json::to_value(&result)
         .unwrap_or_else(|error| json!({ "serialization_error": error.to_string() }));
+    if let Some(out) = emit_module {
+        let Some(llvm_link) = &registry.llvm_link else {
+            let message = "`emit_module` needs llvm-link, and this server has none configured";
+            return Outcome::Result(call_tool_result(true, message), false);
+        };
+        match emit_slice(session, &key, &result, llvm_link, &out) {
+            Ok(emitted) => payload["emitted"] = json!(emitted),
+            Err(error) => {
+                return Outcome::Result(call_tool_result(true, &error.to_string()), false);
+            }
+        }
+    }
     Outcome::Result(call_tool_result(false, &payload.to_string()), false)
 }
 
@@ -1132,6 +1198,15 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
         "reach" => {
             let (include_overlay, min_confidence) = overlay_arguments(arguments)?;
             Ok(Query::Reach {
+                from: string_field("from")?,
+                to: string_field("to")?,
+                include_overlay,
+                min_confidence,
+            })
+        }
+        "slice" => {
+            let (include_overlay, min_confidence) = overlay_arguments(arguments)?;
+            Ok(Query::Slice {
                 from: string_field("from")?,
                 to: string_field("to")?,
                 include_overlay,
@@ -1204,6 +1279,7 @@ mod tests {
             Query::Callees { .. } => json!({ "name": "a" }),
             Query::Uses { .. } => json!({ "name": "a" }),
             Query::Reach { .. } => json!({ "from": "a", "to": "b" }),
+            Query::Slice { .. } => json!({ "from": "a", "to": "b" }),
             Query::Closure { .. } => json!({ "name": "a", "direction": "in" }),
             Query::Externals => json!({}),
             Query::FfiExports => json!({}),
@@ -1304,7 +1380,7 @@ mod tests {
 
     /// Every query tool takes the same optional `catalog` argument. It is
     /// added at one point in `tool_for`, and this is what says it reached
-    /// all eleven.
+    /// all twelve.
     #[test]
     fn every_query_tool_accepts_a_catalog_argument() {
         for query in sample_queries() {
@@ -1368,12 +1444,59 @@ mod tests {
             "the error must name the tools that attach an overlay: {text}"
         );
 
+        let slice = json!({ "from": "a", "to": "b", "include_overlay": true });
+        let text = call_text(&mut registry, "slice", slice);
+        assert!(
+            text.contains("load_overlay") && text.contains("record_edges"),
+            "a slice asking for the overlay names the same tools: {text}"
+        );
+
         for tool in tools_list_result()["tools"].as_array().unwrap() {
-            let walks = matches!(tool["name"].as_str(), Some("reach" | "closure"));
+            let walks = matches!(tool["name"].as_str(), Some("reach" | "closure" | "slice"));
             let properties = &tool["inputSchema"]["properties"];
             assert_eq!(properties.get("include_overlay").is_some(), walks, "{tool}");
             assert_eq!(properties.get("min_confidence").is_some(), walks, "{tool}");
         }
+    }
+
+    /// `emit_module` fails before any module is read when it cannot be
+    /// honoured, and never writes a module for a slice that found no path.
+    #[test]
+    fn a_slice_emits_a_module_only_when_it_can() {
+        let emit = |from: &str, to: &str| {
+            let mut arguments = json!({ "from": from, "to": to });
+            arguments["emit_module"] = json!("never-written.bc");
+            arguments
+        };
+
+        let mut artifact = one_catalog().with_llvm_link(PathBuf::from("/absent/llvm-link"));
+        artifact.artifacts.insert(PathBuf::from("first"));
+        let text = tool_error(&mut artifact, "slice", emit("a", "b"));
+        assert!(text.contains("load_catalog"), "{text}");
+        assert!(
+            answer(&mut artifact, "slice", json!({ "from": "a", "to": "b" }))
+                .get("emitted")
+                .is_none(),
+            "an artifact still answers a slice that emits nothing"
+        );
+
+        let mut unconfigured = one_catalog();
+        let text = tool_error(&mut unconfigured, "slice", emit("a", "b"));
+        assert!(text.contains("llvm-link"), "{text}");
+
+        let mut configured = one_catalog().with_llvm_link(PathBuf::from("/absent/llvm-link"));
+        let text = tool_error(&mut configured, "slice", emit("b", "a"));
+        assert!(
+            text.contains("no path from b to a; nothing to emit"),
+            "{text}"
+        );
+        let text = tool_error(
+            &mut configured,
+            "slice",
+            json!({ "from": "a", "to": "b", "emit_module": 7 }),
+        );
+        assert!(text.contains("emit_module"), "{text}");
+        assert!(!Path::new("never-written.bc").exists());
     }
 
     /// One loaded catalog is the default, so an agent working on a single

@@ -79,7 +79,9 @@ pub struct CacheReport {
 }
 
 pub mod index;
-pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Session};
+pub use index::{
+    Direction, NameMatch, NameResolution, PathStep, ReachResult, Session, SliceEdge, SliceResult,
+};
 
 pub mod overlay;
 pub use overlay::{
@@ -92,10 +94,13 @@ pub mod mcp;
 pub mod render;
 pub use render::{Color, TextMode, render};
 
+pub mod slice;
+pub use slice::{EmittedModule, emit_module, emit_slice};
+
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// One of the eleven source-level queries. Serializes with a `kind` tag, e.g.
+/// One of the twelve source-level queries. Serializes with a `kind` tag, e.g.
 /// `{"kind": "callers", "name": "parse_frame"}`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -125,6 +130,18 @@ pub enum Query {
         include_overlay: bool,
         /// The weakest overlay edge walked; `None` means `low`, every edge
         /// not refuted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_confidence: Option<Confidence>,
+    },
+    /// Every function on some path from `from` to `to`, with the edges
+    /// among them. Empty when no path exists over the edges walked.
+    Slice {
+        from: String,
+        to: String,
+        /// As for `Reach`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        include_overlay: bool,
+        /// As for `Reach`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_confidence: Option<Confidence>,
     },
@@ -209,7 +226,7 @@ pub struct IndirectTargetsResult {
 }
 
 /// Unresolved indirect sites that share a dispatch, and the functions that
-/// could be what they call. Never an edge: `reach` and `closure` ignore it.
+/// could be what they call. Never an edge: no walk follows it.
 #[derive(Debug, Serialize)]
 pub struct CandidateGroup {
     /// The field every site in the group dispatches through; `None` groups
@@ -261,6 +278,7 @@ pub enum QueryResults {
     /// absent one. Collapsing the two into one `Vec` would make a trivial
     /// found path read as unreachable.
     Reach(Option<Vec<PathStep>>),
+    Slice(SliceResult),
     Closure(Vec<FunctionId>),
     Externals(Vec<SymbolBinding>),
     FfiExports(Vec<DefEntry>),
@@ -280,6 +298,7 @@ impl QueryResults {
             // `Some(_)` is a found answer even when its step list is
             // itself empty (a trivial `reach(x, x)`).
             QueryResults::Reach(path) => path.is_none(),
+            QueryResults::Slice(slice) => slice.functions.is_empty(),
             QueryResults::Closure(items) => items.is_empty(),
             QueryResults::Externals(items) => items.is_empty(),
             QueryResults::FfiExports(items) => items.is_empty(),
@@ -335,14 +354,15 @@ pub struct Uncertainty {
     /// entry per symbol. For every other query, every ambiguous binding in
     /// the selected scope.
     pub frontier: Vec<SymbolBinding>,
-    /// Steps of a returned `reach` path that are `bounded_indirect`, and so
-    /// hold only if the call takes the member the path chose. Zero for a
-    /// path of direct calls and resolved bindings, and for every query that
-    /// returns no path: a non-zero count says *this* answer is conditional
-    /// without the reader having to walk the step kinds.
+    /// Steps of a returned `reach` path, or edges of a `slice`, that are
+    /// `bounded_indirect`, and so hold only if the call takes the member the
+    /// path chose. Zero for a path of direct calls and resolved bindings,
+    /// and for every query that returns no path: a non-zero count says
+    /// *this* answer is conditional without the reader having to walk the
+    /// step kinds.
     pub conditional_path_steps: usize,
-    /// Steps of the returned path that are agent edges. Non-zero means the
-    /// answer is not proof.
+    /// Steps of the returned path, or edges of a `slice`, that are agent
+    /// edges. Non-zero means the answer is not proof.
     pub agent_path_steps: usize,
     /// `closure` with the overlay: functions reached only through at least
     /// one agent edge (closure with overlay minus closure without).
@@ -587,8 +607,8 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
     run_with_overlay(session, None, query)
 }
 
-/// [`run`], with an overlay of agent-proposed edges that `reach` and
-/// `closure` walk when the query sets `include_overlay`. A query that asks
+/// [`run`], with an overlay of agent-proposed edges that `reach`, `closure`
+/// and `slice` walk when the query sets `include_overlay`. A query that asks
 /// for the overlay when `overlay` is `None` is an argument error, never a
 /// silent direct-only answer.
 pub fn run_with_overlay(
@@ -625,15 +645,14 @@ pub fn run_with_overlay(
         Query::Reach { from, to, .. } => {
             let reach = session.reach_with(from, to, view);
             reach_frontier = Some(reach.frontier);
-            let steps = reach.path.iter().flatten();
-            conditional_path_steps = steps
-                .clone()
-                .filter(|step| matches!(step, PathStep::BoundedIndirect { .. }))
-                .count();
-            agent_path_steps = steps
-                .filter(|step| matches!(step, PathStep::Agent { .. }))
-                .count();
+            (conditional_path_steps, agent_path_steps) = hedged_steps(reach.path.iter().flatten());
             QueryResults::Reach(reach.path)
+        }
+        Query::Slice { from, to, .. } => {
+            let slice = session.slice_with(from, to, view);
+            (conditional_path_steps, agent_path_steps) =
+                hedged_steps(slice.edges.iter().map(|edge| &edge.step));
+            QueryResults::Slice(slice)
         }
         Query::Closure {
             name, direction, ..
@@ -697,6 +716,16 @@ pub fn run_with_overlay(
             llvm_version: llvm_version(),
             rllvm_query_version: env!("CARGO_PKG_VERSION").to_string(),
         },
+    })
+}
+
+/// How many of `steps` are `bounded_indirect`, holding only if the call takes
+/// the member chosen, and how many are agent edges, which are never proof.
+fn hedged_steps<'s>(steps: impl Iterator<Item = &'s PathStep>) -> (usize, usize) {
+    steps.fold((0, 0), |(conditional, agent), step| match step {
+        PathStep::BoundedIndirect { .. } => (conditional + 1, agent),
+        PathStep::Agent { .. } => (conditional, agent + 1),
+        PathStep::Call(_) | PathStep::Binding(_) | PathStep::Alias { .. } => (conditional, agent),
     })
 }
 
@@ -776,6 +805,16 @@ impl QueryResults {
             QueryResults::Reach(path) => {
                 for step in path.iter().flatten() {
                     collect_step(step, into);
+                }
+            }
+            QueryResults::Slice(slice) => {
+                for id in &slice.functions {
+                    collect_function(id, into);
+                }
+                for edge in &slice.edges {
+                    collect_function(&edge.from, into);
+                    collect_function(&edge.to, into);
+                    collect_step(&edge.step, into);
                 }
             }
             QueryResults::Closure(ids) => {
@@ -1208,7 +1247,7 @@ impl Query {
             | Query::Callees { name }
             | Query::Uses { name }
             | Query::Closure { name, .. } => vec![name],
-            Query::Reach { from, to, .. } => vec![from, to],
+            Query::Reach { from, to, .. } | Query::Slice { from, to, .. } => vec![from, to],
             // These take a location or nothing at all.
             Query::At { .. }
             | Query::Externals
@@ -1248,6 +1287,11 @@ impl Query {
     fn overlay_fields(&self) -> Option<(bool, Option<Confidence>)> {
         match self {
             Query::Reach {
+                include_overlay,
+                min_confidence,
+                ..
+            }
+            | Query::Slice {
                 include_overlay,
                 min_confidence,
                 ..
@@ -2329,6 +2373,60 @@ mod tests {
                 path_of(&result)
             );
             assert_eq!(result.uncertainty.agent_path_steps, 0);
+        }
+
+        fn slice(include_overlay: bool) -> Query {
+            Query::Slice {
+                from: "dispatch".into(),
+                to: "h3".into(),
+                include_overlay,
+                min_confidence: None,
+            }
+        }
+
+        fn slice_of(result: &QueryResult) -> &SliceResult {
+            match &result.results {
+                QueryResults::Slice(slice) => slice,
+                other => panic!("expected a slice answer, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn an_agent_edge_widens_the_slice_only_when_asked() {
+            let session = session();
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::High)]);
+
+            let unasked = run_with_overlay(&session, Some(&overlay), &slice(false)).unwrap();
+            assert!(slice_of(&unasked).functions.is_empty());
+            assert!(unasked.results.is_empty());
+            assert_eq!(unasked.uncertainty.agent_path_steps, 0);
+            assert!(unasked.uncertainty.overlay.is_none());
+
+            let asked = run_with_overlay(&session, Some(&overlay), &slice(true)).unwrap();
+            let widened = slice_of(&asked);
+            let members: Vec<&str> = widened
+                .functions
+                .iter()
+                .map(|id| id.symbol.as_str())
+                .collect();
+            assert_eq!(members, ["dispatch", "h3"]);
+            assert!(
+                matches!(
+                    widened.edges.as_slice(),
+                    [SliceEdge { from, to, step: PathStep::Agent { .. } }]
+                        if from.symbol == "dispatch" && to.symbol == "h3"
+                ),
+                "{:?}",
+                widened.edges
+            );
+            assert_eq!(asked.uncertainty.agent_path_steps, 1);
+            assert!(asked.uncertainty.overlay.is_some());
+            assert!(asked.symbols.is_empty(), "a C answer has no readings");
+
+            assert!(
+                run(&session, &slice(true)).is_err(),
+                "asking for an overlay that is not there is an error"
+            );
         }
 
         #[test]
