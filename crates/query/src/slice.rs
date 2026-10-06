@@ -275,18 +275,30 @@ fn refuse_colliding_statics(pieces: &[Piece]) -> Result<(), Error> {
 }
 
 /// `llvm-nm`'s plain listing as `(type letter, name)` pairs. A line is an
-/// optional value, the letter and the name; anything else is skipped.
+/// optional value, the one-letter type, and the name, which is the rest of
+/// the line: an Objective-C method's holds spaces. Anything else, such as an
+/// archive member's header, is skipped.
 fn symbol_table(listing: &str) -> Vec<(char, String)> {
+    let one_letter = |field: &str| {
+        let mut letters = field.chars();
+        match (letters.next(), letters.next()) {
+            (Some(kind), None) => Some(kind),
+            _ => None,
+        }
+    };
     listing
         .lines()
         .filter_map(|line| {
-            let mut fields = line.split_whitespace().rev();
-            let name = fields.next()?;
-            let mut letter = fields.next()?.chars();
-            match (letter.next(), letter.next()) {
-                (Some(kind), None) => Some((kind, name.to_string())),
-                _ => None,
-            }
+            let (first, rest) = line.trim().split_once(char::is_whitespace)?;
+            let (kind, name) = match one_letter(first) {
+                Some(kind) => (kind, rest),
+                None => {
+                    let (letter, name) = rest.trim_start().split_once(char::is_whitespace)?;
+                    (one_letter(letter)?, name)
+                }
+            };
+            let name = name.trim_start();
+            (!name.is_empty()).then(|| (kind, name.to_string()))
         })
         .collect()
 }
@@ -336,6 +348,21 @@ fn inherited_environment() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An Objective-C method's name holds a space, and an undefined symbol
+    /// has no address.
+    #[test]
+    fn a_name_keeps_its_spaces_and_an_address_is_optional() {
+        let listing = "---------------- t -[Foo bar:baz:]\nU -[Foo other]\n   U _leaf  \n";
+        assert_eq!(
+            symbol_table(listing),
+            [
+                ('t', "-[Foo bar:baz:]".to_string()),
+                ('U', "-[Foo other]".to_string()),
+                ('U', "_leaf".to_string()),
+            ]
+        );
+    }
 
     #[test]
     fn a_listing_reads_as_type_letters_and_names() {
