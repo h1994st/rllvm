@@ -84,7 +84,7 @@ pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Ses
 pub mod overlay;
 pub use overlay::{
     Confidence, EdgeKey, OVERLAY_VERSION, Overlay, OverlayCoverage, OverlayEdge, OverlaySummary,
-    Record, SummaryEdge, TargetSpec, Verdict, Verification, default_overlay_path, fingerprint,
+    Record, SummaryEdge, TargetSpec, Verdict, Verification, default_overlay_path,
 };
 
 pub mod mcp;

@@ -255,6 +255,7 @@ impl DiskState {
 }
 
 /// The folded overlay, bound to one build of one catalog.
+#[derive(Debug)]
 pub struct Overlay {
     /// Where `save` and `compact` write; `None` for one never saved.
     path: Option<PathBuf>,
@@ -971,7 +972,7 @@ mod tests {
     }
 
     fn open_error(session: &Session, path: &Path) -> String {
-        message(Overlay::open(session, path).err().expect("open must fail"))
+        message(Overlay::open(session, path).expect_err("open must fail"))
     }
 
     fn header(session: &Session) -> String {
