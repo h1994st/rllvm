@@ -57,6 +57,8 @@ declare module 'claude-code' {
   interface PluginState {
     rllvm: {
       groups: OverlayGroup[]
+      /** Groups the last `resolution_candidates` listed beyond those kept. */
+      dropped_groups: number
       overlay: OverlayView | null
     }
   }

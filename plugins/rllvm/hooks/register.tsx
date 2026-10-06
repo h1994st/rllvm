@@ -38,6 +38,7 @@ const VERDICT_MARKS: Readonly<Record<OverlayVerdict, string>> = {
 }
 
 const groups = atom({ plugin: 'rllvm', key: 'groups' } as const, [])
+const droppedGroups = atom({ plugin: 'rllvm', key: 'dropped_groups' } as const, 0)
 const overlay = atom({ plugin: 'rllvm', key: 'overlay' } as const, null)
 
 type Json = Record<string, unknown>
@@ -169,7 +170,11 @@ const parseSummary = (value: unknown): OverlayView | undefined => {
 const remember = async ($: StateDollar, tool: string, payload: unknown) => {
   if (tool === CANDIDATES_TOOL) {
     const parsed = isObject(payload) ? allOf(payload.results, parseGroup) : undefined
-    if (parsed) await update($, groups, () => parsed.slice(-GROUP_LIMIT))
+    if (!parsed) return
+    // The server lists field groups first, the ones an edge can cover most
+    // sites through, so the first are kept and the rest only counted.
+    await update($, groups, () => parsed.slice(0, GROUP_LIMIT))
+    await update($, droppedGroups, () => Math.max(0, parsed.length - GROUP_LIMIT))
   } else if (tool === SAVE_TOOL) {
     if (!isObject(payload) || typeof payload.saved !== 'number' || typeof payload.path !== 'string')
       return
@@ -310,9 +315,13 @@ const coverageLine = (view: OverlayView | null): Line =>
       }
     : { key: 'coverage', text: 'no overlay loaded yet', isDim: true }
 
-/** Everything the pane shows, cut to `rows` lines with a count of the blocks left out. */
+/**
+ * Everything the pane shows, cut to `rows` lines with a count of the blocks
+ * left out, `dropped` groups never kept among them.
+ */
 const paneLines = (
   list: readonly OverlayGroup[],
+  dropped: number,
   view: OverlayView | null,
   rows: number,
 ): Line[] => {
@@ -331,15 +340,17 @@ const paneLines = (
     siteBlock(edges, at),
   ].filter(block => block.length > 0)
 
+  const more = (count: number): Line => ({ key: 'more', text: `…${count} more`, isDim: true })
   const shown = [...head]
   for (const [index, block] of blocks.entries()) {
-    const isLast = index === blocks.length - 1
+    const isLast = index === blocks.length - 1 && dropped === 0
     if (shown.length + block.length + (isLast ? 0 : 1) > rows) {
-      shown.push({ key: 'more', text: `…${blocks.length - index} more`, isDim: true })
-      break
+      shown.push(more(blocks.length - index + dropped))
+      return shown
     }
     shown.push(...block)
   }
+  if (dropped > 0) shown.push(more(dropped))
   return shown
 }
 
@@ -377,7 +388,12 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)
     const rows = e.props.scroll?.bodyRows ?? e.viewport?.rows ?? Number.POSITIVE_INFINITY
-    const lines = paneLines(await read($, groups), await read($, overlay), Math.max(rows, 1))
+    const lines = paneLines(
+      await read($, groups),
+      await read($, droppedGroups),
+      await read($, overlay),
+      Math.max(rows, 1),
+    )
     return (
       <Box flexDirection="column">
         {lines.map(line => (

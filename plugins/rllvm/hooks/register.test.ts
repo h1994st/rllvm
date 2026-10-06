@@ -350,16 +350,24 @@ describe('pane', () => {
     }))
     answering(on, many)
     await $.tool.call({ tool: `${SERVER}resolution_candidates` })
-    expect((await state($)).groups).toHaveLength(50)
+    const kept = (await state($)).groups ?? []
+    // The server lists field groups first, so the first 50 of 60 are kept.
+    expect(kept).toHaveLength(50)
+    expect(kept[0]?.field).toEqual({ record: 'ops', offset: 0 })
+    expect(kept[49]?.field).toEqual({ record: 'ops', offset: 392 })
 
     const ui = await mountPane($, 'terminal', 8)
-    // The last 50 of 60 groups are kept, from ops@80. Eight rows hold the
-    // coverage line, three groups of two lines each, and the count of the rest.
-    expect(await ui.find({ key: 'group-ops@72' })).toBeUndefined()
-    expect(await ui.find({ key: 'group-ops@80' })).toBeDefined()
-    expect(await ui.find({ key: 'group-ops@96' })).toBeDefined()
-    expect(await ui.find({ key: 'group-ops@104' })).toBeUndefined()
-    expect((await ui.find({ key: 'more' }))?.text).toBe('…47 more')
+    // Eight rows hold the coverage line, three groups of two lines each, and
+    // the count of the rest: 47 groups that did not fit and 10 never kept.
+    expect(await ui.find({ key: 'group-ops@0' })).toBeDefined()
+    expect(await ui.find({ key: 'group-ops@16' })).toBeDefined()
+    expect(await ui.find({ key: 'group-ops@24' })).toBeUndefined()
+    expect((await ui.find({ key: 'more' }))?.text).toBe('…57 more')
+
+    // With room for every kept group, the ten never kept are still counted.
+    const tall = await mountPane($, 'desktop', 200)
+    expect(await tall.find({ key: 'group-ops@392' })).toBeDefined()
+    expect((await tall.find({ key: 'more' }))?.text).toBe('…10 more')
   })
 })
 
