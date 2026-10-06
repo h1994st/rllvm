@@ -82,6 +82,17 @@ is never changed.
   it was opened; reopen it and record again.
 
 Overlay edges are hypotheses, never proof: no answer uses them unless asked.
+`reach` and `closure` walk them with `include_overlay` (`--include-overlay`),
+skipping refuted edges and any below `min_confidence` (`--min-confidence
+low|medium|high`, default `low`). Over MCP no overlay can be loaded yet, so
+`include_overlay` there is an error.
+
+- Every step through one is `kind: agent` with its `confidence` and
+  `verdict`; `uncertainty.agent_path_steps` counts them. Non-zero means the
+  path is not proven: report it as a hypothesis, never as reachability.
+- `closure` lists functions reached only through agent edges in
+  `uncertainty.agent_reached`; `uncertainty.overlay` gives `covered_sites` of
+  `unresolved_sites`.
 
 ## Is a vulnerable function present and reachable?
 

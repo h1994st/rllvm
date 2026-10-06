@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use owo_colors::OwoColorize;
 
 use crate::{
-    PathStep, QueryResult, QueryResults,
+    EdgeKey, PathStep, QueryResult, QueryResults,
     bind::BindingStatus,
     facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, SourceLocation},
 };
@@ -354,12 +354,18 @@ fn shown_in(results: &QueryResults) -> Shown {
                 .any(|use_fact| use_fact.in_function.is_some() && use_fact.location.is_none());
         }
         QueryResults::Reach(path) => {
-            // A path prints no locations, and its only indirect step is the
-            // one CVP bounded.
-            shown.indirect_call_site = path
-                .iter()
-                .flatten()
-                .any(|step| matches!(step, PathStep::BoundedIndirect { .. }));
+            // Only an agent step prints a location. Its site and a bounded
+            // one are the path's indirect steps.
+            for step in path.iter().flatten() {
+                match step {
+                    PathStep::BoundedIndirect { .. } => shown.indirect_call_site = true,
+                    PathStep::Agent { location, .. } => {
+                        shown.indirect_call_site = true;
+                        shown.missing_location |= location.is_none();
+                    }
+                    PathStep::Call(_) | PathStep::Binding(_) | PathStep::Alias { .. } => {}
+                }
+            }
         }
         QueryResults::IndirectTargets(entries) => {
             shown.missing_location = entries.iter().any(|entry| entry.location.is_none());
@@ -558,6 +564,12 @@ fn footer(result: &QueryResult, color: Color, out: &mut String) {
             uncertainty.conditional_path_steps
         ));
     }
+    if let Some(overlay) = &uncertainty.overlay {
+        notes.push(format!(
+            "overlay edges cover {} of {} unresolved indirect site(s)",
+            overlay.covered_sites, overlay.unresolved_sites
+        ));
+    }
     if let Some(unknown) = uncertainty.functions_of_unknown_language
         && unknown > 0
     {
@@ -698,6 +710,13 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
     if let Some(unknown) = uncertainty.functions_of_unknown_language {
         out.push_str(&format!("  functions_of_unknown_language: {unknown}\n"));
     }
+    // Only for a walk that included the overlay: without it they say nothing.
+    if let Some(overlay) = &uncertainty.overlay {
+        out.push_str(&format!(
+            "  agent_path_steps: {}\n  overlay: {} of {} unresolved site(s) covered\n",
+            uncertainty.agent_path_steps, overlay.covered_sites, overlay.unresolved_sites
+        ));
+    }
     // Every ambiguous binding `ambiguous_bindings` only counts: for `reach`
     // the ones that walk actually reached, for every other query the full
     // program-wide set. `ambiguous_bindings` says how many; this says which,
@@ -754,6 +773,17 @@ pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
     if mode == TextMode::Full {
         full_sections(result, color, &mut out);
     }
+    // Last, in every mode, so no reader stops before it.
+    let agent_steps = result.uncertainty.agent_path_steps;
+    if agent_steps > 0 {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "{} this path uses {agent_steps} agent edge(s)\n",
+            paint("not proven:", color, Paint::Uncertain)
+        ));
+    }
     out
 }
 
@@ -770,8 +800,22 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
             }
         }
         QueryResults::Closure(functions) => {
-            for function in functions {
+            let agent_reached = &result.uncertainty.agent_reached;
+            for function in functions.iter().filter(|id| !agent_reached.contains(id)) {
                 out.push_str(&format!("{}\n", name(symbols, &function.symbol, ctx)));
+            }
+            if !agent_reached.is_empty() {
+                out.push_str(&format!(
+                    "{}\n",
+                    paint(
+                        "reached only through agent edges:",
+                        ctx.color,
+                        Paint::Uncertain
+                    )
+                ));
+                for function in agent_reached {
+                    out.push_str(&format!("  {}\n", name(symbols, &function.symbol, ctx)));
+                }
             }
         }
         QueryResults::Externals(bindings) => {
@@ -868,6 +912,38 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                         name(symbols, &alias.symbol, ctx),
                         name(symbols, &target.symbol, ctx)
                     )),
+                    PathStep::Agent {
+                        site,
+                        chosen,
+                        location: at,
+                        key,
+                        confidence,
+                        verdict,
+                    } => {
+                        let via = match key {
+                            EdgeKey::Field { via_field, .. } => format!(
+                                " via {}",
+                                paint(&via_field.to_string(), ctx.color, Paint::Symbol)
+                            ),
+                            EdgeKey::Site { .. } => String::new(),
+                        };
+                        let verdict = verdict.map_or_else(
+                            || "unverified".to_string(),
+                            |verdict| verdict.to_string(),
+                        );
+                        out.push_str(&format!(
+                            "{}             {} -> {} at {}{via} {}\n",
+                            paint("agent", ctx.color, Paint::Uncertain),
+                            name(symbols, &site.function.symbol, ctx),
+                            name(symbols, &chosen.symbol, ctx),
+                            location(at.as_ref(), ctx),
+                            paint(
+                                &format!("[{confidence}, {verdict}]"),
+                                ctx.color,
+                                Paint::Uncertain
+                            )
+                        ));
+                    }
                 }
             }
         }
@@ -1177,6 +1253,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "b".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1195,6 +1273,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "a".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1218,11 +1298,84 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "target".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
         let text = render(&result, TextMode::Adaptive, Color::Never);
         assert!(text.contains("bounded-indirect"), "got: {text}");
+    }
+
+    /// The fixture's `dispatch` calls through `ops@8` with no bound, and an
+    /// agent says that call takes `h3`.
+    fn overlay_answer(query: Query) -> QueryResult {
+        use crate::overlay::{Confidence, Overlay, Record, TargetSpec};
+        let session = Session::new(facts_with_overlay_sites(), Vec::new());
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        overlay
+            .record(
+                &session,
+                vec![Record::Add {
+                    via_field: Some(FieldRef {
+                        record: "ops".into(),
+                        offset: 8,
+                    }),
+                    site: None,
+                    to: TargetSpec::Symbol("h3".into()),
+                    confidence: Confidence::High,
+                    provenance: vec!["init: o->on_event = h3".into()],
+                    source: "agent".into(),
+                }],
+            )
+            .unwrap();
+        crate::run_with_overlay(&session, Some(&overlay), &query).unwrap()
+    }
+
+    #[test]
+    fn an_agent_step_is_labeled_and_the_answer_ends_not_proven() {
+        let result = overlay_answer(Query::Reach {
+            from: "dispatch".into(),
+            to: "h3".into(),
+            include_overlay: true,
+            min_confidence: None,
+        });
+        for mode in [TextMode::Adaptive, TextMode::Full] {
+            let text = render(&result, mode, Color::Never);
+            assert!(
+                text.contains(
+                    "agent             dispatch -> h3 at t.c:4 via ops@8 [high, unverified]\n"
+                ),
+                "got: {text}"
+            );
+            assert!(
+                text.ends_with("\nnot proven: this path uses 1 agent edge(s)\n"),
+                "got: {text}"
+            );
+            assert!(
+                text.contains("overlay edges cover 1 of 2 unresolved indirect site(s)"),
+                "got: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closure_lists_what_only_agent_edges_reach_apart() {
+        let result = overlay_answer(Query::Closure {
+            name: "h3".into(),
+            direction: Direction::In,
+            include_overlay: true,
+            min_confidence: None,
+        });
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(
+            text.starts_with("init\nreached only through agent edges:\n  dispatch\n"),
+            "got: {text}"
+        );
+        assert!(
+            !text.contains("not proven"),
+            "a closure has no path: {text}"
+        );
     }
 
     #[test]
@@ -1398,6 +1551,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "c".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1595,6 +1750,8 @@ mod tests {
         let closure = text_of(Query::Closure {
             name: "a".into(),
             direction: Direction::Out,
+            include_overlay: false,
+            min_confidence: None,
         });
         assert!(closure.contains("indirect call site"), "got: {closure:?}");
     }
@@ -1956,6 +2113,8 @@ mod tests {
             &Query::Closure {
                 name: "b".into(),
                 direction: Direction::Out,
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();

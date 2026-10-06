@@ -53,8 +53,8 @@ use serde_json::{Value, json};
 use rllvm_core::error::Error;
 
 use super::{
-    Direction, FactsCache, Query, Session, analysis_of, open_catalog_with_cache, open_with_cache,
-    run,
+    Confidence, Direction, FactsCache, Query, Session, analysis_of, open_catalog_with_cache,
+    open_with_cache, run_with_overlay,
 };
 
 /// The modern protocol revision this server has been checked against.
@@ -590,8 +590,8 @@ query_tool_surface! {
     Query::Callers { .. } => Query::Callers { name: String::new() }, "callers";
     Query::Callees { .. } => Query::Callees { name: String::new() }, "callees";
     Query::Uses { .. } => Query::Uses { name: String::new() }, "uses";
-    Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new() }, "reach";
-    Query::Closure { .. } => Query::Closure { name: String::new(), direction: Direction::In }, "closure";
+    Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None }, "reach";
+    Query::Closure { .. } => Query::Closure { name: String::new(), direction: Direction::In, include_overlay: false, min_confidence: None }, "closure";
     Query::Externals => Query::Externals, "externals";
     Query::FfiExports => Query::FfiExports, "ffi_exports";
     Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
@@ -606,6 +606,46 @@ fn symbol_property() -> Value {
         "type": "string",
         "description": "Symbol to look up. Accepts a mangled symbol (`_Z5twiceIiET_S0_`), a full demangled reading (`int twice<int>(int)`), or a bare identifier (`twice`). A bare identifier matches a C++ demangled reading that contains it as a whole identifier, so `twice` finds `int twice<int>(int)`; a C symbol has no reading, so a bare C name matches only its own exact symbol. The answer's `resolution` block says which applied."
     })
+}
+
+/// The two overlay arguments `reach` and `closure` take, identically: spelled
+/// once for the same reason as [`symbol_property`].
+fn overlay_properties() -> [(&'static str, Value); 2] {
+    [
+        (
+            "include_overlay",
+            json!({
+                "type": "boolean",
+                "default": false,
+                "description": "Also walk agent-proposed edges from the loaded overlay. Never proof: the answer labels them."
+            }),
+        ),
+        (
+            "min_confidence",
+            json!({
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": "The weakest overlay edge to walk; default `low`, every edge not refuted. Needs `include_overlay`."
+            }),
+        ),
+    ]
+}
+
+/// `include_overlay` and `min_confidence`, as [`overlay_properties`] declares them.
+fn overlay_arguments(arguments: &Value) -> Result<(bool, Option<Confidence>), String> {
+    let include_overlay = match arguments.get("include_overlay") {
+        None => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "non-boolean argument `include_overlay`".to_string())?,
+    };
+    let min_confidence = match arguments.get("min_confidence") {
+        None => None,
+        Some(value) => Some(serde_json::from_value(value.clone()).map_err(|_| {
+            "invalid argument `min_confidence`, expected `low`, `medium` or `high`".to_string()
+        })?),
+    };
+    Ok((include_overlay, min_confidence))
 }
 
 /// A tool whose only argument is that symbol name.
@@ -641,6 +681,11 @@ fn tool_for(query: &Query) -> Value {
         .and_then(Value::as_object_mut)
     {
         properties.insert("catalog".into(), catalog_property());
+        if matches!(query, Query::Reach { .. } | Query::Closure { .. }) {
+            for (name, property) in overlay_properties() {
+                properties.insert(name.into(), property);
+            }
+        }
     }
     tool
 }
@@ -781,7 +826,9 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
     // location that does not parse -- is a tool error the client can
     // display, not a protocol error, and never an empty `results` list that
     // would read as a valid answer.
-    let result = match run(session, &query) {
+    // No overlay is loaded over MCP yet, so `include_overlay` is a tool
+    // error naming that, never a direct-only answer.
+    let result = match run_with_overlay(session, None, &query) {
         Ok(result) => result,
         Err(error) => return Outcome::Result(call_tool_result(true, &error.to_string()), false),
     };
@@ -827,10 +874,15 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
         "uses" => Ok(Query::Uses {
             name: string_field("name")?,
         }),
-        "reach" => Ok(Query::Reach {
-            from: string_field("from")?,
-            to: string_field("to")?,
-        }),
+        "reach" => {
+            let (include_overlay, min_confidence) = overlay_arguments(arguments)?;
+            Ok(Query::Reach {
+                from: string_field("from")?,
+                to: string_field("to")?,
+                include_overlay,
+                min_confidence,
+            })
+        }
         "closure" => {
             let name = string_field("name")?;
             let direction = match string_field("direction")?.as_str() {
@@ -842,7 +894,13 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                     ));
                 }
             };
-            Ok(Query::Closure { name, direction })
+            let (include_overlay, min_confidence) = overlay_arguments(arguments)?;
+            Ok(Query::Closure {
+                name,
+                direction,
+                include_overlay,
+                min_confidence,
+            })
         }
         "externals" => Ok(Query::Externals),
         "ffi_exports" => Ok(Query::FfiExports),
@@ -1024,6 +1082,39 @@ mod tests {
             text.contains("load_catalog") && text.contains("inventory"),
             "the error must name the tools that fix it: {text}"
         );
+    }
+
+    /// The walks take the overlay arguments; until an overlay can be loaded
+    /// over MCP, asking for it is a tool error rather than a direct-only
+    /// answer that would read as though the overlay had been walked.
+    #[test]
+    fn a_walk_asking_for_the_overlay_parses_and_says_none_is_loaded() {
+        let arguments = json!({
+            "from": "a", "to": "b", "include_overlay": true, "min_confidence": "medium"
+        });
+        assert!(matches!(
+            query_from_call("reach", &arguments),
+            Ok(Query::Reach {
+                include_overlay: true,
+                min_confidence: Some(Confidence::Medium),
+                ..
+            })
+        ));
+        let bad = json!({ "name": "a", "direction": "in", "min_confidence": "certain" });
+        assert!(query_from_call("closure", &bad).is_err());
+
+        let mut registry = one_catalog();
+        let result = call(&mut registry, "reach", arguments);
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap_or_default();
+        assert!(text.contains("include_overlay"), "{text}");
+
+        for tool in tools_list_result()["tools"].as_array().unwrap() {
+            let walks = matches!(tool["name"].as_str(), Some("reach" | "closure"));
+            let properties = &tool["inputSchema"]["properties"];
+            assert_eq!(properties.get("include_overlay").is_some(), walks, "{tool}");
+            assert_eq!(properties.get("min_confidence").is_some(), walks, "{tool}");
+        }
     }
 
     /// One loaded catalog is the default, so an agent working on a single

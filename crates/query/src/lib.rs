@@ -30,7 +30,7 @@
 #![warn(unreachable_pub)]
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -84,7 +84,7 @@ pub use index::{Direction, NameMatch, NameResolution, PathStep, ReachResult, Ses
 pub mod overlay;
 pub use overlay::{
     Confidence, EdgeKey, OVERLAY_VERSION, Overlay, OverlayCoverage, OverlayEdge, OverlaySummary,
-    Record, SummaryEdge, TargetSpec, Verdict, Verification, default_overlay_path,
+    OverlayView, Record, SummaryEdge, TargetSpec, Verdict, Verification, default_overlay_path,
 };
 
 pub mod mcp;
@@ -116,10 +116,30 @@ pub enum Query {
     Uses { name: String },
     /// One supporting path from `from` to `to`, or its explicit absence.
     /// Enumerating every path is out of scope.
-    Reach { from: String, to: String },
+    Reach {
+        from: String,
+        to: String,
+        /// Also walk agent-proposed edges from the overlay. Never proof:
+        /// every step through one is labeled `agent`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        include_overlay: bool,
+        /// The weakest overlay edge walked; `None` means `low`, every edge
+        /// not refuted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_confidence: Option<Confidence>,
+    },
     /// The set that can reach the target (`In`) or that it can reach
     /// (`Out`).
-    Closure { name: String, direction: Direction },
+    Closure {
+        name: String,
+        direction: Direction,
+        /// As for `Reach`.
+        #[serde(default, skip_serializing_if = "is_false")]
+        include_overlay: bool,
+        /// As for `Reach`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_confidence: Option<Confidence>,
+    },
     /// Unbound symbols: the captured program's boundary.
     Externals,
     /// Definitions a Rust module makes C-callable: external, attributed to
@@ -321,6 +341,16 @@ pub struct Uncertainty {
     /// returns no path: a non-zero count says *this* answer is conditional
     /// without the reader having to walk the step kinds.
     pub conditional_path_steps: usize,
+    /// Steps of the returned path that are agent edges. Non-zero means the
+    /// answer is not proof.
+    pub agent_path_steps: usize,
+    /// `closure` with the overlay: functions reached only through at least
+    /// one agent edge (closure with overlay minus closure without).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub agent_reached: Vec<FunctionId>,
+    /// Present only when the query included the overlay.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<OverlayCoverage>,
     /// `ffi-exports` only: external definitions whose symbol is fully
     /// unmangled but whose language neither debug info nor the producer
     /// could establish. They might be exports and were not searched.
@@ -554,8 +584,36 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
 /// but finds nothing is an answer, not an error, and comes back as an empty
 /// `results` list.
 pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
+    run_with_overlay(session, None, query)
+}
+
+/// [`run`], with an overlay of agent-proposed edges that `reach` and
+/// `closure` walk when the query sets `include_overlay`. A query that asks
+/// for the overlay when `overlay` is `None` is an argument error, never a
+/// silent direct-only answer.
+pub fn run_with_overlay(
+    session: &Session,
+    overlay: Option<&Overlay>,
+    query: &Query,
+) -> Result<QueryResult, Error> {
+    let view = match query.overlay_request()? {
+        Some(min_confidence) => {
+            let overlay = overlay.ok_or_else(|| {
+                Error::InvalidArguments(
+                    "`include_overlay` needs an overlay: none is loaded for this catalog"
+                        .to_string(),
+                )
+            })?;
+            Some(OverlayView::new(session, overlay, min_confidence))
+        }
+        None => None,
+    };
+    let view = view.as_ref();
+
     let mut reach_frontier: Option<Vec<SymbolBinding>> = None;
     let mut conditional_path_steps = 0;
+    let mut agent_path_steps = 0;
+    let mut agent_reached = Vec::new();
     let mut unknown_language = None;
 
     let results = match query {
@@ -564,19 +622,33 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
         Query::Callers { name } => QueryResults::Callers(callers(session, name)),
         Query::Callees { name } => QueryResults::Callees(session.callees(name)),
         Query::Uses { name } => QueryResults::Uses(uses_of(session, name)),
-        Query::Reach { from, to } => {
-            let reach = session.reach(from, to);
+        Query::Reach { from, to, .. } => {
+            let reach = session.reach_with(from, to, view);
             reach_frontier = Some(reach.frontier);
-            conditional_path_steps = reach
-                .path
-                .iter()
-                .flatten()
+            let steps = reach.path.iter().flatten();
+            conditional_path_steps = steps
+                .clone()
                 .filter(|step| matches!(step, PathStep::BoundedIndirect { .. }))
+                .count();
+            agent_path_steps = steps
+                .filter(|step| matches!(step, PathStep::Agent { .. }))
                 .count();
             QueryResults::Reach(reach.path)
         }
-        Query::Closure { name, direction } => {
-            QueryResults::Closure(session.closure(name, *direction))
+        Query::Closure {
+            name, direction, ..
+        } => {
+            let reached = session.closure_with(name, *direction, view);
+            if view.is_some() {
+                let direct: HashSet<FunctionId> =
+                    session.closure(name, *direction).into_iter().collect();
+                agent_reached = reached
+                    .iter()
+                    .filter(|id| !direct.contains(id))
+                    .cloned()
+                    .collect();
+            }
+            QueryResults::Closure(reached)
         }
         Query::Externals => QueryResults::Externals(externals(session)),
         Query::FfiExports => {
@@ -614,6 +686,9 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
         scope: session.scope().clone(),
         analysis: analysis_of(session.modules(), session.cache_report()),
         uncertainty: Uncertainty {
+            agent_path_steps,
+            agent_reached,
+            overlay: view.map(|view| view.coverage().clone()),
             functions_of_unknown_language: unknown_language,
             ..uncertainty_of(session, frontier, conditional_path_steps)
         },
@@ -786,6 +861,10 @@ fn collect_step(step: &PathStep, into: &mut BTreeSet<String>) {
         PathStep::Alias { alias, target } => {
             collect_function(alias, into);
             collect_function(target, into);
+        }
+        PathStep::Agent { site, chosen, .. } => {
+            collect_function(&site.function, into);
+            collect_function(chosen, into);
         }
     }
 }
@@ -1129,7 +1208,7 @@ impl Query {
             | Query::Callees { name }
             | Query::Uses { name }
             | Query::Closure { name, .. } => vec![name],
-            Query::Reach { from, to } => vec![from, to],
+            Query::Reach { from, to, .. } => vec![from, to],
             // These take a location or nothing at all.
             Query::At { .. }
             | Query::Externals
@@ -1146,11 +1225,44 @@ impl Query {
     /// that can be known bad beforehand, so callers check it first and a typo
     /// costs a diagnostic rather than a full analysis.
     pub fn validate(&self) -> Result<(), Error> {
+        self.overlay_request()?;
         match self {
             Query::IndirectTargets { at, .. } => parse_location(at).map(|_| ()),
             _ => Ok(()),
         }
     }
+
+    /// The weakest overlay edge a walk takes, when it asked for the overlay
+    /// at all. A minimum without the overlay is an error rather than a
+    /// filter that silently does nothing.
+    fn overlay_request(&self) -> Result<Option<Confidence>, Error> {
+        match self {
+            Query::Reach {
+                include_overlay,
+                min_confidence,
+                ..
+            }
+            | Query::Closure {
+                include_overlay,
+                min_confidence,
+                ..
+            } => match (include_overlay, min_confidence) {
+                (true, minimum) => Ok(Some(minimum.unwrap_or(Confidence::Low))),
+                (false, None) => Ok(None),
+                (false, Some(_)) => Err(Error::InvalidArguments(
+                    "`min_confidence` filters overlay edges; it needs `include_overlay`"
+                        .to_string(),
+                )),
+            },
+            _ => Ok(None),
+        }
+    }
+}
+
+/// For `skip_serializing_if`: a flag left off is not written, so a query
+/// that did not ask for an option serializes as it did before the option.
+fn is_false(flag: &bool) -> bool {
+    !flag
 }
 
 /// Splits a `file:line` location on its last colon, so a path containing a
@@ -1258,6 +1370,11 @@ fn uncertainty_of(
             .count(),
         frontier,
         conditional_path_steps,
+        // Overwritten by `run_with_overlay` for a walk; every other query
+        // leaves them zero, empty and absent.
+        agent_path_steps: 0,
+        agent_reached: Vec::new(),
+        overlay: None,
         // Overwritten by `run` for `Query::FfiExports`; every other query
         // leaves it absent.
         functions_of_unknown_language: None,
@@ -1369,6 +1486,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "c".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1389,6 +1508,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "a".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1402,6 +1523,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "absent".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1502,6 +1625,8 @@ mod tests {
             &Query::Reach {
                 from: "caller".into(),
                 to: "target".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1529,6 +1654,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "target".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1540,6 +1667,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "c".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1711,6 +1840,8 @@ mod tests {
             &Query::Reach {
                 from: "a".into(),
                 to: "b".into(),
+                include_overlay: false,
+                min_confidence: None,
             },
         )
         .unwrap();
@@ -1954,5 +2085,245 @@ mod tests {
         base.uses = vec![store];
         let groups = candidates_of(&Session::new(base, Vec::new()));
         assert_eq!(groups[0].field_name.as_deref(), Some("on_event"));
+    }
+
+    /// Walks over the overlay: an agent edge is used only when the query
+    /// asks, and every answer that used one says so.
+    mod overlay_walks {
+        use super::*;
+        use crate::overlay::{Confidence, EdgeKey, Overlay, Record, TargetSpec, Verdict};
+
+        fn session() -> Session {
+            Session::new(facts_with_overlay_sites(), Vec::new())
+        }
+
+        fn add(to: &str, confidence: Confidence) -> Record {
+            Record::Add {
+                via_field: Some(ops(8)),
+                site: None,
+                to: TargetSpec::Symbol(to.into()),
+                confidence,
+                provenance: vec!["init: o->on_event = h3".into()],
+                source: "agent".into(),
+            }
+        }
+
+        fn overlay_of(session: &Session, records: Vec<Record>) -> Overlay {
+            let mut overlay = Overlay::empty(session, None).unwrap();
+            overlay.record(session, records).unwrap();
+            overlay
+        }
+
+        fn reach(include_overlay: bool, min_confidence: Option<Confidence>) -> Query {
+            Query::Reach {
+                from: "dispatch".into(),
+                to: "h3".into(),
+                include_overlay,
+                min_confidence,
+            }
+        }
+
+        fn closure_in(name: &str, include_overlay: bool) -> Query {
+            Query::Closure {
+                name: name.into(),
+                direction: Direction::In,
+                include_overlay,
+                min_confidence: None,
+            }
+        }
+
+        fn path_of(result: &QueryResult) -> Option<&Vec<PathStep>> {
+            match &result.results {
+                QueryResults::Reach(path) => path.as_ref(),
+                other => panic!("expected a reach answer, got {other:?}"),
+            }
+        }
+
+        fn closure_of(result: &QueryResult) -> Vec<&str> {
+            let QueryResults::Closure(ids) = &result.results else {
+                panic!("expected a closure answer");
+            };
+            let mut symbols: Vec<&str> = ids.iter().map(|id| id.symbol.as_str()).collect();
+            symbols.sort_unstable();
+            symbols
+        }
+
+        #[test]
+        fn the_overlay_is_ignored_unless_asked() {
+            let session = session();
+            let without = run(&session, &reach(false, None)).unwrap();
+            assert!(path_of(&without).is_none());
+
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::High)]);
+            let unasked = run_with_overlay(&session, Some(&overlay), &reach(false, None)).unwrap();
+            assert!(
+                path_of(&unasked).is_none(),
+                "a loaded overlay is not walked unless the query asks"
+            );
+            assert_eq!(unasked.uncertainty.agent_path_steps, 0);
+            assert!(unasked.uncertainty.overlay.is_none());
+
+            // A walk that did not ask serializes exactly as before.
+            let json = serde_json::to_value(&unasked).unwrap();
+            assert_eq!(
+                json["query"],
+                serde_json::json!({"kind": "reach", "from": "dispatch", "to": "h3"})
+            );
+            assert!(json["uncertainty"].get("overlay").is_none());
+            assert!(json["uncertainty"].get("agent_reached").is_none());
+        }
+
+        #[test]
+        fn an_agent_edge_completes_a_path_and_is_labeled() {
+            let session = session();
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::High)]);
+            let result = run_with_overlay(&session, Some(&overlay), &reach(true, None)).unwrap();
+            let path = path_of(&result).expect("the agent edge completes the path");
+            assert!(
+                matches!(
+                    path.last(),
+                    Some(PathStep::Agent {
+                        confidence: Confidence::High,
+                        verdict: None,
+                        chosen,
+                        site,
+                        ..
+                    }) if chosen.symbol == "h3" && site.function.symbol == "dispatch"
+                ),
+                "{path:?}"
+            );
+            assert_eq!(result.uncertainty.agent_path_steps, 1);
+            assert_eq!(result.uncertainty.conditional_path_steps, 0);
+            let coverage = result.uncertainty.overlay.as_ref().expect("coverage");
+            assert_eq!(coverage.covered_sites, 1);
+            assert_eq!(coverage.unresolved_sites, 2);
+        }
+
+        #[test]
+        fn a_refuted_edge_is_never_walked() {
+            let session = session();
+            let verify = Record::Verify {
+                edge: EdgeKey::Field {
+                    via_field: ops(8),
+                    to: FunctionId {
+                        module_id: "mod_a".into(),
+                        symbol: "h3".into(),
+                    },
+                },
+                tool: "reread".into(),
+                verdict: Verdict::Refuted,
+                at: None,
+            };
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::High), verify]);
+            let result = run_with_overlay(&session, Some(&overlay), &reach(true, None)).unwrap();
+            assert!(path_of(&result).is_none());
+            assert_eq!(result.uncertainty.agent_path_steps, 0);
+            assert_eq!(
+                result.uncertainty.overlay.as_ref().unwrap().covered_sites,
+                0,
+                "a refuted edge covers nothing"
+            );
+        }
+
+        #[test]
+        fn min_confidence_drops_weaker_edges() {
+            let session = session();
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::Low)]);
+            let strict = run_with_overlay(
+                &session,
+                Some(&overlay),
+                &reach(true, Some(Confidence::Medium)),
+            )
+            .unwrap();
+            assert!(path_of(&strict).is_none());
+
+            let lenient = run_with_overlay(&session, Some(&overlay), &reach(true, None)).unwrap();
+            assert!(
+                path_of(&lenient).is_some(),
+                "no minimum means low, which includes every non-refuted edge"
+            );
+        }
+
+        #[test]
+        fn closure_marks_what_only_agent_edges_reach() {
+            let session = session();
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::High)]);
+
+            let direct =
+                run_with_overlay(&session, Some(&overlay), &closure_in("h3", false)).unwrap();
+            assert_eq!(closure_of(&direct), ["init"]);
+            assert!(direct.uncertainty.agent_reached.is_empty());
+
+            let with = run_with_overlay(&session, Some(&overlay), &closure_in("h3", true)).unwrap();
+            assert_eq!(closure_of(&with), ["dispatch", "init"]);
+            let agent_only: Vec<&str> = with
+                .uncertainty
+                .agent_reached
+                .iter()
+                .map(|id| id.symbol.as_str())
+                .collect();
+            assert_eq!(agent_only, ["dispatch"]);
+        }
+
+        #[test]
+        fn including_the_overlay_without_one_is_an_argument_error() {
+            let session = session();
+            for query in [reach(true, None), closure_in("h3", true)] {
+                match run_with_overlay(&session, None, &query) {
+                    Err(Error::InvalidArguments(message)) => {
+                        assert!(message.contains("include_overlay"), "{message}")
+                    }
+                    other => panic!("expected an argument error, got {other:?}"),
+                }
+                assert!(run(&session, &query).is_err(), "`run` has no overlay");
+            }
+        }
+
+        #[test]
+        fn a_minimum_confidence_without_the_overlay_is_an_argument_error() {
+            let query = reach(false, Some(Confidence::High));
+            assert!(query.validate().is_err());
+            assert!(run(&session(), &query).is_err());
+        }
+
+        #[test]
+        fn a_direct_path_wins_over_an_agent_edge_at_equal_depth() {
+            let mut base = facts_with_overlay_sites();
+            let dispatch = function("mod_a", "dispatch", true, Linkage::External);
+            let h3 = function("mod_a", "h3", true, Linkage::Internal);
+            base.call_sites.push(direct_call(&dispatch, &h3, 10));
+            let session = Session::new(base, Vec::new());
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::High)]);
+            let result = run_with_overlay(&session, Some(&overlay), &reach(true, None)).unwrap();
+            assert!(
+                matches!(
+                    path_of(&result).map(Vec::as_slice),
+                    Some([PathStep::Call(_)])
+                ),
+                "{:?}",
+                path_of(&result)
+            );
+            assert_eq!(result.uncertainty.agent_path_steps, 0);
+        }
+
+        #[test]
+        fn a_field_edge_applies_to_every_site_through_the_field() {
+            let mut base = facts_with_overlay_sites();
+            let second = function("mod_a", "dispatch_again", true, Linkage::External);
+            base.call_sites
+                .push(indirect_call_through(&second, 9, Some(ops(8))));
+            base.functions.push(second);
+            let session = Session::new(base, Vec::new());
+            let overlay = overlay_of(&session, vec![add("h3", Confidence::High)]);
+
+            let result =
+                run_with_overlay(&session, Some(&overlay), &closure_in("h3", true)).unwrap();
+            assert_eq!(closure_of(&result), ["dispatch", "dispatch_again", "init"]);
+            assert_eq!(result.uncertainty.agent_reached.len(), 2);
+            assert_eq!(
+                result.uncertainty.overlay.as_ref().unwrap().covered_sites,
+                2
+            );
+        }
     }
 }

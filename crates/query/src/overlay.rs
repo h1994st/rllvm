@@ -15,7 +15,7 @@
 //! record silently skipped would change what the overlay claims.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
@@ -33,7 +33,7 @@ use crate::{
         CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, Linkage,
         ModuleAnalysis,
     },
-    index::{NameMatch, NameResolution, Session},
+    index::{NameMatch, NameResolution, PathStep, Session},
 };
 
 /// The `v` of the header line this version writes and reads.
@@ -53,7 +53,11 @@ fn agent() -> String {
     AGENT_SOURCE.to_string()
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// How sure the agent that recorded an edge was. Ordered, so a walk can keep
+/// the edges at or above a minimum.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, clap::ValueEnum,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
     Low,
@@ -102,6 +106,13 @@ pub enum EdgeKey {
 }
 
 impl EdgeKey {
+    /// The function the edge says the call can take.
+    pub(crate) fn to(&self) -> &FunctionId {
+        match self {
+            EdgeKey::Field { to, .. } | EdgeKey::Site { to, .. } => to,
+        }
+    }
+
     /// The unresolved sites this edge attaches to: every one dispatching
     /// through the field, or the one site while it stays unresolved.
     pub(crate) fn sites<'s>(&self, session: &'s Session) -> Vec<&'s CallSiteFact> {
@@ -598,15 +609,75 @@ impl Overlay {
             fingerprint: self.fingerprint.clone(),
             pending: self.pending.len(),
             edges,
-            coverage: OverlayCoverage {
-                unresolved_sites: session
-                    .call_sites()
-                    .iter()
-                    .filter(|site| is_unresolved(site))
-                    .count(),
-                covered_sites: covered.len(),
-            },
+            coverage: OverlayCoverage::of(session, covered.len()),
         }
+    }
+}
+
+/// Overlay edges expanded to per-site edges for one walk. Refuted edges are
+/// always excluded; edges below `min_confidence` are excluded.
+///
+/// A field edge becomes one edge per unresolved site through the field, from
+/// the function that makes the call to the edge's target, each step labeled
+/// [`PathStep::Agent`] so a path through it can never read as proof.
+pub struct OverlayView {
+    successors: HashMap<FunctionId, Vec<(FunctionId, PathStep)>>,
+    predecessors: HashMap<FunctionId, Vec<(FunctionId, PathStep)>>,
+    coverage: OverlayCoverage,
+}
+
+impl OverlayView {
+    pub fn new(session: &Session, overlay: &Overlay, min_confidence: Confidence) -> OverlayView {
+        let mut successors: HashMap<FunctionId, Vec<(FunctionId, PathStep)>> = HashMap::new();
+        let mut predecessors: HashMap<FunctionId, Vec<(FunctionId, PathStep)>> = HashMap::new();
+        let mut covered: BTreeSet<&CallSiteId> = BTreeSet::new();
+        for edge in overlay
+            .edges()
+            .filter(|edge| !edge.is_refuted() && edge.confidence >= min_confidence)
+        {
+            let to = edge.key.to();
+            for site in edge.key.sites(session) {
+                covered.insert(&site.id);
+                let step = PathStep::Agent {
+                    site: site.id.clone(),
+                    chosen: to.clone(),
+                    location: site.location.clone(),
+                    key: edge.key.clone(),
+                    confidence: edge.confidence,
+                    verdict: edge.verification.as_ref().map(|v| v.verdict),
+                };
+                let caller = &site.id.function;
+                successors
+                    .entry(caller.clone())
+                    .or_default()
+                    .push((to.clone(), step.clone()));
+                predecessors
+                    .entry(to.clone())
+                    .or_default()
+                    .push((caller.clone(), step));
+            }
+        }
+        OverlayView {
+            successors,
+            predecessors,
+            coverage: OverlayCoverage::of(session, covered.len()),
+        }
+    }
+
+    /// The unresolved sites this view's edges attach to, of all in scope.
+    pub fn coverage(&self) -> &OverlayCoverage {
+        &self.coverage
+    }
+
+    /// Agent edges out of the function that makes the call. Not public API:
+    /// internal plumbing for the walks in `index.rs`.
+    pub(crate) fn successors(&self, id: &FunctionId) -> &[(FunctionId, PathStep)] {
+        self.successors.get(id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Agent edges into the target, walked back to each calling function.
+    pub(crate) fn predecessors(&self, id: &FunctionId) -> &[(FunctionId, PathStep)] {
+        self.predecessors.get(id).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -632,8 +703,23 @@ pub struct SummaryEdge {
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct OverlayCoverage {
     pub unresolved_sites: usize,
-    /// Unresolved sites at least one non-refuted edge attaches to.
+    /// Unresolved sites at least one non-refuted edge attaches to; in a
+    /// walk's answer, at least one edge the walk could take.
     pub covered_sites: usize,
+}
+
+impl OverlayCoverage {
+    /// `covered_sites` of every unresolved site in `session`.
+    fn of(session: &Session, covered_sites: usize) -> OverlayCoverage {
+        OverlayCoverage {
+            unresolved_sites: session
+                .call_sites()
+                .iter()
+                .filter(|site| is_unresolved(site))
+                .count(),
+            covered_sites,
+        }
+    }
 }
 
 /// sha256 (hex) over the sorted `(module_id, content_sha256)` pairs of the
