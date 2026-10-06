@@ -751,19 +751,11 @@ fn management_outcome(
         }
         Management::List => Ok(registry.list()),
         Management::Unload => registry.unload(&string_argument(arguments, "catalog")?),
-        Management::LoadOverlay => {
-            let discard_pending = match arguments.get("discard_pending") {
-                None => false,
-                Some(value) => value
-                    .as_bool()
-                    .ok_or_else(|| "non-boolean argument `discard_pending`".to_string())?,
-            };
-            registry.load_overlay(
-                catalog_argument(arguments),
-                arguments.get("path").and_then(Value::as_str),
-                discard_pending,
-            )
-        }
+        Management::LoadOverlay => registry.load_overlay(
+            catalog_argument(arguments),
+            arguments.get("path").and_then(Value::as_str),
+            flag_argument(arguments, "discard_pending")?,
+        ),
         Management::RecordEdges => {
             registry.record_edges(catalog_argument(arguments), records_argument(arguments)?)
         }
@@ -793,6 +785,17 @@ fn records_argument(arguments: &Value) -> Result<Vec<Record>, String> {
                 .map_err(|error| error.to_string())
         })
         .collect()
+}
+
+/// An optional boolean argument, false when absent. Any other type is an
+/// error, never read as false.
+fn flag_argument(arguments: &Value, key: &str) -> Result<bool, String> {
+    match arguments.get(key) {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| format!("non-boolean argument `{key}`")),
+    }
 }
 
 /// One string argument, or the message a client sees when it is missing.
@@ -884,12 +887,7 @@ fn overlay_properties() -> [(&'static str, Value); 2] {
 
 /// `include_overlay` and `min_confidence`, as [`overlay_properties`] declares them.
 fn overlay_arguments(arguments: &Value) -> Result<(bool, Option<Confidence>), String> {
-    let include_overlay = match arguments.get("include_overlay") {
-        None => false,
-        Some(value) => value
-            .as_bool()
-            .ok_or_else(|| "non-boolean argument `include_overlay`".to_string())?,
-    };
+    let include_overlay = flag_argument(arguments, "include_overlay")?;
     let min_confidence = match arguments.get("min_confidence") {
         None => None,
         Some(value) => Some(serde_json::from_value(value.clone()).map_err(|_| {
