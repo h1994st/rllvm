@@ -40,6 +40,9 @@ dependence, do not start; completing a whole program is rarely the goal.
 6. Ask the question again with `include_overlay` on `reach`, `closure` or
    `slice`.
 
+The user can watch progress with `/overlay-view`, a read-only pane of each
+unresolved field, its candidates and the edges recorded so far.
+
 ## Confidence
 
 - `high`: the assignment stores this function into this field of this record
