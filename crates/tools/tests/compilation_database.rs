@@ -13,13 +13,30 @@ fn llvm_bin(name: &str) -> PathBuf {
     Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)
 }
 
+/// An isolated config for the configured toolchain, with `llvm_bindir` in
+/// place of its own when given. Its bitcode flags break any compilation that
+/// uses them: generation must not take the wrappers' settings.
+fn write_config(scratch: &TempDir, llvm_bindir: Option<&Path>) -> PathBuf {
+    let config = rllvm_testkit::scratch_rllvm_config(scratch.path());
+    let mut contents: String = fs::read_to_string(&config)
+        .unwrap()
+        .lines()
+        .filter(|line| llvm_bindir.is_none() || !line.starts_with("llvm_bindir"))
+        .map(|line| format!("{line}\n"))
+        .collect();
+    if let Some(llvm_bindir) = llvm_bindir {
+        contents.push_str(&format!("llvm_bindir = '{}'\n", llvm_bindir.display()));
+    }
+    contents.push_str("bitcode_generation_flags = ['-DUNEXPECTED_WRAPPER_OVERRIDE']\n");
+    fs::write(&config, contents).unwrap();
+    config
+}
+
 fn rllvm(scratch: &TempDir) -> Command {
-    let config = scratch.path().join("config.toml");
-    fs::write(
-        &config,
-        "bitcode_generation_flags = ['-DUNEXPECTED_WRAPPER_OVERRIDE']\n",
-    )
-    .unwrap();
+    rllvm_with(scratch, write_config(scratch, None))
+}
+
+fn rllvm_with(scratch: &TempDir, config: PathBuf) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rllvm-compdb"));
     command
         .env("RLLVM_CONFIG", config)
@@ -624,6 +641,79 @@ fn analysis_identity_tracks_expanded_override_response_contents() {
         modules[0]["compilation"]["analysis_id"],
         modules[1]["compilation"]["analysis_id"]
     );
+}
+
+/// Generated modules are read with the `llvm-dis` of the configured
+/// `llvm_bindir`, not with the one beside the recorded compiler.
+#[test]
+#[cfg(unix)]
+fn generated_modules_are_read_with_the_configured_llvm_bindir() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let bindir = scratch.path().join("bindir");
+    fs::create_dir(&bindir).unwrap();
+    let log = scratch.path().join("llvm-dis.log");
+    let llvm_dis = bindir.join("llvm-dis");
+    fs::write(
+        &llvm_dis,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            llvm_bin("llvm-dis").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&llvm_dis, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        scratch.path().join("source.c"),
+        "int value(void) { return 2; }\n",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".", "file":"source.c", "arguments":[llvm_bin("clang"), "-c", "source.c"]}]),
+    );
+    let config = write_config(&scratch, Some(&bindir));
+    assert_success(
+        &rllvm_with(&scratch, config)
+            .args(["generate", ".", "--output-dir", "analysis"])
+            .output()
+            .unwrap(),
+    );
+    // A module read, not merely a version query.
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.lines().any(|call| call.contains("/analysis/")),
+        "the configured llvm-dis read no module: {calls:?}"
+    );
+}
+
+/// A bindir without `llvm-dis` fails the run once, before the output
+/// directory exists, so the same command can run again once it is fixed.
+#[test]
+fn a_missing_llvm_dis_fails_before_the_output_directory_is_created() {
+    let scratch = tempfile::tempdir().unwrap();
+    let bindir = scratch.path().join("empty-bindir");
+    fs::create_dir(&bindir).unwrap();
+    fs::write(
+        scratch.path().join("source.c"),
+        "int value(void) { return 2; }\n",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".", "file":"source.c", "arguments":[llvm_bin("clang"), "-c", "source.c"]}]),
+    );
+    let config = write_config(&scratch, Some(&bindir));
+    let output = rllvm_with(&scratch, config)
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "ran without llvm-dis");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("llvm-dis"), "{stderr}");
+    assert!(stderr.contains(&bindir.display().to_string()), "{stderr}");
+    assert!(!scratch.path().join("analysis").exists());
 }
 
 #[test]

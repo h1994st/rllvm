@@ -144,8 +144,22 @@ fn selected_modules_relocate_without_merging_and_can_later_be_merged() {
         .find(|m| m.sources.iter().any(|s| s.path.ends_with("first.c")))
         .unwrap();
     let destination = f.root.path().join("selected");
+    // The toolchain's llvm-dis still inventories the catalog.
     let unused_config = f.root.path().join("unused.toml");
-    fs::write(&unused_config,"llvm_link_filepath = '/must-not-run/llvm-link'\nllvm_ar_filepath = '/must-not-run/llvm-ar'\n").unwrap();
+    let contents: String = fs::read_to_string(&f.config)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("llvm_link_filepath") {
+                "llvm_link_filepath = '/must-not-run/llvm-link'\n".to_string()
+            } else if line.starts_with("llvm_ar_filepath") {
+                "llvm_ar_filepath = '/must-not-run/llvm-ar'\n".to_string()
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    fs::write(&unused_config, contents).unwrap();
     let output = f
         .command("get")
         .env("RLLVM_CONFIG", unused_config)

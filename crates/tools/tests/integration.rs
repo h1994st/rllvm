@@ -2177,6 +2177,62 @@ fn info_reports_on_bitcode_and_on_object_files() {
     );
 }
 
+/// `rllvm-info` disassembles with the `llvm-dis` of the configured
+/// `llvm_bindir`, not with one from an LLVM it discovers on its own.
+#[test]
+#[cfg(unix)]
+fn info_disassembles_with_the_configured_llvm_bindir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let bindir = tmp.path().join("bindir");
+    fs::create_dir(&bindir).unwrap();
+    let log = tmp.path().join("llvm-dis.log");
+    let llvm_dis = bindir.join("llvm-dis");
+    fs::write(
+        &llvm_dis,
+        format!(
+            "#!/bin/sh\necho ran >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            find_llvm_dis().expect("llvm-dis not found").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&llvm_dis, fs::Permissions::from_mode(0o755)).unwrap();
+    let cfg = tmp.path().join("config.toml");
+    fs::write(
+        &cfg,
+        format!(
+            "{}llvm_bindir = '{}'\n",
+            fs::read_to_string(shared_config_path()).unwrap(),
+            bindir.display()
+        ),
+    )
+    .unwrap();
+
+    let bitcode = tmp.path().join("foo.bc");
+    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let status = Command::new(clang)
+        .args(["-c", "-emit-llvm", "-o"])
+        .arg(&bitcode)
+        .arg(fixture("foo.c"))
+        .status()
+        .unwrap();
+    assert!(status.success(), "compile failed");
+
+    let output = Command::new(cargo_bin("rllvm-info"))
+        .env("RLLVM_CONFIG", &cfg)
+        .arg(&bitcode)
+        .output()
+        .expect("Failed to run rllvm-info");
+    assert!(
+        output.status.success(),
+        "rllvm-info failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(log.exists(), "the configured llvm-dis did not run");
+}
+
 /// `llvm-dis` appends predecessor comments to explicit block labels, while the
 /// entry block can be implicit.
 #[test]

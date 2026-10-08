@@ -8,10 +8,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::{
-    error::Error,
-    utils::{execute_command_for_stdout_string, find_llvm_config},
-};
+use crate::{config::try_rllvm_config, error::Error, utils::execute_command_for_stdout_string};
+
+/// `llvm-dis`'s file name, looked for in the configured LLVM bindir.
+const LLVM_DIS: &str = "llvm-dis";
 
 /// Information about a single function in the bitcode module.
 #[derive(Debug)]
@@ -43,18 +43,10 @@ pub struct BitcodeInfo {
     pub total_instructions: usize,
 }
 
-/// Locate the `llvm-dis` binary by deriving it from `llvm-config --bindir`.
+/// Locate `llvm-dis` in the configured LLVM bindir; see
+/// [`RLLVMConfig::llvm_bindir`](crate::config::RLLVMConfig::llvm_bindir).
 pub fn find_llvm_dis() -> Result<PathBuf, Error> {
-    let llvm_config = find_llvm_config()?;
-    let bindir = execute_command_for_stdout_string(&llvm_config, &["--bindir"])?;
-    let llvm_dis = PathBuf::from(bindir).join("llvm-dis");
-    if !llvm_dis.exists() {
-        return Err(Error::MissingFile(format!(
-            "llvm-dis not found at {}",
-            llvm_dis.display()
-        )));
-    }
-    Ok(llvm_dis)
+    try_rllvm_config()?.llvm_tool(LLVM_DIS)
 }
 
 /// Disassemble a bitcode file to LLVM IR text using `llvm-dis`.
