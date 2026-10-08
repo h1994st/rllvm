@@ -716,6 +716,159 @@ fn a_missing_llvm_dis_fails_before_the_output_directory_is_created() {
     assert!(!scratch.path().join("analysis").exists());
 }
 
+/// A Clang driver that reports `version_line` for `--version` and is the
+/// real `clang` otherwise, with a database compiling one source through it.
+#[cfg(unix)]
+fn database_with_driver(scratch: &TempDir, version_line: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let driver = scratch.path().join("clang");
+    fs::write(
+        &driver,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version_line}'; exit 0; fi\nexec '{}' \"$@\"\n",
+            llvm_bin("clang").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        scratch.path().join("source.c"),
+        "int value(void) { return 2; }\n",
+    )
+    .unwrap();
+    write_database(
+        scratch,
+        json!([{"directory":".", "file":"source.c", "arguments":[&driver, "-c", "source.c"]}]),
+    );
+    driver
+}
+
+/// The LLVM major of the configured toolchain's `llvm-dis`.
+fn llvm_dis_major() -> u32 {
+    let output = Command::new(llvm_bin("llvm-dis"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let version = text
+        .split_whitespace()
+        .skip_while(|word| *word != "version")
+        .nth(1)
+        .unwrap();
+    version.split('.').next().unwrap().parse().unwrap()
+}
+
+/// `llvm-dis` cannot read bitcode from a newer LLVM, so a recorded compiler
+/// newer than it fails the run before anything compiles, naming both.
+#[test]
+#[cfg(unix)]
+fn a_compiler_newer_than_llvm_dis_fails_before_compiling() {
+    let scratch = tempfile::tempdir().unwrap();
+    let newer = llvm_dis_major() + 1;
+    let driver = database_with_driver(&scratch, &format!("clang version {newer}.0.0"));
+    let output = rllvm(&scratch)
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "a newer compiler was accepted");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        driver.display().to_string(),
+        format!("LLVM {newer}"),
+        format!("LLVM {}", llvm_dis_major()),
+        "llvm_bindir".to_string(),
+    ] {
+        assert!(stderr.contains(&expected), "{expected} not named: {stderr}");
+    }
+    // Nothing written, so the same command can run again once fixed.
+    assert!(!scratch.path().join("analysis").exists());
+}
+
+/// A compiler at or below `llvm-dis`'s major is read as usual.
+#[test]
+#[cfg(unix)]
+fn a_compiler_no_newer_than_llvm_dis_is_accepted() {
+    for major in [llvm_dis_major(), 1] {
+        let scratch = tempfile::tempdir().unwrap();
+        database_with_driver(&scratch, &format!("clang version {major}.0.0"));
+        let output = rllvm(&scratch)
+            .args(["generate", ".", "--output-dir", "analysis"])
+            .output()
+            .unwrap();
+        assert_success(&output);
+        assert!(
+            !String::from_utf8_lossy(&output.stderr).contains("cannot compare"),
+            "{output:?}"
+        );
+    }
+}
+
+/// Apple clang's version does not name the LLVM it is built from, so the
+/// versions are not compared, and the run says so instead of guessing.
+#[test]
+#[cfg(unix)]
+fn an_unknown_compiler_major_is_warned_about() {
+    let scratch = tempfile::tempdir().unwrap();
+    let driver = database_with_driver(&scratch, "Apple clang version 17.0.0 (clang-1700.0.13.5)");
+    let output = rllvm(&scratch)
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot compare"), "{stderr}");
+    assert!(stderr.contains(&driver.display().to_string()), "{stderr}");
+    // Shown as a diagnostic, not as a log line that `log_level` hides.
+    assert!(stderr.contains("warning:"), "{stderr}");
+    assert!(!stderr.contains("WARN"), "{stderr}");
+}
+
+/// An existing output directory is refused before any recorded compiler
+/// runs.
+#[test]
+#[cfg(unix)]
+fn an_existing_output_directory_is_refused_before_compilers_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = tempfile::tempdir().unwrap();
+    let driver = scratch.path().join("clang");
+    let log = scratch.path().join("driver.log");
+    fs::write(
+        &driver,
+        format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
+            log.display(),
+            llvm_bin("clang").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        scratch.path().join("source.c"),
+        "int value(void) { return 2; }\n",
+    )
+    .unwrap();
+    write_database(
+        &scratch,
+        json!([{"directory":".", "file":"source.c", "arguments":[&driver, "-c", "source.c"]}]),
+    );
+    fs::create_dir(scratch.path().join("analysis")).unwrap();
+    let output = rllvm(&scratch)
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "an existing directory was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("output directory must be new"), "{stderr}");
+    assert!(
+        !log.exists(),
+        "the recorded compiler ran: {:?}",
+        fs::read_to_string(&log)
+    );
+}
+
 #[test]
 fn compiler_metadata_is_resolved_once_per_distinct_driver() {
     use std::os::unix::fs::PermissionsExt;

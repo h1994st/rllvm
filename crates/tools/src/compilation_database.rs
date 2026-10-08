@@ -10,6 +10,7 @@ use rllvm_core::{
         ModuleCatalog, ModuleRecord, ModuleStatus, SourceAssociation, SourceDigest, hash_bytes,
         hash_file, identity, write_catalog,
     },
+    diagnostics::{llvm_major_version, print_warning, tool_llvm_major_version},
     error::Error,
 };
 use serde::Deserialize;
@@ -111,18 +112,12 @@ impl CompilationDatabase {
         // One for the whole run, found before anything is written, so a
         // missing tool or configuration leaves nothing to clean up.
         let llvm_dis = find_llvm_dis()?;
+        // Checked again where it is created; this only fails fast, before
+        // every recorded compiler is run and hashed.
         let output = resolve(&options.output_dir, &directory);
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
+        if output.exists() {
+            return Err(output_not_new(&output, "it exists"));
         }
-        fs::create_dir(&output).map_err(|error| {
-            invalid(format!(
-                "output directory must be new ({}): {error}",
-                output.display()
-            ))
-        })?;
-        fs::create_dir(output.join("modules"))?;
-        fs::create_dir(output.join("diagnostics"))?;
         let environment = analysis_environment();
         let mut compilers = BTreeMap::new();
         let mut prepared = Vec::new();
@@ -149,6 +144,19 @@ impl CompilationDatabase {
                 });
             prepared.push((module, compiler));
         }
+        // Before the output directory exists, so a refused run can be rerun.
+        check_readable(
+            compilers
+                .values()
+                .filter_map(|compiler| compiler.as_ref().ok()),
+            &llvm_dis,
+        )?;
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::create_dir(&output).map_err(|error| output_not_new(&output, error))?;
+        fs::create_dir(output.join("modules"))?;
+        fs::create_dir(output.join("diagnostics"))?;
         let sdk = sdk::MacosSdk::default();
         let run = Run {
             options,
@@ -268,6 +276,58 @@ fn compiler_identity(
         version,
         sha256: Some(hash_file(path)?),
     })
+}
+
+/// Fails when a recorded compiler is a newer LLVM than the `llvm-dis` that
+/// reads its bitcode: a reader must be the producer's LLVM major or newer.
+/// Checked once per distinct compiler, before anything compiles, so a
+/// mismatch is one error rather than a diagnostic on every module. A major
+/// that cannot be established is warned about, never guessed.
+fn check_readable<'a>(
+    compilers: impl Iterator<Item = &'a CompilerIdentity>,
+    llvm_dis: &Path,
+) -> Result<(), Error> {
+    let reader = tool_llvm_major_version(llvm_dis);
+    for compiler in compilers {
+        let producer = llvm_major_version(&compiler.version);
+        match (producer, reader) {
+            (Some(producer), Some(reader)) if producer > reader => {
+                return Err(Error::ConfigError(format!(
+                    "{} is LLVM {producer}, newer than the llvm-dis that reads its bitcode, {} \
+                     (LLVM {reader}); set `llvm_bindir` (or the configured llvm-config) to \
+                     LLVM {producer} or newer",
+                    compiler.path.display(),
+                    llvm_dis.display()
+                )));
+            }
+            (Some(_), Some(_)) => {}
+            // Not a `tracing::warn!`: the default log level is ERROR, and
+            // this must not be silent.
+            _ => print_warning(&format!(
+                "cannot compare the LLVM versions of {} ({}) and {} ({}); llvm-dis cannot read \
+                 the bitcode if the compiler is the newer",
+                compiler.path.display(),
+                major_or_unknown(producer),
+                llvm_dis.display(),
+                major_or_unknown(reader)
+            )),
+        }
+    }
+    Ok(())
+}
+
+fn major_or_unknown(major: Option<u32>) -> String {
+    major.map_or_else(
+        || "LLVM major unknown".to_string(),
+        |major| format!("LLVM {major}"),
+    )
+}
+
+fn output_not_new(output: &Path, reason: impl std::fmt::Display) -> Error {
+    invalid(format!(
+        "output directory must be new ({}): {reason}",
+        output.display()
+    ))
 }
 
 fn analysis_environment() -> BTreeMap<String, String> {

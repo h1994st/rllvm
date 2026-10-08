@@ -187,7 +187,10 @@ rllvm-compdb generate build/ --source src/example.c --output-dir analysis/exampl
 `list` reports entry and configuration IDs without compiling. `generate` takes
 all entries by default; repeat `--source` or `--entry` to narrow, and combine
 them to intersect. Only direct `clang`/`clang++` drivers are supported, and the
-output directory must be new.
+output directory must be new. Modules are read with the `llvm-dis` in the
+configured `llvm_bindir`, so `generate` refuses a compiler from a newer LLVM
+major before compiling anything; Apple clang's version names no LLVM major, so
+it only draws a warning.
 
 These modules describe the **current source tree**, not membership in a real
 link. Use wrapper capture when participation in the actual build matters.
