@@ -3531,11 +3531,13 @@ fn a_staticlib_allocator_shim_records_no_bitcode() {
 /// Compiles a one-function rlib through `rllvm-rustc` under a configuration
 /// whose `llvm-ar` is alone in a directory of its own, the way a wrapper or a
 /// probe around the real tool is. `llvm_config` is the configured
-/// `llvm-config`. Answers the compilation's output and the rlib's path.
+/// `llvm-config`, and `llvm_bindir` the configured bindir, if any. Answers the
+/// compilation's output and the rlib's path.
 #[cfg(unix)]
 fn compile_rlib_with_llvm_ar_apart(
     root: &Path,
     llvm_config: &Path,
+    llvm_bindir: Option<&Path>,
 ) -> (std::process::Output, PathBuf) {
     let apart = root.join("llvm-ar-apart");
     fs::create_dir(&apart).unwrap();
@@ -3544,7 +3546,7 @@ fn compile_rlib_with_llvm_ar_apart(
     std::os::unix::fs::symlink(llvm_nm.with_file_name("llvm-ar"), &llvm_ar).unwrap();
 
     let cfg = root.join("config.toml");
-    let contents: String = fs::read_to_string(shared_config_path())
+    let mut contents: String = fs::read_to_string(shared_config_path())
         .unwrap()
         .lines()
         .map(|line| {
@@ -3557,6 +3559,9 @@ fn compile_rlib_with_llvm_ar_apart(
             }
         })
         .collect();
+    if let Some(llvm_bindir) = llvm_bindir {
+        contents.push_str(&format!("llvm_bindir = '{}'\n", llvm_bindir.display()));
+    }
     fs::write(&cfg, contents).unwrap();
 
     let src = root.join("apart.rs");
@@ -3572,16 +3577,52 @@ fn compile_rlib_with_llvm_ar_apart(
     (output, root.join("libapart.rlib"))
 }
 
-/// `llvm-nm` is not a configuration key, and `llvm-ar` may be a wrapper that
-/// lives apart from the other LLVM tools. The archive is then patched with
-/// the `llvm-nm` of the configured `llvm-config`'s bindir.
+/// `llvm-nm` has no configuration key of its own, and `llvm-ar` may be a
+/// wrapper that lives apart from the other LLVM tools. With no `llvm_bindir`
+/// configured, the archive is patched with the `llvm-nm` of the configured
+/// `llvm-config`'s bindir.
 #[test]
 #[cfg(unix)]
 fn rustc_archive_is_patched_when_llvm_ar_lives_apart_from_llvm_nm() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let llvm_config = find_llvm_config().expect("llvm-config not found");
-    let (output, rlib) = compile_rlib_with_llvm_ar_apart(&root, &llvm_config);
+    let (output, rlib) = compile_rlib_with_llvm_ar_apart(&root, &llvm_config, None);
+    assert_rlib_records_bitcode(&root, &output, &rlib);
+}
+
+/// A configured `llvm_bindir` supplies `llvm-nm`, and `llvm-config` is not
+/// asked for a bindir at all: here it would fail if it were.
+#[test]
+#[cfg(unix)]
+fn rustc_archive_is_patched_with_the_configured_llvm_bindir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let asked = root.join("asked-for-bindir");
+    let stand_in = root.join("llvm-config");
+    fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = --bindir ] && touch '{}' && exit 1\nexec '{}' \"$@\"\n",
+            asked.display(),
+            find_llvm_config().expect("llvm-config not found").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+    let bindir = find_llvm_nm().expect("llvm-nm not found");
+    let bindir = bindir.parent().unwrap();
+
+    let (output, rlib) = compile_rlib_with_llvm_ar_apart(&root, &stand_in, Some(bindir));
+    assert_rlib_records_bitcode(&root, &output, &rlib);
+    assert!(!asked.exists(), "llvm-config was asked for its bindir");
+}
+
+/// Asserts the compilation `output` succeeded and its `rlib` yields bitcode.
+#[cfg(unix)]
+fn assert_rlib_records_bitcode(root: &Path, output: &std::process::Output, rlib: &Path) {
     assert!(
         output.status.success(),
         "rlib compilation failed: {}",
@@ -3590,7 +3631,7 @@ fn rustc_archive_is_patched_when_llvm_ar_lives_apart_from_llvm_nm() {
 
     let bitcode = root.join("apart.bc");
     let output = rllvm("rllvm-get-bc")
-        .arg(&rlib)
+        .arg(rlib)
         .arg("-o")
         .arg(&bitcode)
         .output()
@@ -3603,8 +3644,9 @@ fn rustc_archive_is_patched_when_llvm_ar_lives_apart_from_llvm_nm() {
     assert_bitcode_magic(&bitcode);
 }
 
-/// With no `llvm-nm` in either place the failure names the tool and where it
-/// was looked for, rather than reporting a bare "No such file or directory".
+/// With no `llvm-nm` in the bindir the failure names the tool, the bindir, and
+/// that `llvm-config --bindir` reported it, rather than reporting a bare "No
+/// such file or directory".
 #[test]
 #[cfg(unix)]
 fn rustc_archive_patching_names_a_missing_llvm_nm() {
@@ -3628,7 +3670,7 @@ fn rustc_archive_patching_names_a_missing_llvm_nm() {
     .unwrap();
     fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
 
-    let (output, _) = compile_rlib_with_llvm_ar_apart(&root, &stand_in);
+    let (output, _) = compile_rlib_with_llvm_ar_apart(&root, &stand_in, None);
     assert!(
         !output.status.success(),
         "patching cannot succeed without llvm-nm"
@@ -3636,8 +3678,8 @@ fn rustc_archive_patching_names_a_missing_llvm_nm() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     for expected in [
         "llvm-nm",
-        &root.join("llvm-ar-apart").display().to_string(),
         &empty_bindir.display().to_string(),
+        &format!("{} --bindir", stand_in.display()),
     ] {
         assert!(stderr.contains(expected), "{expected} not named: {stderr}");
     }
