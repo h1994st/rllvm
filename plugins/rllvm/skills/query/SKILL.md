@@ -119,14 +119,15 @@ an error, never a direct-only answer.
   `unresolved_sites`.
 - A `slice` counts its agent edges the same way. To check one edge in scope,
   `emit_module` writes the slice's definitions, cut out with the
-  `llvm-extract` and `llvm-nm` beside the configured `llvm-link`, as one
-  small `.bc` to verify or re-read; the answer gains `emitted`. An alias
-  comes with the function it stands for. It needs a program loaded with
-  `load_catalog`, writes nothing for an empty slice, and refuses when a
-  `static` function or variable that stays in one module's part shares its
-  name with any function or variable another part holds, since cutting it
-  out makes it external. Compiler-private data such as string literals is
-  not checked: same-named copies from two parts merge into one declaration.
+  `llvm-extract` and `llvm-nm` in the configured `llvm_bindir` and joined
+  with the configured `llvm-link`, as one small `.bc` to verify or re-read;
+  the answer gains `emitted`. An alias comes with the function it stands
+  for. It needs a program loaded with `load_catalog`, writes nothing for an
+  empty slice, and refuses when a `static` function or variable that stays
+  in one module's part shares its name with any function or variable
+  another part holds, since cutting it out makes it external.
+  Compiler-private data such as string literals is not checked: same-named
+  copies from two parts merge into one declaration.
 
 ## Is a vulnerable function present and reachable?
 

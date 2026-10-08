@@ -26,7 +26,10 @@ starting. If rllvm is not set up, use the `setup` skill first.
 
 A fresh build directory avoids reusing objects compiled without the wrappers.
 `rllvm-compdb` describes the current source tree, not what a real link
-contained; prefer wrapper capture when that matters. `cargo check` and
+contained; prefer wrapper capture when that matters. It reads modules with the
+`llvm-dis` in the configured `llvm_bindir` and refuses a recorded compiler from
+a newer LLVM major; point `llvm_bindir` at an LLVM at least that new. Apple
+clang cannot be compared and is only warned about. `cargo check` and
 procedural-macro crates are not captured, and the Rust standard library is not
 rebuilt: it is prebuilt, so its functions never appear in the module. Nor do
 the allocator shim's (`__rust_alloc` and its siblings) in a staticlib; the

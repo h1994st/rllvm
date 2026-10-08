@@ -70,6 +70,7 @@ each where one exists:
 | `query_cache`, `query_cache_warn_mb` | reuse rllvm-query's extracted per-module facts (default on, warns past 1024 MB) | `RLLVM_QUERY_CACHE` |
 | `log_level` | 0 errors (default) up to 4+ trace | `RLLVM_LOG_LEVEL` |
 | `llvm_objcopy_filepath` | embedding tool; needed for targets such as RISC-V | |
+| `llvm_bindir` | absolute directory where `llvm-nm`, `llvm-dis` and `llvm-extract` are found; written by `rllvm-init` (default: `llvm-config --bindir`) | |
 | `rustc_filepath` | the real `rustc` for `rllvm-rustc` | `RLLVM_REAL_RUSTC` |
 
 ## 5. Verify

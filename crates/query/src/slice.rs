@@ -12,7 +12,9 @@ use std::{
 
 use serde::Serialize;
 
-use rllvm_core::{catalog::ArchiveCache, error::Error, utils::execute_llvm_tool_in_for_output};
+use rllvm_core::{
+    catalog::ArchiveCache, config::LlvmBindir, error::Error, utils::execute_llvm_tool_in_for_output,
+};
 
 use crate::{
     Query, QueryResult, QueryResults, Session,
@@ -20,10 +22,10 @@ use crate::{
     load::{load_catalog, read_module},
 };
 
-/// `llvm-extract`'s file name, looked for beside the configured `llvm-link`.
+/// `llvm-extract`'s file name, looked for in the LLVM bindir.
 const LLVM_EXTRACT: &str = "llvm-extract";
 
-/// `llvm-nm`'s file name, looked for beside the configured `llvm-link`.
+/// `llvm-nm`'s file name, looked for in the LLVM bindir.
 const LLVM_NM: &str = "llvm-nm";
 
 /// The `llvm-nm` type letters of a symbol local to its module: a `static`
@@ -51,8 +53,8 @@ pub struct EmittedModule {
 /// Writes one module holding the slice's definitions: each source module's
 /// slice functions are cut out with `llvm-extract --func` (`--alias` for an
 /// alias), then the pieces are joined with `llvm-link`. Other functions
-/// stay as declarations. `llvm-extract` and `llvm-nm` are the siblings of
-/// the configured `llvm-link`.
+/// stay as declarations. `llvm-extract` and `llvm-nm` come from
+/// `llvm_bindir`, which need not hold `llvm-link`.
 ///
 /// `session` is the one `functions` came from, loaded from `catalog`: it says
 /// which members are definitions and which are aliases, so no module is
@@ -66,8 +68,8 @@ pub struct EmittedModule {
 /// `llvm-extract` makes every `static` that stays in a piece external, as a
 /// definition or as a declaration a kept function still uses, and
 /// `llvm-link` then binds it by name. So every piece's symbols, functions
-/// and data, defined and undefined, are listed with the `llvm-nm` beside
-/// `llvm-link`, and a `static` of one module that stays in its piece under a
+/// and data, defined and undefined, are listed with `llvm_bindir`'s
+/// `llvm-nm`, and a `static` of one module that stays in its piece under a
 /// name another piece also holds is refused rather than linked. A `static`
 /// is what the source module's listing calls local, or a function the facts
 /// give internal or private linkage: `llvm-nm` omits private symbols, so the
@@ -80,10 +82,11 @@ pub fn emit_module(
     catalog: &Path,
     functions: &[FunctionId],
     llvm_link: &Path,
+    llvm_bindir: &LlvmBindir,
     out: &Path,
 ) -> Result<EmittedModule, Error> {
-    let llvm_extract = sibling(llvm_link, LLVM_EXTRACT)?;
-    let llvm_nm = sibling(llvm_link, LLVM_NM)?;
+    let llvm_extract = llvm_bindir.tool(LLVM_EXTRACT)?;
+    let llvm_nm = llvm_bindir.tool(LLVM_NM)?;
 
     let mut plans = plan_pieces(session, functions);
     if plans.is_empty() {
@@ -196,6 +199,7 @@ pub fn emit_slice(
     catalog: &Path,
     answer: &QueryResult,
     llvm_link: &Path,
+    llvm_bindir: &LlvmBindir,
     out: &Path,
 ) -> Result<EmittedModule, Error> {
     match (&answer.query, &answer.results) {
@@ -205,7 +209,14 @@ pub fn emit_slice(
                     "no path from {from} to {to}; nothing to emit"
                 )));
             }
-            emit_module(session, catalog, &slice.functions, llvm_link, out)
+            emit_module(
+                session,
+                catalog,
+                &slice.functions,
+                llvm_link,
+                llvm_bindir,
+                out,
+            )
         }
         _ => Err(Error::InvalidArguments(
             "only a `slice` answer emits a module".to_string(),
@@ -358,18 +369,6 @@ fn spellings(symbol: &str, prefix: Option<&str>) -> Vec<String> {
             .map(|prefix| format!("{prefix}{symbol}"))
             .collect(),
     }
-}
-
-/// The tool named `name` in `llvm_link`'s directory.
-fn sibling(llvm_link: &Path, name: &str) -> Result<PathBuf, Error> {
-    let tool = llvm_link.with_file_name(name);
-    if tool.is_file() {
-        return Ok(tool);
-    }
-    Err(Error::MissingFile(format!(
-        "`{name}` is needed beside the configured llvm-link, at {}",
-        tool.display()
-    )))
 }
 
 /// Runs one LLVM tool through the shared transport, which moves a long

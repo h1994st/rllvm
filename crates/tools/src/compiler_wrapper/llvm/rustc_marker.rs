@@ -10,22 +10,15 @@
 //! generated outside its bitcode, so a member that defines globals is patched
 //! only when it defines something the bitcode defines.
 
-use std::{
-    collections::HashSet,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{collections::HashSet, fs, path::Path, process::Command};
 
 use object::{Object, ObjectSymbol};
 
 use rllvm_core::{
-    config::try_rllvm_config,
-    error::Error,
-    utils::{embed_bitcode_filepath_to_object_file, execute_llvm_config},
+    config::try_rllvm_config, error::Error, utils::embed_bitcode_filepath_to_object_file,
 };
 
-/// `llvm-nm`'s file name. It has no configuration key of its own.
+/// `llvm-nm`'s file name, looked for in the configured LLVM bindir.
 const LLVM_NM: &str = "llvm-nm";
 
 /// The member-name prefixes rustc gives a crate's own objects. rustc names
@@ -54,31 +47,6 @@ fn owns(prefixes: &[String], member: &str) -> bool {
     prefixes
         .iter()
         .any(|prefix| member.starts_with(prefix.as_str()))
-}
-
-/// The `llvm-nm` to read the crate's bitcode with: the one beside the
-/// configured `llvm-ar`, or else the one in the bindir the configured
-/// `llvm-config` reports. `llvm-ar` alone does not locate it: a wrapper
-/// around the real `llvm-ar` sits in a directory with no other LLVM tool.
-fn find_llvm_nm(llvm_ar: &Path, llvm_config: &Path) -> Result<PathBuf, Error> {
-    let beside = llvm_ar.with_file_name(LLVM_NM);
-    if beside.is_file() {
-        return Ok(beside);
-    }
-    let bindir = execute_llvm_config(llvm_config, &["--bindir"]).unwrap_or_default();
-    // An empty answer would otherwise name a file in the working directory.
-    if !bindir.is_empty() {
-        let in_bindir = Path::new(&bindir).join(LLVM_NM);
-        if in_bindir.is_file() {
-            return Ok(in_bindir);
-        }
-    }
-    Err(Error::MissingFile(format!(
-        "`{LLVM_NM}` is needed to patch a Rust archive, and is neither beside the configured \
-         llvm-ar, at {}, nor in the bindir {bindir:?} of the configured llvm-config, {}",
-        beside.display(),
-        llvm_config.display()
-    )))
 }
 
 /// The symbols the crate's bitcode module defines, read with `llvm_nm`.
@@ -141,7 +109,7 @@ pub(crate) fn patch_archive(
 ) -> Result<usize, Error> {
     let config = try_rllvm_config()?;
     let llvm_ar = config.llvm_ar_filepath().clone();
-    let llvm_nm = find_llvm_nm(&llvm_ar, config.llvm_config_filepath())?;
+    let llvm_nm = config.llvm_tool(LLVM_NM)?;
     let archive = archive.canonicalize()?;
 
     let workspace = tempfile::tempdir()?;

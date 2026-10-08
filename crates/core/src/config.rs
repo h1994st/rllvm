@@ -26,6 +26,12 @@ use crate::{
     utils::{execute_llvm_config, find_llvm_config},
 };
 
+/// The configuration key naming the directory of the unnamed LLVM tools.
+const LLVM_BINDIR_KEY: &str = "llvm_bindir";
+
+/// The `llvm-config` argument that reports its bindir.
+const LLVM_CONFIG_BINDIR_ARG: &str = "--bindir";
+
 /// The cached outcome of loading the configuration.
 ///
 /// The failure is stored as a message rather than as an [`Error`], because a
@@ -135,6 +141,11 @@ pub struct RLLVMConfig {
     /// The absolute filepath of `llvm-objcopy` (optional, currently unused)
     llvm_objcopy_filepath: Option<PathBuf>,
 
+    /// The absolute path of the directory holding the LLVM tools the
+    /// configuration does not name (Default: what `llvm-config --bindir`
+    /// reports)
+    llvm_bindir: Option<PathBuf>,
+
     /// The absolute filepath of `rustc` (optional; `which rustc` when unset)
     rustc_filepath: Option<PathBuf>,
 
@@ -177,6 +188,11 @@ pub struct RLLVMConfig {
     /// Disk use of the query facts cache, in MiB, past which rllvm-query
     /// warns (Default: 1024).
     query_cache_warn_mb: Option<u64>,
+
+    /// `llvm_bindir`, or else what `llvm-config --bindir` reported, decided
+    /// on first use so a process asks `llvm-config` at most once.
+    #[serde(skip)]
+    resolved_llvm_bindir: OnceLock<Result<LlvmBindir, String>>,
 }
 
 impl RLLVMConfig {
@@ -208,6 +224,38 @@ impl RLLVMConfig {
     /// Returns the optional path to `llvm-objcopy`.
     pub fn llvm_objcopy_filepath(&self) -> Option<&PathBuf> {
         self.llvm_objcopy_filepath.as_ref()
+    }
+
+    /// Returns the directory holding the LLVM tools the configuration does
+    /// not name, such as `llvm-nm`, `llvm-dis` and `llvm-extract`.
+    ///
+    /// That is `llvm_bindir` when the configuration sets it, and otherwise
+    /// what the configured `llvm-config --bindir` reports. `llvm-config` runs
+    /// at most once per configuration, and not at all when the key is set.
+    /// There is no other place these tools are looked for: not beside another
+    /// configured tool, and not in a discovered LLVM.
+    pub fn llvm_bindir(&self) -> Result<&LlvmBindir, Error> {
+        self.resolved_llvm_bindir
+            .get_or_init(|| match &self.llvm_bindir {
+                // A relative one would mean a different directory in each
+                // working directory a build runs a tool from.
+                Some(path) if path.is_relative() => Err(format!(
+                    "`{LLVM_BINDIR_KEY}` must be an absolute path, not {}",
+                    path.display()
+                )),
+                Some(path) => Ok(LlvmBindir::configured(path)),
+                None => LlvmBindir::reported_by(&self.llvm_config_filepath),
+            })
+            .as_ref()
+            .map_err(|message| Error::ConfigError(message.clone()))
+    }
+
+    /// Returns the LLVM tool `name` from [`llvm_bindir`](Self::llvm_bindir).
+    ///
+    /// Fails with [`Error::MissingFile`] naming the tool, the directory, and
+    /// where that directory came from when the tool is not there.
+    pub fn llvm_tool(&self, name: &str) -> Result<PathBuf, Error> {
+        self.llvm_bindir()?.tool(name)
     }
 
     /// Returns the optional bitcode store directory path.
@@ -515,10 +563,12 @@ impl RLLVMConfig {
         }
 
         let llvm_bindir = PathBuf::from(
-            execute_llvm_config(&llvm_config_filepath, &["--bindir"]).map_err(|err| {
-                tracing::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
-                err
-            })?,
+            execute_llvm_config(&llvm_config_filepath, &[LLVM_CONFIG_BINDIR_ARG]).map_err(
+                |err| {
+                    tracing::error!("Failed to execute `llvm-config --bindir`: {:?}", err);
+                    err
+                },
+            )?,
         );
 
         // Find `clang`
@@ -566,6 +616,9 @@ impl RLLVMConfig {
             llvm_ar_filepath,
             llvm_link_filepath,
             llvm_objcopy_filepath,
+            // Recorded so that a written configuration never has to ask
+            // `llvm-config` again.
+            llvm_bindir: Some(llvm_bindir),
             // Not inferred: rustc is not an LLVM tool and need not be
             // installed. The wrapper falls back to `rustc` on `PATH`.
             rustc_filepath: None,
@@ -581,7 +634,79 @@ impl RLLVMConfig {
             cache_dir: None,
             query_cache: None,
             query_cache_warn_mb: None,
+            resolved_llvm_bindir: OnceLock::new(),
         })
+    }
+}
+
+/// The directory holding the LLVM tools the configuration does not name,
+/// and how it was decided, so a tool missing from it can say where to fix
+/// that.
+///
+/// Obtained from [`RLLVMConfig::llvm_bindir`], or made with
+/// [`LlvmBindir::configured`] by a caller that has its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlvmBindir {
+    path: PathBuf,
+    /// The `llvm-config` that reported `path`; `None` when it is configured.
+    reported_by: Option<PathBuf>,
+}
+
+impl LlvmBindir {
+    /// A bindir named by configuration, as the `llvm_bindir` key does.
+    pub fn configured(path: impl Into<PathBuf>) -> LlvmBindir {
+        LlvmBindir {
+            path: path.into(),
+            reported_by: None,
+        }
+    }
+
+    /// The bindir `llvm_config --bindir` reports. The failure is a message,
+    /// because it is cached and [`Error`] is not `Clone`.
+    fn reported_by(llvm_config: &Path) -> Result<LlvmBindir, String> {
+        let unknown = |reason: String| {
+            format!(
+                "Cannot find the LLVM bindir: `{} {LLVM_CONFIG_BINDIR_ARG}` {reason}; set \
+                 `{LLVM_BINDIR_KEY}` in the configuration to the directory holding the LLVM tools",
+                llvm_config.display()
+            )
+        };
+        let answer = execute_llvm_config(llvm_config, &[LLVM_CONFIG_BINDIR_ARG])
+            .map_err(|err| unknown(format!("failed: {err}")))?;
+        // An empty answer would otherwise name a file in the working directory.
+        if answer.is_empty() {
+            return Err(unknown("reported nothing".to_string()));
+        }
+        Ok(LlvmBindir {
+            path: PathBuf::from(answer),
+            reported_by: Some(llvm_config.to_path_buf()),
+        })
+    }
+
+    /// The directory itself.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The tool `name` in this directory, or [`Error::MissingFile`] naming
+    /// the tool, the directory, and where the directory came from.
+    pub fn tool(&self, name: &str) -> Result<PathBuf, Error> {
+        let tool = self.path.join(name);
+        if tool.is_file() {
+            return Ok(tool);
+        }
+        let origin = match &self.reported_by {
+            None => format!("configured as `{LLVM_BINDIR_KEY}`"),
+            Some(llvm_config) => format!(
+                "reported by `{} {LLVM_CONFIG_BINDIR_ARG}`; set `{LLVM_BINDIR_KEY}` in the \
+                 configuration to the directory that holds it",
+                llvm_config.display()
+            ),
+        };
+        Err(Error::MissingFile(format!(
+            "`{name}` is not in the LLVM bindir {}, {origin}",
+            self.path.display()
+        )))
     }
 }
 
@@ -794,6 +919,183 @@ mod tests {
         let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
         assert!(!config.query_cache_enabled_ignoring_env());
         assert_eq!(config.query_cache_warn_bytes(), 5 * 1024 * 1024);
+    }
+
+    /// A configuration whose required tool paths are placeholders, plus
+    /// `extra`. Parsed without loading, so nothing validates or runs a tool.
+    fn config_from(llvm_config: &Path, extra: &str) -> RLLVMConfig {
+        toml::from_str(&format!(
+            "llvm_config_filepath = '{}'\n\
+             clang_filepath = '/unused/clang'\n\
+             clangxx_filepath = '/unused/clang++'\n\
+             llvm_ar_filepath = '/unused/llvm-ar'\n\
+             llvm_link_filepath = '/unused/llvm-link'\n\
+             {extra}",
+            llvm_config.display()
+        ))
+        .expect("Failed to parse the test configuration")
+    }
+
+    /// An executable `llvm-config` stand-in in `dir` that appends its
+    /// arguments to `log` and then runs `body`.
+    #[cfg(unix)]
+    fn stand_in_llvm_config(dir: &Path, log: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = dir.join("llvm-config");
+        fs::write(
+            &path,
+            format!("#!/bin/sh\necho \"$@\" >> '{}'\n{body}\n", log.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_configured_llvm_bindir_is_used_without_running_llvm_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let bindir = dir.path().join("bin");
+        fs::create_dir(&bindir).unwrap();
+        fs::write(bindir.join("llvm-nm"), b"").unwrap();
+        let log = dir.path().join("llvm-config.log");
+        let llvm_config = stand_in_llvm_config(dir.path(), &log, "exit 1");
+
+        let config = config_from(
+            &llvm_config,
+            &format!("llvm_bindir = '{}'\n", bindir.display()),
+        );
+
+        assert_eq!(config.llvm_tool("llvm-nm").unwrap(), bindir.join("llvm-nm"));
+        assert!(!log.exists(), "llvm-config ran: {:?}", fs::read(&log));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_unset_llvm_bindir_asks_the_configured_llvm_config_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let reported = dir.path().join("reported");
+        fs::create_dir(&reported).unwrap();
+        fs::write(reported.join("llvm-dis"), b"").unwrap();
+        fs::write(reported.join("llvm-nm"), b"").unwrap();
+        let log = dir.path().join("llvm-config.log");
+        let llvm_config =
+            stand_in_llvm_config(dir.path(), &log, &format!("echo '{}'", reported.display()));
+
+        let config = config_from(&llvm_config, "");
+
+        assert_eq!(
+            config.llvm_tool("llvm-dis").unwrap(),
+            reported.join("llvm-dis")
+        );
+        assert_eq!(
+            config.llvm_tool("llvm-nm").unwrap(),
+            reported.join("llvm-nm")
+        );
+        assert_eq!(fs::read_to_string(&log).unwrap(), "--bindir\n");
+    }
+
+    #[test]
+    fn a_tool_missing_from_the_configured_llvm_bindir_is_named_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_from(
+            Path::new("/unused/llvm-config"),
+            &format!("llvm_bindir = '{}'\n", dir.path().display()),
+        );
+
+        match config.llvm_tool("llvm-extract") {
+            Err(Error::MissingFile(message)) => {
+                for expected in [
+                    "llvm-extract",
+                    &dir.path().display().to_string(),
+                    "llvm_bindir",
+                ] {
+                    assert!(
+                        message.contains(expected),
+                        "{expected} not named: {message}"
+                    );
+                }
+            }
+            other => panic!("expected a missing file, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_tool_missing_from_the_reported_bindir_names_the_llvm_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let reported = dir.path().join("reported");
+        fs::create_dir(&reported).unwrap();
+        let log = dir.path().join("llvm-config.log");
+        let llvm_config =
+            stand_in_llvm_config(dir.path(), &log, &format!("echo '{}'", reported.display()));
+        let config = config_from(&llvm_config, "");
+
+        match config.llvm_tool("llvm-nm") {
+            Err(Error::MissingFile(message)) => {
+                for expected in [
+                    "llvm-nm",
+                    &reported.display().to_string(),
+                    &format!("{} --bindir", llvm_config.display()),
+                ] {
+                    assert!(
+                        message.contains(expected),
+                        "{expected} not named: {message}"
+                    );
+                }
+            }
+            other => panic!("expected a missing file, got {other:?}"),
+        }
+    }
+
+    /// A relative bindir would resolve against each process's working
+    /// directory, and so differ across one build.
+    #[test]
+    fn a_relative_llvm_bindir_is_rejected() {
+        let config = config_from(
+            Path::new("/unused/llvm-config"),
+            "llvm_bindir = 'llvm/bin'\n",
+        );
+        match config.llvm_tool("llvm-nm") {
+            Err(Error::ConfigError(message)) => {
+                for expected in ["llvm_bindir", "llvm/bin", "absolute"] {
+                    assert!(
+                        message.contains(expected),
+                        "{expected} not named: {message}"
+                    );
+                }
+            }
+            other => panic!("expected a configuration error, got {other:?}"),
+        }
+    }
+
+    /// An empty answer would otherwise name a file in the working directory.
+    #[test]
+    #[cfg(unix)]
+    fn an_empty_bindir_answer_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("llvm-config.log");
+        let llvm_config = stand_in_llvm_config(dir.path(), &log, "echo");
+        let config = config_from(&llvm_config, "");
+
+        let error = config.llvm_tool("llvm-nm").unwrap_err().to_string();
+        assert!(error.contains("--bindir"), "{error}");
+        assert!(error.contains("llvm_bindir"), "{error}");
+    }
+
+    #[test]
+    fn an_inferred_configuration_records_its_llvm_bindir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_filepath = dir.path().join("config.toml");
+        let inferred = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+
+        let written = RLLVMConfig::parse_file(&config_filepath).unwrap();
+        let bindir = written
+            .llvm_bindir
+            .clone()
+            .expect("the written configuration has no llvm_bindir");
+        assert_eq!(Some(bindir.as_path()), inferred.clang_filepath().parent());
     }
 
     #[test]

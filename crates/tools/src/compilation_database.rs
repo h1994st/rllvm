@@ -4,11 +4,13 @@ mod sdk;
 
 use rllvm_core::{
     arg_parser::CompilerArgsInfo,
+    bitcode_info::find_llvm_dis,
     catalog::{
         CatalogOrigin, CompilationRecord, CompilerIdentity, DigestAlgorithm, DigestOrigin,
         ModuleCatalog, ModuleRecord, ModuleStatus, SourceAssociation, SourceDigest, hash_bytes,
         hash_file, identity, write_catalog,
     },
+    diagnostics::{llvm_major_version, print_warning, tool_llvm_major_version},
     error::Error,
 };
 use serde::Deserialize;
@@ -107,18 +109,15 @@ impl CompilationDatabase {
         if options.jobs == 0 {
             return Err(invalid("--jobs must be at least one"));
         }
+        // One for the whole run, found before anything is written, so a
+        // missing tool or configuration leaves nothing to clean up.
+        let llvm_dis = find_llvm_dis()?;
+        // Checked again where it is created; this only fails fast, before
+        // every recorded compiler is run and hashed.
         let output = resolve(&options.output_dir, &directory);
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent)?;
+        if output.exists() {
+            return Err(output_not_new(&output, "it exists"));
         }
-        fs::create_dir(&output).map_err(|error| {
-            invalid(format!(
-                "output directory must be new ({}): {error}",
-                output.display()
-            ))
-        })?;
-        fs::create_dir(output.join("modules"))?;
-        fs::create_dir(output.join("diagnostics"))?;
         let environment = analysis_environment();
         let mut compilers = BTreeMap::new();
         let mut prepared = Vec::new();
@@ -138,23 +137,36 @@ impl CompilationDatabase {
                     compilers
                         .entry(path.clone())
                         .or_insert_with(|| {
-                            compiler_context(&path, &compilation.directory, &environment)
+                            compiler_identity(&path, &compilation.directory, &environment)
                                 .map_err(|error| error.to_string())
                         })
                         .clone()
                 });
             prepared.push((module, compiler));
         }
+        // Before the output directory exists, so a refused run can be rerun.
+        check_readable(
+            compilers
+                .values()
+                .filter_map(|compiler| compiler.as_ref().ok()),
+            &llvm_dis,
+        )?;
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::create_dir(&output).map_err(|error| output_not_new(&output, error))?;
+        fs::create_dir(output.join("modules"))?;
+        fs::create_dir(output.join("diagnostics"))?;
         let sdk = sdk::MacosSdk::default();
+        let run = Run {
+            options,
+            output: &output,
+            environment: &environment,
+            sdk: &sdk,
+            llvm_dis: &llvm_dis,
+        };
         let modules = bounded_map(&prepared, options.jobs, |_, (original, compiler)| {
-            generate_entry(
-                original.clone(),
-                compiler.as_ref(),
-                options,
-                &output,
-                &environment,
-                &sdk,
-            )
+            generate_entry(original.clone(), compiler.as_ref(), &run)
         })?;
         let mut catalog = self.catalog(modules);
         catalog.scope.analysis_arguments = options.extra_arguments.clone();
@@ -237,17 +249,11 @@ impl CompilationDatabase {
     }
 }
 
-#[derive(Clone)]
-struct CompilerContext {
-    identity: CompilerIdentity,
-    llvm_dis: PathBuf,
-}
-
-fn compiler_context(
+fn compiler_identity(
     path: &Path,
     directory: &Path,
     environment: &BTreeMap<String, String>,
-) -> Result<CompilerContext, Error> {
+) -> Result<CompilerIdentity, Error> {
     let output = rllvm_core::utils::execute_llvm_tool_in_for_output(
         path,
         &["--version", "--no-default-config"],
@@ -264,35 +270,64 @@ fn compiler_context(
     if !version.to_ascii_lowercase().contains("clang") {
         return Err(invalid("recorded driver does not identify itself as Clang"));
     }
-    let parent = path
-        .parent()
-        .ok_or_else(|| invalid("compiler has no parent directory"))?;
-    let llvm_dis = if parent.join("llvm-dis").is_file() {
-        parent.join("llvm-dis")
-    } else {
-        let config = rllvm_core::utils::find_llvm_config()?;
-        let output = rllvm_core::utils::execute_llvm_tool_in_for_output(
-            config,
-            &["--bindir"],
-            directory,
-            environment,
-        )?;
-        if !output.status.success() {
-            return Err(Error::ExecutionFailure(
-                "llvm-config --bindir failed".into(),
-            ));
-        }
-        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()).join("llvm-dis")
-    };
-    Ok(CompilerContext {
-        identity: CompilerIdentity {
-            path: path.to_path_buf(),
-            realpath: fs::canonicalize(path).ok(),
-            version,
-            sha256: Some(hash_file(path)?),
-        },
-        llvm_dis,
+    Ok(CompilerIdentity {
+        path: path.to_path_buf(),
+        realpath: fs::canonicalize(path).ok(),
+        version,
+        sha256: Some(hash_file(path)?),
     })
+}
+
+/// Fails when a recorded compiler is a newer LLVM than the `llvm-dis` that
+/// reads its bitcode: a reader must be the producer's LLVM major or newer.
+/// Checked once per distinct compiler, before anything compiles, so a
+/// mismatch is one error rather than a diagnostic on every module. A major
+/// that cannot be established is warned about, never guessed.
+fn check_readable<'a>(
+    compilers: impl Iterator<Item = &'a CompilerIdentity>,
+    llvm_dis: &Path,
+) -> Result<(), Error> {
+    let reader = tool_llvm_major_version(llvm_dis);
+    for compiler in compilers {
+        let producer = llvm_major_version(&compiler.version);
+        match (producer, reader) {
+            (Some(producer), Some(reader)) if producer > reader => {
+                return Err(Error::ConfigError(format!(
+                    "{} is LLVM {producer}, newer than the llvm-dis that reads its bitcode, {} \
+                     (LLVM {reader}); set `llvm_bindir` (or the configured llvm-config) to \
+                     LLVM {producer} or newer",
+                    compiler.path.display(),
+                    llvm_dis.display()
+                )));
+            }
+            (Some(_), Some(_)) => {}
+            // Not a `tracing::warn!`: the default log level is ERROR, and
+            // this must not be silent.
+            _ => print_warning(&format!(
+                "cannot compare the LLVM versions of {} ({}) and {} ({}); llvm-dis cannot read \
+                 the bitcode if the compiler is the newer",
+                compiler.path.display(),
+                major_or_unknown(producer),
+                llvm_dis.display(),
+                major_or_unknown(reader)
+            )),
+        }
+    }
+    Ok(())
+}
+
+fn major_or_unknown(major: Option<u32>) -> String {
+    major.map_or_else(
+        || "LLVM major unknown".to_string(),
+        |major| format!("LLVM {major}"),
+    )
+}
+
+fn output_not_new(output: &Path, reason: impl std::fmt::Display) -> Error {
+    invalid(format!(
+        "output directory must be new ({}): {reason}",
+        output.display()
+    ))
 }
 
 fn analysis_environment() -> BTreeMap<String, String> {
@@ -324,14 +359,27 @@ fn analysis_environment() -> BTreeMap<String, String> {
         .collect()
 }
 
+/// What every entry of one generation run shares.
+struct Run<'a> {
+    options: &'a GenerateOptions,
+    output: &'a Path,
+    environment: &'a BTreeMap<String, String>,
+    sdk: &'a sdk::MacosSdk,
+    /// Reads every generated module.
+    llvm_dis: &'a Path,
+}
+
 fn generate_entry(
     mut module: ModuleRecord,
-    compiler: Option<&Result<CompilerContext, String>>,
-    options: &GenerateOptions,
-    output: &Path,
-    environment: &BTreeMap<String, String>,
-    sdk: &sdk::MacosSdk,
+    compiler: Option<&Result<CompilerIdentity, String>>,
+    run: &Run,
 ) -> ModuleRecord {
+    let Run {
+        options,
+        output,
+        environment,
+        ..
+    } = *run;
     let diagnostic = PathBuf::from("diagnostics").join(format!("{}.txt", module.id));
     module.diagnostic_path = Some(diagnostic.clone());
     if let Some(compilation) = &mut module.compilation {
@@ -340,15 +388,7 @@ fn generate_entry(
         compilation.environment_complete = true;
     }
     let mut diagnostics = Vec::new();
-    let result = materialize_entry(
-        &mut module,
-        compiler,
-        options,
-        output,
-        environment,
-        sdk,
-        &mut diagnostics,
-    );
+    let result = materialize_entry(&mut module, compiler, run, &mut diagnostics);
     if let Err(error) = result {
         if module.status != ModuleStatus::Unsupported {
             module.status = ModuleStatus::Failed;
@@ -368,13 +408,17 @@ fn generate_entry(
 
 fn materialize_entry(
     module: &mut ModuleRecord,
-    compiler: Option<&Result<CompilerContext, String>>,
-    options: &GenerateOptions,
-    output: &Path,
-    environment: &BTreeMap<String, String>,
-    sdk: &sdk::MacosSdk,
+    compiler: Option<&Result<CompilerIdentity, String>>,
+    run: &Run,
     diagnostics: &mut Vec<u8>,
 ) -> Result<(), Error> {
+    let Run {
+        options,
+        output,
+        environment,
+        sdk,
+        llvm_dis,
+    } = *run;
     if module.status == ModuleStatus::Unsupported {
         return Ok(());
     }
@@ -382,7 +426,7 @@ fn materialize_entry(
         .ok_or_else(|| invalid("compiler identity unavailable"))?
         .as_ref()
         .map_err(|message| Error::ExecutionFailure(message.clone()))?;
-    module.compiler = Some(compiler.identity.clone());
+    module.compiler = Some(compiler.clone());
     let compilation = module
         .compilation
         .as_mut()
@@ -399,12 +443,9 @@ fn materialize_entry(
     let mut environment = environment.clone();
     let mut sdk_error = None;
     if cfg!(target_os = "macos") {
-        match sdk.infer(
-            &compile_args,
-            &compiler.identity.version,
-            &environment,
-            || sdk::discover(&environment),
-        ) {
+        match sdk.infer(&compile_args, &compiler.version, &environment, || {
+            sdk::discover(&environment)
+        }) {
             Ok(Some(path)) => {
                 environment.insert("SDKROOT".into(), path);
             }
@@ -418,7 +459,7 @@ fn materialize_entry(
         &compile_args,
         ANALYSIS_DRIVER_ARGUMENTS,
         &environment,
-        &compiler.identity,
+        compiler,
     ))
     .map_err(|error| invalid(error.to_string()))?;
     compilation.analysis_id = identity(&[
@@ -453,12 +494,11 @@ fn materialize_entry(
         0..0,
         ANALYSIS_DRIVER_ARGUMENTS.iter().map(|arg| (*arg).into()),
     );
-    compilation.effective_arguments =
-        std::iter::once(compiler.identity.path.to_string_lossy().into_owned())
-            .chain(arguments.iter().cloned())
-            .collect();
+    compilation.effective_arguments = std::iter::once(compiler.path.to_string_lossy().into_owned())
+        .chain(arguments.iter().cloned())
+        .collect();
     let result = rllvm_core::utils::execute_llvm_tool_in_for_output(
-        &compiler.identity.path,
+        &compiler.path,
         &arguments,
         &compilation.directory,
         &environment,
@@ -476,11 +516,8 @@ fn materialize_entry(
             result.status
         )));
     }
-    let inspected = rllvm_core::catalog::inspect_bitcode(
-        temporary.path(),
-        &compiler.llvm_dis,
-        module.id.clone(),
-    );
+    let inspected =
+        rllvm_core::catalog::inspect_bitcode(temporary.path(), llvm_dis, module.id.clone());
     module.target_triple = inspected.target_triple;
     module.data_layout = inspected.data_layout;
     module.debug_info = inspected.debug_info;

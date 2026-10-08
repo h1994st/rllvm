@@ -1148,6 +1148,50 @@ fn statics_that_stay_out_of_every_piece_do_not_block_the_module() {
     );
 }
 
+/// `llvm-extract` and `llvm-nm` come from the configured `llvm_bindir`, not
+/// from beside `llvm-link`, which may live apart from the other LLVM tools.
+#[cfg(unix)]
+#[test]
+fn a_slice_is_emitted_with_the_configured_llvm_bindir() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let apart = scratch.path().join("llvm-link-apart");
+    std::fs::create_dir(&apart).unwrap();
+    std::os::unix::fs::symlink(llvm_bin("llvm-link"), apart.join("llvm-link")).unwrap();
+    let config = scratch_rllvm_config(scratch.path());
+    let contents: String = std::fs::read_to_string(&config)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("llvm_link_filepath") {
+                format!(
+                    "llvm_link_filepath = '{}'\n",
+                    apart.join("llvm-link").display()
+                )
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    std::fs::write(&config, contents).unwrap();
+
+    let out = scratch.path().join("slice.bc");
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", &config)
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["--json", "slice", "main", "add", "--emit-module"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out.is_file(), "no module written");
+}
+
 /// A tool that runs and fails is reported with what it printed, never as a
 /// module.
 #[cfg(unix)]
@@ -1171,7 +1215,7 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
     std::fs::set_permissions(&llvm_link, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let out = scratch.path().join("slice.bc");
-    match emit_main_to_add(&catalog, &llvm_link, &out) {
+    match emit_main_to_add(&catalog, &llvm_link, &tools, &out) {
         Err(rllvm_core::error::Error::ExecutionFailure(message)) => {
             assert!(message.contains("refusing to link today"), "{message}")
         }
@@ -1180,10 +1224,12 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
     assert!(!out.exists());
 }
 
-/// Emits `slice main add` through the library, linking with `llvm_link`.
+/// Emits `slice main add` through the library, linking with `llvm_link` and
+/// taking the other tools from `llvm_bindir`.
 fn emit_main_to_add(
     catalog: &Path,
     llvm_link: &Path,
+    llvm_bindir: &Path,
     out: &Path,
 ) -> Result<rllvm_query::EmittedModule, rllvm_core::error::Error> {
     let session = rllvm_query::open(catalog).unwrap();
@@ -1194,24 +1240,23 @@ fn emit_main_to_add(
         min_confidence: None,
     };
     let answer = rllvm_query::run(&session, &query).unwrap();
-    rllvm_query::emit_slice(&session, catalog, &answer, llvm_link, out)
+    let llvm_bindir = rllvm_core::config::LlvmBindir::configured(llvm_bindir);
+    rllvm_query::emit_slice(&session, catalog, &answer, llvm_link, &llvm_bindir, out)
 }
 
-/// Every tool beside `llvm-link` that emitting needs is checked for, and a
+/// Every tool from the LLVM bindir that emitting needs is checked for, and a
 /// missing one is named rather than run.
 #[cfg(unix)]
 #[test]
-fn a_missing_tool_beside_llvm_link_is_named() {
+fn a_missing_tool_in_the_llvm_bindir_is_named() {
     let scratch = tempfile::tempdir().unwrap();
     let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
     for (present, missing) in [("llvm-extract", "llvm-nm"), ("llvm-nm", "llvm-extract")] {
         let tools = scratch.path().join(format!("without-{missing}"));
         std::fs::create_dir(&tools).unwrap();
-        for tool in ["llvm-link", present] {
-            std::os::unix::fs::symlink(llvm_bin(tool), tools.join(tool)).unwrap();
-        }
+        std::os::unix::fs::symlink(llvm_bin(present), tools.join(present)).unwrap();
         let out = scratch.path().join("slice.bc");
-        match emit_main_to_add(&catalog, &tools.join("llvm-link"), &out) {
+        match emit_main_to_add(&catalog, &llvm_bin("llvm-link"), &tools, &out) {
             Err(rllvm_core::error::Error::MissingFile(message)) => {
                 assert!(message.contains(missing), "{message}")
             }
