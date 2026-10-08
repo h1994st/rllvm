@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.7.0](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.5...rllvm-v0.7.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* add llvm_bindir for LLVM tools the config omits ([#315](https://github.com/h1994st/rllvm/issues/315))
+
+### Features
+
+* add llvm_bindir for LLVM tools the config omits ([#315](https://github.com/h1994st/rllvm/issues/315)) ([97261e6](https://github.com/h1994st/rllvm/commit/97261e6bd04c9a4ebead6d16578a16ca1dd335f2))
+
+
+### Bug Fixes
+
+* find llvm-nm when llvm-ar lives apart from it ([#314](https://github.com/h1994st/rllvm/issues/314)) ([aa050ef](https://github.com/h1994st/rllvm/commit/aa050ef371fbead9190419c18ca68178820a3c98))
+* keep the crate path on empty codegen units ([#313](https://github.com/h1994st/rllvm/issues/313)) ([b4bcc12](https://github.com/h1994st/rllvm/commit/b4bcc123996b59f3cb7967603d5bccbd7c61019f))
+* patch only members compiled from the crate bitcode ([#311](https://github.com/h1994st/rllvm/issues/311)) ([ef0ab37](https://github.com/h1994st/rllvm/commit/ef0ab375ea04a0e3e4094ed23bc41044181e9821))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * rllvm-core bumped from 0.6.3 to 0.7.0
+
 ## [0.6.5](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.4...rllvm-v0.6.5) (2026-10-04)
 
 

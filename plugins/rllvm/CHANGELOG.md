@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.2.0](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.1.1...rllvm-plugin-v0.2.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* add llvm_bindir for LLVM tools the config omits ([#315](https://github.com/h1994st/rllvm/issues/315))
+
+### Features
+
+* add call-graph completion skill and command ([#306](https://github.com/h1994st/rllvm/issues/306)) ([9cb37da](https://github.com/h1994st/rllvm/commit/9cb37da05c5542b04ff7879506bc3c1f0e01fa7a))
+* add call-graph overlay store ([#302](https://github.com/h1994st/rllvm/issues/302)) ([70af290](https://github.com/h1994st/rllvm/commit/70af29028d995b8cda55f928e287a33d3aecb363))
+* add llvm_bindir for LLVM tools the config omits ([#315](https://github.com/h1994st/rllvm/issues/315)) ([97261e6](https://github.com/h1994st/rllvm/commit/97261e6bd04c9a4ebead6d16578a16ca1dd335f2))
+* add overlay view to the rllvm plugin ([#307](https://github.com/h1994st/rllvm/issues/307)) ([be8b282](https://github.com/h1994st/rllvm/commit/be8b28271ddca4cdf368f5e1046da352d8c5de87))
+* add resolution-candidates query ([#301](https://github.com/h1994st/rllvm/issues/301)) ([e76a877](https://github.com/h1994st/rllvm/commit/e76a877cdb6be851c5cecdaee01cd992c17dff5f))
+* add slice query with module extraction ([#305](https://github.com/h1994st/rllvm/issues/305)) ([27ae0ba](https://github.com/h1994st/rllvm/commit/27ae0ba63f1117d35e22a40e42f17289d8db83c4))
+* record the fields indirect calls dispatch through ([#300](https://github.com/h1994st/rllvm/issues/300)) ([c0d62a2](https://github.com/h1994st/rllvm/commit/c0d62a2ff71d953091f44b2fcaa2bc293f5dd713))
+* serve call-graph overlay tools over MCP ([#304](https://github.com/h1994st/rllvm/issues/304)) ([1f5cb22](https://github.com/h1994st/rllvm/commit/1f5cb22dac7fcc2ad1ac064d0aac6fd7b9470b33))
+* walk overlay edges in reach and closure ([#303](https://github.com/h1994st/rllvm/issues/303)) ([4b16837](https://github.com/h1994st/rllvm/commit/4b16837c405ec64c183ec06bb296ada9658c08bb))
+
+
+### Bug Fixes
+
+* patch only members compiled from the crate bitcode ([#311](https://github.com/h1994st/rllvm/issues/311)) ([ef0ab37](https://github.com/h1994st/rllvm/commit/ef0ab375ea04a0e3e4094ed23bc41044181e9821))
+
 ## [0.1.1](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.1.0...rllvm-plugin-v0.1.1) (2026-10-04)
 
 

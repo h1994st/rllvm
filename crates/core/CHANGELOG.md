@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.0](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.3...rllvm-core-v0.7.0) (2026-10-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* add llvm_bindir for LLVM tools the config omits ([#315](https://github.com/h1994st/rllvm/issues/315))
+
+### Features
+
+* add llvm_bindir for LLVM tools the config omits ([#315](https://github.com/h1994st/rllvm/issues/315)) ([97261e6](https://github.com/h1994st/rllvm/commit/97261e6bd04c9a4ebead6d16578a16ca1dd335f2))
+
 ## [0.6.3](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.2...rllvm-core-v0.6.3) (2026-10-04)
 
 
