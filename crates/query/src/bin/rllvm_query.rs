@@ -477,13 +477,17 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     // Before anything is printed, so a failed emit leaves no answer that
     // reads as though the module were written.
     let emitted = match &emit_module {
-        Some(out) => Some(emit_slice(
-            &session,
-            &catalog,
-            &result,
-            try_rllvm_config()?.llvm_link_filepath(),
-            out,
-        )?),
+        Some(out) => {
+            let config = try_rllvm_config()?;
+            Some(emit_slice(
+                &session,
+                &catalog,
+                &result,
+                config.llvm_link_filepath(),
+                config.llvm_bindir()?,
+                out,
+            )?)
+        }
         None => None,
     };
 
@@ -541,8 +545,13 @@ fn stdout_color() -> Color {
 /// the command line should hear that it could not be read, not discover it
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
-    let mut registry = mcp::Registry::with_cache(facts_cache()?)
-        .with_llvm_link(try_rllvm_config()?.llvm_link_filepath().clone());
+    let config = try_rllvm_config()?;
+    // Only emitting a slice needs the bindir, so failing to find it fails
+    // only that.
+    let mut registry = mcp::Registry::with_cache(facts_cache()?).with_llvm_tools(
+        config.llvm_link_filepath().clone(),
+        config.llvm_bindir().cloned(),
+    );
     if let Some(catalog) = catalog {
         registry.load(catalog)?;
     }

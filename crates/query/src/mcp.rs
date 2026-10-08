@@ -56,7 +56,7 @@ use std::{
 
 use serde_json::{Value, json};
 
-use rllvm_core::error::Error;
+use rllvm_core::{config::LlvmBindir, error::Error};
 
 use super::{
     Confidence, Direction, FactsCache, Overlay, Query, Record, Session, analysis_of,
@@ -107,8 +107,10 @@ pub struct Registry {
     artifacts: BTreeSet<PathBuf>,
     /// The facts cache every load reads and fills; `None` when disabled.
     cache: Option<FactsCache>,
-    /// The configured `llvm-link`, which `slice` needs to emit a module.
-    llvm_link: Option<PathBuf>,
+    /// What `slice` needs to emit a module: the configured `llvm-link`, and
+    /// the LLVM bindir holding the other tools, or why it could not be
+    /// found, which is what an `emit_module` is then told.
+    slice_tools: Option<(PathBuf, Result<LlvmBindir, String>)>,
 }
 
 impl Registry {
@@ -125,10 +127,15 @@ impl Registry {
     }
 
     /// This registry, emitting `slice` modules with `llvm_link` and the
-    /// `llvm-extract` beside it.
-    pub fn with_llvm_link(self, llvm_link: PathBuf) -> Registry {
+    /// `llvm-extract` and `llvm-nm` in `llvm_bindir`. A bindir that could not
+    /// be found fails only `emit_module`, with that error.
+    pub fn with_llvm_tools(
+        self,
+        llvm_link: PathBuf,
+        llvm_bindir: Result<LlvmBindir, Error>,
+    ) -> Registry {
         Registry {
-            llvm_link: Some(llvm_link),
+            slice_tools: Some((llvm_link, llvm_bindir.map_err(|error| error.to_string()))),
             ..self
         }
     }
@@ -1144,11 +1151,15 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
     let mut payload = serde_json::to_value(&result)
         .unwrap_or_else(|error| json!({ "serialization_error": error.to_string() }));
     if let Some(out) = emit_module {
-        let Some(llvm_link) = &registry.llvm_link else {
+        let Some((llvm_link, llvm_bindir)) = &registry.slice_tools else {
             let message = "`emit_module` needs llvm-link, and this server has none configured";
             return Outcome::Result(call_tool_result(true, message), false);
         };
-        match emit_slice(session, &key, &result, llvm_link, &out) {
+        let llvm_bindir = match llvm_bindir {
+            Ok(llvm_bindir) => llvm_bindir,
+            Err(message) => return Outcome::Result(call_tool_result(true, message), false),
+        };
+        match emit_slice(session, &key, &result, llvm_link, llvm_bindir, &out) {
             Ok(emitted) => payload["emitted"] = json!(emitted),
             Err(error) => {
                 return Outcome::Result(call_tool_result(true, &error.to_string()), false);
@@ -1459,6 +1470,23 @@ mod tests {
         }
     }
 
+    /// A bindir that could not be found fails `emit_module` with that error,
+    /// rather than as though nothing were configured.
+    #[test]
+    fn an_unfound_llvm_bindir_is_what_emit_module_reports() {
+        let mut registry = one_catalog().with_llvm_tools(
+            PathBuf::from("/absent/llvm-link"),
+            Err(Error::ConfigError("no bindir here".into())),
+        );
+        let text = tool_error(
+            &mut registry,
+            "slice",
+            json!({ "from": "a", "to": "b", "emit_module": "never-written.bc" }),
+        );
+        assert!(text.contains("no bindir here"), "{text}");
+        assert!(!Path::new("never-written.bc").exists());
+    }
+
     /// `emit_module` fails before any module is read when it cannot be
     /// honoured, and never writes a module for a slice that found no path.
     #[test]
@@ -1469,7 +1497,10 @@ mod tests {
             arguments
         };
 
-        let mut artifact = one_catalog().with_llvm_link(PathBuf::from("/absent/llvm-link"));
+        let mut artifact = one_catalog().with_llvm_tools(
+            PathBuf::from("/absent/llvm-link"),
+            Ok(LlvmBindir::configured("/absent")),
+        );
         artifact.artifacts.insert(PathBuf::from("first"));
         let text = tool_error(&mut artifact, "slice", emit("a", "b"));
         assert!(text.contains("load_catalog"), "{text}");
@@ -1484,7 +1515,10 @@ mod tests {
         let text = tool_error(&mut unconfigured, "slice", emit("a", "b"));
         assert!(text.contains("llvm-link"), "{text}");
 
-        let mut configured = one_catalog().with_llvm_link(PathBuf::from("/absent/llvm-link"));
+        let mut configured = one_catalog().with_llvm_tools(
+            PathBuf::from("/absent/llvm-link"),
+            Ok(LlvmBindir::configured("/absent")),
+        );
         let text = tool_error(&mut configured, "slice", emit("b", "a"));
         assert!(
             text.contains("no path from b to a; nothing to emit"),
