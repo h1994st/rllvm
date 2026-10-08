@@ -29,6 +29,8 @@ pub fn llvm_bin(name: &str) -> PathBuf {
 /// configuration almost no user has, and the examples are exactly what is
 /// supposed to prove the documented flow still works. The fallback keeps its
 /// own coverage, from the one test that drops this key deliberately.
+///
+/// `llvm_bindir` is recorded for the same reason: `rllvm-init` writes it.
 pub fn scratch_rllvm_config(directory: &Path) -> PathBuf {
     let contents = format!(
         "llvm_config_filepath = '{}'\n\
@@ -37,6 +39,7 @@ pub fn scratch_rllvm_config(directory: &Path) -> PathBuf {
          llvm_objcopy_filepath = '{}'\n\
          llvm_ar_filepath = '{}'\n\
          llvm_link_filepath = '{}'\n\
+         llvm_bindir = '{}'\n\
          cache_dir = '{}'\n",
         llvm_bin("llvm-config").display(),
         llvm_bin("clang").display(),
@@ -44,6 +47,7 @@ pub fn scratch_rllvm_config(directory: &Path) -> PathBuf {
         llvm_bin("llvm-objcopy").display(),
         llvm_bin("llvm-ar").display(),
         llvm_bin("llvm-link").display(),
+        llvm_bin("llvm-link").parent().unwrap().display(),
         directory.join("cache").display(),
     );
     let path = directory.join("rllvm-config.toml");

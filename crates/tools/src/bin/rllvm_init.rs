@@ -15,6 +15,8 @@ use rllvm_core::{
 struct DetectedTools {
     llvm_config: PathBuf,
     llvm_version: String,
+    /// Where the LLVM tools the config does not name are looked for
+    bindir: PathBuf,
     clang: PathBuf,
     clangxx: PathBuf,
     llvm_ar: PathBuf,
@@ -132,6 +134,7 @@ fn detect_tools(llvm_prefix: Option<&Path>) -> Result<DetectedTools, Error> {
     Ok(DetectedTools {
         llvm_config,
         llvm_version,
+        bindir,
         clang,
         clangxx,
         llvm_ar,
@@ -147,12 +150,14 @@ clang_filepath = "{}"
 clangxx_filepath = "{}"
 llvm_ar_filepath = "{}"
 llvm_link_filepath = "{}"
+llvm_bindir = "{}"
 "#,
         tools.llvm_config.display(),
         tools.clang.display(),
         tools.clangxx.display(),
         tools.llvm_ar.display(),
         tools.llvm_link.display(),
+        tools.bindir.display(),
     );
 
     if let Some(llvm_objcopy) = &tools.llvm_objcopy {
@@ -188,6 +193,7 @@ fn run() -> Result<(), Error> {
     eprintln!("clang++      : {}", tools.clangxx.display());
     eprintln!("llvm-ar      : {}", tools.llvm_ar.display());
     eprintln!("llvm-link    : {}", tools.llvm_link.display());
+    eprintln!("LLVM bindir  : {}", tools.bindir.display());
     match &tools.llvm_objcopy {
         Some(llvm_objcopy) => eprintln!("llvm-objcopy : {}", llvm_objcopy.display()),
         None => eprintln!("llvm-objcopy : (not found, optional)"),

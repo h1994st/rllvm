@@ -2580,7 +2580,7 @@ fn init_accepts_prefix_and_bindir() {
     let bindir = llvm_config.parent().unwrap().to_path_buf();
     let prefix = bindir.parent().unwrap().to_path_buf();
 
-    for candidate in [prefix, bindir] {
+    for candidate in [prefix, bindir.clone()] {
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("config.toml");
         let output = Command::new(cargo_bin("rllvm-init"))
@@ -2596,7 +2596,13 @@ fn init_accepts_prefix_and_bindir() {
             "--llvm-prefix {candidate:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(target.exists(), "no config written for {candidate:?}");
+        // The bindir is recorded, so the config never asks llvm-config again.
+        let written = fs::read_to_string(&target).expect("no config written");
+        let recorded = format!("llvm_bindir = \"{}\"", bindir.display());
+        assert!(
+            written.lines().any(|line| line == recorded),
+            "{recorded} not written for {candidate:?}: {written}"
+        );
     }
 }
 

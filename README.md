@@ -510,6 +510,7 @@ and `-o` selects the file to write.
 | `llvm_ar_filepath` | Yes | Absolute path to `llvm-ar` |
 | `llvm_link_filepath` | Yes | Absolute path to `llvm-link` |
 | `llvm_objcopy_filepath` | No | Absolute path to `llvm-objcopy`; preferred for embedding, with an internal fallback |
+| `llvm_bindir` | No | Absolute path to the directory holding the LLVM tools without a key of their own (`llvm-nm`, `llvm-dis`, `llvm-extract`); `rllvm-init` records it (default: `llvm-config --bindir`) |
 | `rustc_filepath` | No | Compiler for direct Rust invocation; `RLLVM_REAL_RUSTC` overrides; defaults to `rustc` on `PATH` |
 | `bitcode_store_path` | No | Directory for bitcode files (must be absolute; created if missing) |
 | `bitcode_root` | No | Record embedded paths relative to this root (default: absolute) |
