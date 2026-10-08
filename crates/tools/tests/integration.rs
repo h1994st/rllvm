@@ -3522,6 +3522,121 @@ fn a_staticlib_allocator_shim_records_no_bitcode() {
     );
 }
 
+/// Compiles a one-function rlib through `rllvm-rustc` under a configuration
+/// whose `llvm-ar` is alone in a directory of its own, the way a wrapper or a
+/// probe around the real tool is. `llvm_config` is the configured
+/// `llvm-config`. Answers the compilation's output and the rlib's path.
+#[cfg(unix)]
+fn compile_rlib_with_llvm_ar_apart(
+    root: &Path,
+    llvm_config: &Path,
+) -> (std::process::Output, PathBuf) {
+    let apart = root.join("llvm-ar-apart");
+    fs::create_dir(&apart).unwrap();
+    let llvm_nm = find_llvm_nm().expect("llvm-nm not found");
+    let llvm_ar = apart.join("llvm-ar");
+    std::os::unix::fs::symlink(llvm_nm.with_file_name("llvm-ar"), &llvm_ar).unwrap();
+
+    let cfg = root.join("config.toml");
+    let contents: String = fs::read_to_string(shared_config_path())
+        .unwrap()
+        .lines()
+        .map(|line| {
+            if line.starts_with("llvm_ar_filepath") {
+                format!("llvm_ar_filepath = '{}'\n", llvm_ar.display())
+            } else if line.starts_with("llvm_config_filepath") {
+                format!("llvm_config_filepath = '{}'\n", llvm_config.display())
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    fs::write(&cfg, contents).unwrap();
+
+    let src = root.join("apart.rs");
+    fs::write(&src, "pub fn apart() -> u32 { 1 }\n").unwrap();
+    let output = Command::new(cargo_bin("rllvm-rustc"))
+        .env("RLLVM_CONFIG", &cfg)
+        .arg(which("rustc").unwrap())
+        .args(["--crate-name=apart", "--crate-type=lib", "--out-dir"])
+        .arg(root)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    (output, root.join("libapart.rlib"))
+}
+
+/// `llvm-nm` is not a configuration key, and `llvm-ar` may be a wrapper that
+/// lives apart from the other LLVM tools. The archive is then patched with
+/// the `llvm-nm` of the configured `llvm-config`'s bindir.
+#[test]
+#[cfg(unix)]
+fn rustc_archive_is_patched_when_llvm_ar_lives_apart_from_llvm_nm() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let llvm_config = find_llvm_config().expect("llvm-config not found");
+    let (output, rlib) = compile_rlib_with_llvm_ar_apart(&root, &llvm_config);
+    assert!(
+        output.status.success(),
+        "rlib compilation failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bitcode = root.join("apart.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(&rlib)
+        .arg("-o")
+        .arg(&bitcode)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "extraction from the rlib failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_bitcode_magic(&bitcode);
+}
+
+/// With no `llvm-nm` in either place the failure names the tool and where it
+/// was looked for, rather than reporting a bare "No such file or directory".
+#[test]
+#[cfg(unix)]
+fn rustc_archive_patching_names_a_missing_llvm_nm() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let empty_bindir = root.join("empty-bindir");
+    fs::create_dir(&empty_bindir).unwrap();
+    // An `llvm-config` whose bindir holds no tools; every other question
+    // still goes to the real one.
+    let stand_in = root.join("llvm-config");
+    fs::write(
+        &stand_in,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = --bindir ] && echo '{}' && exit 0\nexec '{}' \"$@\"\n",
+            empty_bindir.display(),
+            find_llvm_config().expect("llvm-config not found").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (output, _) = compile_rlib_with_llvm_ar_apart(&root, &stand_in);
+    assert!(
+        !output.status.success(),
+        "patching cannot succeed without llvm-nm"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        "llvm-nm",
+        &root.join("llvm-ar-apart").display().to_string(),
+        &empty_bindir.display().to_string(),
+    ] {
+        assert!(stderr.contains(expected), "{expected} not named: {stderr}");
+    }
+}
+
 fn assert_rustc_relative_output(out_dir: bool, relative_record: bool) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
