@@ -3700,6 +3700,69 @@ fn assert_rlib_records_bitcode(root: &Path, output: &std::process::Output, rlib:
     assert_bitcode_magic(&bitcode);
 }
 
+/// Without `-o`, rustc ignores an `llvm-bc` path once a crate splits into
+/// several codegen units and writes one `.rcgu.bc` per unit instead, as a
+/// non-incremental cargo build does. The recorded path must still hold the
+/// whole crate.
+#[test]
+fn rustc_split_codegen_units_still_record_the_whole_crate() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let src = root.join("split.rs");
+    fs::write(
+        &src,
+        "pub mod a { pub fn in_a(x: u32) -> u32 { x + 1 } }\n\
+         pub mod b { pub fn in_b(x: u32) -> u32 { x * 2 } }\n\
+         pub mod c { pub fn in_c(x: u64) -> u64 { x * 3 } }\n\
+         pub mod d { pub fn in_d(x: u8) -> u8 { x } }\n",
+    )
+    .unwrap();
+    let output = rllvm("rllvm-rustc")
+        .arg(which("rustc").unwrap())
+        .args(["--crate-name=split", "--crate-type=lib", "-Copt-level=0"])
+        .args(["-Ccodegen-units=16", "-Cextra-filename=-x", "--out-dir"])
+        .arg(&root)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    assert!(
+        output.status.success(),
+        "rustc wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bitcode = root.join("split.bc");
+    let output = rllvm("rllvm-get-bc")
+        .arg(root.join("libsplit-x.rlib"))
+        .arg("-o")
+        .arg(&bitcode)
+        .output()
+        .expect("Failed to run rllvm-get-bc");
+    assert!(
+        output.status.success(),
+        "extraction from the rlib failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let symbols = Command::new(find_llvm_nm().expect("llvm-nm not found"))
+        .arg("--defined-only")
+        .arg(&bitcode)
+        .output()
+        .unwrap();
+    let symbols = String::from_utf8_lossy(&symbols.stdout);
+    for function in ["in_a", "in_b", "in_c", "in_d"] {
+        assert!(symbols.contains(function), "{function} missing:\n{symbols}");
+    }
+    let leftovers: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".rcgu.bc"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "codegen-unit bitcode left behind: {leftovers:?}"
+    );
+}
+
 /// With no `llvm-nm` in the bindir the failure names the tool, the bindir, and
 /// that `llvm-config --bindir` reported it, rather than reporting a bare "No
 /// such file or directory".

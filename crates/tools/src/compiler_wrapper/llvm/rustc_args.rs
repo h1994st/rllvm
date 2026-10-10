@@ -149,6 +149,14 @@ pub(crate) fn classify(args: &[&str]) -> Option<Actions> {
     })
 }
 
+/// Whether the invocation itself asks for `llvm-bc`, before rllvm adds its own.
+pub(crate) fn emits_bitcode(args: &[&str]) -> bool {
+    flag_value(args, "--emit").is_some_and(|list| {
+        list.split(',')
+            .any(|e| e == "llvm-bc" || e.starts_with("llvm-bc="))
+    })
+}
+
 /// Where this crate's bitcode goes.
 ///
 /// Cargo never passes `-o`; it passes `--out-dir` with `--crate-name` and
@@ -363,6 +371,14 @@ mod tests {
     #[test]
     fn undeterminable_bitcode_path_is_an_error() {
         assert!(bitcode_path(&["src/lib.rs"], None).is_err());
+    }
+
+    #[test]
+    fn emits_bitcode_only_when_the_invocation_asks() {
+        assert!(emits_bitcode(&["--emit=link,llvm-bc"]));
+        assert!(emits_bitcode(&["--emit", "llvm-bc=out.bc"]));
+        assert!(!emits_bitcode(&["--emit=dep-info,metadata,link"]));
+        assert!(!emits_bitcode(&["--crate-type=lib"]));
     }
 
     #[test]

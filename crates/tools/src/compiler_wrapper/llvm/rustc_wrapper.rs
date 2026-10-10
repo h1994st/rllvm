@@ -15,6 +15,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    time::SystemTime,
 };
 
 use object::{BinaryFormat, Object, ObjectKind};
@@ -23,9 +24,15 @@ use rllvm_core::compiler_wrapper::llvm::marker;
 
 use super::{rustc_args, rustc_marker};
 use rllvm_core::{
-    compiler_wrapper::CompilerKind, config::try_rllvm_config, error::Error,
+    compiler_wrapper::CompilerKind,
+    config::try_rllvm_config,
+    error::Error,
+    merge::{MergeStrategy, merge_bitcode_files},
     utils::embed_bitcode_filepath_to_object_file,
 };
+
+/// Suffix rustc gives the per-codegen-unit bitcode it writes instead.
+const CODEGEN_UNIT_BITCODE_SUFFIX: &str = ".rcgu.bc";
 
 /// Rustc wrapper that generates LLVM bitcode alongside normal compilation.
 #[derive(Debug)]
@@ -95,9 +102,13 @@ impl RustcWrapper {
             tracing::debug!("rustc: bitcode={bitcode:?}, actions={actions:?}");
         }
 
+        let started = SystemTime::now();
         let code = self.spawn(&rewritten)?;
         if code != Some(0) {
             return Ok(code);
+        }
+        if !bitcode.exists() {
+            self.merge_codegen_units(&args, &bitcode, started)?;
         }
 
         if actions.archives || actions.object {
@@ -105,6 +116,61 @@ impl RustcWrapper {
         }
 
         Ok(Some(0))
+    }
+
+    /// Link the per-codegen-unit bitcode rustc wrote into `bitcode`.
+    ///
+    /// Without `-o`, rustc ignores an `llvm-bc` path once a crate splits into
+    /// several codegen units, and writes `<crate><extra>.<unit>.rcgu.bc` into
+    /// `--out-dir` instead. Only files written since `started` belong to this
+    /// run; they are removed once linked unless the caller asked for bitcode.
+    fn merge_codegen_units(
+        &self,
+        args: &[&str],
+        bitcode: &Path,
+        started: SystemTime,
+    ) -> Result<(), Error> {
+        let out_dir = Path::new(rustc_args::flag_value(args, "--out-dir").unwrap_or("."));
+        let prefix = format!(
+            "{}{}.",
+            self.crate_name(args)?,
+            rustc_args::codegen_value(args, "extra-filename").unwrap_or("")
+        );
+        let mut units = Vec::new();
+        for entry in fs::read_dir(out_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(&prefix)
+                && name.ends_with(CODEGEN_UNIT_BITCODE_SUFFIX)
+                && entry.metadata()?.modified()? >= started
+            {
+                units.push(entry.path());
+            }
+        }
+        if units.is_empty() {
+            return Err(Error::MissingFile(format!(
+                "rustc wrote neither {bitcode:?} nor codegen-unit bitcode in {out_dir:?}"
+            )));
+        }
+        units.sort();
+        if merge_bitcode_files(MergeStrategy::Full, &units, bitcode.to_path_buf())?
+            .is_some_and(|code| code != 0)
+        {
+            return Err(Error::ExecutionFailure(format!(
+                "llvm-link failed to join the codegen units of {bitcode:?}"
+            )));
+        }
+        tracing::debug!(
+            "rustc: linked {} codegen units into {bitcode:?}",
+            units.len()
+        );
+        if !rustc_args::emits_bitcode(args) {
+            for unit in &units {
+                fs::remove_file(unit)?;
+            }
+        }
+        Ok(())
     }
 
     /// Run rustc with the given arguments and hand back its exit code.
