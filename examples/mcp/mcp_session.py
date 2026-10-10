@@ -3,7 +3,9 @@
 Runs two full JSON-RPC-over-stdio sessions against `rllvm-query mcp`, one per
 protocol era the server supports. Each session discovers the server, lists its
 tools, loads the captured object with `inventory`, and asks `defs` where
-`helper` is defined. Invoked by check.sh with the output directory as argv[1].
+`helper` is defined -- checking that the query answer carries the aggregate
+analysis counts but not the per-module roster. Invoked by check.sh with the
+output directory as argv[1].
 """
 
 import json
@@ -62,6 +64,14 @@ def locates_helper(res):
         ):
             return True
     return False
+
+
+def analysis_is_lean(res):
+    """A query answer carries the aggregate analysis counts but drops the
+    per-module roster, which rides `load_catalog` and `list_catalogs`."""
+    envelope = json.loads(res["content"][0]["text"])
+    analysis = envelope.get("analysis", {})
+    return "analyzed" in analysis and "modules" not in analysis
 
 
 def check_legacy(libo):
@@ -125,6 +135,10 @@ def check_legacy(libo):
         sys.exit(
             f"legacy defs did not locate helper at lib.c:1: {frames.get(5)}"
         )
+    if not analysis_is_lean(result(frames, 5)):
+        sys.exit(
+            f"legacy defs answer kept the per-module roster: {frames.get(5)}"
+        )
 
     for request_id in range(1, 6):
         stray = [
@@ -138,7 +152,7 @@ def check_legacy(libo):
             )
 
     print(
-        f"  legacy (2025-06-18): {len(names)} tools, defs located helper@lib.c:1, no cache envelope"
+        f"  legacy (2025-06-18): {len(names)} tools, defs located helper@lib.c:1 (lean analysis), no cache envelope"
     )
     return versions
 
@@ -222,9 +236,13 @@ def check_modern(libo, versions):
         sys.exit(
             f"modern defs did not locate helper at lib.c:1: {frames.get(4)}"
         )
+    if not analysis_is_lean(result(frames, 4)):
+        sys.exit(
+            f"modern defs answer kept the per-module roster: {frames.get(4)}"
+        )
 
     print(
-        f"  modern ({modern_version}): cacheScope valid (public|private), defs located helper@lib.c:1"
+        f"  modern ({modern_version}): cacheScope valid (public|private), defs located helper@lib.c:1 (lean analysis)"
     )
 
 

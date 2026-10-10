@@ -17,7 +17,9 @@ It captures `lib.c`, then `mcp_session.py` runs two full sessions over stdio —
 one per protocol era the server supports. Each session discovers the server,
 lists its tools, loads the captured module with `inventory`, and asks `defs`
 where `helper` is defined. The check confirms the answer (`lib.c:1`), that the
-modern session's cache envelope is well formed (`cacheScope` is `public` or
+query answer carries the aggregate analysis counts but not the per-module
+roster (which rides `load_catalog` and `list_catalogs`), that the modern
+session's cache envelope is well formed (`cacheScope` is `public` or
 `private`), and that stdout carried protocol frames and nothing else.
 
 ## What a session looks like
