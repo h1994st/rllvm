@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/h1994st/rllvm/compare/rllvm-v0.7.0...rllvm-v0.7.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* link split codegen-unit bitcode from rustc ([#318](https://github.com/h1994st/rllvm/issues/318)) ([2628884](https://github.com/h1994st/rllvm/commit/26288846c098cf892b50cf8da615cbffc7eb914c))
+
 ## [0.7.0](https://github.com/h1994st/rllvm/compare/rllvm-v0.6.5...rllvm-v0.7.0) (2026-10-08)
 
 
