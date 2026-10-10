@@ -187,6 +187,7 @@ describe('tool results', () => {
     expect((await state($)).groups).toEqual([
       {
         field: { record: 'ops', offset: 8 },
+        slot: null,
         field_name: 'on_event',
         signature: 'void (i32)',
         sites: [{ site: DISPATCH_SITE, location: 'ops.c:10' }],
@@ -340,6 +341,28 @@ describe('pane', () => {
     )
     // The field edge has no group of its own here, so it is listed apart.
     expect((await ui.find({ key: 'group-ops@8' }))?.text).toBe('ops@8')
+  })
+
+  test('a_slot_group_lists_the_slot_and_its_slot_edges', async ($, on) => {
+    const RUN = { module_id: MODULE, symbol: 'run' }
+    const slot = { kind: 'param', function: RUN, index: 0 }
+    const bySlot = structuredClone(CANDIDATES) as { results: Record<string, unknown>[] }
+    delete bySlot.results[0]!.field
+    delete bySlot.results[0]!.field_name
+    bySlot.results[0]!.slot = slot
+    const summary = structuredClone(SUMMARY) as { edges: Record<string, unknown>[] }
+    summary.edges = [{ ...summary.edges[0]!, key: { to: HANDLER, via_slot: slot } }]
+    const answer = answering(on, bySlot)
+    await $.tool.call({ tool: `${SERVER}resolution_candidates` })
+    answer(summary)
+    await $.tool.call({ tool: `${SERVER}list_overlay` })
+
+    const ui = await mountPane($, 'terminal')
+    const id = `param:${MODULE}:run:0`
+    expect((await ui.find({ key: `group-${id}` }))?.text).toMatch(/^param 0 of run/)
+    expect((await ui.find({ key: `candidate-${id}-handler` }))?.text).toMatch(
+      /^→ handler +high ✓$/,
+    )
   })
 
   test('a_short_pane_shows_what_fits_and_how_many_more', PROBING, async ($, on) => {
