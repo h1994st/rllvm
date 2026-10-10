@@ -12,7 +12,7 @@ use owo_colors::OwoColorize;
 use crate::{
     EdgeKey, PathStep, QueryResult, QueryResults,
     bind::BindingStatus,
-    facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, SourceLocation},
+    facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, Slot, SourceLocation},
     overlay::verdict_label,
 };
 
@@ -235,6 +235,19 @@ fn field_note(word: &str, evidence: Option<&FieldEvidence>, ctx: Ctx) -> String 
     )
 }
 
+/// A slot as a reader names it: `global xmlGenericError`, `param 1 of run`.
+fn slot_name(symbols: &BTreeMap<String, String>, slot: &Slot, ctx: Ctx) -> String {
+    match slot {
+        Slot::Global { name, .. } => format!("global {name}"),
+        Slot::Param { function, index } => {
+            format!("param {index} of {}", name(symbols, &function.symbol, ctx))
+        }
+        Slot::Returned { function } => {
+            format!("*{}()", name(symbols, &function.symbol, ctx))
+        }
+    }
+}
+
 /// One call target, named by kind so an indirect or intrinsic site never
 /// reads like a resolved call. The kind word is coloured by how certain it
 /// is, and still printed, so the colour is never the only signal.
@@ -249,10 +262,17 @@ fn call_target(symbols: &BTreeMap<String, String>, target: &CallTarget, ctx: Ctx
             signature,
             llvm_target_bound,
             via_field,
+            via_slot,
         } => {
             let kind = paint("indirect", ctx.color, Paint::Uncertain);
             let signature = paint(signature, ctx.color, Paint::Muted);
-            let field = field_note("via", via_field.as_ref(), ctx);
+            let field = match via_slot {
+                Some(slot) => format!(
+                    " via {}",
+                    paint(&slot_name(symbols, slot, ctx), ctx.color, Paint::Symbol)
+                ),
+                None => field_note("via", via_field.as_ref(), ctx),
+            };
             match llvm_target_bound {
                 Some(bound) => format!(
                     "{kind}  {signature}  {} {}{field}",
@@ -944,10 +964,14 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                         provenance,
                         verdict,
                     } => {
-                        let via = match key {
+                        let via = match &**key {
                             EdgeKey::Field { via_field, .. } => format!(
                                 " via {}",
                                 paint(&via_field.to_string(), ctx.color, Paint::Symbol)
+                            ),
+                            EdgeKey::Slot { via_slot, .. } => format!(
+                                " via {}",
+                                paint(&slot_name(symbols, via_slot, ctx), ctx.color, Paint::Symbol)
                             ),
                             EdgeKey::Site { .. } => String::new(),
                         };
@@ -1008,7 +1032,10 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                             .map(|name| format!(" ({name})"))
                             .unwrap_or_default()
                     ),
-                    None => format!("no field, {}", group.signature),
+                    None => match &group.slot {
+                        Some(slot) => slot_name(symbols, slot, ctx),
+                        None => format!("no field, {}", group.signature),
+                    },
                 };
                 let hint = if group.single_candidate {
                     format!(" {}", paint("[single]", ctx.color, Paint::Uncertain))
@@ -1371,6 +1398,7 @@ mod tests {
                         record: "ops".into(),
                         offset: 8,
                     }),
+                    via_slot: None,
                     site: None,
                     to: TargetSpec::Symbol("h3".into()),
                     confidence: Confidence::High,
@@ -1486,6 +1514,7 @@ mod tests {
             in_global: Some("table".into()),
             location: Some(source_location("t.c", 9)),
             kind: UseKind::GlobalInitializer,
+            into_slot: None,
             field: Some(evidence.clone()),
         }];
         if second_candidate {
@@ -1495,6 +1524,7 @@ mod tests {
                 in_global: None,
                 location: Some(source_location("t.c", 12)),
                 kind: UseKind::StoredToMemory,
+                into_slot: None,
                 field: Some(evidence),
             });
         }
@@ -1668,6 +1698,7 @@ mod tests {
             in_global: Some("table".into()),
             location: None,
             kind: UseKind::GlobalInitializer,
+            into_slot: None,
             field: None,
         }];
         let session = Session::new(base, Vec::new());
@@ -1740,6 +1771,7 @@ mod tests {
             in_global: None,
             location: Some(source_location("t.c", 3)),
             kind: UseKind::StoredToMemory,
+            into_slot: None,
             field: Some(ops_field(Some("on_event"))),
         }];
         let session = Session::new(base, Vec::new());

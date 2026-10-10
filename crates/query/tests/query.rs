@@ -3409,8 +3409,8 @@ fn a_mistyped_location_is_rejected_before_the_catalog_is_analysed() {
 /// record the new pair here, or old cache entries will be served as if they
 /// were current.
 const FACTS_GUARD: (u32, &str) = (
-    3,
-    "32ff5d8f633b74d546a2dbcb727969112ab415a0f45d7c721384f42394cd846b",
+    4,
+    "b8daeb5d396dc7f4fe653ecaa90052bfe67dfe1c16d080cd9ead4ba32e887211",
 );
 
 /// Extracts the neutral facts from `fixtures/facts-guard.ll`: indirect calls,
@@ -4156,6 +4156,192 @@ fn resolution_candidates_join_a_dispatch_to_its_stores() {
     assert!(candidates.contains(&"h1"), "{candidates:?}");
     assert!(candidates.contains(&"h3"), "{candidates:?}");
     assert!(!candidates.contains(&"h2"), "{candidates:?}");
+}
+
+/// Callbacks kept in a global, a parameter, an accessor's location and a
+/// field a setter fills, assigned from another module. The accessor's global
+/// also has a default of its own, which only aliasing the two reaches. `unrelated` has the
+/// same type and its address is taken, but it never reaches a call.
+const SLOT_SOURCES: [(&str, &str); 2] = [
+    (
+        "hooks.c",
+        r#"
+typedef void (*hook_t)(int);
+static void default_hook(int n) {}
+static void unrelated(int n) {}
+hook_t decoy_store = unrelated;
+static hook_t hook = default_hook;
+void set_hook(hook_t h) { hook = h; }
+void fire(void) { hook(1); }
+void run(hook_t cb) { cb(2); }
+void run_twice(hook_t cb) { run(cb); }
+static void state_default(int n) {}
+static hook_t state_hook = state_default;
+hook_t *hook_ref(void) { return &state_hook; }
+void set_ref(hook_t h) { *hook_ref() = h; }
+void fire_ref(void) { (*hook_ref())(3); }
+struct ops { hook_t on; };
+void set_on(struct ops *o, hook_t h) { o->on = h; }
+void fire_on(struct ops *o) { o->on(4); }
+"#,
+    ),
+    (
+        "main.c",
+        r#"
+typedef void (*hook_t)(int);
+struct ops { hook_t on; };
+void set_hook(hook_t);
+void run(hook_t);
+void run_twice(hook_t);
+void set_ref(hook_t);
+void set_on(struct ops *, hook_t);
+static void custom(int n) {}
+static void on_run(int n) {}
+static void on_twice(int n) {}
+static void via_ref(int n) {}
+static void on_setter(int n) {}
+struct ops g;
+int main(void) {
+  set_hook(custom);
+  run(on_run);
+  run_twice(on_twice);
+  set_ref(via_ref);
+  set_on(&g, on_setter);
+  return 0;
+}
+"#,
+    ),
+];
+
+fn slot_catalog(scratch: &tempfile::TempDir) -> PathBuf {
+    let modules: Vec<PathBuf> = SLOT_SOURCES
+        .iter()
+        .map(|(name, source)| compile_bitcode(scratch, name, source))
+        .collect();
+    plain_module_catalog(scratch, &modules)
+}
+
+/// The one candidate group whose sites are all in `function`.
+fn group_in<'v>(groups: &'v [serde_json::Value], function: &str) -> &'v serde_json::Value {
+    let matching: Vec<_> = groups
+        .iter()
+        .filter(|group| {
+            group["sites"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|site| site["site"]["function"]["symbol"] == function)
+        })
+        .collect();
+    assert_eq!(matching.len(), 1, "one group for {function}: {groups:?}");
+    matching[0]
+}
+
+fn candidate_symbols(group: &serde_json::Value) -> BTreeSet<String> {
+    group["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| {
+            candidate["function"]["symbol"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[test]
+fn resolution_candidates_follow_callbacks_through_globals_parameters_and_accessors() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = slot_catalog(&scratch);
+    let value = query_json(&scratch, &catalog, &["resolution-candidates"]);
+    let groups = value["results"].as_array().unwrap();
+
+    for (function, kind, expected) in [
+        ("fire", "global", &["custom", "default_hook"][..]),
+        ("run", "param", &["on_run", "on_twice"][..]),
+        ("fire_ref", "returned", &["state_default", "via_ref"][..]),
+    ] {
+        let group = group_in(groups, function);
+        assert_eq!(group["slot"]["kind"], kind, "{function}: {group}");
+        assert_eq!(
+            candidate_symbols(group),
+            expected.iter().map(|symbol| symbol.to_string()).collect(),
+            "{function}"
+        );
+    }
+
+    let field = group_in(groups, "fire_on");
+    assert_eq!(
+        field["field"],
+        serde_json::json!({ "record": "ops", "offset": 0 })
+    );
+    assert_eq!(
+        candidate_symbols(field),
+        BTreeSet::from(["on_setter".to_string()]),
+        "a setter's parameter reaches the field it stores into"
+    );
+}
+
+#[test]
+fn an_overlay_slot_edge_covers_every_site_reading_the_slot() {
+    let scratch = tempfile::tempdir().unwrap();
+    let catalog = slot_catalog(&scratch);
+    let value = query_json(&scratch, &catalog, &["resolution-candidates"]);
+    let slot = group_in(value["results"].as_array().unwrap(), "run")["slot"].clone();
+
+    let add = serde_json::json!({
+        "op": "add",
+        "via_slot": slot,
+        "to": "on_run",
+        "confidence": "high",
+        "provenance": ["main.c:17: run(on_run)"],
+    });
+    let output = query_stdin(
+        &scratch,
+        &catalog,
+        &["overlay", "record"],
+        &format!("{add}\n"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let reach = query_json(
+        &scratch,
+        &catalog,
+        &["reach", "main", "on_run", "--include-overlay"],
+    );
+    let steps = reach["results"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the slot edge carries the path: {reach}"));
+    assert!(
+        steps.iter().any(|step| step["kind"] == "agent"),
+        "the step through the slot is labeled agent: {reach}"
+    );
+
+    let unread = serde_json::json!({
+        "op": "add",
+        "via_slot": { "kind": "global", "name": "decoy_store" },
+        "to": "unrelated",
+        "confidence": "low",
+        "provenance": ["hooks.c:5: hook_t decoy_store = unrelated"],
+    });
+    let output = query_stdin(
+        &scratch,
+        &catalog,
+        &["overlay", "record"],
+        &format!("{unread}\n"),
+    );
+    assert!(!output.status.success(), "no site reads decoy_store");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("decoy_store"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// A walk over an overlay `--overlay` names reads that file: a missing one

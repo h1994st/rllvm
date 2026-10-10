@@ -30,8 +30,8 @@ use super::{
     bind::{BindingStatus, SymbolBinding},
     extract::demangle,
     facts::{
-        CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, ModuleReport,
-        ProgramFacts, SourceLocation, UseFact,
+        CallSiteFact, CallSiteId, CallTarget, FieldFlow, FieldRef, FunctionFact, FunctionId,
+        ModuleReport, ProgramFacts, ReturnedAddress, Slot, SlotFlow, SourceLocation, UseFact,
     },
 };
 
@@ -132,7 +132,7 @@ pub enum PathStep {
         /// The call's source location, so a reader can check the claim.
         #[serde(skip_serializing_if = "Option::is_none")]
         location: Option<SourceLocation>,
-        key: EdgeKey,
+        key: Box<EdgeKey>,
         confidence: Confidence,
         /// Why the agent claimed the edge, quoted from the record.
         provenance: Vec<String>,
@@ -189,6 +189,9 @@ pub struct Session {
     /// Unresolved indirect sites (no LLVM bound) keyed by the field they
     /// dispatch through: the sites an overlay field edge attaches to.
     unresolved_by_field: HashMap<FieldRef, Vec<usize>>,
+    /// Keyed by the canonical slot, so a site reading a parameter through a
+    /// declaration meets the definition's parameter.
+    unresolved_by_slot: HashMap<Slot, Vec<usize>>,
     /// Bindings keyed by symbol, for resolving a declaration forward to its
     /// candidates.
     bindings_by_symbol: HashMap<String, Vec<usize>>,
@@ -323,7 +326,7 @@ impl Session {
             }
         }
 
-        Session {
+        let mut session = Session {
             facts,
             bindings,
             by_name,
@@ -332,6 +335,7 @@ impl Session {
             callers_by_function,
             site_index,
             unresolved_by_field,
+            unresolved_by_slot: HashMap::new(),
             bindings_by_symbol,
             bindings_by_candidate,
             aliases_by_target,
@@ -339,7 +343,26 @@ impl Session {
             demangled,
             by_demangled,
             cache_report: None,
+        };
+        // Canonical slots need the bindings, so they are keyed once the
+        // session can resolve them.
+        let mut unresolved_by_slot: HashMap<Slot, Vec<usize>> = HashMap::new();
+        for (idx, site) in session.facts.call_sites.iter().enumerate() {
+            if let CallTarget::Indirect {
+                llvm_target_bound: None,
+                via_field: None,
+                via_slot: Some(slot),
+                ..
+            } = &site.target
+            {
+                unresolved_by_slot
+                    .entry(session.canonical_slot(slot))
+                    .or_default()
+                    .push(idx);
+            }
         }
+        session.unresolved_by_slot = unresolved_by_slot;
+        session
     }
 
     /// Records how the facts cache served the load that built this session.
@@ -444,6 +467,18 @@ impl Session {
     /// `reach`/`closure`; exposed only so an opt-in `indirect-targets`
     /// answer can report it. Not public API: internal plumbing, called by
     /// `crate::run`.
+    pub(crate) fn slot_flows(&self) -> &[SlotFlow] {
+        &self.facts.slot_flows
+    }
+
+    pub(crate) fn field_flows(&self) -> &[FieldFlow] {
+        &self.facts.field_flows
+    }
+
+    pub(crate) fn returned_addresses(&self) -> &[ReturnedAddress] {
+        &self.facts.returned_addresses
+    }
+
     pub(crate) fn uses(&self) -> &[UseFact] {
         &self.facts.uses
     }
@@ -729,6 +764,55 @@ impl Session {
             .get(id)
             .map(|&idx| self.facts.functions[idx].is_definition)
             .unwrap_or(false)
+    }
+
+    /// `slot` with its function bound to the definition it stands for, so the
+    /// same parameter or accessor read through a declaration in one module
+    /// and defined in another is one slot.
+    pub(crate) fn canonical_slot(&self, slot: &Slot) -> Slot {
+        let bound = |function: &FunctionId| {
+            self.bound_definition(function)
+                .unwrap_or_else(|| function.clone())
+        };
+        match slot {
+            Slot::Param { function, index } => Slot::Param {
+                function: bound(function),
+                index: *index,
+            },
+            Slot::Returned { function } => Slot::Returned {
+                function: bound(function),
+            },
+            Slot::Global { .. } => slot.clone(),
+        }
+    }
+
+    /// Unresolved indirect call sites that read their callee from `slot`, in
+    /// any spelling of it. Like `unresolved_sites_through`, the sites an
+    /// overlay slot edge attaches to.
+    pub(crate) fn unresolved_sites_via(&self, slot: &Slot) -> Vec<&CallSiteFact> {
+        self.unresolved_by_slot
+            .get(&self.canonical_slot(slot))
+            .into_iter()
+            .flatten()
+            .map(|&idx| &self.facts.call_sites[idx])
+            .collect()
+    }
+
+    /// The definition `id` stands for: itself, or the one definition its
+    /// declaration binds to.
+    pub(crate) fn bound_definition(&self, id: &FunctionId) -> Option<FunctionId> {
+        if self.is_definition(id) {
+            return Some(id.clone());
+        }
+        let binding = self.binding_for_declaration(id)?;
+        (binding.status == BindingStatus::Unique)
+            .then(|| {
+                binding
+                    .candidates
+                    .first()
+                    .map(|candidate| candidate.function.clone())
+            })
+            .flatten()
     }
 
     fn binding_for_declaration(&self, id: &FunctionId) -> Option<&SymbolBinding> {

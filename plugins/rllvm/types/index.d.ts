@@ -8,6 +8,15 @@ export type OverlayFunction = { module_id: string; symbol: string }
 /** A struct field by record name and byte offset (`ops@8`). */
 export type OverlayField = { record: string; offset: number }
 
+/**
+ * Where a callback is kept on its way to a call: a global, a function's
+ * parameter, or the location an accessor returns the address of.
+ */
+export type OverlaySlot =
+  | { kind: 'global'; name: string; module_id: string | null }
+  | { kind: 'param'; function: OverlayFunction; index: number }
+  | { kind: 'returned'; function: OverlayFunction }
+
 /** One unresolved indirect call site. */
 export type OverlaySite = {
   function: OverlayFunction
@@ -18,9 +27,10 @@ export type OverlaySite = {
 /** A site and where it is in the source, when the build recorded that. */
 export type OverlaySiteAt = { site: OverlaySite; location: string | null }
 
-/** One `resolution_candidates` group: a field (or a set of sites) and the functions it may call. */
+/** One `resolution_candidates` group: a field, a slot (or a set of sites) and the functions it may call. */
 export type OverlayGroup = {
   field: OverlayField | null
+  slot: OverlaySlot | null
   field_name: string | null
   signature: string
   sites: OverlaySiteAt[]
@@ -28,9 +38,11 @@ export type OverlayGroup = {
   single_candidate: boolean
 }
 
-/** An overlay edge's identity: a field or a single site, and the function it calls. */
+/** An overlay edge's identity: a field, a slot or a single site, and the function it calls. */
 export type OverlayEdgeKey =
-  { via_field: OverlayField; to: OverlayFunction } | { site: OverlaySite; to: OverlayFunction }
+  | { via_field: OverlayField; to: OverlayFunction }
+  | { via_slot: OverlaySlot; to: OverlayFunction }
+  | { site: OverlaySite; to: OverlayFunction }
 
 export type OverlayConfidence = 'low' | 'medium' | 'high'
 

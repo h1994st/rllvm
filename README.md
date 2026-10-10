@@ -367,7 +367,7 @@ rllvm-query --catalog catalog.json closure parse_frame in      # everything that
 rllvm-query --catalog catalog.json externals                   # unbound symbols
 rllvm-query --catalog catalog.json ffi-exports                 # Rust functions C can call
 rllvm-query --catalog catalog.json indirect-targets parser.c:8 # targets of an indirect call
-rllvm-query --catalog catalog.json resolution-candidates       # indirect calls grouped by field, with candidates
+rllvm-query --catalog catalog.json resolution-candidates       # indirect calls grouped by field or slot, with candidates
 ```
 
 An indirect call site, and an address stored or placed in a table, names the
@@ -432,8 +432,10 @@ rllvm-query --catalog catalog.json overlay list        # edges, verdicts, sites 
 rllvm-query --catalog catalog.json overlay compact     # rewrite as the current edges
 ```
 
-An `add` names a field (`via_field`, every unresolved site through it) or one
-`site`, and attaches only where LLVM left the call unbounded. `verify` and
+An `add` names a field (`via_field`) or a slot (`via_slot`: the global,
+parameter or accessor result a call reads its callee from), covering every
+unresolved site through it, or one `site`, and attaches only where LLVM left
+the call unbounded. `verify` and
 `retract` name an edge's key. The file is bound to one build: after a rebuild
 it refuses to load, naming both fingerprints, as it does when written by an
 rllvm-query that numbers call sites differently, and a write refuses if
