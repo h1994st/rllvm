@@ -193,7 +193,7 @@ pub enum QueryCommand {
         /// `file:line` location, e.g. `t.c:4`
         at: String,
     },
-    /// Unresolved indirect call sites grouped by the record field they dispatch through, with the functions stored into that field. Candidates, not edges.
+    /// Unresolved indirect call sites grouped by the field, global, parameter or accessor they call through, with the functions whose addresses flow there. Candidates, not edges.
     ResolutionCandidates,
     /// Serve the twelve queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
     Mcp,

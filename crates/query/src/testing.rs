@@ -104,6 +104,7 @@ pub(crate) fn indirect_call(
             signature: "i32 (i32, i32)".into(),
             llvm_target_bound,
             via_field: None,
+            via_slot: None,
         },
     }
 }
@@ -172,6 +173,9 @@ pub(crate) fn facts(functions: Vec<FunctionFact>, call_sites: Vec<CallSiteFact>)
         functions,
         call_sites,
         uses: Vec::new(),
+        slot_flows: Vec::new(),
+        field_flows: Vec::new(),
+        returned_addresses: Vec::new(),
         scope: CatalogScope {
             kind: "test".into(),
             total_entries: 1,
@@ -277,6 +281,7 @@ pub(crate) fn session_with_address_taken_function() -> Session {
             in_global: None,
             location: None,
             kind: UseKind::StoredToMemory,
+            into_slot: None,
             field: None,
         })
         .collect();

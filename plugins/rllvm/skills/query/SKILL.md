@@ -42,7 +42,7 @@ When a warning about the facts cache appears, offer `rllvm-query cache clear
 | Where is X's address taken? | `uses` |
 | Who can call X through a pointer? | `uses` for address-taken sites, then `indirect_targets` at each |
 | What can this indirect call reach? | `indirect_targets` at the call site (`heuristics: true` adds the address-taken inventory) |
-| Which functions could an unresolved indirect call reach, grouped by the record field it dispatches through? | `resolution_candidates` (`resolution-candidates`): candidates, never edges; no walk follows them |
+| Which functions could an unresolved indirect call reach, grouped by the record field it dispatches through or the slot it reads its callee from? | `resolution_candidates` (`resolution-candidates`): candidates, never edges; no walk follows them |
 | Can A reach B — for example, is a vulnerable function reachable? | `reach`; if it finds no path, `closure` to see where the search stopped |
 | Every function on some path from A to B, and the edges among them | `slice`; `emit_module` (`--emit-module OUT.bc`) also writes their definitions as one module |
 | Everything that reaches X, or that X reaches | `closure` with `direction` `in` or `out` |
@@ -66,8 +66,9 @@ in the call-graph overlay. The overlay is a file beside the catalog,
 changed. Records are the same over MCP and the command line:
 
 - `{"op":"add","via_field":{"record":"ops","offset":8},"to":"h3","confidence":"high","provenance":["init: o->handler = h3"]}`
-  attaches to every unresolved site through `ops@8`; `"site": <call site
-  id>` instead names one. `to` is an exact symbol naming one definition
+  attaches to every unresolved site through `ops@8`; `"via_slot": <a
+  group's slot>` instead covers every unresolved site reading that slot,
+  and `"site": <call site id>` names one. `to` is an exact symbol naming one definition
   (ODR copies count as one), or `{"module_id", "symbol"}`. `provenance` is
   required.
 - `{"op":"verify","edge":<key>,"tool":...,"verdict":"confirmed|refuted|inconclusive"}`
@@ -180,6 +181,12 @@ Report what the answer supports, and say what it does not:
   pointer is loaded from or stored into. No field means the IR proved none,
   not that there is none. `basis` says which IR evidence spoke; the member
   `name`, from debug info, is display only.
+- **So is a slot.** An indirect site's `via_slot` names the one location its
+  callee is read from: a `global`, a function's `param`, or the location an
+  accessor `returned` the address of. A slot group's candidates are the
+  functions found flowing into it through stores, arguments and accessors in
+  the captured program; a path the facts do not follow, such as `memcpy` or
+  pointer arithmetic, can add more.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.

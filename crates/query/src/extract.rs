@@ -135,6 +135,9 @@ pub struct ModuleFacts {
     pub functions: Vec<FunctionFact>,
     pub call_sites: Vec<CallSiteFact>,
     pub uses: Vec<UseFact>,
+    pub slot_flows: Vec<SlotFlow>,
+    pub field_flows: Vec<FieldFlow>,
+    pub returned_addresses: Vec<ReturnedAddress>,
     /// Quoted from `!llvm.ident`, in order.
     pub producers: Vec<String>,
     /// Non-fatal problems observed while extracting. Surfaced in the
@@ -168,18 +171,30 @@ impl ModuleFacts {
             }
             resolve(&mut function.location);
         }
+        let stamp_slot = |slot: &mut Slot| match slot {
+            Slot::Global {
+                module_id: Some(id),
+                ..
+            } => *id = module_id.to_string(),
+            Slot::Global {
+                module_id: None, ..
+            } => {}
+            Slot::Param { function, .. } | Slot::Returned { function } => stamp(function),
+        };
         for site in &mut self.call_sites {
             stamp(&mut site.id.function);
             resolve(&mut site.location);
             match &mut site.target {
                 CallTarget::Direct { callee } => stamp(callee),
                 CallTarget::Indirect {
-                    llvm_target_bound: Some(bound),
+                    llvm_target_bound,
+                    via_slot,
                     ..
-                } => bound.iter_mut().for_each(stamp),
-                CallTarget::Indirect { .. }
-                | CallTarget::Intrinsic { .. }
-                | CallTarget::InlineAsm => {}
+                } => {
+                    llvm_target_bound.iter_mut().flatten().for_each(stamp);
+                    via_slot.iter_mut().for_each(stamp_slot);
+                }
+                CallTarget::Intrinsic { .. } | CallTarget::InlineAsm => {}
             }
         }
         for use_fact in &mut self.uses {
@@ -187,7 +202,19 @@ impl ModuleFacts {
             if let Some(function) = &mut use_fact.in_function {
                 stamp(function);
             }
+            use_fact.into_slot.iter_mut().for_each(stamp_slot);
             resolve(&mut use_fact.location);
+        }
+        for flow in &mut self.slot_flows {
+            stamp_slot(&mut flow.from);
+            stamp_slot(&mut flow.into);
+        }
+        for flow in &mut self.field_flows {
+            stamp_slot(&mut flow.from);
+        }
+        for returned in &mut self.returned_addresses {
+            stamp(&mut returned.function);
+            returned.global.iter_mut().for_each(stamp_slot);
         }
     }
 }
@@ -816,6 +843,12 @@ unsafe fn call_target(
             return CallTarget::InlineAsm;
         }
     }
+    let (via_field, via_slot) = if called.is_null() {
+        (None, None)
+    } else {
+        // SAFETY: `called` is a live value in the module `fields` reads.
+        unsafe { trace_source(called, module_id, Some(fields)) }
+    };
     CallTarget::Indirect {
         // SAFETY: the caller guarantees a call or invoke, and
         // `LLVMPrintTypeToString` hands over the string it returns.
@@ -828,9 +861,8 @@ unsafe fn call_target(
         // kind ID. A site CVP could not bound stays `None` rather than
         // claiming a bound nothing established.
         llvm_target_bound: unsafe { indirect_target_bound(instruction, callees_kind, module_id) },
-        // SAFETY: `called` is null or a live value in the module `fields`
-        // reads.
-        via_field: unsafe { fields.loaded_field(called) },
+        via_field,
+        via_slot,
     }
 }
 
@@ -855,6 +887,323 @@ unsafe fn enclosing_function(instruction: LLVMValueRef, module_id: &str) -> Opti
         // SAFETY: `function` is the live function owning that block.
         symbol: unsafe { value_name(function) },
     })
+}
+
+/// How many loads a trace follows back from a called pointer before it gives
+/// up: each `-O0` stack slot costs one.
+const MAX_SLOT_TRACE_STEPS: usize = 8;
+
+/// `value` without the pointer casts around it.
+///
+/// # Safety
+/// `value` must be a live value.
+unsafe fn strip_pointer_casts(mut value: LLVMValueRef) -> LLVMValueRef {
+    loop {
+        // SAFETY: `value` is live; the opcode is read only from a constant
+        // expression, as that accessor requires.
+        let is_cast = unsafe {
+            !LLVMIsABitCastInst(value).is_null()
+                || !LLVMIsAAddrSpaceCastInst(value).is_null()
+                || (!LLVMIsAConstantExpr(value).is_null()
+                    && matches!(
+                        LLVMGetConstOpcode(value),
+                        LLVMOpcode::LLVMBitCast | LLVMOpcode::LLVMAddrSpaceCast
+                    ))
+        };
+        if !is_cast {
+            return value;
+        }
+        // SAFETY: a cast has its source as operand 0.
+        value = unsafe { LLVMGetOperand(value, 0) };
+    }
+}
+
+/// The slot naming a global variable.
+///
+/// # Safety
+/// `global` must be a live global variable.
+unsafe fn global_slot(global: LLVMValueRef, module_id: &str) -> Slot {
+    // SAFETY: the caller guarantees a live global value.
+    let local = matches!(
+        unsafe { LLVMGetLinkage(global) },
+        LLVMLinkage::LLVMInternalLinkage | LLVMLinkage::LLVMPrivateLinkage
+    );
+    Slot::Global {
+        module_id: local.then(|| module_id.to_string()),
+        // SAFETY: as above.
+        name: unsafe { value_name(global) },
+    }
+}
+
+/// The slot naming a parameter.
+///
+/// # Safety
+/// `argument` must be a live function argument.
+unsafe fn param_slot(argument: LLVMValueRef, module_id: &str) -> Option<Slot> {
+    // SAFETY: the caller guarantees an argument, whose parent is a live
+    // function; every index asked for is below its parameter count.
+    unsafe {
+        let function = LLVMGetParamParent(argument);
+        let index =
+            (0..LLVMCountParams(function)).find(|&i| LLVMGetParam(function, i) == argument)?;
+        Some(Slot::Param {
+            function: FunctionId {
+                module_id: module_id.to_string(),
+                symbol: value_name(function),
+            },
+            index,
+        })
+    }
+}
+
+/// Whether `user` is a lifetime marker, which reads no value.
+///
+/// # Safety
+/// `user` must be a live value.
+unsafe fn is_lifetime_marker(user: LLVMValueRef) -> bool {
+    // SAFETY: the called value is read only from a call.
+    unsafe {
+        if LLVMIsACallInst(user).is_null() {
+            return false;
+        }
+        let called = LLVMGetCalledValue(user);
+        !called.is_null()
+            && !LLVMIsAFunction(called).is_null()
+            && value_name(called).starts_with("llvm.lifetime.")
+    }
+}
+
+/// Every value stored into a stack slot whose address goes nowhere but loads
+/// and those stores: how clang keeps a parameter, a local pointer variable or
+/// a return value at `-O0`. `None` when the address escapes.
+///
+/// # Safety
+/// `alloca` must be a live `alloca` instruction.
+unsafe fn stored_values(alloca: LLVMValueRef) -> Option<Vec<LLVMValueRef>> {
+    let mut stored = Vec::new();
+    // SAFETY: `alloca` is live; each use and user read here belongs to it.
+    unsafe {
+        let mut current = LLVMGetFirstUse(alloca);
+        while !current.is_null() {
+            let user = LLVMGetUser(current);
+            if !LLVMIsAStoreInst(user).is_null() {
+                if LLVMGetOperand(user, 1) != alloca {
+                    return None;
+                }
+                stored.push(LLVMGetOperand(user, 0));
+            } else if LLVMIsALoadInst(user).is_null() && !is_lifetime_marker(user) {
+                return None;
+            }
+            current = LLVMGetNextUse(current);
+        }
+    }
+    Some(stored)
+}
+
+/// The one value stored into a stack slot, as `stored_values` reads it.
+///
+/// # Safety
+/// `alloca` must be a live `alloca` instruction.
+unsafe fn sole_stored_value(alloca: LLVMValueRef) -> Option<LLVMValueRef> {
+    // SAFETY: the caller's guarantee, passed through.
+    match unsafe { stored_values(alloca) }?.as_slice() {
+        [value] => Some(*value),
+        _ => None,
+    }
+}
+
+/// The function a direct call calls, when it is not an intrinsic.
+///
+/// # Safety
+/// `value` must be a live value.
+unsafe fn direct_callee(value: LLVMValueRef, module_id: &str) -> Option<FunctionId> {
+    // SAFETY: the called value is read only from a call or invoke.
+    unsafe {
+        if LLVMIsACallInst(value).is_null() && LLVMIsAInvokeInst(value).is_null() {
+            return None;
+        }
+        let called = LLVMGetCalledValue(value);
+        if called.is_null() || LLVMIsAFunction(called).is_null() {
+            return None;
+        }
+        let symbol = value_name(called);
+        (!symbol.starts_with("llvm.")).then(|| FunctionId {
+            module_id: module_id.to_string(),
+            symbol,
+        })
+    }
+}
+
+/// The slot a pointer operand addresses directly: a global, or the location
+/// a direct call returns the address of.
+///
+/// # Safety
+/// `pointer` must be a live value.
+unsafe fn addressed_slot(pointer: LLVMValueRef, module_id: &str) -> Option<Slot> {
+    // SAFETY: the caller's guarantee; each accessor is reached only for the
+    // kind of value it requires.
+    unsafe {
+        let pointer = strip_pointer_casts(pointer);
+        if !LLVMIsAGlobalVariable(pointer).is_null() {
+            return Some(global_slot(pointer, module_id));
+        }
+        direct_callee(pointer, module_id).map(|function| Slot::Returned { function })
+    }
+}
+
+/// Where `value` was read from, followed back through `-O0` stack slots: a
+/// record field (only with `fields`), a global, or a parameter. At most one
+/// is set; a field wins because it is the narrower evidence.
+///
+/// # Safety
+/// `value` must be a live value, in the module `fields` reads if given.
+unsafe fn trace_source(
+    value: LLVMValueRef,
+    module_id: &str,
+    fields: Option<&FieldReader>,
+) -> (Option<FieldEvidence>, Option<Slot>) {
+    // SAFETY: every value visited is an operand of a live one.
+    unsafe {
+        let mut value = strip_pointer_casts(value);
+        for _ in 0..MAX_SLOT_TRACE_STEPS {
+            if !LLVMIsAArgument(value).is_null() {
+                return (None, param_slot(value, module_id));
+            }
+            if let Some(field) = fields.and_then(|fields| fields.loaded_field(value)) {
+                return (Some(field), None);
+            }
+            if LLVMIsALoadInst(value).is_null() {
+                break;
+            }
+            if let Some(slot) = addressed_slot(LLVMGetOperand(value, 0), module_id) {
+                return (None, Some(slot));
+            }
+            let pointer = strip_pointer_casts(LLVMGetOperand(value, 0));
+            if LLVMIsAAllocaInst(pointer).is_null() {
+                break;
+            }
+            let Some(stored) = sole_stored_value(pointer) else {
+                break;
+            };
+            value = strip_pointer_casts(stored);
+        }
+    }
+    (None, None)
+}
+
+/// The global or parameter `value` was read from.
+///
+/// # Safety
+/// `value` must be a live value.
+unsafe fn traced_slot(value: LLVMValueRef, module_id: &str) -> Option<Slot> {
+    // SAFETY: the caller's guarantee, passed through.
+    unsafe { trace_source(value, module_id, None) }.1
+}
+
+/// Whether `value` is a pointer, the only kind a function address travels as.
+///
+/// # Safety
+/// `value` must be a live value.
+unsafe fn is_pointer(value: LLVMValueRef) -> bool {
+    // SAFETY: the caller guarantees a live value.
+    unsafe { LLVMGetTypeKind(LLVMTypeOf(value)) == LLVMTypeKind::LLVMPointerTypeKind }
+}
+
+/// The flows one module's instructions record.
+#[derive(Default)]
+struct Flows {
+    slots: Vec<SlotFlow>,
+    fields: Vec<FieldFlow>,
+    returned: Vec<ReturnedAddress>,
+}
+
+/// Where a pointer read from a slot goes next, from one instruction: passed
+/// as an argument of a direct call, or stored into a global or a field.
+///
+/// # Safety
+/// `instruction` must be a live instruction in the module `fields` reads.
+unsafe fn collect_flows(
+    instruction: LLVMValueRef,
+    module_id: &str,
+    fields: &FieldReader,
+    flows: &mut Flows,
+) {
+    // SAFETY: the caller guarantees a live instruction; each accessor is
+    // reached only for the instruction kind it requires.
+    unsafe {
+        match LLVMGetInstructionOpcode(instruction) {
+            LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke => {
+                let Some(callee) = direct_callee(instruction, module_id) else {
+                    return;
+                };
+                for index in 0..LLVMGetNumArgOperands(instruction) {
+                    let argument = LLVMGetOperand(instruction, index);
+                    if !is_pointer(argument) {
+                        continue;
+                    }
+                    if let Some(from) = traced_slot(argument, module_id) {
+                        flows.slots.push(SlotFlow {
+                            from,
+                            into: Slot::Param {
+                                function: callee.clone(),
+                                index,
+                            },
+                        });
+                    }
+                }
+            }
+            LLVMOpcode::LLVMStore => {
+                let value = LLVMGetOperand(instruction, 0);
+                if !is_pointer(value) {
+                    return;
+                }
+                let Some(from) = traced_slot(value, module_id) else {
+                    return;
+                };
+                let pointer = LLVMGetOperand(instruction, 1);
+                if let Some(into) = addressed_slot(pointer, module_id) {
+                    flows.slots.push(SlotFlow { from, into });
+                } else if let Some(into) = fields.access_field(instruction, pointer) {
+                    flows.fields.push(FieldFlow { from, into });
+                }
+            }
+            LLVMOpcode::LLVMRet if LLVMGetNumOperands(instruction) == 1 => {
+                let value = LLVMGetOperand(instruction, 0);
+                if !is_pointer(value) {
+                    return;
+                }
+                let Some(function) = enclosing_function(instruction, module_id) else {
+                    return;
+                };
+                let mut pending = vec![(value, 0)];
+                while let Some((value, depth)) = pending.pop() {
+                    let value = strip_pointer_casts(value);
+                    if !LLVMIsAGlobalVariable(value).is_null() {
+                        flows.returned.push(ReturnedAddress {
+                            function: function.clone(),
+                            global: Some(global_slot(value, module_id)),
+                            field: None,
+                        });
+                    } else if let Some(field) = fields.gep_field(value) {
+                        flows.returned.push(ReturnedAddress {
+                            function: function.clone(),
+                            global: None,
+                            field: Some(fields.evidence(field, FieldBasis::StructGep)),
+                        });
+                    } else if depth < MAX_SLOT_TRACE_STEPS && !LLVMIsALoadInst(value).is_null() {
+                        let pointer = strip_pointer_casts(LLVMGetOperand(value, 0));
+                        if LLVMIsAAllocaInst(pointer).is_null() {
+                            continue;
+                        }
+                        for stored in stored_values(pointer).into_iter().flatten() {
+                            pending.push((stored, depth + 1));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The prefixes clang gives an IR record type, of which one is stripped.
@@ -1718,6 +2067,15 @@ unsafe fn collect_uses(
             None if is_global => UseKind::GlobalInitializer,
             None => UseKind::Other,
         };
+        // Only a direct address -- casts at most -- names a slot; inside an
+        // aggregate it is one element of a table, which a field names.
+        let direct = !path
+            .iter()
+            .any(|&(wrapper, _)| unsafe { is_aggregate(wrapper) });
+        // SAFETY: each accessor is reached only for the user kind it needs.
+        let into_slot = direct
+            .then(|| unsafe { use_slot(user, operand, kind, module_id) })
+            .flatten();
         // SAFETY: a store is a live instruction and a global a live global
         // variable, each reached through `operand` along `path`.
         let field = match kind {
@@ -1739,7 +2097,37 @@ unsafe fn collect_uses(
                 .flatten(),
             kind,
             field,
+            into_slot,
         });
+    }
+}
+
+/// The slot a direct use of an address puts it into: the global a store
+/// writes or an initializer fills, or the parameter of a direct call.
+///
+/// # Safety
+/// `user` must be a live user of a function address through `operand`, of
+/// the given `kind`.
+unsafe fn use_slot(
+    user: LLVMValueRef,
+    operand: LLVMUseRef,
+    kind: UseKind,
+    module_id: &str,
+) -> Option<Slot> {
+    // SAFETY: each accessor is reached only for the user kind it requires.
+    unsafe {
+        match kind {
+            UseKind::StoredToMemory => (LLVMGetOperandUse(user, 0) == operand)
+                .then(|| addressed_slot(LLVMGetOperand(user, 1), module_id))
+                .flatten(),
+            UseKind::GlobalInitializer => Some(global_slot(user, module_id)),
+            UseKind::PassedAsArgument => {
+                let function = direct_callee(user, module_id)?;
+                let index = operand_index(user, operand)?;
+                (index < LLVMGetNumArgOperands(user)).then_some(Slot::Param { function, index })
+            }
+            UseKind::ReturnedValue | UseKind::Other => None,
+        }
     }
 }
 
@@ -1864,6 +2252,7 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
     let mut functions = Vec::new();
     let mut call_sites = Vec::new();
     let mut uses = Vec::new();
+    let mut flows = Flows::default();
 
     // SAFETY: `parsed` is a module in the live context.
     let mut function = unsafe { LLVMGetFirstFunction(parsed.0) };
@@ -1911,6 +2300,9 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
                         },
                     });
                 }
+
+                // SAFETY: `instruction` is live in the module `fields` reads.
+                unsafe { collect_flows(instruction, NEUTRAL_MODULE_ID, &fields, &mut flows) };
 
                 // SAFETY: `instruction` is live in `block`.
                 instruction = unsafe { LLVMGetNextInstruction(instruction) };
@@ -2009,6 +2401,9 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
         functions,
         call_sites,
         uses,
+        slot_flows: flows.slots,
+        field_flows: flows.fields,
+        returned_addresses: flows.returned,
         producers,
         diagnostics,
     })

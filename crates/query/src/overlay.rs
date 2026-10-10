@@ -31,7 +31,7 @@ use crate::{
     cache::FACTS_FORMAT,
     facts::{
         CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, Linkage,
-        ModuleAnalysis,
+        ModuleAnalysis, Slot,
     },
     index::{NameMatch, NameResolution, PathStep, Session},
 };
@@ -102,8 +102,9 @@ impl fmt::Display for Verdict {
     }
 }
 
-/// What an agent edge is keyed by: a field-to-target pattern that applies
-/// to every unresolved site dispatching through the field, or one site.
+/// What an agent edge is keyed by: a pattern that applies to every
+/// unresolved site dispatching through a field or reading its callee from a
+/// slot, or one site.
 ///
 /// `deny_unknown_fields` makes a key naming both a field and a site an
 /// error, rather than silently read as the field form.
@@ -111,6 +112,7 @@ impl fmt::Display for Verdict {
 #[serde(untagged, deny_unknown_fields)]
 pub enum EdgeKey {
     Field { via_field: FieldRef, to: FunctionId },
+    Slot { via_slot: Slot, to: FunctionId },
     Site { site: CallSiteId, to: FunctionId },
 }
 
@@ -118,15 +120,17 @@ impl EdgeKey {
     /// The function the edge says the call can take.
     pub(crate) fn to(&self) -> &FunctionId {
         match self {
-            EdgeKey::Field { to, .. } | EdgeKey::Site { to, .. } => to,
+            EdgeKey::Field { to, .. } | EdgeKey::Slot { to, .. } | EdgeKey::Site { to, .. } => to,
         }
     }
 
     /// The unresolved sites this edge attaches to: every one dispatching
-    /// through the field, or the one site while it stays unresolved.
+    /// through the field or reading the slot, or the one site while it stays
+    /// unresolved.
     pub(crate) fn sites<'s>(&self, session: &'s Session) -> Vec<&'s CallSiteFact> {
         match self {
             EdgeKey::Field { via_field, .. } => session.unresolved_sites_through(via_field),
+            EdgeKey::Slot { via_slot, .. } => session.unresolved_sites_via(via_slot),
             EdgeKey::Site { site, .. } => session
                 .call_site(site)
                 .filter(|site| is_unresolved(site))
@@ -146,6 +150,9 @@ impl fmt::Display for EdgeKey {
         match self {
             EdgeKey::Field { via_field, to } => {
                 write!(f, "{via_field} -> {}", function_label(to))
+            }
+            EdgeKey::Slot { via_slot, to } => {
+                write!(f, "{via_slot} -> {}", function_label(to))
             }
             EdgeKey::Site { site, to } => write!(
                 f,
@@ -175,6 +182,8 @@ pub enum Record {
     Add {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via_field: Option<FieldRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via_slot: Option<Slot>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         site: Option<CallSiteId>,
         to: TargetSpec,
@@ -665,7 +674,7 @@ impl OverlayView {
                     site: site.id.clone(),
                     chosen: to.clone(),
                     location: site.location.clone(),
-                    key: edge.key.clone(),
+                    key: Box::new(edge.key.clone()),
                     confidence: edge.confidence,
                     provenance: edge.provenance.clone(),
                     verdict: edge.verification.as_ref().map(|v| v.verdict),
@@ -829,12 +838,14 @@ fn json_line(value: &impl Serialize) -> Result<String, Error> {
 /// The `add` that recreates the edge at `key`, as stored: `to` resolved,
 /// `source` the agent.
 fn add_record(key: &EdgeKey, confidence: Confidence, provenance: Vec<String>) -> Record {
-    let (via_field, site, to) = match key {
-        EdgeKey::Field { via_field, to } => (Some(via_field.clone()), None, to),
-        EdgeKey::Site { site, to } => (None, Some(site.clone()), to),
+    let (via_field, via_slot, site, to) = match key {
+        EdgeKey::Field { via_field, to } => (Some(via_field.clone()), None, None, to),
+        EdgeKey::Slot { via_slot, to } => (None, Some(via_slot.clone()), None, to),
+        EdgeKey::Site { site, to } => (None, None, Some(site.clone()), to),
     };
     Record::Add {
         via_field,
+        via_slot,
         site,
         to: TargetSpec::Id(to.clone()),
         confidence,
@@ -854,6 +865,7 @@ fn apply(
     match record {
         Record::Add {
             via_field,
+            via_slot,
             site,
             to,
             confidence,
@@ -867,8 +879,8 @@ fn apply(
                 return Err("an add needs at least one provenance entry".to_string());
             }
             let to = resolve_target(session, &to)?;
-            let key = match (via_field, site) {
-                (Some(via_field), None) => {
+            let key = match (via_field, via_slot, site) {
+                (Some(via_field), None, None) => {
                     if session.unresolved_sites_through(&via_field).is_empty() {
                         return Err(format!(
                             "no unresolved indirect call site dispatches through {via_field}"
@@ -876,11 +888,26 @@ fn apply(
                     }
                     EdgeKey::Field { via_field, to }
                 }
-                (None, Some(site)) => {
+                (None, Some(via_slot), None) => {
+                    // Stored canonical, so two spellings of one parameter are
+                    // one edge.
+                    let via_slot = session.canonical_slot(&via_slot);
+                    if session.unresolved_sites_via(&via_slot).is_empty() {
+                        return Err(format!(
+                            "no unresolved indirect call site reads its callee from {via_slot}"
+                        ));
+                    }
+                    EdgeKey::Slot { via_slot, to }
+                }
+                (None, None, Some(site)) => {
                     check_site(session, &site)?;
                     EdgeKey::Site { site, to }
                 }
-                _ => return Err("an add names exactly one of via_field and site".to_string()),
+                _ => {
+                    return Err(
+                        "an add names exactly one of via_field, via_slot and site".to_string()
+                    );
+                }
             };
             match edges.get_mut(&key) {
                 Some(edge) => {
@@ -1077,6 +1104,7 @@ mod tests {
     fn add(via_field: Option<FieldRef>, site: Option<CallSiteId>, to: TargetSpec) -> Record {
         Record::Add {
             via_field,
+            via_slot: None,
             site,
             to,
             confidence: Confidence::High,

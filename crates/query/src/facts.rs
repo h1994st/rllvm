@@ -183,6 +183,65 @@ pub enum FieldBasis {
     DebugInfo,
 }
 
+/// Where a function pointer is kept on its way from the function to a call:
+/// a global variable, or a parameter of a function. Unlike a field, a slot is
+/// one storage location, so the functions that flow into it are exactly what
+/// a call through it can target, within the captured program.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Slot {
+    /// `module_id` is set only for a global other modules cannot name.
+    Global {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        module_id: Option<String>,
+        name: String,
+    },
+    /// The function as referenced where the flow was seen: a declaration in
+    /// a caller's module binds to its definition when solved.
+    Param { function: FunctionId, index: u32 },
+    /// The location whose address a function returns, as an accessor such
+    /// as libxml2's `__xmlGenericError()` does. Loads and stores through the
+    /// result reach whatever the function returns the address of.
+    Returned { function: FunctionId },
+}
+
+impl std::fmt::Display for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Slot::Global { name, .. } => write!(f, "global {name}"),
+            Slot::Param { function, index } => write!(f, "param {index} of {}", function.symbol),
+            Slot::Returned { function } => write!(f, "*{}()", function.symbol),
+        }
+    }
+}
+
+/// A function returns the address of a global or of a record field. Exactly
+/// one of `global` and `field` is set.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReturnedAddress {
+    pub function: FunctionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global: Option<Slot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<FieldEvidence>,
+}
+
+/// A pointer read from one slot is stored or passed into another: a
+/// parameter passed on as an argument, or stored into a global.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlotFlow {
+    pub from: Slot,
+    pub into: Slot,
+}
+
+/// A pointer read from a slot is stored into a record field, as a setter such
+/// as `set_cb(obj, cb)` does with its parameter.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FieldFlow {
+    pub from: Slot,
+    pub into: FieldEvidence,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FieldEvidence {
     pub field: FieldRef,
@@ -209,6 +268,10 @@ pub enum CallTarget {
         /// proves one. A plain pointer variable or a vtable slot has none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via_field: Option<FieldEvidence>,
+        /// The global or parameter the called pointer was read from, when no
+        /// field names it. Traced through `-O0` stack slots.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via_slot: Option<Slot>,
     },
     Intrinsic {
         name: String,
@@ -249,6 +312,10 @@ pub struct UseFact {
     /// it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<FieldEvidence>,
+    /// The global the address is stored into or initializes directly, or the
+    /// parameter it is passed as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub into_slot: Option<Slot>,
 }
 
 /// Mirrors the catalog's `ModuleStatus` where it applies, and adds what only
@@ -299,6 +366,9 @@ pub struct ProgramFacts {
     pub functions: Vec<FunctionFact>,
     pub call_sites: Vec<CallSiteFact>,
     pub uses: Vec<UseFact>,
+    pub slot_flows: Vec<SlotFlow>,
+    pub field_flows: Vec<FieldFlow>,
+    pub returned_addresses: Vec<ReturnedAddress>,
     /// Quoted from the catalog; never recomputed and never shrunk.
     pub scope: CatalogScope,
     /// Quoted from the catalog, so `provenance.catalog_origin` in the

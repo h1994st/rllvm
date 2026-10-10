@@ -743,7 +743,7 @@ management_tool_surface! {
                 "records": {
                     "type": "array",
                     "items": { "type": "object" },
-                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it."
+                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it), `\"via_slot\"` (a group's `slot`, every unresolved site reading it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it."
                 }
             },
             "required": ["records"]
@@ -1060,7 +1060,7 @@ fn query_tool(query: &Query) -> Value {
         }),
         Query::ResolutionCandidates => json!({
             "name": name,
-            "description": "Unresolved indirect call sites grouped by the record field they dispatch through, with the functions stored into that field. Candidates, not edges.",
+            "description": "Unresolved indirect call sites grouped by the record field they dispatch through (`field`) or the global, parameter or accessor they read their callee from (`slot`), with the functions whose addresses flow there. Candidates, not edges.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
         Query::IndirectTargets { .. } => json!({
