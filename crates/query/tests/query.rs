@@ -4444,7 +4444,7 @@ fn the_overlay_cli_records_lists_and_compacts() {
     let written = std::fs::read_to_string(&overlay).unwrap();
     assert_eq!(written.lines().count(), 1, "{written}");
     assert!(
-        written.starts_with("{\"v\":1,\"fingerprint\":"),
+        written.starts_with("{\"v\":2,\"fingerprint\":"),
         "{written}"
     );
 }

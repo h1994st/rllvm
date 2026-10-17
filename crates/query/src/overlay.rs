@@ -37,7 +37,7 @@ use crate::{
 };
 
 /// The `v` of the header line this version writes and reads.
-pub const OVERLAY_VERSION: u32 = 1;
+pub const OVERLAY_VERSION: u32 = 2;
 
 /// The only `source` an `add` may carry, and the one every stored edge has.
 const AGENT_SOURCE: &str = "agent";
@@ -1151,7 +1151,7 @@ mod tests {
 
     fn header(session: &Session) -> String {
         format!(
-            "{{\"v\":1,\"fingerprint\":\"{}\",\"facts\":{FACTS_FORMAT}}}\n",
+            "{{\"v\":{OVERLAY_VERSION},\"fingerprint\":\"{}\",\"facts\":{FACTS_FORMAT}}}\n",
             fingerprint(session).unwrap()
         )
     }
@@ -1414,7 +1414,7 @@ mod tests {
         let error = open_error(&session, &path);
         assert!(error.contains(&format!("{shown}:1:")), "{error}");
 
-        std::fs::write(&path, "{\"v\":2,\"fingerprint\":\"x\"}\n").unwrap();
+        std::fs::write(&path, "{\"v\":1,\"fingerprint\":\"x\"}\n").unwrap();
         let error = open_error(&session, &path);
         assert!(error.contains(&format!("{shown}:1:")), "{error}");
 
@@ -1438,6 +1438,44 @@ mod tests {
         let error = open_error(&session, &path);
         assert!(error.contains(&format!("{shown}:2:")), "{error}");
         assert!(error.contains("ops@16"), "{error}");
+    }
+
+    #[test]
+    fn an_overlay_file_written_with_v1_is_rejected_by_v2() {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = overlay_path(&scratch);
+        let session = session();
+        let shown = path.display().to_string();
+
+        // Write a v1 overlay header (the old version).
+        std::fs::write(
+            &path,
+            format!(
+                "{{\"v\":1,\"fingerprint\":\"{}\",\"facts\":{}}}\n",
+                fingerprint(&session).unwrap(),
+                FACTS_FORMAT
+            ),
+        )
+        .unwrap();
+        let error = open_error(&session, &path);
+        assert!(error.contains(&format!("{shown}:1:")), "{error}");
+        assert!(error.contains("overlay version 1"), "{error}");
+        assert!(
+            error.contains(&format!("reads version {OVERLAY_VERSION}")),
+            "{error}"
+        );
+
+        // A freshly written overlay has the current version.
+        let fresh_scratch = tempfile::tempdir().unwrap();
+        let fresh_path = overlay_path(&fresh_scratch);
+        let mut overlay = Overlay::open(&session, &fresh_path).unwrap();
+        overlay.record(&session, vec![add_field(8, "h3")]).unwrap();
+        overlay.save().unwrap();
+        let written = std::fs::read_to_string(overlay.path().unwrap()).unwrap();
+        assert!(
+            written.starts_with(&format!("{{\"v\":{OVERLAY_VERSION},")),
+            "{written}"
+        );
     }
 
     #[test]
