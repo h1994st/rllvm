@@ -43,6 +43,25 @@ dependence, do not start; completing a whole program is rarely the goal.
 The user can watch progress with `/overlay-view`, a read-only pane of each
 unresolved field, its candidates and the edges recorded so far.
 
+## Two kinds of group
+
+`resolution_candidates` returns groups of two shapes, and `field` tells them
+apart. They call for opposite discipline.
+
+- A group with a `field` (`ops@8`: record and offset) dispatches every site
+  through that one member, and `candidates` are the functions stored into it.
+  Record once with `via_field`: the edge covers every unresolved site through
+  the field, and a `single_candidate` field whose signature matches is the
+  `high`-confidence case.
+- A group with no `field` was not traced to a member, so `candidates` are
+  every function of that `signature` in the program: a cross-product, not a
+  call set. Recording them onto the group's sites manufactures false edges.
+  Do not bulk-record it. Resolve one site at a time -- read which container
+  instance reaches the site, confirm the function it was initialized with,
+  and record a single `site` edge with that assignment as provenance. The
+  more sites and candidates such a group has, the more a blanket recording
+  misleads: treat its candidates as leads to check, never as targets.
+
 ## Confidence
 
 - `high`: the assignment stores this function into this field of this record
