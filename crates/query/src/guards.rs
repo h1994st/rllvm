@@ -7,6 +7,7 @@
 //! unbounded.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -19,10 +20,10 @@ use crate::ir::{
     int_predicate,
 };
 use crate::overlay::function_label;
-use std::path::Path;
-
 use crate::slice::{EmittedModule, check_opt_llvm, emit_module, promote, promote_anchor_module};
-use crate::{CallSiteId, CallTarget, FunctionId, GuardKind, Linkage, Session, SourceLocation};
+use crate::{
+    CallSiteFact, CallSiteId, CallTarget, FunctionId, GuardKind, Linkage, Session, SourceLocation,
+};
 
 /// The value whose constraints are asked for.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -419,8 +420,7 @@ pub fn emit_guards_module(
         None => {
             let mut set = BTreeSet::from([function.clone()]);
             set.extend(
-                session
-                    .callers(&function.symbol)
+                calls_to(session, &function)
                     .into_iter()
                     .map(|site| site.id.function),
             );
@@ -485,6 +485,25 @@ fn use_point(
             .find(|binding| binding.name == *name && binding.value == Operand::Value(value))
             .map_or(value, |binding| binding.at),
     })
+}
+
+/// The call sites that run `function` itself: those whose target resolves,
+/// through binding and aliases, to this definition. `Session::callers` goes
+/// by name, so it also holds the callers of a same-named `static` elsewhere.
+fn calls_to(session: &Session, function: &FunctionId) -> Vec<CallSiteFact> {
+    let calls_traced = |callee: &FunctionId| definition_of(session, callee) == *function;
+    session
+        .callers(&function.symbol)
+        .into_iter()
+        .filter(|site| match &site.target {
+            CallTarget::Direct { callee } => calls_traced(callee),
+            CallTarget::Indirect {
+                llvm_target_bound: Some(bound),
+                ..
+            } => bound.iter().any(calls_traced),
+            _ => false,
+        })
+        .collect()
 }
 
 /// The definition `callee` runs: the one its declaration binds to, through
@@ -858,19 +877,8 @@ impl Trace<'_> {
     /// The crossings into parameter `index` of the traced function: one per
     /// call site that calls it, bounded to the slice from `from` when given.
     fn crossings_into(&self, index: usize) -> Vec<Crossing> {
-        let calls_traced =
-            |callee: &FunctionId| definition_of(self.session, callee) == *self.function;
-        self.session
-            .callers(&self.function.symbol)
+        calls_to(self.session, self.function)
             .into_iter()
-            .filter(|site| match &site.target {
-                CallTarget::Direct { callee } => calls_traced(callee),
-                CallTarget::Indirect {
-                    llvm_target_bound: Some(bound),
-                    ..
-                } => bound.iter().any(calls_traced),
-                _ => false,
-            })
             .filter(|site| {
                 self.scope
                     .is_none_or(|scope| scope.contains(&site.id.function))

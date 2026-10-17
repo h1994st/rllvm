@@ -4569,3 +4569,40 @@ fn guards_emits_its_promoted_slice_module() {
         "the emitted module is mem2reg-promoted"
     );
 }
+
+#[test]
+fn guards_emits_only_the_callers_of_its_own_anchor_function() {
+    let scratch = tempfile::tempdir().unwrap();
+    let a = compile_bitcode(
+        &scratch,
+        "a.c",
+        "extern void sink(unsigned);\nvoid f(unsigned n) { sink(n); }\nvoid caller_a(void) { f(3); }\n",
+    );
+    // Another module's own `static f`, called by `caller_b`: not this `f`.
+    let b = compile_bitcode(
+        &scratch,
+        "b.c",
+        "extern void sink(unsigned);\nstatic void f(unsigned n) { sink(n); }\nvoid caller_b(void) { f(1); }\n",
+    );
+    let catalog = plain_module_catalog(&scratch, &[a, b]);
+    let out = scratch.path().join("guards.bc");
+    let at = format!("{}:2", scratch.path().join("a.c").display());
+    query_json(
+        &scratch,
+        &catalog,
+        &[
+            "guards",
+            "--at",
+            &at,
+            "--operand",
+            "0",
+            "--emit-module",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        defined_symbols(&out),
+        BTreeSet::from(["f".to_string(), "caller_a".to_string()]),
+        "`caller_b` calls B's own static `f`"
+    );
+}
