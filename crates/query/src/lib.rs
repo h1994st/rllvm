@@ -82,8 +82,8 @@ pub struct CacheReport {
 
 pub mod guards;
 pub use guards::{
-    Crossing, CrossingDir, GuardAnchor, GuardRelation, GuardSite, GuardsResult, anchor_from_parts,
-    check_anchor_parts, guards,
+    AnchorParts, Crossing, CrossingDir, GuardAnchor, GuardRelation, GuardSite, GuardsResult,
+    anchor_from_parts, check_anchor_parts, guards,
 };
 
 pub mod index;

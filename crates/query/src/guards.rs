@@ -41,76 +41,75 @@ enum AnchorShape<'a> {
     Local { function: &'a str, name: &'a str },
 }
 
-/// What the parts of an anchor name, or why they do not name one. Needs no
-/// catalog, so a surface can reject a bad combination before loading one.
-fn anchor_shape<'a>(
-    at: Option<&'a str>,
-    operand: Option<usize>,
-    ret: bool,
-    function: Option<&'a str>,
-    local: Option<&'a str>,
-) -> Result<AnchorShape<'a>, String> {
-    let call = at.is_some() || operand.is_some() || ret;
-    let named = function.is_some() || local.is_some();
-    match (call, named) {
-        (false, false) => Err(
-            "name a value: --at with --operand or --return, or --function with \
-             --local"
-                .to_string(),
-        ),
-        (true, true) => Err(
-            "a call site (--at) and a local (--function, --local) name two values: give one"
-                .to_string(),
-        ),
-        (true, false) => {
-            let at = at.ok_or("--operand and --return need --at, the call site they refer to")?;
-            match (operand, ret) {
-                (Some(_), true) => {
-                    Err("--operand and --return name two values: give one".to_string())
+/// The parts a surface's flags or arguments give for an anchor: `at` with
+/// `operand` or `ret`, or `function` with `local`. Every surface fills this
+/// in and hands it to [`anchor_from_parts`], so none validates on its own.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AnchorParts {
+    pub at: Option<String>,
+    pub operand: Option<usize>,
+    pub ret: bool,
+    pub function: Option<String>,
+    pub local: Option<String>,
+}
+
+impl AnchorParts {
+    /// What these parts name, or why they do not name one. Needs no
+    /// catalog, so a surface can reject a bad combination before loading one.
+    fn shape(&self) -> Result<AnchorShape<'_>, String> {
+        let (at, operand, ret) = (self.at.as_deref(), self.operand, self.ret);
+        let (function, local) = (self.function.as_deref(), self.local.as_deref());
+        let call = at.is_some() || operand.is_some() || ret;
+        let named = function.is_some() || local.is_some();
+        match (call, named) {
+            (false, false) => Err(
+                "name a value: --at with --operand or --return, or --function with \
+                 --local"
+                    .to_string(),
+            ),
+            (true, true) => Err(
+                "a call site (--at) and a local (--function, --local) name two values: give one"
+                    .to_string(),
+            ),
+            (true, false) => {
+                let at =
+                    at.ok_or("--operand and --return need --at, the call site they refer to")?;
+                match (operand, ret) {
+                    (Some(_), true) => {
+                        Err("--operand and --return name two values: give one".to_string())
+                    }
+                    (Some(operand), false) => Ok(AnchorShape::Argument { at, operand }),
+                    (None, true) => Ok(AnchorShape::Return { at }),
+                    (None, false) => Err("--at needs --operand N (an argument) or --return (the \
+                         result)"
+                        .to_string()),
                 }
-                (Some(operand), false) => Ok(AnchorShape::Argument { at, operand }),
-                (None, true) => Ok(AnchorShape::Return { at }),
-                (None, false) => Err("--at needs --operand N (an argument) or --return (the \
-                     result)"
-                    .to_string()),
             }
+            (false, true) => match (function, local) {
+                (Some(function), Some(name)) => Ok(AnchorShape::Local { function, name }),
+                (None, _) => {
+                    Err("--local needs --function, the function that holds it".to_string())
+                }
+                (_, None) => Err("--function needs --local, the variable to trace".to_string()),
+            },
         }
-        (false, true) => match (function, local) {
-            (Some(function), Some(name)) => Ok(AnchorShape::Local { function, name }),
-            (None, _) => Err("--local needs --function, the function that holds it".to_string()),
-            (_, None) => Err("--function needs --local, the variable to trace".to_string()),
-        },
     }
 }
 
 /// Rejects a combination of anchor parts that names no value, without
 /// reading a catalog. [`anchor_from_parts`] makes the same check.
-pub fn check_anchor_parts(
-    at: Option<&str>,
-    operand: Option<usize>,
-    ret: bool,
-    function: Option<&str>,
-    local: Option<&str>,
-) -> Result<(), String> {
-    anchor_shape(at, operand, ret, function, local).map(|_| ())
+pub fn check_anchor_parts(parts: &AnchorParts) -> Result<(), String> {
+    parts.shape().map(|_| ())
 }
 
-/// The anchor a surface's flags name: `at` with `operand` or `ret`, or
-/// `function` with `local`. `at` is a `file:line`, or a call site id as JSON
+/// The anchor a surface's parts name. `at` is a `file:line`, or a call site id as JSON
 /// for a line that holds several calls. A line must hold exactly one call
 /// site: with several, the error names each so the caller can pick one.
 ///
 /// Surface-neutral on purpose: the CLI, the MCP tool and `annotate` all
 /// resolve a call site the same way.
-pub fn anchor_from_parts(
-    session: &Session,
-    at: Option<&str>,
-    operand: Option<usize>,
-    ret: bool,
-    function: Option<&str>,
-    local: Option<&str>,
-) -> Result<GuardAnchor, String> {
-    Ok(match anchor_shape(at, operand, ret, function, local)? {
+pub fn anchor_from_parts(session: &Session, parts: &AnchorParts) -> Result<GuardAnchor, String> {
+    Ok(match parts.shape()? {
         AnchorShape::Argument { at, operand } => GuardAnchor::Argument {
             site: resolve_site(session, at)?,
             operand,
@@ -2108,6 +2107,22 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         assert!(!d.dominates(0, 99));
     }
 
+    fn parts(
+        at: Option<&str>,
+        operand: Option<usize>,
+        ret: bool,
+        function: Option<&str>,
+        local: Option<&str>,
+    ) -> AnchorParts {
+        AnchorParts {
+            at: at.map(str::to_string),
+            operand,
+            ret,
+            function: function.map(str::to_string),
+            local: local.map(str::to_string),
+        }
+    }
+
     #[test]
     fn a_line_with_one_call_resolves_to_its_site() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2125,7 +2140,7 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             .id
             .clone();
         let at = format!("{}:3", scratch.path().join("t.c").display());
-        let anchor = anchor_from_parts(&session, Some(&at), Some(0), false, None, None);
+        let anchor = anchor_from_parts(&session, &parts(Some(&at), Some(0), false, None, None));
         match anchor.unwrap() {
             GuardAnchor::Argument {
                 site: found,
@@ -2136,10 +2151,11 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             other => panic!("{other:?}"),
         }
         let json = serde_json::to_string(&site).unwrap();
-        let spelled = anchor_from_parts(&session, Some(&json), None, true, None, None).unwrap();
+        let spelled =
+            anchor_from_parts(&session, &parts(Some(&json), None, true, None, None)).unwrap();
         assert!(matches!(spelled, GuardAnchor::Return { site: found } if found == site));
         let blank = format!("{}:1", scratch.path().join("t.c").display());
-        let missing = anchor_from_parts(&session, Some(&blank), None, true, None, None);
+        let missing = anchor_from_parts(&session, &parts(Some(&blank), None, true, None, None));
         assert!(missing.unwrap_err().contains("no call site at"));
     }
 
@@ -2153,7 +2169,8 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             &["-O0", "-g"],
         );
         let at = format!("{}:4", scratch.path().join("t.c").display());
-        let error = anchor_from_parts(&session, Some(&at), Some(0), false, None, None).unwrap_err();
+        let error =
+            anchor_from_parts(&session, &parts(Some(&at), Some(0), false, None, None)).unwrap_err();
         assert!(error.contains("holds 2 call sites"), "{error}");
         assert!(
             error.contains("a in f") && error.contains("b in f"),
@@ -2168,7 +2185,7 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             .split(';')
             .next()
             .unwrap();
-        assert!(anchor_from_parts(&session, Some(json), None, true, None, None).is_ok());
+        assert!(anchor_from_parts(&session, &parts(Some(json), None, true, None, None)).is_ok());
     }
 
     #[test]
@@ -2177,14 +2194,15 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         let session = compiled_session(scratch.path(), "t.c", "void a(void) {}\n", &["-O0"]);
         let ghost =
             r#"{"function":{"module_id":"x","symbol":"y"},"block_index":0,"instruction_index":0}"#;
-        let error = anchor_from_parts(&session, Some(ghost), None, true, None, None).unwrap_err();
+        let error =
+            anchor_from_parts(&session, &parts(Some(ghost), None, true, None, None)).unwrap_err();
         assert!(error.contains("no such call site"), "{error}");
     }
 
     #[test]
     fn a_combination_of_parts_that_names_no_single_value_is_rejected() {
         let ok = |at, operand, ret, function, local| {
-            check_anchor_parts(at, operand, ret, function, local)
+            check_anchor_parts(&parts(at, operand, ret, function, local))
         };
         assert!(ok(Some("t.c:4"), Some(0), false, None, None).is_ok());
         assert!(ok(Some("t.c:4"), None, true, None, None).is_ok());

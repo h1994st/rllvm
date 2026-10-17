@@ -59,9 +59,9 @@ use serde_json::{Value, json};
 use rllvm_core::{config::LlvmBindir, error::Error};
 
 use super::{
-    Confidence, Direction, FactsCache, GuardAnchor, Overlay, Query, Record, Session, analysis_of,
-    default_overlay_path, emit_slice, open_catalog_with_cache, open_with_cache,
-    overlay::fingerprint, run_with_overlay,
+    AnchorParts, Confidence, Direction, FactsCache, GuardAnchor, Overlay, Query, Record, Session,
+    analysis_of, anchor_from_parts, check_anchor_parts, default_overlay_path, emit_slice,
+    open_catalog_with_cache, open_with_cache, overlay::fingerprint, run_with_overlay,
 };
 
 /// The modern protocol revision this server has been checked against.
@@ -1069,17 +1069,19 @@ fn query_tool(query: &Query) -> Value {
         }),
         Query::Guards { .. } => json!({
             "name": name,
-            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument, a call result, or a named local. Evidence, not a verdict: no guard found is an empty list, not \"unbounded\".",
+            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\".",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "anchor": {
-                        "type": "object",
-                        "description": "The value: `{kind: argument, site, operand}`, `{kind: return, site}` or `{kind: local, function, name}`"
-                    },
-                    "from": { "type": "string", "description": "Where the trace starts, when not the anchor's own function" }
+                    "at": { "type": "string", "description": "The call site: a `file:line` location, e.g. `t.c:4`, or a call site id as JSON (`{\"function\": ..., \"block_index\": ..., \"instruction_index\": ...}`) for a line that holds several calls. An ambiguous `file:line` is an error naming each candidate's id." },
+                    "operand": { "type": "integer", "minimum": 0, "description": "With `at`: the call's argument to trace, counting from 0" },
+                    "return": { "type": "boolean", "description": "With `at`: trace the call's result instead of an argument" },
+                    "function": { "type": "string", "description": "With `local`: the function that holds the variable" },
+                    "local": { "type": "string", "description": "With `function`: the source variable to trace" },
+                    "from": { "type": "string", "description": "Where the trace starts, when not the anchor's own function" },
+                    "emit_module": { "type": "string", "description": "Not yet supported: rejected with an error" }
                 },
-                "required": ["anchor"]
+                "required": []
             }
         }),
         Query::IndirectTargets { .. } => json!({
@@ -1146,6 +1148,23 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Ok(loaded) => loaded,
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
+    let query = match query {
+        Query::Guards {
+            from, emit_module, ..
+        } => {
+            let anchor =
+                guard_parts(&arguments).and_then(|parts| anchor_from_parts(session, &parts));
+            match anchor {
+                Ok(anchor) => Query::Guards {
+                    anchor,
+                    from,
+                    emit_module,
+                },
+                Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
+            }
+        }
+        other => other,
+    };
     // Before the query runs: the modules are read through the catalog file,
     // which an artifact does not have.
     if emit_module.is_some() && registry.artifacts.contains(&key) {
@@ -1193,6 +1212,38 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         }
     }
     Outcome::Result(call_tool_result(false, &payload.to_string()), false)
+}
+
+/// The anchor parts a `guards` call names; the combination is checked by
+/// `check_anchor_parts` and resolved by `anchor_from_parts`, as on the CLI.
+fn guard_parts(arguments: &Value) -> Result<AnchorParts, String> {
+    let text = |key: &str| match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(format!("non-string argument `{key}`")),
+    };
+    let operand = match arguments.get("operand") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|operand| usize::try_from(operand).ok())
+                .ok_or_else(|| "invalid argument `operand`".to_string())?,
+        ),
+    };
+    let ret = match arguments.get("return") {
+        None | Some(Value::Null) => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "non-boolean argument `return`".to_string())?,
+    };
+    Ok(AnchorParts {
+        at: text("at")?,
+        operand,
+        ret,
+        function: text("function")?,
+        local: text("local")?,
+    })
 }
 
 fn call_tool_result(is_error: bool, text: &str) -> Value {
@@ -1279,21 +1330,25 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                 .unwrap_or(false),
         }),
         "resolution_candidates" => Ok(Query::ResolutionCandidates),
-        "guards" => Ok(Query::Guards {
-            anchor: arguments
-                .get("anchor")
-                .cloned()
-                .ok_or_else(|| "missing argument `anchor`".to_string())
-                .and_then(|anchor| {
-                    serde_json::from_value(anchor)
-                        .map_err(|error| format!("invalid argument `anchor`: {error}"))
-                })?,
-            from: arguments
-                .get("from")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            emit_module: None,
-        }),
+        "guards" => {
+            check_anchor_parts(&guard_parts(arguments)?)?;
+            if arguments.get("emit_module").is_some() {
+                return Err("guards cannot write a module yet: drop `emit_module`".to_string());
+            }
+            // The call site an `at` names needs a catalog; `tool_call_outcome`
+            // resolves the anchor once the session is loaded.
+            Ok(Query::Guards {
+                anchor: GuardAnchor::Local {
+                    function: String::new(),
+                    name: String::new(),
+                },
+                from: arguments
+                    .get("from")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                emit_module: None,
+            })
+        }
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -1337,9 +1392,7 @@ mod tests {
             Query::FfiExports => json!({}),
             Query::IndirectTargets { .. } => json!({ "at": "t.c:4" }),
             Query::ResolutionCandidates => json!({}),
-            Query::Guards { .. } => {
-                json!({ "anchor": { "kind": "local", "function": "a", "name": "x" } })
-            }
+            Query::Guards { .. } => json!({ "function": "a", "local": "x" }),
         }
     }
 
@@ -1374,6 +1427,87 @@ mod tests {
     /// match makes that every variant, or the crate does not compile --
     /// reaches `tools/list` under its own name and comes back through
     /// `query_from_call` as the same variant.
+    #[test]
+    fn the_guards_tool_is_listed_with_every_anchor_part_optional() {
+        let tools = tools_list_result()["tools"].as_array().unwrap().clone();
+        let tool = tools.iter().find(|tool| tool["name"] == "guards").unwrap();
+        let schema = &tool["inputSchema"];
+        for part in [
+            "at",
+            "operand",
+            "return",
+            "function",
+            "local",
+            "from",
+            "emit_module",
+        ] {
+            assert!(schema["properties"].get(part).is_some(), "{part}");
+        }
+        assert_eq!(schema["required"], json!([]));
+        let at = schema["properties"]["at"]["description"].as_str().unwrap();
+        assert!(
+            at.contains("file:line") && at.contains("block_index"),
+            "{at}"
+        );
+    }
+
+    #[test]
+    fn guards_arguments_that_name_no_value_are_tool_errors() {
+        let mut registry = one_catalog();
+        for (arguments, fragment) in [
+            (json!({}), "name a value"),
+            (json!({ "at": "t.c:4" }), "--operand N"),
+            (
+                json!({ "at": "t.c:4", "operand": 0, "return": true }),
+                "give one",
+            ),
+            (json!({ "function": "f" }), "needs --local"),
+            (json!({ "at": "t.c:4", "operand": -1 }), "operand"),
+            (json!({ "at": 4, "operand": 0 }), "`at`"),
+            (
+                json!({ "function": "f", "local": "n", "emit_module": "x.bc" }),
+                "emit_module",
+            ),
+        ] {
+            let text = tool_error(&mut registry, "guards", arguments);
+            assert!(text.contains(fragment), "{fragment}: {text}");
+        }
+        // A well-formed combination reaches the resolver, which reads the catalog.
+        let text = tool_error(
+            &mut registry,
+            "guards",
+            json!({ "at": "t.c:4", "operand": 0 }),
+        );
+        assert!(text.contains("no call site at t.c:4"), "{text}");
+    }
+
+    #[test]
+    fn an_ambiguous_guards_line_names_the_candidates_and_an_id_resolves_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern unsigned a(unsigned);\nextern void b(unsigned);\nvoid f(unsigned n) {\n  b(a(n));\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        let at = format!("{}:4", scratch.path().join("t.c").display());
+        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
+        assert!(
+            text.contains("holds 2 call sites") && text.contains("a in f"),
+            "{text}"
+        );
+        let id = text.split("=> ").nth(1).unwrap().split(';').next().unwrap();
+        // The id is accepted as an anchor; what follows is the analysis, which
+        // this synthetic registry has no tools for -- never an anchor error.
+        let result = call(&mut registry, "guards", json!({ "at": id, "return": true }));
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("call site") && !text.contains("name a value"),
+            "{text}"
+        );
+    }
+
     #[test]
     fn every_query_variant_is_listed_and_resolves_through_a_call() {
         let listed = listed_tool_names();

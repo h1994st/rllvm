@@ -11,7 +11,7 @@ use rllvm_core::{
     utils::{print_stdout, split_response_arguments},
 };
 use rllvm_query::{
-    Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session, TextMode,
+    AnchorParts, Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session, TextMode,
     anchor_from_parts, check_anchor_parts,
     cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
     default_overlay_path, emit_slice,
@@ -56,11 +56,13 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
     } = command
     {
         return Some(Planned::Guards(GuardsRequest {
-            at,
-            operand,
-            ret,
-            function,
-            local,
+            parts: AnchorParts {
+                at,
+                operand,
+                ret,
+                function,
+                local,
+            },
             from,
             emit_module,
         }));
@@ -120,11 +122,7 @@ enum Planned {
 /// resolve the call site they name.
 #[derive(Debug, PartialEq)]
 struct GuardsRequest {
-    at: Option<String>,
-    operand: Option<usize>,
-    ret: bool,
-    function: Option<String>,
-    local: Option<String>,
+    parts: AnchorParts,
     from: Option<String>,
     emit_module: Option<PathBuf>,
 }
@@ -140,14 +138,7 @@ impl Planned {
                         "guards cannot write a module yet: drop --emit-module".to_string(),
                     ));
                 }
-                check_anchor_parts(
-                    request.at.as_deref(),
-                    request.operand,
-                    request.ret,
-                    request.function.as_deref(),
-                    request.local.as_deref(),
-                )
-                .map_err(Error::InvalidArguments)
+                check_anchor_parts(&request.parts).map_err(Error::InvalidArguments)
             }
         }
     }
@@ -158,15 +149,8 @@ impl Planned {
         match self {
             Planned::Ready(query) => Ok(query),
             Planned::Guards(request) => Ok(Query::Guards {
-                anchor: anchor_from_parts(
-                    session,
-                    request.at.as_deref(),
-                    request.operand,
-                    request.ret,
-                    request.function.as_deref(),
-                    request.local.as_deref(),
-                )
-                .map_err(Error::InvalidArguments)?,
+                anchor: anchor_from_parts(session, &request.parts)
+                    .map_err(Error::InvalidArguments)?,
                 from: request.from,
                 emit_module: request.emit_module,
             }),
@@ -1069,29 +1053,35 @@ mod tests {
             let site_json = serde_json::to_string(&site).unwrap();
             let expected = match &anchor {
                 GuardAnchor::Argument { operand, .. } => GuardsRequest {
-                    at: Some(site_json),
-                    operand: Some(*operand),
-                    ret: false,
-                    function: None,
-                    local: None,
+                    parts: AnchorParts {
+                        at: Some(site_json),
+                        operand: Some(*operand),
+                        ret: false,
+                        function: None,
+                        local: None,
+                    },
                     from,
                     emit_module: Some("out.bc".into()),
                 },
                 GuardAnchor::Return { .. } => GuardsRequest {
-                    at: Some(site_json),
-                    operand: None,
-                    ret: true,
-                    function: None,
-                    local: None,
+                    parts: AnchorParts {
+                        at: Some(site_json),
+                        operand: None,
+                        ret: true,
+                        function: None,
+                        local: None,
+                    },
                     from,
                     emit_module: Some("out.bc".into()),
                 },
                 GuardAnchor::Local { function, name } => GuardsRequest {
-                    at: None,
-                    operand: None,
-                    ret: false,
-                    function: Some(function.clone()),
-                    local: Some(name.clone()),
+                    parts: AnchorParts {
+                        at: None,
+                        operand: None,
+                        ret: false,
+                        function: Some(function.clone()),
+                        local: Some(name.clone()),
+                    },
                     from,
                     emit_module: Some("out.bc".into()),
                 },
@@ -1114,12 +1104,12 @@ mod tests {
                 Planned::Ready(query) => panic!("{query:?}"),
             })
             .collect();
-        assert_eq!(requests[0].at.as_deref(), Some("t.c:4"));
-        assert_eq!(requests[0].operand, Some(0));
+        assert_eq!(requests[0].parts.at.as_deref(), Some("t.c:4"));
+        assert_eq!(requests[0].parts.operand, Some(0));
         assert_eq!(requests[0].from.as_deref(), Some("main"));
-        assert!(requests[1].ret && requests[1].operand.is_none());
-        assert_eq!(requests[2].function.as_deref(), Some("parse"));
-        assert_eq!(requests[2].local.as_deref(), Some("len"));
+        assert!(requests[1].parts.ret && requests[1].parts.operand.is_none());
+        assert_eq!(requests[2].parts.function.as_deref(), Some("parse"));
+        assert_eq!(requests[2].parts.local.as_deref(), Some("len"));
     }
 
     #[test]
