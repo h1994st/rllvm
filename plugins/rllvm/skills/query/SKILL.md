@@ -43,6 +43,7 @@ When a warning about the facts cache appears, offer `rllvm-query cache clear
 | Who can call X through a pointer? | `uses` for address-taken sites, then `indirect_targets` at each |
 | What can this indirect call reach? | `indirect_targets` at the call site (`heuristics: true` adds the address-taken inventory) |
 | Which functions could an unresolved indirect call reach, grouped by the record field it dispatches through or the slot it reads its callee from? | `resolution_candidates` (`resolution-candidates`): candidates, never edges; no walk follows them |
+| What comparisons, clamps, masks or moduli constrain a value, such as a length handed to a copy? | `guards` (`--at file:line` with `--operand N`, counting from 0, or `--return`; or `--function F --local NAME`; `--from F` bounds a parameter's callers): evidence only, so an empty list is not "unbounded"; reads the anchor's module through `opt` from `llvm_bindir`, so over MCP it needs `load_catalog`, not `inventory` |
 | Can A reach B — for example, is a vulnerable function reachable? | `reach`; if it finds no path, `closure` to see where the search stopped |
 | Every function on some path from A to B, and the edges among them | `slice`; `emit_module` (`--emit-module OUT.bc`) also writes their definitions as one module |
 | Everything that reaches X, or that X reaches | `closure` with `direction` `in` or `out` |
@@ -187,6 +188,18 @@ Report what the answer supports, and say what it does not:
   functions found flowing into it through stores, arguments and accessors in
   the captured program; a path the facts do not follow, such as `memcpy` or
   pointer arithmetic, can add more.
+- **A guard list covers one function.** `guards` traces the value inside
+  the anchor's function only. A guard's `depth` is 0 on the value itself, or
+  on a value it only widens (the bound holds across zext or sext when the
+  guard's signedness matches the cast's), and N on a value N steps up the
+  chain it is computed from, a truncation counting as a step; that is not
+  by itself a bound on the value. A `relation` of `dominates` runs before
+  the use on every path but does not say which way its branch goes; one that
+  is on_path lies on some path to the use, not every one. `crossings` name
+  the call where the value enters or leaves: ask `guards` there next. `from`
+  only keeps crossings from callers on a path from one named function;
+  nothing between it and the anchor was examined.
+  `uncertainty.value_trace_lost` means the list is partial.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.

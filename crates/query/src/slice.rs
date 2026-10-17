@@ -736,6 +736,37 @@ mod tests {
         assert!(error.contains(&format!("LLVM {linked}")), "{error}");
     }
 
+    /// What a rustc module relies on, its producer naming no LLVM release:
+    /// `opt`'s own reader failing is reported with `opt`'s version and the
+    /// module, not as a bare tool failure.
+    #[test]
+    fn a_failing_opt_is_named_with_its_llvm_version_and_the_module() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let mut session = clamp_session(&scratch);
+        let bindir = scratch.path().join("bin");
+        std::fs::create_dir(&bindir).unwrap();
+        let major = linked_major().unwrap();
+        let opt = bindir.join(OPT);
+        std::fs::write(
+            &opt,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'LLVM version {major}.0.0'; exit 0; }}\necho 'error: cannot read' >&2\nexit 1\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&opt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        session.set_llvm_bindir(Ok(LlvmBindir::configured(&bindir)));
+
+        let error = promote_anchor_module(&session, &fid("f"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("(LLVM {major})")) && error.contains("module m"),
+            "{error}"
+        );
+    }
+
     #[test]
     fn a_producer_without_an_llvm_major_is_left_to_opts_reader() {
         let scratch = tempfile::tempdir().unwrap();

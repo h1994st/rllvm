@@ -6,7 +6,7 @@
 //! trace found nothing constraining the value, not that the value is
 //! unbounded.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -223,7 +223,8 @@ pub enum GuardRelation {
     OnPath,
 }
 
-/// One instruction that constrains the anchored value.
+/// One instruction that constrains the anchored value, or a value the
+/// anchored one is computed from: `depth` says which.
 #[derive(Clone, Debug, Serialize)]
 pub struct GuardSite {
     pub op: GuardKind,
@@ -232,15 +233,24 @@ pub struct GuardSite {
     /// the bound, `bound - value`, has a `.rev` suffix: `usub.sat.rev`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
+    /// The constant: unsigned for a mask and for an unsigned operation
+    /// (`ult`, `umin`, `usub.sat`, `urem`, ...), at the width of the guarded
+    /// integer; as the IR prints it, signed, otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound: Option<String>,
-    /// The width in bits of the guarded integer: not part of the answer's
-    /// JSON, only what lets the text show a bound unsigned or in hex.
-    #[serde(skip)]
-    pub(crate) bits: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<SourceLocation>,
+    /// `dominates` says the guard runs before the use on every path, not
+    /// which way its branch goes to reach it.
     pub relation: GuardRelation,
+    /// 0 when the guard constrains the anchored value itself, or a widening
+    /// of it (`zext`, `sext`), whose bound holds when the guard's signedness
+    /// matches the cast's. Otherwise how many steps up the chain the
+    /// anchored value is computed from lies the value it constrains, a
+    /// truncation counting as a step; such a guard is not by itself a bound
+    /// on the anchored value: anchored at `n = (len & 0xff) + 1000`, the
+    /// mask is at depth 1.
+    pub depth: u32,
 }
 
 /// Which way a trace crossed a call boundary.
@@ -299,25 +309,43 @@ const UNTRACED_CASTS: [(CastOp, &str); 4] = [
     (CastOp::BitCast, "bitcast"),
 ];
 
-/// Casts that keep an integer's value, only resizing it.
-const RESIZING_CASTS: [CastOp; 3] = [CastOp::Trunc, CastOp::ZExt, CastOp::SExt];
+/// Casts that keep an integer's value, only widening it. A `trunc` is not
+/// one: many values narrow to the same one, so a bound on the wide value is
+/// none on the narrow.
+const WIDENING_CASTS: [CastOp; 2] = [CastOp::ZExt, CastOp::SExt];
 
-/// Intrinsics, by name prefix, whose result is read from memory or a
-/// register rather than computed from their arguments.
-const READING_INTRINSICS: [&str; 9] = [
-    "llvm.masked.load.",
-    "llvm.masked.gather.",
-    "llvm.masked.expandload.",
-    "llvm.vp.load.",
-    "llvm.vp.gather.",
-    "llvm.experimental.vp.strided.load.",
-    "llvm.load.relative.",
-    "llvm.read_register.",
-    "llvm.read_volatile_register.",
+/// Intrinsics, by name prefix, whose result is computed from their integer
+/// arguments alone: the trace reads through them to those arguments. Any
+/// other intrinsic may read memory or a register, or compute from a pointer,
+/// so the trace stops there and says so. Clamps and saturating operations
+/// are guards, read before this list is.
+const PURE_INTRINSICS: [&str; 23] = [
+    "llvm.abs.",
+    "llvm.smin.",
+    "llvm.smax.",
+    "llvm.umin.",
+    "llvm.umax.",
+    "llvm.sadd.sat.",
+    "llvm.uadd.sat.",
+    "llvm.ssub.sat.",
+    "llvm.usub.sat.",
+    "llvm.sshl.sat.",
+    "llvm.ushl.sat.",
+    "llvm.bswap.",
+    "llvm.bitreverse.",
+    "llvm.ctpop.",
+    "llvm.ctlz.",
+    "llvm.cttz.",
+    "llvm.fshl.",
+    "llvm.fshr.",
+    "llvm.scmp.",
+    "llvm.ucmp.",
+    "llvm.expect.",
+    "llvm.expect.with.probability.",
+    "llvm.ssa.copy.",
 ];
 
-/// How intrinsic names begin. An intrinsic's result is computed from its
-/// arguments, so the trace reads through it rather than crossing into it.
+/// How intrinsic names begin.
 const INTRINSIC_PREFIX: &str = "llvm.";
 
 /// The position a value crossing out of a callee holds.
@@ -432,28 +460,49 @@ pub fn emit_guards_module(
     for module in modules {
         check_opt_llvm(llvm_bindir, session, module)?;
     }
-    let emitted = emit_module(session, catalog, &functions, llvm_link, llvm_bindir, out)?;
+    // Linked and promoted in scratch, then renamed into place: a failure
+    // on the way leaves nothing at `out`.
     let scratch = tempfile::TempDir::new()?;
-    let promoted = promote(&std::fs::read(out)?, llvm_bindir, scratch.path())?;
-    std::fs::write(out, promoted.bytes)?;
-    Ok(emitted)
+    let linked = scratch.path().join("linked.bc");
+    let emitted = emit_module(
+        session,
+        catalog,
+        &functions,
+        llvm_link,
+        llvm_bindir,
+        &linked,
+    )?;
+    let promoted = promote(&std::fs::read(&linked)?, llvm_bindir, scratch.path())?;
+    let directory = match out.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    // Created as `llvm-link` creates a slice's module: readable as the
+    // umask allows, not owner-only as a temporary file would be.
+    let mut builder = tempfile::Builder::new();
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o666));
+    let mut staged = builder.tempfile_in(directory)?;
+    std::io::Write::write_all(&mut staged, &promoted.bytes)?;
+    staged.persist(out).map_err(|error| error.error)?;
+    Ok(EmittedModule {
+        path: out.to_path_buf(),
+        ..emitted
+    })
 }
 
 /// The functions on a path from `from` to `function`: the callers a
-/// parameter may cross from when the trace is bounded to that slice. An
-/// error when `function` is on no such path.
+/// parameter may cross from when the trace is bounded to that slice. `from`
+/// must name exactly one defined function. An error when `function` is on
+/// no such path.
 fn caller_scope(
     session: &Session,
     from: &str,
     function: &FunctionId,
 ) -> Result<HashSet<FunctionId>, Error> {
-    if session.resolve(from).is_none() {
-        return Err(Error::InvalidArguments(format!(
-            "no function named {from:?} in the catalog to bound the trace from"
-        )));
-    }
+    let start = one_definition(session, from, "`from`")?;
     let scope: HashSet<FunctionId> = session
-        .slice_with(from, &function.symbol, None)
+        .slice_with(&start.symbol, &function.symbol, None)
         .functions
         .into_iter()
         .collect();
@@ -540,6 +589,9 @@ struct Walk {
     defining: BTreeMap<ValueId, GuardSite>,
     /// Comparisons a clamp in the chain is made of, which it reports.
     folded: HashSet<ValueId>,
+    /// Each step the walk took back: a value, and an operand it is
+    /// computed from.
+    steps: Vec<(ValueId, ValueId)>,
     crossings: Vec<Crossing>,
     lost: Vec<String>,
 }
@@ -561,10 +613,12 @@ impl Trace<'_> {
             }
             let node = self.node(id);
             let mut follow = |operands: &[Operand]| {
-                pending.extend(operands.iter().filter_map(|operand| match operand {
-                    Operand::Value(value) => Some(*value),
-                    _ => None,
-                }));
+                for operand in operands {
+                    if let Operand::Value(value) = operand {
+                        pending.push(*value);
+                        walk.steps.push((id, *value));
+                    }
+                }
             };
             match node.opcode {
                 OpcodeIr::Param => {
@@ -584,20 +638,21 @@ impl Trace<'_> {
                         follow(&call.args);
                     } else {
                         match &call.callee {
-                            Some(callee)
-                                if READING_INTRINSICS
-                                    .iter()
-                                    .any(|prefix| callee.symbol.starts_with(prefix)) =>
-                            {
-                                walk.lost.push(format!(
-                                    "`{}` reads the value from memory or a register{}, and what \
-                                     was stored there is not traced",
-                                    callee.symbol,
-                                    place(node)
-                                ));
-                            }
                             Some(callee) if callee.symbol.starts_with(INTRINSIC_PREFIX) => {
-                                follow(&call.args);
+                                if PURE_INTRINSICS
+                                    .iter()
+                                    .any(|prefix| callee.symbol.starts_with(prefix))
+                                {
+                                    follow(&call.args);
+                                } else {
+                                    walk.lost.push(format!(
+                                        "the intrinsic `{}` produces the value{}, and the trace \
+                                         does not read through it: it may read memory or a \
+                                         register",
+                                        callee.symbol,
+                                        place(node)
+                                    ));
+                                }
                             }
                             Some(_) => match self.crossing_from(id) {
                                 Ok(crossing) => walk.crossings.push(crossing),
@@ -671,7 +726,12 @@ impl Trace<'_> {
     /// instruction the value is used at, and on its path otherwise. In
     /// instruction order.
     fn guard_sites(&self, walk: &Walk, value: ValueId, at: ValueId) -> Vec<GuardSite> {
+        let depths = self.depths(walk, value);
+        let depth_of = |id: &ValueId| depths.get(id).copied().unwrap_or_default();
         let mut sites = walk.defining.clone();
+        for (id, site) in &mut sites {
+            site.depth = depth_of(id);
+        }
         let mut folded = walk.folded.clone();
         let downstream = self.downstream(value);
         let traced = |operand: &Operand| {
@@ -721,16 +781,48 @@ impl Trace<'_> {
             } else {
                 GuardRelation::OnPath
             };
-            sites.insert(
-                id,
-                surfaced(raw, side == 1, node.location.clone(), relation),
-            );
+            let mut site = surfaced(raw, side == 1, node.location.clone(), relation);
+            if let Operand::Value(compared) = &node.operands[side]
+                && !downstream.contains(compared)
+            {
+                site.depth = depth_of(compared);
+            }
+            sites.insert(id, site);
         }
         sites.into_values().collect()
     }
 
-    /// `value`, and what it is only widened or narrowed into downstream:
-    /// a guard on those constrains it too.
+    /// How many steps back from `value` each value of `walk`'s chain lies:
+    /// the fewest operands followed to reach it. A widening keeps the value,
+    /// so stepping through one is no step; a truncation is one.
+    fn depths(&self, walk: &Walk, value: ValueId) -> HashMap<ValueId, u32> {
+        let mut operands: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+        for (user, operand) in &walk.steps {
+            operands.entry(*user).or_default().push(*operand);
+        }
+        let mut depths = HashMap::new();
+        let mut pending = VecDeque::from([(value, 0)]);
+        while let Some((id, depth)) = pending.pop_front() {
+            if depths.contains_key(&id) {
+                continue;
+            }
+            depths.insert(id, depth);
+            let widens = matches!(self.node(id).opcode,
+                OpcodeIr::Cast { op } if WIDENING_CASTS.contains(&op));
+            for &operand in operands.get(&id).into_iter().flatten() {
+                if widens {
+                    pending.push_front((operand, depth));
+                } else {
+                    pending.push_back((operand, depth + 1));
+                }
+            }
+        }
+        depths
+    }
+
+    /// `value`, and what it is only widened into downstream: a guard on
+    /// those constrains it too. A truncation of it is left out: a guard on
+    /// the narrow value says nothing about the wide one.
     fn downstream(&self, value: ValueId) -> BTreeSet<ValueId> {
         let mut values = BTreeSet::from([value]);
         let mut grew = true;
@@ -739,7 +831,7 @@ impl Trace<'_> {
             for (id, node) in self.body.values.iter().enumerate() {
                 if let (OpcodeIr::Cast { op }, Some(Operand::Value(from))) =
                     (node.opcode, node.operands.first())
-                    && RESIZING_CASTS.contains(&op)
+                    && WIDENING_CASTS.contains(&op)
                     && values.contains(from)
                 {
                     grew |= values.insert(id as ValueId);
@@ -840,20 +932,23 @@ impl Trace<'_> {
         let node = self.node(compare);
         let predicate = int_predicate(node.guard.as_ref()?.predicate.as_deref()?)?;
         let picks = usize::from(node.operands.first() != Some(on_true));
-        let (bound, bits) = [a, b]
-            .into_iter()
-            .find_map(|operand| match operand {
-                Operand::Const(constant) => Some((constant.value.clone(), constant.bits)),
-                _ => None,
-            })
-            .unzip();
+        let clamp = predicate.clamps?[picks];
+        let bound = [a, b].into_iter().find_map(|operand| match operand {
+            Operand::Const(constant) => Some(unsigned_bound(
+                GuardKind::Clamp,
+                Some(clamp),
+                &constant.value,
+                constant.bits,
+            )),
+            _ => None,
+        });
         let site = GuardSite {
             op: GuardKind::Clamp,
-            predicate: Some(predicate.clamps?[picks].to_string()),
+            predicate: Some(clamp.to_string()),
             bound,
-            bits: bits.flatten(),
             location: node.location.clone().or_else(|| phi.location.clone()),
             relation: GuardRelation::Defines,
+            depth: 0,
         };
         Some((site, compare))
     }
@@ -945,11 +1040,35 @@ fn surfaced(
     });
     GuardSite {
         op: raw.kind,
+        bound: raw
+            .bound
+            .as_deref()
+            .map(|bound| unsigned_bound(raw.kind, predicate, bound, raw.bits)),
         predicate: predicate.map(str::to_string),
-        bound: raw.bound.clone(),
-        bits: raw.bits,
         location,
         relation,
+        depth: 0,
+    }
+}
+
+/// `bound`, a constant as the IR prints it, read unsigned at width `bits`
+/// when `op` with `predicate` is unsigned: a mask, or an operation whose
+/// name starts with `u`. The IR prints every integer signed, so the mask
+/// `0xfffffff0` reads `-16`. Kept as printed for a signed or equality
+/// operation, or when the width is not known.
+fn unsigned_bound(
+    op: GuardKind,
+    predicate: Option<&str>,
+    bound: &str,
+    bits: Option<u32>,
+) -> String {
+    let unsigned = op == GuardKind::Mask || predicate.is_some_and(|p| p.starts_with('u'));
+    let width = bits
+        .and_then(|bits| 1_i128.checked_shl(bits))
+        .filter(|width| *width > 0);
+    match (unsigned, width, bound.parse::<i128>()) {
+        (true, Some(width), Ok(value)) if value < 0 => (value + width).to_string(),
+        _ => bound.to_string(),
     }
 }
 
@@ -1002,6 +1121,17 @@ pub(crate) fn anchor_function(
         }
         GuardAnchor::Local { function, .. } => function,
     };
+    one_definition(session, name, "a local")
+}
+
+/// The one function `name` defines, for `role` to name in the error when
+/// it defines none or several. ODR copies count as one definition, and an
+/// `available_externally` body as none.
+pub(crate) fn one_definition(
+    session: &Session,
+    name: &str,
+    role: &str,
+) -> Result<FunctionId, Error> {
     let definitions = session
         .definitions(name)
         .into_iter()
@@ -1014,7 +1144,7 @@ pub(crate) fn anchor_function(
         ))),
         [one] => Ok(one.clone()),
         several => Err(Error::InvalidArguments(format!(
-            "{name:?} names {} defined functions ({}); a local needs exactly one",
+            "{name:?} names {} defined functions ({}); {role} needs exactly one",
             several.len(),
             several
                 .iter()
@@ -1756,6 +1886,86 @@ define void @f(ptr %p) {
 !0 = !{!"sp"}
 "#;
 
+    /// A target intrinsic that loads through its pointer argument, which
+    /// comes from a parameter `caller` passes.
+    const TARGET_LOAD_IR: &str = r#"
+declare i64 @llvm.aarch64.ldxr.p0(ptr)
+declare void @sink(i64)
+
+define void @h(ptr %p) {
+  %v = call i64 @llvm.aarch64.ldxr.p0(ptr elementtype(i64) %p)
+  call void @sink(i64 %v)
+  ret void
+}
+
+define void @caller(ptr %q) {
+  call void @h(ptr %q)
+  ret void
+}
+"#;
+
+    /// The mask bounds `len & 0xff`, which `n` is computed from; `n` itself
+    /// lies in [1000, 1255].
+    const MASKED_OPERAND_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len) {
+  unsigned n = (len & 0xff) + 1000;
+  sink(n);
+}
+";
+
+    /// The comparison bounds `len`; `n` is `len * 4`.
+    const COMPARED_OPERAND_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len) {
+  unsigned n = len * 4;
+  if (len > 16)
+    return;
+  sink(n);
+}
+";
+
+    /// `len = -2^32 + 100` passes the comparison and truncates to 100: the
+    /// bound on `len` is not one on `(int)len`.
+    const TRUNCATED_SOURCE: &str = "extern void sink(int);
+void f(long len) {
+  if (len > 64)
+    return;
+  sink((int)len);
+}
+";
+
+    /// A bound the narrowed `unsigned char` cannot even reach.
+    const NARROWED_SOURCE: &str = "extern void sink(unsigned char);
+void f(unsigned len) {
+  if (len < 300)
+    return;
+  sink((unsigned char)len);
+}
+";
+
+    /// A widening keeps the value, so its bound holds for the anchor.
+    const WIDENED_SOURCE: &str = "extern void sink(unsigned long);
+void f(unsigned len) {
+  if (len > 64)
+    return;
+  sink((unsigned long)len);
+}
+";
+
+    /// A mask and a comparison whose constants the IR prints negative.
+    const UNSIGNED_BOUNDS_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len) {
+  if (len < 0x80000000u)
+    sink(len & 0xfffffff0u);
+}
+";
+
+    /// `use` is called from two functions named `parse`.
+    const TWO_PARSERS_SOURCE: &str = "extern \"C\" void sink(unsigned);
+void use(unsigned n) { sink(n); }
+namespace a { void parse(unsigned x) { use(x); } }
+namespace b { void parse(unsigned x) { use(x); } }
+";
+
     /// The value comes out of an `asm goto`.
     const ASM_GOTO_SOURCE: &str = "extern void sink(unsigned);
 void f(void) {
@@ -2162,6 +2372,192 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             let lost = r.lost.as_deref().unwrap_or_default();
             assert!(lost.contains(intrinsic), "{r:?}");
         }
+    }
+
+    /// Its pointer argument is not where the value comes from: following it
+    /// would claim a crossing into `h` that carries no such value.
+    #[test]
+    fn an_intrinsic_outside_the_pure_ones_loses_the_trace() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            TARGET_LOAD_IR,
+            &["-Wno-override-module"],
+        );
+        let r = guards(&session, &sink_argument(&session, "h", 0), None).unwrap();
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(lost.contains("llvm.aarch64.ldxr"), "{r:?}");
+        assert!(r.crossings.is_empty(), "no crossing into h: {r:?}");
+    }
+
+    #[test]
+    fn a_guard_on_the_anchor_is_at_depth_zero() {
+        for (source, flags) in [
+            (CLAMP_SOURCE, &["-O0", "-g"][..]),
+            (CLAMP_SOURCE, &["-O1", "-g"]),
+            (DOMINATING_SOURCE, &["-O0", "-g"]),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session(&scratch, source, flags);
+            let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+            assert!(!r.guards.is_empty(), "{flags:?}: {r:?}");
+            assert!(
+                r.guards.iter().all(|guard| guard.depth == 0),
+                "{flags:?}: {r:?}"
+            );
+        }
+    }
+
+    /// A guard on a value the anchor is computed from is not a guard on the
+    /// anchor: it says how many steps upstream it lies.
+    #[test]
+    fn a_guard_on_an_operand_says_how_far_upstream_it_is() {
+        for (source, op) in [
+            (MASKED_OPERAND_SOURCE, GuardKind::Mask),
+            (COMPARED_OPERAND_SOURCE, GuardKind::Compare),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session(&scratch, source, &["-O0", "-g"]);
+            let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+            let depths: Vec<(GuardKind, u32)> = r
+                .guards
+                .iter()
+                .map(|guard| (guard.op, guard.depth))
+                .collect();
+            assert_eq!(depths, [(op, 1)], "{r:?}");
+        }
+    }
+
+    /// A truncation does not keep the value, so a guard before one is a
+    /// step upstream; a widening does, so a guard before one is on the
+    /// anchor.
+    #[test]
+    fn a_guard_before_a_truncation_is_a_step_upstream() {
+        for (source, op, depth) in [
+            (TRUNCATED_SOURCE, GuardKind::Compare, 1),
+            (NARROWED_SOURCE, GuardKind::Compare, 1),
+            (WIDENED_SOURCE, GuardKind::Compare, 0),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session(&scratch, source, &["-O0", "-g"]);
+            let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+            let depths: Vec<(GuardKind, u32)> = r
+                .guards
+                .iter()
+                .map(|guard| (guard.op, guard.depth))
+                .collect();
+            assert_eq!(depths, [(op, depth)], "{source}: {r:?}");
+        }
+    }
+
+    /// The IR prints `0xfffffff0` as `-16` and `0x80000000` as
+    /// `-2147483648`; an unsigned comparison's or a mask's bound is the
+    /// unsigned value.
+    #[test]
+    fn an_unsigned_bound_is_the_unsigned_value() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, UNSIGNED_BOUNDS_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [
+                (
+                    GuardKind::Compare,
+                    Some("ult"),
+                    Some("2147483648"),
+                    GuardRelation::Dominates
+                ),
+                (
+                    GuardKind::Mask,
+                    None,
+                    Some("4294967280"),
+                    GuardRelation::Defines
+                ),
+            ],
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn a_bound_reads_unsigned_only_for_an_unsigned_operation_of_known_width() {
+        let read = |op, predicate, bound, bits| unsigned_bound(op, predicate, bound, bits);
+        assert_eq!(read(GuardKind::Mask, None, "-16", Some(32)), "4294967280");
+        assert_eq!(read(GuardKind::Clamp, Some("umin"), "-1", Some(8)), "255");
+        assert_eq!(
+            read(GuardKind::Saturate, Some("usub.sat.rev"), "-1", Some(16)),
+            "65535"
+        );
+        assert_eq!(
+            read(GuardKind::Compare, Some("slt"), "-16", Some(32)),
+            "-16"
+        );
+        assert_eq!(read(GuardKind::Compare, Some("eq"), "-16", Some(32)), "-16");
+        assert_eq!(
+            read(GuardKind::Clamp, Some("umin"), "-1", None),
+            "-1",
+            "an unknown width leaves the IR's spelling"
+        );
+        assert_eq!(read(GuardKind::Mask, None, "true", Some(1)), "true");
+    }
+
+    #[test]
+    fn a_from_naming_several_functions_is_rejected_naming_them() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(scratch.path(), "t.cc", TWO_PARSERS_SOURCE, &["-O0", "-g"]);
+        let anchor = sink_argument(&session, "_Z3usej", 0);
+        let error = guards(&session, &anchor, Some("parse"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("names 2 defined functions")
+                && error.contains("_ZN1a5parseEj")
+                && error.contains("_ZN1b5parseEj"),
+            "{error}"
+        );
+        let one = guards(&session, &anchor, Some("_ZN1a5parseEj")).unwrap();
+        assert_eq!(
+            crossings(&one),
+            [("_ZN1a5parseEj", CrossingDir::Into, "_Z3usej", "parameter 0")]
+        );
+    }
+
+    /// The linked module is promoted before anything reaches `out`, so a
+    /// promotion that fails leaves no file behind.
+    #[test]
+    fn a_failed_promotion_leaves_no_emitted_module() {
+        use std::os::unix::fs::PermissionsExt;
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, CROSSING_SOURCE, &["-O0", "-g"]);
+        let bindir = scratch.path().join("bin");
+        std::fs::create_dir(&bindir).unwrap();
+        for tool in ["llvm-extract", "llvm-nm"] {
+            std::os::unix::fs::symlink(rllvm_testkit::llvm_bin(tool), bindir.join(tool)).unwrap();
+        }
+        let real_opt = rllvm_testkit::llvm_bin("opt");
+        let major = rllvm_core::diagnostics::tool_llvm_major_version(&real_opt).unwrap();
+        let opt = bindir.join("opt");
+        std::fs::write(
+            &opt,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'LLVM version {major}.0.0'; exit 0; }}\nexit 1\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&opt, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let out = scratch.path().join("guards.bc");
+        let result = emit_guards_module(
+            &session,
+            session.catalog_path().unwrap(),
+            &sink_argument(&session, "callee", 0),
+            None,
+            &rllvm_testkit::llvm_bin("llvm-link"),
+            &LlvmBindir::configured(&bindir),
+            &out,
+        );
+        assert!(result.is_err(), "{result:?}");
+        assert!(!out.exists(), "a failed promotion wrote {}", out.display());
     }
 
     #[test]

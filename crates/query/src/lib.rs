@@ -184,7 +184,9 @@ pub enum Query {
     /// verdict: no guard found is an empty list, not "unbounded".
     Guards {
         anchor: GuardAnchor,
-        /// Where the trace starts, when not the anchor's own function.
+        /// Bounds the crossings into a parameter to the callers on a path
+        /// from this function, which must name exactly one definition. The
+        /// trace itself never leaves the anchor's function.
         from: Option<String>,
         /// Write the traced slice as a module here.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1421,17 +1423,19 @@ impl Query {
             | Query::Uses { name }
             | Query::Closure { name, .. } => vec![name],
             Query::Reach { from, to, .. } | Query::Slice { from, to, .. } => vec![from, to],
-            Query::Guards {
-                anchor: GuardAnchor::Local { function, .. },
-                ..
-            } => vec![function],
+            Query::Guards { anchor, from, .. } => {
+                let function = match anchor {
+                    GuardAnchor::Local { function, .. } => Some(function.as_str()),
+                    GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => None,
+                };
+                function.into_iter().chain(from.as_deref()).collect()
+            }
             // These take a location or nothing at all.
             Query::At { .. }
             | Query::Externals
             | Query::FfiExports
             | Query::IndirectTargets { .. }
-            | Query::ResolutionCandidates
-            | Query::Guards { .. } => Vec::new(),
+            | Query::ResolutionCandidates => Vec::new(),
         }
     }
 
@@ -1693,6 +1697,60 @@ mod tests {
         let lost = answer.uncertainty.value_trace_lost.as_deref();
         assert!(lost.is_some_and(|l| l.contains("ptrtoint")), "{lost:?}");
         assert_eq!(answer.uncertainty.agent_path_steps, 0);
+    }
+
+    #[test]
+    fn llvm_diagnostics_on_the_anchor_module_reach_uncertainty() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = stale_debug_info_module(scratch.path());
+        let session = module_session(scratch.path(), &module);
+        let site = session.call_sites()[0].id.clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: None,
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let diagnostics = &answer.uncertainty.value_trace_diagnostics;
+        assert!(
+            diagnostics.iter().any(|d| d.contains("invalid version")),
+            "{diagnostics:?}"
+        );
+        assert!(answer.uncertainty.value_trace_lost.is_none());
+    }
+
+    /// `from` is a name like any other, so the answer says how it matched.
+    #[test]
+    fn a_guards_from_is_reported_in_the_resolution() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) { sink(n); }\nvoid g(void) { f(3); }\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| site.id.function.symbol == "f")
+            .unwrap()
+            .id
+            .clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: Some("g".into()),
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let from = answer
+            .resolution
+            .iter()
+            .find(|resolution| resolution.requested == "g");
+        assert!(
+            from.is_some_and(|from| from.matched.is_some() && from.symbols == ["g"]),
+            "{:?}",
+            answer.resolution
+        );
     }
 
     #[test]

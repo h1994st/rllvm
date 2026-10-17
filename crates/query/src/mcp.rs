@@ -89,6 +89,11 @@ const EMIT_NEEDS_CATALOG: &str = "`emit_module` reads the modules a catalog file
                                   artifact loaded by `inventory` has none: load its catalog \
                                   with `load_catalog` first";
 
+/// What `guards` answers for an `inventory` artifact.
+const GUARDS_NEEDS_CATALOG: &str = "`guards` reads the anchor's module through the catalog file \
+                                    that names it, and an artifact loaded by `inventory` has \
+                                    none: load its catalog with `load_catalog` first";
+
 /// The catalogs one MCP session has loaded, keyed by the canonical path they
 /// came from: the catalog JSON for `load_catalog`, the artifact itself for
 /// `inventory`. Loading the same path twice replaces its entry, which is
@@ -108,9 +113,9 @@ pub struct Registry {
     artifacts: BTreeSet<PathBuf>,
     /// The facts cache every load reads and fills; `None` when disabled.
     cache: Option<FactsCache>,
-    /// What `slice` needs to emit a module: the configured `llvm-link`, and
-    /// the LLVM bindir holding the other tools, or why it could not be
-    /// found, which is what an `emit_module` is then told.
+    /// The configured `llvm-link`, and the LLVM bindir holding the other
+    /// tools, or why it could not be found: what an `emit_module` and every
+    /// `guards` call, which runs `opt`, are then told.
     slice_tools: Option<(PathBuf, Result<LlvmBindir, String>)>,
 }
 
@@ -127,9 +132,10 @@ impl Registry {
         }
     }
 
-    /// This registry, emitting `slice` modules with `llvm_link` and the
-    /// `llvm-extract` and `llvm-nm` in `llvm_bindir`. A bindir that could not
-    /// be found fails only `emit_module`, with that error.
+    /// This registry, emitting modules with `llvm_link` and the
+    /// `llvm-extract` and `llvm-nm` in `llvm_bindir`, and promoting a
+    /// `guards` anchor's module with its `opt`. A bindir that could not be
+    /// found fails only `emit_module` and `guards`, with that error.
     pub fn with_llvm_tools(
         self,
         llvm_link: PathBuf,
@@ -1070,7 +1076,7 @@ fn query_tool(query: &Query) -> Value {
         }),
         Query::Guards { .. } => json!({
             "name": name,
-            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\".",
+            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `relation` `on_path` runs on some path to the use but not every one. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1079,7 +1085,7 @@ fn query_tool(query: &Query) -> Value {
                     "return": { "type": "boolean", "description": "With `at`: trace the call's result instead of an argument" },
                     "function": { "type": "string", "description": "With `local`: the function that holds the variable" },
                     "local": { "type": "string", "description": "With `function`: the source variable to trace" },
-                    "from": { "type": "string", "description": "Where the trace starts, when not the anchor's own function" },
+                    "from": { "type": "string", "description": "Bound the crossings into a parameter to the callers on a path from this function, which must name exactly one definition. The trace still stays in the anchor's function: guards between `from` and it are not examined." },
                     "emit_module": { "type": "string", "description": "Write the promoted slice a scoped re-read would use (from `from` to the anchor's function, else the function and its callers) to this .bc file, relative to the server's working directory; the answer gains `emitted`. Needs a catalog loaded by `load_catalog`." }
                 },
                 "required": []
@@ -1170,6 +1176,9 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
     };
     // Before the query runs: the modules are read through the catalog file,
     // which an artifact does not have.
+    if matches!(query, Query::Guards { .. }) && registry.artifacts.contains(&key) {
+        return Outcome::Result(call_tool_result(true, GUARDS_NEEDS_CATALOG), false);
+    }
     if emit_module.is_some() && registry.artifacts.contains(&key) {
         return Outcome::Result(call_tool_result(true, EMIT_NEEDS_CATALOG), false);
     }
@@ -1229,14 +1238,20 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
     Outcome::Result(call_tool_result(false, &payload.to_string()), false)
 }
 
-/// The anchor parts a `guards` call names; the combination is checked by
-/// `check_anchor_parts` and resolved by `anchor_from_parts`, as on the CLI.
-fn guard_parts(arguments: &Value) -> Result<AnchorParts, String> {
-    let text = |key: &str| match arguments.get(key) {
+/// The string argument `key`, absent when missing or `null`; any other type
+/// is an error, never read as absent.
+fn optional_string(arguments: &Value, key: &str) -> Result<Option<String>, String> {
+    match arguments.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(text)) => Ok(Some(text.clone())),
         Some(_) => Err(format!("non-string argument `{key}`")),
-    };
+    }
+}
+
+/// The anchor parts a `guards` call names; the combination is checked by
+/// `check_anchor_parts` and resolved by `anchor_from_parts`, as on the CLI.
+fn guard_parts(arguments: &Value) -> Result<AnchorParts, String> {
+    let text = |key: &str| optional_string(arguments, key);
     let operand = match arguments.get("operand") {
         None | Some(Value::Null) => None,
         Some(value) => Some(
@@ -1354,10 +1369,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                     function: String::new(),
                     name: String::new(),
                 },
-                from: arguments
-                    .get("from")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                from: optional_string(arguments, "from")?,
                 emit_module: None,
             })
         }
@@ -1536,6 +1548,42 @@ mod tests {
         assert!(
             guards.iter().any(|guard| guard["bound"] == "8"),
             "{payload}"
+        );
+    }
+
+    /// A `from` that is not a name would otherwise be dropped, turning a
+    /// bounded request into an unbounded answer.
+    #[test]
+    fn a_guards_from_that_is_not_a_string_is_a_tool_error() {
+        let mut registry = one_catalog();
+        let text = tool_error(
+            &mut registry,
+            "guards",
+            json!({ "function": "a", "local": "x", "from": 7 }),
+        );
+        assert!(text.contains("`from`"), "{text}");
+    }
+
+    /// An `inventory` artifact has no catalog file to read the anchor's
+    /// module through: the error says so and names the way out.
+    #[test]
+    fn guards_on_an_inventory_artifact_names_load_catalog() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        registry.artifacts.insert(PathBuf::from("first"));
+        let at = format!("{}:3", scratch.path().join("t.c").display());
+        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
+        assert!(
+            text.contains("`guards`")
+                && text.contains("inventory")
+                && text.contains("load_catalog"),
+            "{text}"
         );
     }
 

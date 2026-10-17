@@ -648,8 +648,8 @@ fn stdout_color() -> Color {
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
     let config = try_rllvm_config()?;
-    // Only emitting a slice needs the bindir, so failing to find it fails
-    // only that.
+    // Only emitting a module and `guards` need the bindir, so failing to
+    // find it fails only those.
     let mut registry = mcp::Registry::with_cache(facts_cache()?).with_llvm_tools(
         config.llvm_link_filepath().clone(),
         config.llvm_bindir().cloned(),

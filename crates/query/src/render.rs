@@ -135,30 +135,25 @@ fn paint(text: &str, color: Color, style: Paint) -> String {
     }
 }
 
-/// A guard's bound as the text shows it. The IR prints every integer
-/// signed, so a mask `0xfffffff0` reads `-16` and `icmp ult %x, 2147483648`
-/// reads `-2147483648`: a mask is shown in hex and a bound of an unsigned
-/// operation (`ult`, `umin`, `usub.sat`, `urem`, ...) as unsigned, both at the
-/// width of the guarded integer. Without a recorded width, or for a signed or
-/// equality bound, the IR's own spelling stands.
+/// A guard's bound as the text shows it: a mask in hex, since its bits are
+/// what it keeps; any other bound as the answer gives it, already unsigned
+/// for an unsigned operation.
 fn guard_bound(guard: &GuardSite) -> Option<String> {
     let bound = guard.bound.as_deref()?;
-    let (Some(bits), Ok(value)) = (guard.bits, bound.parse::<i128>()) else {
-        return Some(bound.to_string());
-    };
-    let unsigned = || {
-        let width = 1_i128.checked_shl(bits)?;
-        Some(if value < 0 { value + width } else { value })
-    };
-    let unsigned_op = guard
-        .predicate
-        .as_deref()
-        .is_some_and(|p| p.starts_with('u'));
-    Some(match guard.op {
-        GuardKind::Mask => unsigned().map_or_else(|| bound.to_string(), |v| format!("{v:#x}")),
-        _ if unsigned_op => unsigned().map_or_else(|| bound.to_string(), |v| v.to_string()),
+    Some(match (guard.op, bound.parse::<u128>()) {
+        (GuardKind::Mask, Ok(value)) => format!("{value:#x}"),
         _ => bound.to_string(),
     })
+}
+
+/// How far up the chain the anchored value is computed from a guard's value
+/// lies, as the text says it.
+fn guard_depth(depth: u32) -> String {
+    match depth {
+        0 => "on the anchor".to_string(),
+        1 => "1 step upstream".to_string(),
+        n => format!("{n} steps upstream"),
+    }
 }
 
 /// The name a unit-variant enum carries into the JSON envelope, not the
@@ -879,7 +874,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
         QueryResults::Guards(result) => {
             for guard in &result.guards {
                 out.push_str(&format!(
-                    "{}  {}{}{} ({})\n",
+                    "{}  {}{}{} ({}, {})\n",
                     location(guard.location.as_ref(), ctx),
                     serde_name(&guard.op),
                     guard
@@ -887,7 +882,8 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                         .as_ref()
                         .map_or(String::new(), |p| format!(" {p}")),
                     guard_bound(guard).map_or(String::new(), |b| format!(" {b}")),
-                    serde_name(&guard.relation)
+                    serde_name(&guard.relation),
+                    guard_depth(guard.depth)
                 ));
             }
             for crossing in &result.crossings {
@@ -2291,21 +2287,21 @@ mod tests {
         op: GuardKind,
         predicate: Option<&str>,
         bound: &str,
-        bits: Option<u32>,
         relation: crate::GuardRelation,
+        depth: u32,
     ) -> GuardSite {
         GuardSite {
             op,
             predicate: predicate.map(str::to_string),
             bound: Some(bound.to_string()),
-            bits,
             location: None,
             relation,
+            depth,
         }
     }
 
     #[test]
-    fn guards_print_snake_case_names_unsigned_bounds_hex_masks_and_crossings() {
+    fn guards_print_snake_case_names_hex_masks_depths_and_crossings() {
         use crate::{CrossingDir, GuardRelation::*, GuardsResult};
         let session = session_from(&[("a", "b")]);
         let mut answer = run(&session, &Query::Externals).unwrap();
@@ -2319,16 +2315,10 @@ mod tests {
         };
         answer.results = QueryResults::Guards(GuardsResult {
             guards: vec![
-                guard(
-                    GuardKind::Compare,
-                    Some("ult"),
-                    "-2147483648",
-                    Some(32),
-                    Dominates,
-                ),
-                guard(GuardKind::Mask, None, "-16", Some(32), OnPath),
-                guard(GuardKind::Compare, Some("slt"), "-16", Some(32), Defines),
-                guard(GuardKind::Clamp, Some("umin"), "-1", None, Defines),
+                guard(GuardKind::Compare, Some("ult"), "2147483648", Dominates, 0),
+                guard(GuardKind::Mask, None, "4294967280", OnPath, 1),
+                guard(GuardKind::Compare, Some("slt"), "-16", Defines, 2),
+                guard(GuardKind::Mask, None, "-1", Defines, 0),
             ],
             crossings: vec![crate::Crossing {
                 site: site.clone(),
@@ -2345,13 +2335,19 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(
             lines[0],
-            "<no location>  compare ult 2147483648 (dominates)"
+            "<no location>  compare ult 2147483648 (dominates, on the anchor)"
         );
-        assert_eq!(lines[1], "<no location>  mask 0xfffffff0 (on_path)");
-        assert_eq!(lines[2], "<no location>  compare slt -16 (defines)");
         assert_eq!(
-            lines[3], "<no location>  clamp umin -1 (defines)",
-            "an unknown width leaves the IR's spelling"
+            lines[1],
+            "<no location>  mask 0xfffffff0 (on_path, 1 step upstream)"
+        );
+        assert_eq!(
+            lines[2],
+            "<no location>  compare slt -16 (defines, 2 steps upstream)"
+        );
+        assert_eq!(
+            lines[3], "<no location>  mask -1 (defines, on the anchor)",
+            "a bound read signed, for want of a width, stays as the IR spells it"
         );
         assert_eq!(lines[4], "crossing into b parameter 0  via a call in a");
     }

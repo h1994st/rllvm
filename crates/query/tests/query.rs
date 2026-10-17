@@ -4514,7 +4514,7 @@ fn the_guards_flags_name_a_call_site_argument_and_print_snake_case() {
         "{text}"
     );
     assert!(
-        text.contains("(dominates)") || text.contains("(on_path)"),
+        text.contains("(dominates, ") || text.contains("(on_path, "),
         "{text}"
     );
 
@@ -4522,6 +4522,52 @@ fn the_guards_flags_name_a_call_site_argument_and_print_snake_case() {
     assert!(error.contains("needs --operand"), "{error}");
     let error = guards_failure(&scratch, &catalog, &["--function", "f"]);
     assert!(error.contains("needs --local"), "{error}");
+}
+
+/// The IR prints the mask `0xfffffff0` as `-16` and the bound `0x80000000`
+/// as `-2147483648`.
+const UNSIGNED_GUARDS_SOURCE: &str = "extern void sink(unsigned);\n\
+     void f(unsigned len) {\n\
+       if (len < 0x80000000u)\n\
+         sink(len & 0xfffffff0u);\n\
+     }\n";
+
+#[test]
+fn guards_read_unsigned_bounds_unsigned_and_print_masks_in_hex() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "u.c", UNSIGNED_GUARDS_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let at = format!("{}:4", scratch.path().join("u.c").display());
+    let args = ["guards", "--at", at.as_str(), "--operand", "0"];
+
+    let json = query_json(&scratch, &catalog, &args);
+    let bounds: Vec<(&str, &str, u64)> = json["results"]["guards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|guard| {
+            (
+                guard["op"].as_str().unwrap(),
+                guard["bound"].as_str().unwrap(),
+                guard["depth"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        bounds,
+        [("compare", "2147483648", 1), ("mask", "4294967280", 0)],
+        "{json}"
+    );
+
+    let text = query_text(&scratch, &catalog, &args);
+    assert!(
+        text.contains("compare ult 2147483648 (dominates, 1 step upstream)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("mask 0xfffffff0 (defines, on the anchor)"),
+        "{text}"
+    );
 }
 
 const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\
@@ -4568,6 +4614,24 @@ fn guards_emits_its_promoted_slice_module() {
         !String::from_utf8_lossy(&listing.stdout).contains("alloca"),
         "the emitted module is mem2reg-promoted"
     );
+
+    // Written with the mode `slice --emit-module` gives its module, not a
+    // temporary file's owner-only one.
+    use std::os::unix::fs::PermissionsExt;
+    let slice_out = scratch.path().join("slice.bc");
+    query_json(
+        &scratch,
+        &catalog,
+        &[
+            "slice",
+            "caller",
+            "callee",
+            "--emit-module",
+            slice_out.to_str().unwrap(),
+        ],
+    );
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&out), mode(&slice_out));
 }
 
 #[test]
