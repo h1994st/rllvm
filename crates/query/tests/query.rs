@@ -4449,6 +4449,54 @@ fn the_overlay_cli_records_lists_and_compacts() {
     );
 }
 
+#[test]
+fn the_overlay_cli_records_an_annotation_and_lists_it() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "g.c", GUARDED_CALLS);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let overlay = scratch.path().join("plain-catalog.overlay.jsonl");
+    let annotate = |name: &str| {
+        serde_json::json!({
+            "op": "annotate",
+            "anchor": { "kind": "local", "function": "f", "name": name },
+            "verdict": "infeasible",
+            "confidence": "medium",
+            "provenance": ["g.c:4: if (n > 15) return"],
+        })
+    };
+
+    // A local that is not bound fails the batch and writes nothing.
+    let input = format!("{}\n{}\n", annotate("n"), annotate("missing"));
+    let output = query_stdin(&scratch, &catalog, &["overlay", "record"], &input);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("line 2: "), "{stderr}");
+    assert!(!overlay.exists(), "all or none");
+
+    let output = query_stdin(
+        &scratch,
+        &catalog,
+        &["overlay", "record"],
+        &format!("{}\n", annotate("n")),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("recorded 1, saved 1 to {}\n", overlay.display())
+    );
+
+    let listed = query_json(&scratch, &catalog, &["overlay", "list"]);
+    assert_eq!(listed["edges"], serde_json::json!([]), "{listed}");
+    let annotations = listed["annotations"].as_array().unwrap();
+    assert_eq!(annotations.len(), 1, "{listed}");
+    assert_eq!(annotations[0]["verdict"], "infeasible", "{listed}");
+    assert_eq!(annotations[0]["key"]["anchor"]["kind"], "local", "{listed}");
+}
+
 const GUARDED_CALLS: &str = "extern unsigned a(unsigned);\n\
      extern void b(unsigned);\n\
      void f(unsigned n) {\n\

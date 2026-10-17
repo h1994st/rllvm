@@ -55,4 +55,17 @@ query guards --at clamp.c:14 --operand 2 --from copy --emit-module "$OUT/guards.
 symbols=$("$BINDIR/llvm-nm" --defined-only "$OUT/guards.bc")
 defines "$symbols" " [Tt] _?copy\$" "the emitted module does not define copy: $symbols"
 
-echo "ok: guards reports the clamp that defines the length handed to put, and nothing for an unconstrained value"
+# 6. Record the verdict the clamp supports, then confirm it: an agent's
+#    hypothesis in the overlay beside the catalog, the records the README shows.
+rm -f "$OUT/catalog.overlay.jsonl"
+anchor='{"kind":"argument","site":"clamp.c:14","operand":2}'
+echo '{"op":"annotate","anchor":'"$anchor"',"verdict":"infeasible","confidence":"high","provenance":["clamp.c:13: n = len < CAP ? len : CAP"]}' |
+    query overlay record >/dev/null
+echo '{"op":"verify","annotation":{"anchor":'"$anchor"'},"tool":"review","verdict":"confirmed"}' |
+    query overlay record >/dev/null
+listed=$(query overlay list --json |
+    field '[(x["verdict"], x["verification"]["verdict"]) for x in a["annotations"]]')
+[ "$listed" = "[('infeasible', 'confirmed')]" ] ||
+    fail "overlay list showed $listed, expected one confirmed infeasible annotation"
+
+echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, and a recorded verdict lists as confirmed"

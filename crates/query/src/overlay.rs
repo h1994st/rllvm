@@ -500,7 +500,9 @@ impl fmt::Display for AnnotationKey {
 #[derive(Clone, Debug, Serialize)]
 pub struct Annotation {
     pub key: AnnotationKey,
-    pub feasibility: Feasibility,
+    /// What the `annotate` record said: `feasible`, `infeasible` or
+    /// `conditional`. Not `verification`'s verdict, which judges this one.
+    pub verdict: Feasibility,
     pub confidence: Confidence,
     pub provenance: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1193,7 +1195,7 @@ fn annotate_record(annotation: &Annotation) -> Record {
     Record::Annotate {
         anchor: AnchorSpec::from(&annotation.key.anchor),
         from: annotation.key.from.clone(),
-        verdict: annotation.feasibility,
+        verdict: annotation.verdict,
         confidence: annotation.confidence,
         provenance: annotation.provenance.clone(),
     }
@@ -1383,11 +1385,11 @@ fn apply(
             // does, and goes with it.
             let verification = annotations
                 .get(&key)
-                .filter(|current| current.feasibility == verdict)
+                .filter(|current| current.verdict == verdict)
                 .and_then(|current| current.verification.clone());
             let annotation = Annotation {
                 key: key.clone(),
-                feasibility: verdict,
+                verdict,
                 confidence,
                 provenance,
                 verification,
@@ -2460,7 +2462,7 @@ int main(void) { f(3); return 0; }
             },
         };
         let stored = &overlay.annotations()[&key];
-        assert_eq!(stored.feasibility, Feasibility::Infeasible);
+        assert_eq!(stored.verdict, Feasibility::Infeasible);
         assert_eq!(stored.confidence, Confidence::Medium);
         assert!(!stored.is_refuted());
 
@@ -2476,10 +2478,7 @@ int main(void) { f(3); return 0; }
             )
             .unwrap();
         assert_eq!(overlay.annotations().len(), 1);
-        assert_eq!(
-            overlay.annotations()[&key].feasibility,
-            Feasibility::Feasible
-        );
+        assert_eq!(overlay.annotations()[&key].verdict, Feasibility::Feasible);
 
         // Reached from another function, it is another key.
         overlay
@@ -2798,7 +2797,8 @@ int main(void) { f(3); return 0; }
 
         let summary = serde_json::to_value(reopened.summary(&session)).unwrap();
         let listed = &summary["annotations"][0];
-        assert_eq!(listed["feasibility"], "conditional", "{summary}");
+        assert_eq!(listed["verdict"], "conditional", "{summary}");
+        assert!(listed.get("feasibility").is_none(), "{summary}");
         assert_eq!(listed["key"]["anchor"]["kind"], "argument", "{summary}");
         assert_eq!(listed["verification"]["verdict"], "confirmed", "{summary}");
     }

@@ -377,7 +377,7 @@ fn run_overlay(
 }
 
 /// One line per edge: `<key>  <confidence>  <verdict|unverified>  <n> site(s)`,
-/// then one per annotation: `<key>  <feasibility>  <confidence>  <verdict|unverified>`.
+/// then one per annotation: `<key>  <verdict>  <confidence>  <verification|unverified>`.
 fn overlay_table(summary: &OverlaySummary) -> String {
     let verdict = |verification: Option<&Verification>| {
         verdict_label(verification.map(|verification| verification.verdict))
@@ -395,7 +395,7 @@ fn overlay_table(summary: &OverlaySummary) -> String {
         format!(
             "{}  {}  {}  {}\n",
             annotation.key,
-            annotation.feasibility,
+            annotation.verdict,
             annotation.confidence,
             verdict(annotation.verification.as_ref())
         )
@@ -657,8 +657,8 @@ fn stdout_color() -> Color {
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
     let config = try_rllvm_config()?;
-    // Only emitting a module and `guards` need the bindir, so failing to
-    // find it fails only those.
+    // Only emitting a module, `guards` and grounding an `annotate` need the
+    // bindir, so failing to find it fails only those.
     let mut registry = mcp::Registry::with_cache(facts_cache()?).with_llvm_tools(
         config.llvm_link_filepath().clone(),
         config.llvm_bindir().cloned(),

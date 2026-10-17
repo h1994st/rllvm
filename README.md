@@ -428,8 +428,8 @@ catalog itself is never changed.
 ```bash
 echo '{"op":"add","via_field":{"record":"ops","offset":8},"to":"h3","confidence":"high","provenance":["init: o->on_event = h3"]}' \
   | rllvm-query --catalog catalog.json overlay record  # validate and append, all or none
-rllvm-query --catalog catalog.json overlay list        # edges, verdicts, sites covered
-rllvm-query --catalog catalog.json overlay compact     # rewrite as the current edges
+rllvm-query --catalog catalog.json overlay list        # edges, annotations, verdicts
+rllvm-query --catalog catalog.json overlay compact     # rewrite as what now stands
 ```
 
 An `add` names a field (`via_field`) or a slot (`via_slot`: the global,
@@ -460,6 +460,26 @@ names. To check an edge in scope, `slice --emit-module` writes the slice's
 definitions as one small module, cut out with the `llvm-extract` and `llvm-nm`
 in the configured `llvm_bindir` and joined with the configured `llvm-link`; an
 alias comes with the function it stands for, and an empty slice writes nothing.
+An `annotate` record is the other kind: a verdict you author that a value is
+`feasible`, `infeasible` or `conditional`, with a `confidence` and
+`provenance`. It is never proof, and rllvm-query never writes one itself. Its
+`anchor` is an `argument` (`site`, `operand`), a `return` (`site`) or a
+`local` (`function`, `name`), as `guards` names a value; `site` is a
+`file:line` or a call site id, and an optional `from` names the one function
+the verdict holds for. It is checked against the catalog when recorded,
+reading the anchor's module through `opt` as `guards` does, so an anchor that
+does not resolve, or is ambiguous, rejects the batch. `verify` and `retract`
+name an annotation by its `anchor` and `from` under `annotation`. `overlay
+list` shows each with its verdict; with `--json`, and in `list_overlay`, they
+are under `annotations`, beside `edges`.
+
+```bash
+echo '{"op":"annotate","anchor":{"kind":"argument","site":"clamp.c:14","operand":2},"verdict":"infeasible","confidence":"high","provenance":["clamp.c:13: n = len < CAP ? len : CAP"]}' \
+  | rllvm-query --catalog catalog.json overlay record
+echo '{"op":"verify","annotation":{"anchor":{"kind":"argument","site":"clamp.c:14","operand":2}},"tool":"review","verdict":"confirmed"}' \
+  | rllvm-query --catalog catalog.json overlay record
+```
+
 See the [call-graph overlay example](examples/callgraph-overlay/).
 
 ### Value guards
@@ -520,11 +540,12 @@ Four tools keep the [call-graph overlay](#completing-the-call-graph) over MCP.
 `record_edges` takes the records `overlay record` reads, all or none, attaching
 the overlay beside the catalog first if none is; `reach`, `closure` and `slice`
 walk them at once with `include_overlay` (and `min_confidence`), and `slice`'s
-`emit_module` needs a catalog from `load_catalog`. Only `save_overlay`
-writes, appending to the file. `load_overlay` attaches the default file or
-`path` (required after `inventory`) and refuses to drop unsaved records unless
-`discard_pending` is set; `list_overlay` shows the edges, saved or not.
-`unload_catalog` reports any unsaved records it dropped.
+`emit_module` and an `annotate` record need a catalog from `load_catalog`.
+Only `save_overlay` writes, appending to the file. `load_overlay` attaches the
+default file or `path` (required after `inventory`) and refuses to drop
+unsaved records unless `discard_pending` is set; `list_overlay` shows the
+edges and annotations, saved or not. `unload_catalog` reports any unsaved
+records it dropped.
 
 See the [MCP example](examples/mcp/). In Claude Code, the
 [plugin](#claude-code-plugin) configures this server for you.

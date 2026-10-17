@@ -74,6 +74,18 @@ changed. Records are the same over MCP and the command line:
   required.
 - `{"op":"verify","edge":<key>,"tool":...,"verdict":"confirmed|refuted|inconclusive"}`
   and `{"op":"retract","edge":<key>,"reason":...}` name an edge's key.
+- `{"op":"annotate","anchor":{"kind":"argument","site":"clamp.c:14","operand":2},"verdict":"infeasible","confidence":"high","provenance":["clamp.c:13: n = len < CAP ? len : CAP"]}`
+  is your own feasibility verdict on a value, never proof. `anchor` is an
+  `argument` (`site`, `operand`, counting from 0), a `return` (`site`) or a
+  `local` (`function`, `name`); `site` is `file:line` or a call site id;
+  optional `from` names one function. `verdict` is `feasible`, `infeasible`
+  or `conditional`. It is checked against the catalog on write, reading the
+  anchor's module (over MCP, a program loaded with `load_catalog`): an anchor
+  that does not resolve, or is ambiguous, is rejected. rllvm-query never
+  writes one itself.
+- `{"op":"verify","annotation":{"anchor":<anchor>,"from":...},"tool":...,"verdict":"confirmed|refuted|inconclusive"}`
+  and `{"op":"retract","annotation":{"anchor":<anchor>,"from":...},"reason":...}`
+  name an annotation by its anchor and `from` (omitted when it has none).
 - A batch applies all or none; an error names the bad record. An edge on a
   bounded or direct site is rejected.
 - After a rebuild the overlay refuses to load, naming both fingerprints. It
@@ -92,8 +104,8 @@ Over MCP:
 - `load_overlay` attaches the default file, or `path` — required for a
   program loaded with `inventory`. It refuses to replace an overlay holding
   unsaved records unless `discard_pending` is true.
-- `list_overlay` shows the edges, the sites they cover, and `pending`
-  unsaved records.
+- `list_overlay` shows the edges, the sites they cover, the `annotations`
+  with their `verdict`, and `pending` unsaved records.
 - Unloading a catalog drops its overlay and reports how many unsaved records
   went with it; reloading a rebuilt catalog drops an overlay bound to the
   old build. Save before unloading, reloading, or ending the session;
@@ -101,8 +113,9 @@ Over MCP:
 
 On the command line, pipe them as JSON lines to `rllvm-query --catalog
 catalog.json overlay record`, which saves at once; `--overlay PATH` names
-another file. `overlay list` shows edges and the sites they cover; `overlay
-compact` rewrites the file as the current edges.
+another file. `overlay list` shows edges and the sites they cover, then
+annotations with their verdict; `overlay compact` rewrites the file as the
+current edges and annotations.
 
 Overlay edges are hypotheses, never proof: no answer uses them unless asked.
 `reach`, `closure` and `slice` walk them with `include_overlay`

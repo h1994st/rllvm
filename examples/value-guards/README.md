@@ -16,7 +16,8 @@ and `opt` in the configured `llvm_bindir`.
 ```
 
 It checks the clamp from a call site and from a named local, the empty answer
-for an unconstrained argument, and the module `--emit-module` writes.
+for an unconstrained argument, the module `--emit-module` writes, and a
+recorded verdict.
 
 ## What it does
 
@@ -37,3 +38,20 @@ slice that holds the guard.
 
 The second names the same value as the source variable `n` in `copy`, which
 needs no call site but a module built with `-g`, and finds the same clamp.
+
+## Recording a verdict
+
+```bash
+echo '{"op":"annotate","anchor":{"kind":"argument","site":"clamp.c:14","operand":2},"verdict":"infeasible","confidence":"high","provenance":["clamp.c:13: n = len < CAP ? len : CAP"]}' \
+  | rllvm-query --catalog build/catalog.json overlay record
+echo '{"op":"verify","annotation":{"anchor":{"kind":"argument","site":"clamp.c:14","operand":2}},"tool":"review","verdict":"confirmed"}' \
+  | rllvm-query --catalog build/catalog.json overlay record
+rllvm-query --catalog build/catalog.json overlay list
+```
+
+The clamp is evidence; whether a length above `CAP` can reach `put` is a
+verdict, which you write as an `annotate` record in the overlay beside the
+catalog. rllvm-query checks that its anchor names one value but never judges
+it, and never writes one itself. A `verify` or `retract` record names it by
+the same `anchor` under `annotation`, and `overlay list` shows it with its
+verdict and verification.
