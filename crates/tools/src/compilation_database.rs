@@ -442,6 +442,7 @@ fn materialize_entry(
             .inspect_err(|_| module.status = ModuleStatus::Unsupported)?;
     let mut environment = environment.clone();
     let mut sdk_error = None;
+    let mut driver_arguments = ANALYSIS_DRIVER_ARGUMENTS.to_vec();
     if cfg!(target_os = "macos") {
         match sdk.infer(&compile_args, &compiler.version, &environment, || {
             sdk::discover(&environment)
@@ -450,14 +451,22 @@ fn materialize_entry(
                 environment.insert("SDKROOT".into(), path);
             }
             Ok(None) => {}
-            Err(error) => sdk_error = Some(error),
+            Err(error) => {
+                // Without an SDK, keep the compiler from choosing one itself.
+                if sdk.accepts_no_xcselect(&compiler.path, || {
+                    sdk::probe_no_xcselect(&compiler.path, &compilation.directory, &environment)
+                }) {
+                    driver_arguments.push(sdk::NO_XCSELECT);
+                }
+                sdk_error = Some(error);
+            }
         }
     }
     compilation.environment = environment.clone();
     let identity_options = serde_json::to_string(&(
         &options.extra_arguments,
         &compile_args,
-        ANALYSIS_DRIVER_ARGUMENTS,
+        &driver_arguments,
         &environment,
         compiler,
     ))
@@ -490,10 +499,7 @@ fn materialize_entry(
         None,
     )?;
     // Hidden configuration and driver crash reports may create unowned outputs.
-    arguments.splice(
-        0..0,
-        ANALYSIS_DRIVER_ARGUMENTS.iter().map(|arg| (*arg).into()),
-    );
+    arguments.splice(0..0, driver_arguments.iter().map(|arg| (*arg).into()));
     compilation.effective_arguments = std::iter::once(compiler.path.to_string_lossy().into_owned())
         .chain(arguments.iter().cloned())
         .collect();

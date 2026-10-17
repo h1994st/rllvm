@@ -1,11 +1,26 @@
 //! Optional macOS SDK discovery for imported compilations.
 
-use std::{collections::BTreeMap, path::Path, process::Command, sync::OnceLock};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{Mutex, OnceLock},
+};
 
 use rllvm_core::constants::{arg_exact_match_map, arg_patterns};
 
+/// Stops a clang built with `CLANG_USE_XCSELECT` from finding an SDK through
+/// `libxcselect` when no sysroot is given. Without it, a compilation whose SDK
+/// discovery failed builds against an SDK the catalog never records.
+pub(super) const NO_XCSELECT: &str = "--no-xcselect";
+
+/// The SDK one generation run discovered, and which compilers accept
+/// [`NO_XCSELECT`] (LLVM 23 and newer; older clang and Apple clang reject it).
 #[derive(Default)]
-pub(super) struct MacosSdk(OnceLock<Result<String, String>>);
+pub(super) struct MacosSdk {
+    discovered: OnceLock<Result<String, String>>,
+    no_xcselect: Mutex<BTreeMap<PathBuf, bool>>,
+}
 
 impl MacosSdk {
     pub(super) fn infer(
@@ -77,8 +92,37 @@ impl MacosSdk {
         if !macos {
             return Ok(None);
         }
-        self.0.get_or_init(discover).clone().map(Some)
+        self.discovered.get_or_init(discover).clone().map(Some)
     }
+
+    /// Whether `compiler` accepts [`NO_XCSELECT`], asked once per compiler.
+    pub(super) fn accepts_no_xcselect(
+        &self,
+        compiler: &Path,
+        accepts: impl FnOnce() -> bool,
+    ) -> bool {
+        let mut known = self
+            .no_xcselect
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *known.entry(compiler.to_path_buf()).or_insert_with(accepts)
+    }
+}
+
+/// Whether `compiler` accepts [`NO_XCSELECT`]: an unknown driver flag fails
+/// even `--version`.
+pub(super) fn probe_no_xcselect(
+    compiler: &Path,
+    directory: &Path,
+    environment: &BTreeMap<String, String>,
+) -> bool {
+    rllvm_core::utils::execute_llvm_tool_in_for_output(
+        compiler,
+        &[NO_XCSELECT, "--version"],
+        directory,
+        environment,
+    )
+    .is_ok_and(|output| output.status.success())
 }
 
 pub(super) fn discover(environment: &BTreeMap<String, String>) -> Result<String, String> {
@@ -109,6 +153,21 @@ mod tests {
     use std::cell::Cell;
 
     const CLANG: &str = "Homebrew clang\nTarget: arm64-apple-darwin25.0.0";
+
+    #[test]
+    fn no_xcselect_support_is_probed_once_per_compiler() {
+        let sdk = MacosSdk::default();
+        let probes = Cell::new(0);
+        let probe = |answer| {
+            probes.set(probes.get() + 1);
+            answer
+        };
+        for _ in 0..3 {
+            assert!(sdk.accepts_no_xcselect(Path::new("/llvm23/clang"), || probe(true)));
+        }
+        assert!(!sdk.accepts_no_xcselect(Path::new("/usr/bin/clang"), || probe(false)));
+        assert_eq!(probes.get(), 2);
+    }
 
     #[test]
     fn sdk_inference_respects_explicit_settings_and_cross_targets() {
