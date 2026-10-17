@@ -68,4 +68,15 @@ listed=$(query overlay list --json |
 [ "$listed" = "[('infeasible', 'confirmed')]" ] ||
     fail "overlay list showed $listed, expected one confirmed infeasible annotation"
 
-echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, and a recorded verdict lists as confirmed"
+# 7. reach with --annotations returns the same path, and the annotation on the
+#    call to put rides along labeled agent: a hypothesis, never proof.
+plain=$(query reach main put --json | field 'a["results"]')
+annotated=$(query reach main put --annotations --json)
+path=$(field 'a["results"]' <<<"$annotated")
+[ "$path" = "$plain" ] || fail "--annotations changed the path: $path, not $plain"
+flows=$(field '[(f["source"], f["verdict"]) for f in a["uncertainty"].get("annotated_flows", [])]' \
+    <<<"$annotated")
+[ "$flows" = "[('agent', 'infeasible')]" ] ||
+    fail "annotated_flows was $flows, expected one infeasible annotation labeled agent"
+
+echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, and an annotated reach that keeps its path"

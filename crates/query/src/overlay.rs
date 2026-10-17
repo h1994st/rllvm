@@ -965,7 +965,7 @@ impl Overlay {
             .values()
             .filter(|annotation| {
                 matches!(
-                    annotation.feasibility,
+                    annotation.verdict,
                     Feasibility::Infeasible | Feasibility::Conditional
                 ) && !annotation.is_refuted()
             })

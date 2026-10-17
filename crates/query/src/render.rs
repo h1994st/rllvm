@@ -890,7 +890,7 @@ fn annotated_flows(result: &QueryResult, ctx: Ctx, walked: &str, out: &mut Strin
         out.push_str(&format!(
             "{}  {}: {}{at} {}\n",
             paint("agent annotation", ctx.color, Paint::Uncertain),
-            annotation.feasibility,
+            annotation.verdict,
             annotation.key,
             paint(
                 &format!("[{}, {verdict}]", annotation.confidence),
@@ -1525,6 +1525,56 @@ mod tests {
             )
             .unwrap();
         crate::run_with_overlay(&session, Some(&overlay), &query).unwrap()
+    }
+
+    #[test]
+    fn an_annotation_on_an_agent_edge_is_surfaced_and_changes_no_step() {
+        let reach = |include_annotations| Query::Reach {
+            from: "dispatch".into(),
+            to: "h3".into(),
+            include_overlay: true,
+            min_confidence: None,
+            include_annotations,
+        };
+        let add = serde_json::json!({
+            "op": "add",
+            "via_field": { "record": "ops", "offset": 8 },
+            "to": "h3",
+            "confidence": "high",
+            "provenance": ["init: o->on_event = h3"],
+        });
+        let annotate = serde_json::json!({
+            "op": "annotate",
+            "anchor": { "kind": "return", "site": "t.c:4" },
+            "verdict": "infeasible",
+            "confidence": "medium",
+            "provenance": ["t.c:3: if (!o) return"],
+        });
+        let scratch = tempfile::tempdir().unwrap();
+        let session = Session::new(facts_with_overlay_sites(), Vec::new());
+        let path = scratch.path().join("catalog.overlay.jsonl");
+        std::fs::write(
+            &path,
+            format!("{}{add}\n{annotate}\n", overlay_header(&session)),
+        )
+        .unwrap();
+        let overlay = crate::overlay::Overlay::open(&session, &path).unwrap();
+        let run = |query| crate::run_with_overlay(&session, Some(&overlay), &query).unwrap();
+        let plain = run(reach(false));
+        let annotated = run(reach(true));
+        assert!(plain.uncertainty.annotated_flows.is_empty());
+        assert_eq!(
+            serde_json::to_value(&annotated.results).unwrap(),
+            serde_json::to_value(&plain.results).unwrap(),
+            "an annotation never changes the path"
+        );
+        assert_eq!(annotated.uncertainty.agent_path_steps, 1);
+        let [flow] = annotated.uncertainty.annotated_flows.as_slice() else {
+            panic!("the annotation on the agent edge's site surfaces");
+        };
+        assert_eq!(flow.annotation.verdict.to_string(), "infeasible");
+        let text = render(&annotated, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("agent annotation"), "got: {text}");
     }
 
     #[test]

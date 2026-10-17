@@ -16,8 +16,8 @@ and `opt` in the configured `llvm_bindir`.
 ```
 
 It checks the clamp from a call site and from a named local, the empty answer
-for an unconstrained argument, the module `--emit-module` writes, and a
-recorded verdict.
+for an unconstrained argument, the module `--emit-module` writes, a recorded
+verdict, and an annotated `reach` that keeps its path.
 
 ## What it does
 
@@ -47,6 +47,7 @@ echo '{"op":"annotate","anchor":{"kind":"argument","site":"clamp.c:14","operand"
 echo '{"op":"verify","annotation":{"anchor":{"kind":"argument","site":"clamp.c:14","operand":2}},"tool":"review","verdict":"confirmed"}' \
   | rllvm-query --catalog build/catalog.json overlay record
 rllvm-query --catalog build/catalog.json overlay list
+rllvm-query --catalog build/catalog.json reach main put --annotations
 ```
 
 The clamp is evidence; whether a length above `CAP` can reach `put` is a
@@ -55,3 +56,8 @@ catalog. rllvm-query checks that its anchor names one value but never judges
 it, and never writes one itself. A `verify` or `retract` record names it by
 the same `anchor` under `annotation`, and `overlay list` shows it with its
 verdict and verification.
+
+`reach main put --annotations` returns the same path as without the flag, and
+the annotation rides along under `uncertainty.annotated_flows`, labeled
+`agent`: a hypothesis about the call to `put`, never proof that the path
+cannot run.

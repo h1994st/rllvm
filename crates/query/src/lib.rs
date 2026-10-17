@@ -667,6 +667,11 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
     run_with_overlay(session, None, query)
 }
 
+/// Why `include_annotations` fails on an overlay that holds none: an empty
+/// `annotated_flows` would read as "nothing infeasible on the path".
+const NO_ANNOTATIONS: &str = "`include_annotations` needs an annotation: the attached overlay \
+     holds none, so an empty answer would not mean the path is unconstrained";
+
 /// [`run`], with an overlay of agent-proposed edges that `reach`, `closure`
 /// and `slice` walk when the query sets `include_overlay`, and whose
 /// annotations `reach` and `slice` surface when it sets
@@ -691,12 +696,16 @@ pub fn run_with_overlay(
     };
     let view = view.as_ref();
     let annotations = if query.includes_annotations() {
-        Some(overlay.ok_or_else(|| {
+        let overlay = overlay.ok_or_else(|| {
             Error::InvalidArguments(
                 "`include_annotations` needs an overlay: none is loaded for this catalog"
                     .to_string(),
             )
-        })?)
+        })?;
+        if overlay.annotations().is_empty() {
+            return Err(Error::InvalidArguments(NO_ANNOTATIONS.to_string()));
+        }
+        Some(overlay)
     } else {
         None
     };
@@ -1518,7 +1527,7 @@ impl Query {
     }
 
     /// Whether this query asks for the annotations on its path.
-    fn includes_annotations(&self) -> bool {
+    pub fn includes_annotations(&self) -> bool {
         match self {
             Query::Reach {
                 include_annotations,
@@ -3015,7 +3024,7 @@ mod tests {
                 })
                 .expect("the unscoped argument annotation");
             assert_eq!(flow["source"], "agent");
-            assert_eq!(flow["feasibility"], "infeasible");
+            assert_eq!(flow["verdict"], "infeasible");
             assert_eq!(flow["confidence"], "medium");
             assert_eq!(flow["provenance"], json!(["t.c:4: if (n > 15) return"]));
             assert_eq!(json["query"]["include_annotations"], true);
@@ -3097,6 +3106,20 @@ mod tests {
             .unwrap();
             assert!(matches!(result.results, QueryResults::Reach(None)));
             assert!(result.uncertainty.annotated_flows.is_empty());
+        }
+
+        #[test]
+        fn including_annotations_from_an_overlay_holding_none_is_an_argument_error() {
+            let session = session();
+            let overlay = Overlay::empty(&session, None).unwrap();
+            for query in [reach("main", true), slice("main", true)] {
+                match run_with_overlay(&session, Some(&overlay), &query) {
+                    Err(Error::InvalidArguments(message)) => {
+                        assert!(message.contains("holds none"), "{message}")
+                    }
+                    other => panic!("expected an argument error, got {other:?}"),
+                }
+            }
         }
 
         #[test]

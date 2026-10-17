@@ -79,6 +79,14 @@ pub struct QueryModifiers {
     #[arg(long, global = true)]
     pub include_overlay: bool,
 
+    /// Surface the overlay's infeasible or conditional annotations on a `reach` or `slice` path; never proof
+    ///
+    /// Global, like `--include-overlay`, and independent of it: an annotation
+    /// is labeled `agent` and never removes the path. It is an error when the
+    /// overlay holds no annotation, or its file is missing.
+    #[arg(long = "annotations", global = true)]
+    pub include_annotations: bool,
+
     /// The weakest overlay edge `--include-overlay` walks [default: low]
     #[arg(long, global = true, value_enum, value_name = "LEVEL")]
     pub min_confidence: Option<Confidence>,
@@ -90,6 +98,7 @@ impl QueryModifiers {
         QueryModifiers {
             heuristics: self.heuristics || line.heuristics,
             include_overlay: self.include_overlay || line.include_overlay,
+            include_annotations: self.include_annotations || line.include_annotations,
             min_confidence: line.min_confidence.or(self.min_confidence),
         }
     }

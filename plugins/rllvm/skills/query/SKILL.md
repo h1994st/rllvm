@@ -144,6 +144,18 @@ an error, never a direct-only answer.
   Compiler-private data such as string literals is not checked: same-named
   copies from two parts merge into one declaration.
 
+Annotations are a separate opt-in: `reach` and `slice` take
+`include_annotations` (`--annotations`, default off, independent of
+`include_overlay`). It surfaces, under `uncertainty.annotated_flows`, each
+`infeasible` or `conditional` annotation, not refuted, whose anchor lies on
+the returned path, labeled `agent`. It is a hypothesis, never proof of
+unreachability, and the path is never removed. An annotation recorded with a
+`from` attaches only when the walk's `from` names that same single function;
+a `from` matching several functions shows none of them. The JSON omits
+`annotated_flows` when none attach. It is an error with no overlay attached
+(over MCP, none loaded: call `load_overlay` or `record_edges`) or an overlay
+holding no annotations.
+
 ## Is a vulnerable function present and reachable?
 
 Ask per build: features and configurations change what is compiled in.

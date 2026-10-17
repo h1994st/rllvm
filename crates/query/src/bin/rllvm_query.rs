@@ -40,6 +40,7 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
     let QueryModifiers {
         heuristics,
         include_overlay,
+        include_annotations,
         min_confidence,
     } = modifiers;
     // `guards` is the one query whose arguments need the catalog: a
@@ -78,7 +79,7 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
             to,
             include_overlay,
             min_confidence,
-            include_annotations: false,
+            include_annotations,
         },
         // `--emit-module` acts on the answer rather than shaping the query,
         // so `run_query` reads it before the command is consumed here.
@@ -87,7 +88,7 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
             to,
             include_overlay,
             min_confidence,
-            include_annotations: false,
+            include_annotations,
         },
         QueryCommand::Closure { name, direction } => Query::Closure {
             name,
@@ -293,7 +294,8 @@ fn overlay_path(catalog: &Path, overlay: Option<&Path>) -> PathBuf {
 /// and `opened` holds none yet: at most once per run. A file that cannot be
 /// read is an error, never a silent direct-only answer. A missing file is an
 /// empty overlay at the default path, where nothing may be recorded yet, but
-/// an error when `--overlay` named it: that is a mistyped path.
+/// an error when `--overlay` named it, which is a mistyped path, or when the
+/// query asks for annotations, which a missing file cannot hold.
 fn overlay_for<'o>(
     opened: &'o mut Option<Overlay>,
     session: &Session,
@@ -303,14 +305,21 @@ fn overlay_for<'o>(
 ) -> Result<Option<&'o Overlay>, Error> {
     if query.walks_overlay() && opened.is_none() {
         let path = overlay_path(catalog, named);
-        if named.is_some()
+        if (named.is_some() || query.includes_annotations())
             && let Err(error) = std::fs::metadata(&path)
             && error.kind() == std::io::ErrorKind::NotFound
         {
-            return Err(Error::InvalidArguments(format!(
-                "{}: no such overlay; --overlay names an existing file for a walk to read",
-                path.display()
-            )));
+            return Err(Error::InvalidArguments(if named.is_some() {
+                format!(
+                    "{}: no such overlay; --overlay names an existing file for a walk to read",
+                    path.display()
+                )
+            } else {
+                format!(
+                    "{}: no such overlay; --annotations needs one holding annotations",
+                    path.display()
+                )
+            }));
         }
         *opened = Some(Overlay::open(session, &path)?);
     }
@@ -980,6 +989,7 @@ mod tests {
         let modifiers = QueryModifiers {
             heuristics: true,
             include_overlay: true,
+            include_annotations: true,
             min_confidence: Some(Confidence::High),
         };
         let queries = [
@@ -996,14 +1006,14 @@ mod tests {
                 to: "b".into(),
                 include_overlay: true,
                 min_confidence: Some(Confidence::High),
-                include_annotations: false,
+                include_annotations: true,
             },
             Query::Slice {
                 from: "a".into(),
                 to: "b".into(),
                 include_overlay: true,
                 min_confidence: Some(Confidence::High),
-                include_annotations: false,
+                include_annotations: true,
             },
             Query::Closure {
                 name: "f".into(),
