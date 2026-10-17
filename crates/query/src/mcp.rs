@@ -89,6 +89,13 @@ const EMIT_NEEDS_CATALOG: &str = "`emit_module` reads the modules a catalog file
                                   artifact loaded by `inventory` has none: load its catalog \
                                   with `load_catalog` first";
 
+/// What `record_edges` answers for an `annotate` record on an `inventory`
+/// artifact.
+const ANNOTATE_NEEDS_CATALOG: &str = "an `annotate` record is grounded by reading its anchor's \
+                                      module through the catalog file that names it, and an \
+                                      artifact loaded by `inventory` has none: load its catalog \
+                                      with `load_catalog` first";
+
 /// What `guards` answers for an `inventory` artifact.
 const GUARDS_NEEDS_CATALOG: &str = "`guards` reads the anchor's module through the catalog file \
                                     that names it, and an artifact loaded by `inventory` has \
@@ -114,8 +121,9 @@ pub struct Registry {
     /// The facts cache every load reads and fills; `None` when disabled.
     cache: Option<FactsCache>,
     /// The configured `llvm-link`, and the LLVM bindir holding the other
-    /// tools, or why it could not be found: what an `emit_module` and every
-    /// `guards` call, which runs `opt`, are then told.
+    /// tools, or why it could not be found: what an `emit_module`, every
+    /// `guards` call and every `annotate` record, which run `opt`, are then
+    /// told.
     slice_tools: Option<(PathBuf, Result<LlvmBindir, String>)>,
 }
 
@@ -134,8 +142,8 @@ impl Registry {
 
     /// This registry, emitting modules with `llvm_link` and the
     /// `llvm-extract` and `llvm-nm` in `llvm_bindir`, and promoting a
-    /// `guards` anchor's module with its `opt`. A bindir that could not be
-    /// found fails only `emit_module` and `guards`, with that error.
+    /// `guards` or `annotate` anchor's module with its `opt`. A bindir that
+    /// could not be found fails only those, with that error.
     pub fn with_llvm_tools(
         self,
         llvm_link: PathBuf,
@@ -359,6 +367,13 @@ impl Registry {
         records: Vec<Record>,
     ) -> Result<Value, String> {
         let key = self.catalog_key(requested)?;
+        if self.artifacts.contains(&key)
+            && records
+                .iter()
+                .any(|record| matches!(record, Record::Annotate { .. }))
+        {
+            return Err(ANNOTATE_NEEDS_CATALOG.to_string());
+        }
         // Through the field, not `session_at`, so the overlays stay free to
         // take the attached overlay out while the session is borrowed.
         let session = self
@@ -745,7 +760,7 @@ management_tool_surface! {
             }
         });
     RecordEdges => "record_edges",
-        "Record agent hypotheses about unresolved indirect calls in the catalog's overlay, all or none: `add`, `verify` or `retract`, in the JSON form `rllvm-query overlay record` reads. Each is checked only for being grounded in the catalog, never judged, and an error names the bad record by its 1-based index. With no overlay attached, first attaches the one beside the catalog. Records are walked at once, stay in memory until `save_overlay`, and are never proof; unsaved records are not written on exit.",
+        "Record agent hypotheses about unresolved indirect calls in the catalog's overlay, all or none: `add`, `verify`, `retract` or `annotate`, in the JSON form `rllvm-query overlay record` reads. Each is checked only for being grounded in the catalog, never judged, and an error names the bad record by its 1-based index. With no overlay attached, first attaches the one beside the catalog. Records are walked at once, stay in memory until `save_overlay`, and are never proof; unsaved records are not written on exit.",
         json!({
             "type": "object",
             "properties": {
@@ -753,7 +768,7 @@ management_tool_surface! {
                 "records": {
                     "type": "array",
                     "items": { "type": "object" },
-                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it), `\"via_slot\"` (a group's `slot`, every unresolved site reading it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it."
+                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it), `\"via_slot\"` (a group's `slot`, every unresolved site reading it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it. `{\"op\":\"annotate\",\"anchor\":{\"kind\":\"argument\",\"site\":\"clamp.c:14\",\"operand\":2},\"verdict\":\"infeasible\",\"confidence\":\"high\",\"provenance\":[\"clamp.c:13: n = len < CAP ? len : CAP\"]}` is your feasibility verdict (`feasible`, `infeasible` or `conditional`) on a value, never proof: `anchor` is an `argument` (`site`, `operand`, counting from 0), a `return` (`site`) or a `local` (`function`, `name`), `site` a `file:line` or a call site id, and the optional `from` a function the verdict holds for. It is grounded in the catalog on write, so an unresolvable or ambiguous anchor is rejected, and grounding reads the anchor's module, so it needs a catalog loaded by `load_catalog`, not `inventory`. `{\"op\":\"verify\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"reason\":...}` judge or remove an annotation, named by its anchor and `from` (omitted when it has none)."
                 }
             },
             "required": ["records"]
@@ -762,7 +777,7 @@ management_tool_surface! {
         "Append the overlay's unsaved records to its file, beside the catalog unless `load_overlay` named another: the only overlay tool that writes to disk, and the catalog itself is never written. Refuses when another writer changed the file since it was read. Saved records stay agent hypotheses, never proof.",
         json!({ "type": "object", "properties": { "catalog": catalog_property() } });
     ListOverlay => "list_overlay",
-        "The catalog's overlay as it stands, unsaved records included: each edge with its confidence, provenance, verdict and the unresolved sites it attaches to, and how many unresolved sites the overlay covers. Edges are agent hypotheses kept beside the catalog, never proof.",
+        "The catalog's overlay as it stands, unsaved records included: each edge with its confidence, provenance, verdict and the unresolved sites it attaches to, and how many unresolved sites the overlay covers; then each annotation, keyed by its anchor and `from`, with its `verdict` (`feasible`, `infeasible` or `conditional`), confidence, provenance and any `verification`. Edges and annotations are agent hypotheses kept beside the catalog, never proof.",
         json!({ "type": "object", "properties": { "catalog": catalog_property() } });
 }
 
@@ -2077,6 +2092,84 @@ mod tests {
     }
 
     #[test]
+    fn list_overlay_shows_annotations_beside_edges() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let catalog = session.catalog_path().unwrap().to_path_buf();
+        let mut registry = Registry::with_sessions(vec![(catalog.to_str().unwrap(), session)]);
+        let at = format!("{}:3", scratch.path().join("t.c").display());
+        let annotate = json!({
+            "op": "annotate",
+            "anchor": { "kind": "argument", "site": at, "operand": 0 },
+            "verdict": "infeasible",
+            "confidence": "high",
+            "provenance": ["t.c:3: sink(n)"],
+        });
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [annotate] }),
+        );
+
+        let listed = answer(&mut registry, "list_overlay", json!({}));
+        assert_eq!(listed["pending"], 1, "{listed}");
+        assert_eq!(listed["edges"], json!([]), "{listed}");
+        let annotation = &listed["annotations"][0];
+        assert_eq!(annotation["verdict"], "infeasible", "{listed}");
+        assert_eq!(annotation["key"]["anchor"]["kind"], "argument", "{listed}");
+        assert_eq!(
+            annotation["key"]["anchor"]["site"]["function"]["symbol"], "f",
+            "listed by its canonical call site id: {listed}"
+        );
+    }
+
+    /// Grounding an annotation reads its anchor's module through the
+    /// catalog file, which an `inventory` artifact does not have.
+    #[test]
+    fn an_annotation_on_an_inventory_artifact_names_load_catalog() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let catalog = session.catalog_path().unwrap().to_path_buf();
+        let mut registry = Registry::with_sessions(vec![(catalog.to_str().unwrap(), session)]);
+        registry.artifacts.insert(catalog);
+        let path = scratch.path().join("chosen.jsonl");
+        answer(
+            &mut registry,
+            "load_overlay",
+            json!({ "path": path.to_str().unwrap() }),
+        );
+        let at = format!("{}:3", scratch.path().join("t.c").display());
+        let annotate = json!({
+            "op": "annotate",
+            "anchor": { "kind": "argument", "site": at, "operand": 0 },
+            "verdict": "infeasible",
+            "confidence": "high",
+            "provenance": ["t.c:3: sink(n)"],
+        });
+        let error = tool_error(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [annotate] }),
+        );
+        assert!(
+            error.contains("`annotate`")
+                && error.contains("inventory")
+                && error.contains("load_catalog"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn saving_appends_and_a_reload_sees_only_saved_records() {
         let scratch = tempfile::tempdir().unwrap();
         let (mut registry, catalog) = overlay_registry(&scratch);
@@ -2143,7 +2236,7 @@ mod tests {
         let malformed = tool_error(
             &mut registry,
             "record_edges",
-            json!({ "records": [add_through(8, "h1"), { "op": "annotate" }] }),
+            json!({ "records": [add_through(8, "h1"), { "op": "annotated" }] }),
         );
         assert!(malformed.contains("record 2: "), "{malformed}");
         assert!(malformed.contains("unknown op"), "{malformed}");

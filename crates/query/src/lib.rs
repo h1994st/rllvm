@@ -93,8 +93,9 @@ pub use index::{
 
 pub mod overlay;
 pub use overlay::{
-    Confidence, EdgeKey, OVERLAY_VERSION, Overlay, OverlayCoverage, OverlayEdge, OverlaySummary,
-    OverlayView, Record, SummaryEdge, TargetSpec, Verdict, Verification, default_overlay_path,
+    Annotation, AnnotationKey, AnnotationRef, Confidence, EdgeKey, Feasibility, OVERLAY_VERSION,
+    Overlay, OverlayCoverage, OverlayEdge, OverlaySummary, OverlayView, Record, SummaryEdge,
+    TargetSpec, Verdict, Verification, default_overlay_path,
 };
 
 pub mod mcp;
@@ -2589,13 +2590,14 @@ mod tests {
         fn a_refuted_edge_is_never_walked() {
             let session = session();
             let verify = Record::Verify {
-                edge: EdgeKey::Field {
+                edge: Some(EdgeKey::Field {
                     via_field: ops(8),
                     to: FunctionId {
                         module_id: "mod_a".into(),
                         symbol: "h3".into(),
                     },
-                },
+                }),
+                annotation: None,
                 tool: "reread".into(),
                 verdict: Verdict::Refuted,
                 at: None,

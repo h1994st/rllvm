@@ -148,4 +148,18 @@ copy it verbatim.
 {"op":"add","via_field":{"record":"ops","offset":8},"to":"handler","confidence":"high","provenance":["ops.c:8: o->cb = handler"]}
 {"op":"verify","edge":{"via_field":{"record":"ops","offset":8},"to":{"module_id":"<id>","symbol":"handler"}},"tool":"reread","verdict":"confirmed"}
 {"op":"retract","edge":{"via_field":{"record":"ops","offset":8},"to":{"module_id":"<id>","symbol":"handler"}},"reason":"re-read: the assignment is dead code"}
+{"op":"annotate","anchor":{"kind":"argument","site":"ops.c:20","operand":1},"verdict":"infeasible","confidence":"medium","provenance":["ops.c:18: if (n > 15) return"]}
+{"op":"verify","annotation":{"anchor":{"kind":"argument","site":"ops.c:20","operand":1}},"tool":"reread","verdict":"confirmed"}
+{"op":"retract","annotation":{"anchor":{"kind":"argument","site":"ops.c:20","operand":1}},"reason":"re-read: the check is elsewhere"}
 ```
+
+An `annotate` is your feasibility verdict on a value, not an edge and never
+proof. `anchor` is an `argument` (`site`, `operand`, counting from 0), a
+`return` (`site`) or a `local` (`function`, `name`); `site` is `file:line` or
+a call site id, and optional `from` names one function. `verdict` is
+`feasible`, `infeasible` or `conditional`. An anchor that does not resolve, or
+is ambiguous, rejects the batch; grounding reads the anchor's module, so it
+needs a program loaded with `load_catalog`. A `verify` or `retract` names an
+annotation under `annotation` by its `anchor` and `from` (omitted when it has
+none). `list_overlay` shows these under `annotations`, each with its
+`verdict`.

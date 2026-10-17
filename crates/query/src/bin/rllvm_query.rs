@@ -12,7 +12,7 @@ use rllvm_core::{
 };
 use rllvm_query::{
     AnchorParts, AnchorSurface, Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session,
-    TextMode, anchor_from_parts, check_anchor_parts,
+    TextMode, Verification, anchor_from_parts, check_anchor_parts,
     cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
     default_overlay_path, emit_guards_module, emit_slice,
     index::Direction,
@@ -344,7 +344,9 @@ fn run_overlay(
         OverlayAction::List | OverlayAction::Compact => Vec::new(),
     };
 
-    let session = open_with_cache(catalog, facts_cache()?.as_ref())?;
+    let mut session = open_with_cache(catalog, facts_cache()?.as_ref())?;
+    // An `annotate` is grounded in its function's promoted module.
+    set_llvm_bindir(&mut session);
     let mut overlay = Overlay::open(&session, &path)?;
     let text = match action {
         OverlayAction::Record => {
@@ -357,9 +359,10 @@ fn run_overlay(
         OverlayAction::Compact => {
             overlay.compact()?;
             format!(
-                "compacted {}: {} edges\n",
+                "compacted {}: {} edges, {} annotations\n",
                 path.display(),
-                overlay.edges().count()
+                overlay.edges().count(),
+                overlay.annotations().len()
             )
         }
     };
@@ -373,25 +376,31 @@ fn run_overlay(
     }
 }
 
-/// One line per edge: `<key>  <confidence>  <verdict|unverified>  <n> site(s)`.
+/// One line per edge: `<key>  <confidence>  <verdict|unverified>  <n> site(s)`,
+/// then one per annotation: `<key>  <verdict>  <confidence>  <verification|unverified>`.
 fn overlay_table(summary: &OverlaySummary) -> String {
-    summary
-        .edges
-        .iter()
-        .map(|entry| {
-            let verdict = verdict_label(
-                entry
-                    .edge
-                    .verification
-                    .as_ref()
-                    .map(|verification| verification.verdict),
-            );
-            format!(
-                "{}  {}  {verdict}  {} site(s)\n",
-                entry.edge.key, entry.edge.confidence, entry.sites
-            )
-        })
-        .collect()
+    let verdict = |verification: Option<&Verification>| {
+        verdict_label(verification.map(|verification| verification.verdict))
+    };
+    let edges = summary.edges.iter().map(|entry| {
+        format!(
+            "{}  {}  {}  {} site(s)\n",
+            entry.edge.key,
+            entry.edge.confidence,
+            verdict(entry.edge.verification.as_ref()),
+            entry.sites
+        )
+    });
+    let annotations = summary.annotations.iter().map(|annotation| {
+        format!(
+            "{}  {}  {}  {}\n",
+            annotation.key,
+            annotation.verdict,
+            annotation.confidence,
+            verdict(annotation.verification.as_ref())
+        )
+    });
+    edges.chain(annotations).collect()
 }
 
 /// Answers the queries piped on stdin from one load of `catalog`. Reading
@@ -648,8 +657,8 @@ fn stdout_color() -> Color {
 /// one query later.
 fn serve_mcp(catalog: Option<&std::path::Path>) -> Result<(), Error> {
     let config = try_rllvm_config()?;
-    // Only emitting a module and `guards` need the bindir, so failing to
-    // find it fails only those.
+    // Only emitting a module, `guards` and grounding an `annotate` need the
+    // bindir, so failing to find it fails only those.
     let mut registry = mcp::Registry::with_cache(facts_cache()?).with_llvm_tools(
         config.llvm_link_filepath().clone(),
         config.llvm_bindir().cloned(),
