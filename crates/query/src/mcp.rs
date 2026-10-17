@@ -762,7 +762,7 @@ management_tool_surface! {
         "Append the overlay's unsaved records to its file, beside the catalog unless `load_overlay` named another: the only overlay tool that writes to disk, and the catalog itself is never written. Refuses when another writer changed the file since it was read. Saved records stay agent hypotheses, never proof.",
         json!({ "type": "object", "properties": { "catalog": catalog_property() } });
     ListOverlay => "list_overlay",
-        "The catalog's overlay as it stands, unsaved records included: each edge with its confidence, provenance, verdict and the unresolved sites it attaches to, and how many unresolved sites the overlay covers. Edges are agent hypotheses kept beside the catalog, never proof.",
+        "The catalog's overlay as it stands, unsaved records included: each edge with its confidence, provenance, verdict and the unresolved sites it attaches to, and how many unresolved sites the overlay covers; then each annotation, a feasibility verdict on a value keyed by its anchor and `from`, with its confidence, provenance and verdict. Edges and annotations are agent hypotheses kept beside the catalog, never proof.",
         json!({ "type": "object", "properties": { "catalog": catalog_property() } });
 }
 
@@ -2073,6 +2073,43 @@ mod tests {
         assert!(
             !default_overlay_path(&catalog).exists(),
             "only save_overlay writes to disk"
+        );
+    }
+
+    #[test]
+    fn list_overlay_shows_annotations_beside_edges() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let catalog = session.catalog_path().unwrap().to_path_buf();
+        let mut registry = Registry::with_sessions(vec![(catalog.to_str().unwrap(), session)]);
+        let at = format!("{}:3", scratch.path().join("t.c").display());
+        let annotate = json!({
+            "op": "annotate",
+            "anchor": { "kind": "argument", "site": at, "operand": 0 },
+            "verdict": "infeasible",
+            "confidence": "high",
+            "provenance": ["t.c:3: sink(n)"],
+        });
+        answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [annotate] }),
+        );
+
+        let listed = answer(&mut registry, "list_overlay", json!({}));
+        assert_eq!(listed["pending"], 1, "{listed}");
+        assert_eq!(listed["edges"], json!([]), "{listed}");
+        let annotation = &listed["annotations"][0];
+        assert_eq!(annotation["feasibility"], "infeasible", "{listed}");
+        assert_eq!(annotation["key"]["anchor"]["kind"], "argument", "{listed}");
+        assert_eq!(
+            annotation["key"]["anchor"]["site"]["function"]["symbol"], "f",
+            "listed by its canonical call site id: {listed}"
         );
     }
 

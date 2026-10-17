@@ -9,6 +9,11 @@
 //! unbounded. A bounded site already has a sound target set, and an agent
 //! edge may never widen it.
 //!
+//! An `annotate` record is the other kind of hypothesis: a feasibility
+//! verdict on a value, keyed by the value's anchor as the `guards` query
+//! takes it. Written, it is grounded as `guards` reads the value; stored, its
+//! call site is always an id, so two spellings of one value are one key.
+//!
 //! The file is append-only between compactions, so a crash or a concurrent
 //! reader never sees an earlier line rewritten. Every line is validated when
 //! the file is folded, and any bad one fails the load naming its line: a
@@ -33,7 +38,10 @@ use crate::{
         CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, Linkage,
         ModuleAnalysis, Slot,
     },
-    guards::AnchorParts,
+    guards::{
+        AnchorParts, AnchorSurface, GuardAnchor, anchor_from_parts, anchor_function, caller_scope,
+        ground_anchor,
+    },
     index::{NameMatch, NameResolution, PathStep, Session},
 };
 
@@ -46,6 +54,10 @@ const AGENT_SOURCE: &str = "agent";
 /// Every `op` this version reads. Any other is named in the load error,
 /// never skipped.
 const KNOWN_OPS: &[&str] = &["add", "verify", "retract", "annotate"];
+
+/// Why an `annotate` without provenance is refused, wherever it is caught.
+const ANNOTATE_NEEDS_PROVENANCE: &str =
+    "annotate needs a non-empty `provenance`: say where the verdict comes from";
 
 /// What text shows for an edge no `verify` has judged.
 const UNVERIFIED: &str = "unverified";
@@ -146,6 +158,16 @@ pub(crate) fn function_label(id: &FunctionId) -> String {
     format!("{} [{}]", id.symbol, id.module_id)
 }
 
+/// `site block:instruction in symbol [module]`: a call site by its id.
+pub(crate) fn site_label(site: &CallSiteId) -> String {
+    format!(
+        "site {}:{} in {}",
+        site.block_index,
+        site.instruction_index,
+        function_label(&site.function)
+    )
+}
+
 impl fmt::Display for EdgeKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -184,6 +206,16 @@ pub enum Feasibility {
     Feasible,
     Infeasible,
     Conditional,
+}
+
+impl fmt::Display for Feasibility {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Feasibility::Feasible => "feasible",
+            Feasibility::Infeasible => "infeasible",
+            Feasibility::Conditional => "conditional",
+        })
+    }
 }
 
 /// How an `annotate` record names a call site: a `file:line`, or a call site
@@ -282,6 +314,32 @@ impl AnchorSpec {
     }
 }
 
+impl From<&GuardAnchor> for AnchorSpec {
+    /// The canonical spelling: a call site always by its id.
+    fn from(anchor: &GuardAnchor) -> AnchorSpec {
+        match anchor.clone() {
+            GuardAnchor::Argument { site, operand } => AnchorSpec::Argument {
+                site: SiteSpec::Id(site),
+                operand,
+            },
+            GuardAnchor::Return { site } => AnchorSpec::Return {
+                site: SiteSpec::Id(site),
+            },
+            GuardAnchor::Local { function, name } => AnchorSpec::Local { function, name },
+        }
+    }
+}
+
+/// How a `verify` or `retract` names an annotation: its key as written,
+/// the call site in either spelling.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnnotationRef {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    pub anchor: AnchorSpec,
+}
+
 /// One JSONL line after the header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -300,15 +358,23 @@ pub enum Record {
         #[serde(default = "agent")]
         source: String,
     },
+    /// Names exactly one of an edge and an annotation.
     Verify {
-        edge: EdgeKey,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<EdgeKey>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        annotation: Option<AnnotationRef>,
         tool: String,
         verdict: Verdict,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<String>,
     },
+    /// Names exactly one of an edge and an annotation.
     Retract {
-        edge: EdgeKey,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<EdgeKey>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        annotation: Option<AnnotationRef>,
         reason: String,
     },
     /// An externally authored feasibility verdict on a value anchor.
@@ -355,9 +421,7 @@ fn parse_record(line: &str) -> Result<Record, String> {
     if let Record::Annotate { provenance, .. } = &record
         && provenance.is_empty()
     {
-        return Err(
-            "annotate needs a non-empty `provenance`: say where the verdict comes from".into(),
-        );
+        return Err(ANNOTATE_NEEDS_PROVENANCE.into());
     }
     Ok(record)
 }
@@ -381,9 +445,105 @@ pub struct OverlayEdge {
 
 impl OverlayEdge {
     fn is_refuted(&self) -> bool {
-        self.verification
-            .as_ref()
-            .is_some_and(|verification| verification.verdict == Verdict::Refuted)
+        is_refuted(self.verification.as_ref())
+    }
+}
+
+/// Whether a check found the record it judged wrong: such a record is kept,
+/// but nothing consumes it.
+fn is_refuted(verification: Option<&Verification>) -> bool {
+    verification.is_some_and(|verification| verification.verdict == Verdict::Refuted)
+}
+
+/// What an annotation is keyed by: the value, canonical (a call site by its
+/// id, a local's function by its definition's symbol), and the function the
+/// verdict was reached from, absent for the unscoped trace.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+pub struct AnnotationKey {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    pub anchor: GuardAnchor,
+}
+
+impl AnnotationKey {
+    /// The key as a `verify` or `retract` names it.
+    fn to_ref(&self) -> AnnotationRef {
+        AnnotationRef {
+            from: self.from.clone(),
+            anchor: AnchorSpec::from(&self.anchor),
+        }
+    }
+}
+
+impl fmt::Display for AnnotationKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.anchor {
+            GuardAnchor::Argument { site, operand } => {
+                write!(f, "operand {operand} of the call at {}", site_label(site))?
+            }
+            GuardAnchor::Return { site } => {
+                write!(f, "the result of the call at {}", site_label(site))?
+            }
+            GuardAnchor::Local { function, name } => write!(f, "local `{name}` in {function}")?,
+        }
+        match &self.from {
+            Some(from) => write!(f, " from {from}"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// An externally authored feasibility verdict on a value, as folded: the
+/// latest `annotate` for its key. A hypothesis, never proof.
+#[derive(Clone, Debug, Serialize)]
+pub struct Annotation {
+    pub key: AnnotationKey,
+    pub feasibility: Feasibility,
+    pub confidence: Confidence,
+    pub provenance: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
+}
+
+impl Annotation {
+    /// A refuted annotation is kept, but ignored by every consumer.
+    pub fn is_refuted(&self) -> bool {
+        is_refuted(self.verification.as_ref())
+    }
+}
+
+/// What a `verify` or `retract` judges or removes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VerifyTarget {
+    Edge(EdgeKey),
+    Annotation(AnnotationKey),
+}
+
+impl VerifyTarget {
+    /// The one of `edge` and `annotation` a record names, the annotation's
+    /// key canonical.
+    fn of(
+        session: &Session,
+        edge: Option<EdgeKey>,
+        annotation: Option<AnnotationRef>,
+    ) -> Result<VerifyTarget, String> {
+        match (edge, annotation) {
+            (Some(edge), None) => Ok(VerifyTarget::Edge(edge)),
+            (None, Some(annotation)) => Ok(VerifyTarget::Annotation(annotation_key(
+                session,
+                annotation.from,
+                &annotation.anchor,
+            )?)),
+            _ => Err("a verify or retract names exactly one of edge and annotation".to_string()),
+        }
+    }
+
+    /// The `edge` and `annotation` fields of a record naming this target.
+    fn fields(&self) -> (Option<EdgeKey>, Option<AnnotationRef>) {
+        match self {
+            VerifyTarget::Edge(edge) => (Some(edge.clone()), None),
+            VerifyTarget::Annotation(key) => (None, Some(key.to_ref())),
+        }
     }
 }
 
@@ -440,6 +600,25 @@ impl DiskState {
     }
 }
 
+/// What the records fold to: the current edges and annotations, by key.
+#[derive(Clone, Debug, Default)]
+struct Folded {
+    edges: BTreeMap<EdgeKey, OverlayEdge>,
+    annotations: BTreeMap<AnnotationKey, Annotation>,
+}
+
+/// How much of an `annotate` record [`apply`] checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Grounding {
+    /// A record being written: its value is read in the anchor function's
+    /// promoted module, as `guards` reads it.
+    Value,
+    /// A line being loaded: only the catalog is consulted. The line's write
+    /// read the value, and the header binds the file to the same module
+    /// bytes, so a load needs no `opt` and no LLVM bindir.
+    Catalog,
+}
+
 /// The folded overlay, bound to one build of one catalog.
 #[derive(Debug)]
 pub struct Overlay {
@@ -447,7 +626,7 @@ pub struct Overlay {
     path: Option<PathBuf>,
     /// [`fingerprint`] of the session this overlay was opened against.
     fingerprint: String,
-    edges: BTreeMap<EdgeKey, OverlayEdge>,
+    folded: Folded,
     /// Applied records not yet appended to the file, `to` resolved.
     pending: Vec<Record>,
     /// The file as this overlay last read or wrote it, or `None` while
@@ -462,7 +641,7 @@ impl Overlay {
         Ok(Overlay {
             path,
             fingerprint: fingerprint(session)?,
-            edges: BTreeMap::new(),
+            folded: Folded::default(),
             pending: Vec::new(),
             disk: None,
         })
@@ -544,7 +723,8 @@ impl Overlay {
                 continue;
             }
             let record = parse_record(line).map_err(|reason| at(number, reason))?;
-            apply(&mut overlay.edges, session, record).map_err(|reason| at(number, reason))?;
+            apply(&mut overlay.folded, session, record, Grounding::Catalog)
+                .map_err(|reason| at(number, reason))?;
         }
         overlay.disk = Some(disk);
         Ok(overlay)
@@ -589,15 +769,15 @@ impl Overlay {
         session: &Session,
         records: impl Iterator<Item = (String, Record)>,
     ) -> Result<(), Error> {
-        let mut edges = self.edges.clone();
+        let mut folded = self.folded.clone();
         let mut applied = Vec::new();
         for (label, record) in records {
             applied.push(
-                apply(&mut edges, session, record)
+                apply(&mut folded, session, record, Grounding::Value)
                     .map_err(|reason| Error::InvalidArguments(format!("{label}: {reason}")))?,
             );
         }
-        self.edges = edges;
+        self.folded = folded;
         self.pending.extend(applied);
         Ok(())
     }
@@ -649,7 +829,8 @@ impl Overlay {
     }
 
     /// Rewrites the file as the header plus one `add` (and one `verify`) per
-    /// current edge, atomically (temp file in the same directory, then
+    /// current edge and one `annotate` (and one `verify`) per current
+    /// annotation, atomically (temp file in the same directory, then
     /// rename), keeping the file's permissions. Refuses while records are
     /// pending, and when the file changed on disk as for `save`.
     pub fn compact(&mut self) -> Result<(), Error> {
@@ -664,19 +845,26 @@ impl Overlay {
         })?;
         self.check_unchanged(&path)?;
         let mut text = json_line(&Header::current(&self.fingerprint))?;
-        for edge in self.edges.values() {
+        for edge in self.folded.edges.values() {
             text.push_str(&json_line(&add_record(
                 &edge.key,
                 edge.confidence,
                 edge.provenance.clone(),
             ))?);
             if let Some(verification) = &edge.verification {
-                text.push_str(&json_line(&Record::Verify {
-                    edge: edge.key.clone(),
-                    tool: verification.tool.clone(),
-                    verdict: verification.verdict,
-                    at: verification.at.clone(),
-                })?);
+                text.push_str(&json_line(&verify_record(
+                    &VerifyTarget::Edge(edge.key.clone()),
+                    verification,
+                ))?);
+            }
+        }
+        for annotation in self.folded.annotations.values() {
+            text.push_str(&json_line(&annotate_record(annotation))?);
+            if let Some(verification) = &annotation.verification {
+                text.push_str(&json_line(&verify_record(
+                    &VerifyTarget::Annotation(annotation.key.clone()),
+                    verification,
+                ))?);
             }
         }
 
@@ -728,7 +916,13 @@ impl Overlay {
     }
 
     pub fn edges(&self) -> impl Iterator<Item = &OverlayEdge> {
-        self.edges.values()
+        self.folded.edges.values()
+    }
+
+    /// The current annotations, refuted ones included: a consumer skips
+    /// those by [`Annotation::is_refuted`].
+    pub fn annotations(&self) -> &BTreeMap<AnnotationKey, Annotation> {
+        &self.folded.annotations
     }
 
     pub fn pending(&self) -> usize {
@@ -747,6 +941,7 @@ impl Overlay {
     pub fn summary(&self, session: &Session) -> OverlaySummary {
         let mut covered: BTreeSet<&CallSiteId> = BTreeSet::new();
         let edges = self
+            .folded
             .edges
             .values()
             .map(|edge| {
@@ -765,6 +960,7 @@ impl Overlay {
             fingerprint: self.fingerprint.clone(),
             pending: self.pending.len(),
             edges,
+            annotations: self.folded.annotations.values().cloned().collect(),
             coverage: OverlayCoverage::of(session, covered.len()),
         }
     }
@@ -846,6 +1042,7 @@ pub struct OverlaySummary {
     pub fingerprint: String,
     pub pending: usize,
     pub edges: Vec<SummaryEdge>,
+    pub annotations: Vec<Annotation>,
     pub coverage: OverlayCoverage,
 }
 
@@ -979,14 +1176,69 @@ fn add_record(key: &EdgeKey, confidence: Confidence, provenance: Vec<String>) ->
     }
 }
 
-/// Validates `record` against `session` and the current `edges`, applies
-/// it, and returns it as it is stored. The reason is bare, for the caller
-/// to prefix with where the record came from.
+/// The `verify` that records `verification` of `target`.
+fn verify_record(target: &VerifyTarget, verification: &Verification) -> Record {
+    let (edge, annotation) = target.fields();
+    Record::Verify {
+        edge,
+        annotation,
+        tool: verification.tool.clone(),
+        verdict: verification.verdict,
+        at: verification.at.clone(),
+    }
+}
+
+/// The `annotate` that recreates `annotation`, its anchor canonical.
+fn annotate_record(annotation: &Annotation) -> Record {
+    Record::Annotate {
+        anchor: AnchorSpec::from(&annotation.key.anchor),
+        from: annotation.key.from.clone(),
+        verdict: annotation.feasibility,
+        confidence: annotation.confidence,
+        provenance: annotation.provenance.clone(),
+    }
+}
+
+/// The canonical key of the annotation on `anchor` reached from `from`: a
+/// call site resolved to its id -- a `file:line` holding several is an
+/// error naming each -- and a local's function to the one definition's
+/// symbol, so two spellings of one value are one key.
+fn annotation_key(
+    session: &Session,
+    from: Option<String>,
+    anchor: &AnchorSpec,
+) -> Result<AnnotationKey, String> {
+    let anchor = anchor_from_parts(session, &anchor.to_parts(), AnchorSurface::Tool)?;
+    let function = anchor_function(session, &anchor).map_err(bare)?;
+    let anchor = match anchor {
+        GuardAnchor::Local { name, .. } => GuardAnchor::Local {
+            function: function.symbol,
+            name,
+        },
+        call => call,
+    };
+    Ok(AnnotationKey { from, anchor })
+}
+
+/// An error's message without the variant's prefix, for a caller that adds
+/// its own.
+fn bare(error: Error) -> String {
+    match error {
+        Error::InvalidArguments(message) => message,
+        other => other.to_string(),
+    }
+}
+
+/// Validates `record` against `session` and the current `folded` state,
+/// applies it, and returns it as it is stored. The reason is bare, for the
+/// caller to prefix with where the record came from.
 fn apply(
-    edges: &mut BTreeMap<EdgeKey, OverlayEdge>,
+    folded: &mut Folded,
     session: &Session,
     record: Record,
+    grounding: Grounding,
 ) -> Result<Record, String> {
+    let Folded { edges, annotations } = folded;
     match record {
         Record::Add {
             via_field,
@@ -1055,33 +1307,86 @@ fn apply(
         }
         Record::Verify {
             edge,
+            annotation,
             tool,
             verdict,
             at,
         } => {
-            let current = edges
-                .get_mut(&edge)
-                .ok_or_else(|| format!("no current edge {edge}"))?;
-            current.verification = Some(Verification {
-                tool: tool.clone(),
-                verdict,
-                at: at.clone(),
-            });
-            Ok(Record::Verify {
+            let target = VerifyTarget::of(session, edge, annotation)?;
+            let verification = Verification { tool, verdict, at };
+            let current = match &target {
+                VerifyTarget::Edge(key) => {
+                    &mut edges
+                        .get_mut(key)
+                        .ok_or_else(|| format!("no current edge {key}"))?
+                        .verification
+                }
+                VerifyTarget::Annotation(key) => {
+                    &mut annotations
+                        .get_mut(key)
+                        .ok_or_else(|| format!("no current annotation on {key}"))?
+                        .verification
+                }
+            };
+            let record = verify_record(&target, &verification);
+            *current = Some(verification);
+            Ok(record)
+        }
+        Record::Retract {
+            edge,
+            annotation,
+            reason,
+        } => {
+            let target = VerifyTarget::of(session, edge, annotation)?;
+            match &target {
+                VerifyTarget::Edge(key) => {
+                    edges
+                        .remove(key)
+                        .ok_or_else(|| format!("no current edge {key}"))?;
+                }
+                VerifyTarget::Annotation(key) => {
+                    annotations
+                        .remove(key)
+                        .ok_or_else(|| format!("no current annotation on {key}"))?;
+                }
+            }
+            let (edge, annotation) = target.fields();
+            Ok(Record::Retract {
                 edge,
-                tool,
-                verdict,
-                at,
+                annotation,
+                reason,
             })
         }
-        Record::Retract { edge, reason } => {
-            edges
-                .remove(&edge)
-                .ok_or_else(|| format!("no current edge {edge}"))?;
-            Ok(Record::Retract { edge, reason })
+        Record::Annotate {
+            anchor,
+            from,
+            verdict,
+            confidence,
+            provenance,
+        } => {
+            if provenance.is_empty() {
+                return Err(ANNOTATE_NEEDS_PROVENANCE.to_string());
+            }
+            let key = annotation_key(session, from, &anchor)?;
+            if let Some(from) = &key.from {
+                let function = anchor_function(session, &key.anchor).map_err(bare)?;
+                caller_scope(session, from, &function).map_err(bare)?;
+            }
+            if grounding == Grounding::Value {
+                ground_anchor(session, &key.anchor).map_err(bare)?;
+            }
+            // Replaced whole: a verification judged the verdict it replaces.
+            let annotation = Annotation {
+                key: key.clone(),
+                feasibility: verdict,
+                confidence,
+                provenance,
+                verification: None,
+            };
+            let record = annotate_record(&annotation);
+            annotations.insert(key, annotation);
+            Ok(record)
         }
-        // Parsed so far; storing and folding annotations is a later change.
-        Record::Annotate { .. } => Err("annotate records are not stored yet".into()),
     }
 }
 
@@ -1168,12 +1473,7 @@ fn target_candidates(session: &Session, symbol: &str) -> Vec<FunctionId> {
 /// A site an agent edge may attach to: present, indirect and unbounded.
 fn check_site(session: &Session, site: &CallSiteId) -> Result<(), String> {
     match session.call_site(site).map(|fact| &fact.target) {
-        None => Err(format!(
-            "no call site {}:{} in {}",
-            site.block_index,
-            site.instruction_index,
-            function_label(&site.function)
-        )),
+        None => Err(format!("no call {}", site_label(site))),
         Some(CallTarget::Indirect {
             llvm_target_bound: None,
             ..
@@ -1362,13 +1662,15 @@ mod tests {
                     add_field(8, "h3"),
                     add_field(8, "h1"),
                     Record::Verify {
-                        edge: field_key("h3"),
+                        edge: Some(field_key("h3")),
+                        annotation: None,
                         tool: "reviewer".into(),
                         verdict: Verdict::Confirmed,
                         at: None,
                     },
                     Record::Retract {
-                        edge: field_key("h1"),
+                        edge: Some(field_key("h1")),
+                        annotation: None,
                         reason: "never stored".into(),
                     },
                 ],
@@ -1386,7 +1688,8 @@ mod tests {
                 .record(
                     &session,
                     vec![Record::Retract {
-                        edge: field_key("h1"),
+                        edge: Some(field_key("h1")),
+                        annotation: None,
                         reason: "again".into(),
                     }],
                 )
@@ -1413,11 +1716,13 @@ mod tests {
                     again,
                     add_field(8, "h1"),
                     Record::Retract {
-                        edge: field_key("h1"),
+                        edge: Some(field_key("h1")),
+                        annotation: None,
                         reason: "never stored".into(),
                     },
                     Record::Verify {
-                        edge: field_key("h3"),
+                        edge: Some(field_key("h3")),
+                        annotation: None,
                         tool: "reviewer".into(),
                         verdict: Verdict::Inconclusive,
                         at: Some("2026-10-05".into()),
@@ -1747,10 +2052,11 @@ mod tests {
             .record(
                 &session,
                 vec![Record::Verify {
-                    edge: EdgeKey::Site {
+                    edge: Some(EdgeKey::Site {
                         site: plain,
                         to: id("mod_a", "h1"),
-                    },
+                    }),
+                    annotation: None,
                     tool: "reviewer".into(),
                     verdict: Verdict::Refuted,
                     at: None,
@@ -2042,5 +2348,525 @@ mod tests {
                 .parse::<Record>()
                 .is_ok()
         );
+    }
+
+    /// `f` passes `len` to one call on line 4, makes two calls on line 5,
+    /// and rebinds `x`; `main` calls `f`, `g` does not.
+    const ANNOTATED_SOURCE: &str = "extern void sink(unsigned);
+extern unsigned get(unsigned);
+void f(unsigned len) {
+  sink(len);
+  sink(get(len));
+  unsigned x = len;
+  sink(x);
+  x = len + 1;
+  sink(x);
+}
+void g(void) {}
+int main(void) { f(3); return 0; }
+";
+
+    fn annotated_session(scratch: &tempfile::TempDir) -> Session {
+        crate::testing::compiled_session(scratch.path(), "t.c", ANNOTATED_SOURCE, &["-O0", "-g"])
+    }
+
+    /// `t.c:line`, spelled as the compiled module records the file.
+    fn at_line(scratch: &tempfile::TempDir, line: u32) -> SiteSpec {
+        SiteSpec::At(format!("{}:{line}", scratch.path().join("t.c").display()))
+    }
+
+    /// The one call on line 4: `sink(len)`.
+    fn sink_len(session: &Session) -> CallSiteId {
+        let sites: Vec<_> = session
+            .call_sites()
+            .iter()
+            .filter(|site| site.id.function.symbol == "f")
+            .filter(|site| site.location.as_ref().is_some_and(|at| at.line == 4))
+            .collect();
+        assert_eq!(sites.len(), 1);
+        sites[0].id.clone()
+    }
+
+    fn argument(site: SiteSpec, operand: usize) -> AnchorSpec {
+        AnchorSpec::Argument { site, operand }
+    }
+
+    fn local(name: &str) -> AnchorSpec {
+        AnchorSpec::Local {
+            function: "f".into(),
+            name: name.into(),
+        }
+    }
+
+    fn annotate(anchor: AnchorSpec, from: Option<&str>, verdict: Feasibility) -> Record {
+        Record::Annotate {
+            anchor,
+            from: from.map(str::to_string),
+            verdict,
+            confidence: Confidence::Medium,
+            provenance: vec!["t.c:4: sink(len)".into()],
+        }
+    }
+
+    fn verify_annotation(anchor: AnchorSpec, verdict: Verdict) -> Record {
+        Record::Verify {
+            edge: None,
+            annotation: Some(AnnotationRef { from: None, anchor }),
+            tool: "reread".into(),
+            verdict,
+            at: None,
+        }
+    }
+
+    fn retract_annotation(anchor: AnchorSpec) -> Record {
+        Record::Retract {
+            edge: None,
+            annotation: Some(AnnotationRef { from: None, anchor }),
+            reason: "the guard was misread".into(),
+        }
+    }
+
+    #[test]
+    fn annotations_fold_by_key_whichever_way_the_site_is_spelled() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let site = sink_len(&session);
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+
+        overlay
+            .record(
+                &session,
+                vec![annotate(
+                    argument(at_line(&scratch, 4), 0),
+                    None,
+                    Feasibility::Infeasible,
+                )],
+            )
+            .unwrap();
+        let key = AnnotationKey {
+            from: None,
+            anchor: GuardAnchor::Argument {
+                site: site.clone(),
+                operand: 0,
+            },
+        };
+        let stored = &overlay.annotations()[&key];
+        assert_eq!(stored.feasibility, Feasibility::Infeasible);
+        assert_eq!(stored.confidence, Confidence::Medium);
+        assert!(!stored.is_refuted());
+
+        // The same value by its call site id: one key, the latest verdict.
+        overlay
+            .record(
+                &session,
+                vec![annotate(
+                    argument(SiteSpec::Id(site.clone()), 0),
+                    None,
+                    Feasibility::Feasible,
+                )],
+            )
+            .unwrap();
+        assert_eq!(overlay.annotations().len(), 1);
+        assert_eq!(
+            overlay.annotations()[&key].feasibility,
+            Feasibility::Feasible
+        );
+
+        // Reached from another function, it is another key.
+        overlay
+            .record(
+                &session,
+                vec![annotate(
+                    argument(SiteSpec::Id(site), 0),
+                    Some("main"),
+                    Feasibility::Conditional,
+                )],
+            )
+            .unwrap();
+        assert_eq!(overlay.annotations().len(), 2);
+        assert_eq!(overlay.pending(), 3);
+    }
+
+    #[test]
+    fn an_annotate_on_a_line_with_several_calls_names_the_candidates() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        let error = message(
+            overlay
+                .record_lines(
+                    &session,
+                    vec![(
+                        3,
+                        annotate(
+                            argument(at_line(&scratch, 5), 0),
+                            None,
+                            Feasibility::Feasible,
+                        ),
+                    )],
+                )
+                .unwrap_err(),
+        );
+        assert!(error.starts_with("line 3: "), "{error}");
+        assert!(error.contains("holds 2 call sites"), "{error}");
+        assert!(
+            error.contains("get in f") && error.contains("sink in f"),
+            "{error}"
+        );
+        assert!(overlay.annotations().is_empty());
+    }
+
+    #[test]
+    fn an_ungrounded_annotate_is_rejected_naming_its_line_and_why() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let site = || at_line(&scratch, 4);
+        let cases = [
+            (argument(site(), 1), None, "out of range"),
+            (
+                AnchorSpec::Return { site: site() },
+                None,
+                "returns no value",
+            ),
+            (argument(at_line(&scratch, 11), 0), None, "no call site at"),
+            (local("nope"), None, "no debug binding of local `nope`"),
+            (local("x"), None, "more than one value"),
+            (
+                AnchorSpec::Local {
+                    function: "absent".into(),
+                    name: "len".into(),
+                },
+                None,
+                "no function named \"absent\"",
+            ),
+            (argument(site(), 0), Some("g"), "not on a path from \"g\""),
+            (
+                argument(site(), 0),
+                Some("absent"),
+                "no function named \"absent\"",
+            ),
+        ];
+        for (anchor, from, reason) in cases {
+            let mut overlay = Overlay::empty(&session, None).unwrap();
+            let error = message(
+                overlay
+                    .record_lines(
+                        &session,
+                        vec![(7, annotate(anchor.clone(), from, Feasibility::Infeasible))],
+                    )
+                    .unwrap_err(),
+            );
+            assert!(error.starts_with("line 7: "), "{anchor:?}: {error}");
+            assert!(error.contains(reason), "{anchor:?}: {error}");
+            assert!(overlay.annotations().is_empty());
+        }
+
+        // A local bound to one value is grounded.
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        overlay
+            .record(
+                &session,
+                vec![annotate(local("len"), Some("main"), Feasibility::Feasible)],
+            )
+            .unwrap();
+        assert_eq!(overlay.annotations().len(), 1);
+    }
+
+    #[test]
+    fn an_annotate_without_provenance_is_rejected() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let error = record_error(
+            &session,
+            vec![Record::Annotate {
+                anchor: local("len"),
+                from: None,
+                verdict: Feasibility::Feasible,
+                confidence: Confidence::Low,
+                provenance: Vec::new(),
+            }],
+        );
+        assert!(error.contains("non-empty `provenance`"), "{error}");
+    }
+
+    #[test]
+    fn a_batch_with_one_bad_annotate_applies_none() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        let error = message(
+            overlay
+                .record_lines(
+                    &session,
+                    vec![
+                        (
+                            1,
+                            annotate(
+                                argument(at_line(&scratch, 4), 0),
+                                None,
+                                Feasibility::Feasible,
+                            ),
+                        ),
+                        (
+                            2,
+                            annotate(
+                                argument(at_line(&scratch, 4), 9),
+                                None,
+                                Feasibility::Feasible,
+                            ),
+                        ),
+                    ],
+                )
+                .unwrap_err(),
+        );
+        assert!(error.starts_with("line 2: "), "{error}");
+        assert!(overlay.annotations().is_empty());
+        assert_eq!(overlay.pending(), 0);
+    }
+
+    #[test]
+    fn an_annotation_verifies_and_retracts_by_its_key() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let site = sink_len(&session);
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        overlay
+            .record(
+                &session,
+                vec![
+                    annotate(
+                        argument(at_line(&scratch, 4), 0),
+                        None,
+                        Feasibility::Infeasible,
+                    ),
+                    verify_annotation(argument(SiteSpec::Id(site.clone()), 0), Verdict::Refuted),
+                ],
+            )
+            .unwrap();
+        let annotation = overlay.annotations().values().next().unwrap();
+        assert_eq!(
+            annotation.verification.as_ref().unwrap().tool,
+            "reread",
+            "a verify by the id reaches the annotation written by line"
+        );
+        assert!(annotation.is_refuted());
+
+        // A new verdict replaces the one the refutation judged.
+        overlay
+            .record(
+                &session,
+                vec![annotate(
+                    argument(SiteSpec::Id(site.clone()), 0),
+                    None,
+                    Feasibility::Conditional,
+                )],
+            )
+            .unwrap();
+        let annotation = overlay.annotations().values().next().unwrap();
+        assert!(annotation.verification.is_none() && !annotation.is_refuted());
+
+        overlay
+            .record(
+                &session,
+                vec![retract_annotation(argument(at_line(&scratch, 4), 0))],
+            )
+            .unwrap();
+        assert!(overlay.annotations().is_empty());
+
+        let again = message(
+            overlay
+                .record(
+                    &session,
+                    vec![retract_annotation(argument(SiteSpec::Id(site), 0))],
+                )
+                .unwrap_err(),
+        );
+        assert!(again.contains("no current annotation"), "{again}");
+
+        let both = record_error(
+            &session,
+            vec![Record::Verify {
+                edge: Some(field_key("h3")),
+                annotation: Some(AnnotationRef {
+                    from: None,
+                    anchor: local("len"),
+                }),
+                tool: "reread".into(),
+                verdict: Verdict::Confirmed,
+                at: None,
+            }],
+        );
+        assert!(
+            both.contains("exactly one of edge and annotation"),
+            "{both}"
+        );
+        let neither = record_error(
+            &session,
+            vec![Record::Retract {
+                edge: None,
+                annotation: None,
+                reason: "nothing".into(),
+            }],
+        );
+        assert!(
+            neither.contains("exactly one of edge and annotation"),
+            "{neither}"
+        );
+    }
+
+    #[test]
+    fn compaction_and_the_summary_keep_annotations() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let path = overlay_path(&scratch);
+        let mut overlay = Overlay::open(&session, &path).unwrap();
+        overlay
+            .record(
+                &session,
+                vec![
+                    annotate(
+                        argument(at_line(&scratch, 4), 0),
+                        None,
+                        Feasibility::Infeasible,
+                    ),
+                    annotate(
+                        argument(at_line(&scratch, 4), 0),
+                        None,
+                        Feasibility::Conditional,
+                    ),
+                    verify_annotation(argument(at_line(&scratch, 4), 0), Verdict::Confirmed),
+                ],
+            )
+            .unwrap();
+        assert_eq!(overlay.save().unwrap(), 3);
+        let appended = std::fs::read_to_string(&path).unwrap();
+        for line in appended.lines().skip(1) {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            let anchor = match record["op"].as_str() {
+                Some("annotate") => &record["anchor"],
+                _ => &record["annotation"]["anchor"],
+            };
+            assert!(anchor["site"].is_object(), "appended by its id: {line}");
+        }
+        let annotations = |overlay: &Overlay| {
+            serde_json::to_value(overlay.annotations().values().collect::<Vec<_>>()).unwrap()
+        };
+        let before = annotations(&overlay);
+
+        overlay.compact().unwrap();
+        let written = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = written
+            .lines()
+            .skip(1)
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2, "one annotate and its verify: {written}");
+        assert_eq!(lines[0]["op"], "annotate");
+        assert_eq!(lines[0]["verdict"], "conditional");
+        assert!(
+            lines[0]["anchor"]["site"].is_object(),
+            "stored by its id: {written}"
+        );
+        assert_eq!(lines[1]["op"], "verify");
+        assert!(lines[1]["annotation"]["anchor"]["site"].is_object());
+        assert!(lines[1].get("edge").is_none(), "{written}");
+
+        let reopened = Overlay::open(&session, &path).unwrap();
+        assert_eq!(annotations(&reopened), before);
+
+        let summary = serde_json::to_value(reopened.summary(&session)).unwrap();
+        let listed = &summary["annotations"][0];
+        assert_eq!(listed["feasibility"], "conditional", "{summary}");
+        assert_eq!(listed["key"]["anchor"]["kind"], "argument", "{summary}");
+        assert_eq!(listed["verification"]["verdict"], "confirmed", "{summary}");
+    }
+
+    #[test]
+    fn a_hand_written_annotate_line_is_canonicalized_on_load_without_opt() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = annotated_session(&scratch);
+        let site = sink_len(&session);
+        let path = overlay_path(&scratch);
+        let by_line = serde_json::to_string(&annotate(
+            argument(at_line(&scratch, 4), 0),
+            None,
+            Feasibility::Infeasible,
+        ))
+        .unwrap();
+        let by_id = serde_json::to_string(&verify_annotation(
+            argument(SiteSpec::Id(site.clone()), 0),
+            Verdict::Inconclusive,
+        ))
+        .unwrap();
+        std::fs::write(&path, format!("{}{by_line}\n{by_id}\n", header(&session))).unwrap();
+
+        // Opened without an LLVM bindir: a load reads only the catalog.
+        let bare = crate::open(session.catalog_path().unwrap()).unwrap();
+        let overlay = Overlay::open(&bare, &path).unwrap();
+        let key = AnnotationKey {
+            from: None,
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+        };
+        let annotation = &overlay.annotations()[&key];
+        assert_eq!(
+            annotation.verification.as_ref().unwrap().verdict,
+            Verdict::Inconclusive
+        );
+
+        // Writing one reads its value, which needs the bindir.
+        let mut overlay = overlay;
+        let error = message(
+            overlay
+                .record(
+                    &bare,
+                    vec![annotate(local("len"), None, Feasibility::Feasible)],
+                )
+                .unwrap_err(),
+        );
+        assert!(error.contains("no LLVM bindir"), "{error}");
+        assert_eq!(overlay.annotations().len(), 1);
+    }
+
+    #[test]
+    fn an_edge_verify_and_retract_read_and_write_as_before() {
+        let edge =
+            r#"{"via_field":{"record":"ops","offset":8},"to":{"module_id":"mod_a","symbol":"h3"}}"#;
+        for line in [
+            format!(r#"{{"op":"verify","edge":{edge},"tool":"reviewer","verdict":"confirmed"}}"#),
+            format!(r#"{{"op":"retract","edge":{edge},"reason":"wrong"}}"#),
+        ] {
+            let record: Record = line.parse().unwrap();
+            assert!(matches!(
+                &record,
+                Record::Verify {
+                    edge: Some(_),
+                    annotation: None,
+                    ..
+                } | Record::Retract {
+                    edge: Some(_),
+                    annotation: None,
+                    ..
+                }
+            ));
+            assert_eq!(
+                serde_json::to_value(&record).unwrap(),
+                serde_json::from_str::<serde_json::Value>(&line).unwrap()
+            );
+        }
+
+        let session = session();
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        overlay.record(&session, vec![add_field(8, "h3")]).unwrap();
+        overlay
+            .record(
+                &session,
+                vec![
+                    format!(r#"{{"op":"verify","edge":{edge},"tool":"t","verdict":"refuted"}}"#)
+                        .parse()
+                        .unwrap(),
+                ],
+            )
+            .unwrap();
+        assert!(overlay.edges().next().unwrap().is_refuted());
     }
 }

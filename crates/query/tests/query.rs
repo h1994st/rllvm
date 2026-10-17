@@ -4439,7 +4439,7 @@ fn the_overlay_cli_records_lists_and_compacts() {
     assert!(success, "{stderr}");
     assert_eq!(
         query_text(&scratch, &catalog, &["overlay", "compact"]),
-        format!("compacted {}: 0 edges\n", overlay.display())
+        format!("compacted {}: 0 edges, 0 annotations\n", overlay.display())
     );
     let written = std::fs::read_to_string(&overlay).unwrap();
     assert_eq!(written.lines().count(), 1, "{written}");

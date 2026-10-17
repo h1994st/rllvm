@@ -19,14 +19,14 @@ use crate::ir::{
     CallIr, CastOp, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand, ValueId, ValueNode,
     int_predicate,
 };
-use crate::overlay::function_label;
+use crate::overlay::{function_label, site_label};
 use crate::slice::{EmittedModule, check_opt_llvm, emit_module, promote, promote_anchor_module};
 use crate::{
     CallSiteFact, CallSiteId, CallTarget, FunctionId, GuardKind, Linkage, Session, SourceLocation,
 };
 
 /// The value whose constraints are asked for.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GuardAnchor {
     /// Operand `operand` of the call at `site`.
@@ -387,15 +387,9 @@ pub fn guards(
     };
     match resolve_anchor(&ir, session, anchor)? {
         Resolved::Ambiguous(values) => {
-            let name = match anchor {
-                GuardAnchor::Local { name, .. } => name.as_str(),
-                GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => "?",
-            };
             lost.push(format!(
-                "local `{name}` in {} is bound to more than one value over its lifetime ({} of \
-                 them SSA values), so none is traced",
-                function_label(&function),
-                values.len()
+                "{}, so none is traced",
+                bound_to_several(anchor, &function, values.len())
             ));
         }
         Resolved::One {
@@ -421,6 +415,39 @@ pub fn guards(
     lost.retain(|reason| seen.insert(reason.clone()));
     result.lost = (!lost.is_empty()).then(|| lost.join(LOST_SEPARATOR));
     Ok(result)
+}
+
+/// Confirms `anchor` names one value to trace, read as [`guards`] reads it:
+/// in its function's `mem2reg`-promoted module. An operand must be an
+/// in-range value, a call result not void, and a local bound to exactly one
+/// value; anything else is an error saying why. A session that cannot
+/// promote the module -- no catalog file, no LLVM bindir -- says which is
+/// missing.
+pub(crate) fn ground_anchor(session: &Session, anchor: &GuardAnchor) -> Result<(), Error> {
+    let function = anchor_function(session, anchor)?;
+    let promoted = promote_anchor_module(session, &function)?;
+    let ir = read_module_ir(&promoted.bytes)?;
+    match resolve_anchor(&ir, session, anchor)? {
+        Resolved::One { .. } => Ok(()),
+        Resolved::Ambiguous(values) => Err(Error::InvalidArguments(format!(
+            "{}, so there is no one value for a verdict to rest on",
+            bound_to_several(anchor, &function, values.len())
+        ))),
+    }
+}
+
+/// What [`Resolved::Ambiguous`] means for `anchor`, a local of `function`
+/// bound to `values` SSA values among others.
+fn bound_to_several(anchor: &GuardAnchor, function: &FunctionId, values: usize) -> String {
+    let name = match anchor {
+        GuardAnchor::Local { name, .. } => name.as_str(),
+        GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => "?",
+    };
+    format!(
+        "local `{name}` in {} is bound to more than one value over its lifetime ({values} of \
+         them SSA values)",
+        function_label(function)
+    )
 }
 
 /// Writes the slice a scoped re-read of `anchor` would read as one
@@ -495,7 +522,7 @@ pub fn emit_guards_module(
 /// parameter may cross from when the trace is bounded to that slice. `from`
 /// must name exactly one defined function. An error when `function` is on
 /// no such path.
-fn caller_scope(
+pub(crate) fn caller_scope(
     session: &Session,
     from: &str,
     function: &FunctionId,
@@ -1389,15 +1416,6 @@ fn deleted_by_promotion(symbol: &str) -> bool {
     PROMOTION_DELETES
         .iter()
         .any(|prefix| symbol.starts_with(prefix))
-}
-
-fn site_label(site: &CallSiteId) -> String {
-    format!(
-        "site {}:{} in {}",
-        site.block_index,
-        site.instruction_index,
-        function_label(&site.function)
-    )
 }
 
 /// Immediate dominators of a function's blocks, entry = block 0.
