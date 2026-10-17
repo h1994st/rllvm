@@ -14,7 +14,7 @@ use rllvm_query::{
     AnchorParts, AnchorSurface, Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session,
     TextMode, anchor_from_parts, check_anchor_parts,
     cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
-    default_overlay_path, emit_slice,
+    default_overlay_path, emit_guards_module, emit_slice,
     index::Direction,
     llvm_version, mcp, open_with_cache,
     overlay::verdict_label,
@@ -132,15 +132,8 @@ impl Planned {
     fn validate(&self) -> Result<(), Error> {
         match self {
             Planned::Ready(query) => query.validate(),
-            Planned::Guards(request) => {
-                if request.emit_module.is_some() {
-                    return Err(Error::InvalidArguments(
-                        "guards cannot write a module yet: drop --emit-module".to_string(),
-                    ));
-                }
-                check_anchor_parts(&request.parts, AnchorSurface::Cli)
-                    .map_err(Error::InvalidArguments)
-            }
+            Planned::Guards(request) => check_anchor_parts(&request.parts, AnchorSurface::Cli)
+                .map_err(Error::InvalidArguments),
         }
     }
 
@@ -195,6 +188,10 @@ fn parse_queries(input: &str, modifiers: QueryModifiers) -> Result<Vec<(String, 
         let parsed =
             QueryLine::try_parse_from(&arguments).map_err(|error| at_line(error.to_string()))?;
         if let QueryCommand::Slice {
+            emit_module: Some(_),
+            ..
+        }
+        | QueryCommand::Guards {
             emit_module: Some(_),
             ..
         } = parsed.command
@@ -534,7 +531,9 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     }
 
     let emit_module = match &command {
-        QueryCommand::Slice { emit_module, .. } => emit_module.clone(),
+        QueryCommand::Slice { emit_module, .. } | QueryCommand::Guards { emit_module, .. } => {
+            emit_module.clone()
+        }
         _ => None,
     };
     // Unreachable through the match above, which returns for every command
@@ -569,14 +568,27 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     let emitted = match &emit_module {
         Some(out) => {
             let config = try_rllvm_config()?;
-            Some(emit_slice(
-                &session,
-                &catalog,
-                &result,
-                config.llvm_link_filepath(),
-                config.llvm_bindir()?,
-                out,
-            )?)
+            Some(match &query {
+                // The analysis read one module; this is the slice a scoped
+                // re-read would use.
+                Query::Guards { anchor, from, .. } => emit_guards_module(
+                    &session,
+                    &catalog,
+                    anchor,
+                    from.as_deref(),
+                    config.llvm_link_filepath(),
+                    config.llvm_bindir()?,
+                    out,
+                )?,
+                _ => emit_slice(
+                    &session,
+                    &catalog,
+                    &result,
+                    config.llvm_link_filepath(),
+                    config.llvm_bindir()?,
+                    out,
+                )?,
+            })
         }
         None => None,
     };

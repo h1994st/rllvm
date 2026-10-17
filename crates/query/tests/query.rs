@@ -4523,3 +4523,49 @@ fn the_guards_flags_name_a_call_site_argument_and_print_snake_case() {
     let error = guards_failure(&scratch, &catalog, &["--function", "f"]);
     assert!(error.contains("needs --local"), "{error}");
 }
+
+const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\
+     void callee(unsigned n) {\n\
+       if (n > 15) return;\n\
+       sink(n);\n\
+     }\n\
+     void caller(void) { callee(3); }\n\
+     void unrelated(void) {}\n";
+
+#[test]
+fn guards_emits_its_promoted_slice_module() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "g.c", GUARDS_SLICE_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let out = scratch.path().join("guards.bc");
+    let answer = query_json(
+        &scratch,
+        &catalog,
+        &[
+            "guards",
+            "--function",
+            "callee",
+            "--local",
+            "n",
+            "--emit-module",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(answer["emitted"]["functions"], 2, "{answer}");
+    assert_eq!(
+        defined_symbols(&out),
+        BTreeSet::from(["callee".to_string(), "caller".to_string()]),
+        "the anchor's function and its caller, and not `unrelated`"
+    );
+    let listing = Command::new(llvm_bin("llvm-dis"))
+        .arg(&out)
+        .arg("-o")
+        .arg("-")
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    assert!(
+        !String::from_utf8_lossy(&listing.stdout).contains("alloca"),
+        "the emitted module is mem2reg-promoted"
+    );
+}

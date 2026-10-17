@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
-use rllvm_core::error::Error;
+use rllvm_core::{config::LlvmBindir, error::Error};
 
 use crate::bind::collapse_odr_duplicates;
 use crate::extract::read_module_ir;
@@ -19,7 +19,9 @@ use crate::ir::{
     int_predicate,
 };
 use crate::overlay::function_label;
-use crate::slice::promote_anchor_module;
+use std::path::Path;
+
+use crate::slice::{EmittedModule, check_opt_llvm, emit_module, promote, promote_anchor_module};
 use crate::{CallSiteId, CallTarget, FunctionId, GuardKind, Linkage, Session, SourceLocation};
 
 /// The value whose constraints are asked for.
@@ -390,6 +392,51 @@ pub fn guards(
     lost.retain(|reason| seen.insert(reason.clone()));
     result.lost = (!lost.is_empty()).then(|| lost.join(LOST_SEPARATOR));
     Ok(result)
+}
+
+/// Writes the slice a scoped re-read of `anchor` would read as one
+/// `mem2reg`-promoted module at `out`: the `from` to anchor-function slice
+/// when `from` is set, else the anchor function and its callers. The analysis
+/// itself never links; this is the one place `guards` does.
+pub fn emit_guards_module(
+    session: &Session,
+    catalog: &Path,
+    anchor: &GuardAnchor,
+    from: Option<&str>,
+    llvm_link: &Path,
+    llvm_bindir: &LlvmBindir,
+    out: &Path,
+) -> Result<EmittedModule, Error> {
+    let function = anchor_function(session, anchor)?;
+    let functions: Vec<FunctionId> = match from {
+        Some(from) => {
+            let mut scope: Vec<FunctionId> = caller_scope(session, from, &function)?
+                .into_iter()
+                .collect();
+            scope.sort();
+            scope
+        }
+        None => {
+            let mut set = BTreeSet::from([function.clone()]);
+            set.extend(
+                session
+                    .callers(&function.symbol)
+                    .into_iter()
+                    .map(|site| site.id.function),
+            );
+            set.into_iter().collect()
+        }
+    };
+    // Before llvm-link: `opt` must read every module the slice is cut from.
+    let modules: BTreeSet<&str> = functions.iter().map(|id| id.module_id.as_str()).collect();
+    for module in modules {
+        check_opt_llvm(llvm_bindir, session, module)?;
+    }
+    let emitted = emit_module(session, catalog, &functions, llvm_link, llvm_bindir, out)?;
+    let scratch = tempfile::TempDir::new()?;
+    let promoted = promote(&std::fs::read(out)?, llvm_bindir, scratch.path())?;
+    std::fs::write(out, promoted.bytes)?;
+    Ok(emitted)
 }
 
 /// The functions on a path from `from` to `function`: the callers a

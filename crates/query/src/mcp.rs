@@ -33,8 +33,8 @@
 //! The overlay tools change state, and two calls write files. Records an
 //! agent sends are held in memory, where `reach`, `closure` and `slice` can
 //! already walk them, and only `save_overlay` writes them to disk. The one
-//! other write is `slice` with `emit_module`, which writes the new module it
-//! names. The catalog is never written at all.
+//! other write is `slice` or `guards` with `emit_module`, which writes the new
+//! module it names. The catalog is never written at all.
 //!
 //! stdout carries protocol frames only, the same rule the compiler wrappers
 //! follow for their own stdout: every diagnostic belongs on stderr, and
@@ -61,7 +61,8 @@ use rllvm_core::{config::LlvmBindir, error::Error};
 use super::{
     AnchorParts, AnchorSurface, Confidence, Direction, FactsCache, GuardAnchor, Overlay, Query,
     Record, Session, analysis_of, anchor_from_parts, check_anchor_parts, default_overlay_path,
-    emit_slice, open_catalog_with_cache, open_with_cache, overlay::fingerprint, run_with_overlay,
+    emit_guards_module, emit_slice, open_catalog_with_cache, open_with_cache, overlay::fingerprint,
+    run_with_overlay,
 };
 
 /// The modern protocol revision this server has been checked against.
@@ -1079,7 +1080,7 @@ fn query_tool(query: &Query) -> Value {
                     "function": { "type": "string", "description": "With `local`: the function that holds the variable" },
                     "local": { "type": "string", "description": "With `function`: the source variable to trace" },
                     "from": { "type": "string", "description": "Where the trace starts, when not the anchor's own function" },
-                    "emit_module": { "type": "string", "description": "Not yet supported: rejected with an error" }
+                    "emit_module": { "type": "string", "description": "Write the promoted slice a scoped re-read would use (from `from` to the anchor's function, else the function and its callers) to this .bc file, relative to the server's working directory; the answer gains `emitted`. Needs a catalog loaded by `load_catalog`." }
                 },
                 "required": []
             }
@@ -1135,13 +1136,15 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
     let emit_module = match (&query, arguments.get("emit_module")) {
-        (Query::Slice { .. }, Some(value)) => match value.as_str() {
-            Some(path) => Some(PathBuf::from(path)),
-            None => {
-                let message = "non-string argument `emit_module`";
-                return Outcome::Result(call_tool_result(true, message), false);
+        (Query::Slice { .. } | Query::Guards { .. }, Some(value)) if !value.is_null() => {
+            match value.as_str() {
+                Some(path) => Some(PathBuf::from(path)),
+                None => {
+                    let message = "non-string argument `emit_module`";
+                    return Outcome::Result(call_tool_result(true, message), false);
+                }
             }
-        },
+        }
         _ => None,
     };
     let (key, session, overlay) = match registry.session(catalog_argument(&arguments)) {
@@ -1204,7 +1207,19 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
             Ok(llvm_bindir) => llvm_bindir,
             Err(message) => return Outcome::Result(call_tool_result(true, message), false),
         };
-        match emit_slice(session, &key, &result, llvm_link, llvm_bindir, &out) {
+        let emitted = match &query {
+            Query::Guards { anchor, from, .. } => emit_guards_module(
+                session,
+                &key,
+                anchor,
+                from.as_deref(),
+                llvm_link,
+                llvm_bindir,
+                &out,
+            ),
+            _ => emit_slice(session, &key, &result, llvm_link, llvm_bindir, &out),
+        };
+        match emitted {
             Ok(emitted) => payload["emitted"] = json!(emitted),
             Err(error) => {
                 return Outcome::Result(call_tool_result(true, &error.to_string()), false);
@@ -1332,12 +1347,6 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
         "resolution_candidates" => Ok(Query::ResolutionCandidates),
         "guards" => {
             check_anchor_parts(&guard_parts(arguments)?, AnchorSurface::Tool)?;
-            if arguments
-                .get("emit_module")
-                .is_some_and(|value| !value.is_null())
-            {
-                return Err("guards cannot write a module yet: drop `emit_module`".to_string());
-            }
             // The call site an `at` names needs a catalog; `tool_call_outcome`
             // resolves the anchor once the session is loaded.
             Ok(Query::Guards {
@@ -1462,10 +1471,6 @@ mod tests {
             (json!({ "function": "f" }), "`function` needs `local`"),
             (json!({ "at": "t.c:4", "operand": -1 }), "operand"),
             (json!({ "at": 4, "operand": 0 }), "`at`"),
-            (
-                json!({ "function": "f", "local": "n", "emit_module": "x.bc" }),
-                "emit_module",
-            ),
         ] {
             let text = tool_error(&mut registry, "guards", arguments);
             assert!(text.contains(fragment), "{fragment}: {text}");
