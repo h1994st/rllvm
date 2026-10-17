@@ -190,6 +190,7 @@ pub enum Feasibility {
 /// id as an object. Resolved to one id before anything is stored.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
+#[serde(try_from = "serde_json::Value")]
 pub enum SiteSpec {
     At(String),
     Id(CallSiteId),
@@ -203,6 +204,21 @@ pub enum AnchorSpec {
     Argument { site: SiteSpec, operand: usize },
     Return { site: SiteSpec },
     Local { function: String, name: String },
+}
+
+impl TryFrom<serde_json::Value> for SiteSpec {
+    type Error = String;
+
+    fn try_from(value: serde_json::Value) -> Result<Self, String> {
+        const EXPECTED: &str = "`site` is a `file:line` string or a call site id object";
+        match value {
+            serde_json::Value::String(at) => Ok(SiteSpec::At(at)),
+            serde_json::Value::Object(_) => serde_json::from_value(value)
+                .map(SiteSpec::Id)
+                .map_err(|error| format!("{EXPECTED}; this object is not one: {error}")),
+            other => Err(format!("{EXPECTED}, not {other}")),
+        }
+    }
 }
 
 impl SiteSpec {
