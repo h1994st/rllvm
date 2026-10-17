@@ -2946,7 +2946,10 @@ mod mcp {
         // Structural, not a bug hunt: the CLI and `tools/call` both resolve
         // to `run`/`Session` (`mcp.rs`'s `tool_call_outcome` calls the same
         // `run` the CLI's own dispatch calls), so this documents that
-        // invariant rather than searching for a place the two diverge.
+        // invariant rather than searching for a place the two diverge. The one
+        // deliberate divergence is `analysis.modules`: an MCP session reports
+        // the roster once at `load_catalog`, so a query answer omits it, while
+        // a standalone CLI invocation keeps it. Everything else is identical.
         let scratch = tempfile::tempdir().unwrap();
         let catalog = super::two_module_catalog(&scratch); // main calls add
 
@@ -2965,7 +2968,13 @@ mod mcp {
         let mcp = mcp_tool_call(&catalog, "callers", serde_json::json!({ "name": "add" }));
 
         assert_eq!(cli["results"], mcp["results"]);
-        assert_eq!(cli["analysis"], mcp["analysis"]);
+        // The CLI keeps the per-module roster; the MCP answer drops it.
+        assert_eq!(cli["analysis"]["modules"].as_array().unwrap().len(), 2);
+        assert!(mcp["analysis"].get("modules").is_none());
+        // Everything else in `analysis`, counts included, is identical.
+        let mut cli_analysis = cli["analysis"].clone();
+        cli_analysis.as_object_mut().unwrap().remove("modules");
+        assert_eq!(cli_analysis, mcp["analysis"]);
         assert_eq!(cli["uncertainty"], mcp["uncertainty"]);
     }
 

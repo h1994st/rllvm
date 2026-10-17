@@ -1150,6 +1150,13 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
     };
     let mut payload = serde_json::to_value(&result)
         .unwrap_or_else(|error| json!({ "serialization_error": error.to_string() }));
+    // The per-module `analysis.modules` roster describes the catalog, not the
+    // query: it is identical on every answer in a session, and `load_catalog`
+    // and `list_catalogs` report it in full. Dropping it from a query answer
+    // keeps an agent's per-call token cost down; the aggregate counts stay.
+    if let Some(analysis) = payload.get_mut("analysis").and_then(Value::as_object_mut) {
+        analysis.remove("modules");
+    }
     if let Some(out) = emit_module {
         let Some((llvm_link, llvm_bindir)) = &registry.slice_tools else {
             let message = "`emit_module` needs llvm-link, and this server has none configured";
@@ -1625,6 +1632,35 @@ mod tests {
         assert!(
             catalogs[0]["analysis"].is_object() && catalogs[0]["scope"].is_object(),
             "a listing must carry the same honesty blocks a query answer does: {listed}"
+        );
+    }
+
+    /// The per-module `analysis.modules` roster describes the catalog, not the
+    /// query: it is identical on every answer, and `load_catalog` and
+    /// `list_catalogs` report it. So a query answer carries the aggregate
+    /// counts alone, which keeps an agent's per-call token cost down.
+    #[test]
+    fn a_query_answer_keeps_the_analysis_counts_but_drops_the_module_roster() {
+        let mut registry = one_catalog();
+
+        let payload = answer(&mut registry, "externals", json!({}));
+        let analysis = payload["analysis"]
+            .as_object()
+            .expect("a query answer still carries analysis");
+        assert!(
+            analysis.contains_key("analyzed"),
+            "the aggregate counts stay on a query answer: {payload}"
+        );
+        assert!(
+            !analysis.contains_key("modules"),
+            "the per-module roster is dropped from a query answer: {payload}"
+        );
+
+        // The roster is not lost: list_catalogs still reports it in full.
+        let listed = answer(&mut registry, "list_catalogs", json!({}));
+        assert!(
+            listed["catalogs"][0]["analysis"]["modules"].is_array(),
+            "list_catalogs still carries the per-module roster: {listed}"
         );
     }
 
