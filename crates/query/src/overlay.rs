@@ -33,6 +33,7 @@ use crate::{
         CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, Linkage,
         ModuleAnalysis, Slot,
     },
+    guards::AnchorParts,
     index::{NameMatch, NameResolution, PathStep, Session},
 };
 
@@ -43,8 +44,8 @@ pub const OVERLAY_VERSION: u32 = 2;
 const AGENT_SOURCE: &str = "agent";
 
 /// Every `op` this version reads. Any other is named in the load error,
-/// never skipped: `annotate` is reserved for a later version.
-const KNOWN_OPS: &[&str] = &["add", "verify", "retract"];
+/// never skipped.
+const KNOWN_OPS: &[&str] = &["add", "verify", "retract", "annotate"];
 
 /// What text shows for an edge no `verify` has judged.
 const UNVERIFIED: &str = "unverified";
@@ -175,6 +176,69 @@ pub enum TargetSpec {
     Symbol(String),
 }
 
+/// Whether the path an anchored value sits on can be taken, as judged by
+/// whoever wrote an `annotate` record. Never computed by rllvm-query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Feasibility {
+    Feasible,
+    Infeasible,
+    Conditional,
+}
+
+/// How an `annotate` record names a call site: a `file:line`, or a call site
+/// id as an object. Resolved to one id before anything is stored.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SiteSpec {
+    At(String),
+    Id(CallSiteId),
+}
+
+/// The wire form of a [`GuardAnchor`](crate::guards::GuardAnchor): the same
+/// shape, but the call site may be spelled either way.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AnchorSpec {
+    Argument { site: SiteSpec, operand: usize },
+    Return { site: SiteSpec },
+    Local { function: String, name: String },
+}
+
+impl SiteSpec {
+    /// The spelling `anchor_from_parts` takes for `at`.
+    fn spelling(&self) -> String {
+        match self {
+            SiteSpec::At(at) => at.clone(),
+            SiteSpec::Id(id) => crate::guards::id_json(id),
+        }
+    }
+}
+
+impl AnchorSpec {
+    /// The parts [`anchor_from_parts`](crate::guards::anchor_from_parts)
+    /// resolves into a canonical anchor.
+    pub fn to_parts(&self) -> AnchorParts {
+        match self {
+            AnchorSpec::Argument { site, operand } => AnchorParts {
+                at: Some(site.spelling()),
+                operand: Some(*operand),
+                ..AnchorParts::default()
+            },
+            AnchorSpec::Return { site } => AnchorParts {
+                at: Some(site.spelling()),
+                ret: true,
+                ..AnchorParts::default()
+            },
+            AnchorSpec::Local { function, name } => AnchorParts {
+                function: Some(function.clone()),
+                local: Some(name.clone()),
+                ..AnchorParts::default()
+            },
+        }
+    }
+}
+
 /// One JSONL line after the header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
@@ -203,6 +267,16 @@ pub enum Record {
     Retract {
         edge: EdgeKey,
         reason: String,
+    },
+    /// An externally authored feasibility verdict on a value anchor.
+    Annotate {
+        anchor: AnchorSpec,
+        /// The function the value was reached from, when the verdict depends on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        verdict: Feasibility,
+        confidence: Confidence,
+        provenance: Vec<String>,
     },
 }
 
@@ -234,7 +308,15 @@ fn parse_record(line: &str) -> Result<Record, String> {
     {
         return Err(format!("unknown op {op:?}"));
     }
-    serde_json::from_value(value).map_err(|error| error.to_string())
+    let record: Record = serde_json::from_value(value).map_err(|error| error.to_string())?;
+    if let Record::Annotate { provenance, .. } = &record
+        && provenance.is_empty()
+    {
+        return Err(
+            "annotate needs a non-empty `provenance`: say where the verdict comes from".into(),
+        );
+    }
+    Ok(record)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -955,6 +1037,8 @@ fn apply(
                 .ok_or_else(|| format!("no current edge {edge}"))?;
             Ok(Record::Retract { edge, reason })
         }
+        // Parsed so far; storing and folding annotations is a later change.
+        Record::Annotate { .. } => Err("annotate records are not stored yet".into()),
     }
 }
 
@@ -1420,12 +1504,12 @@ mod tests {
 
         std::fs::write(
             &path,
-            format!("{}{{\"op\":\"annotate\"}}\n", header(&session)),
+            format!("{}{{\"op\":\"annotated\"}}\n", header(&session)),
         )
         .unwrap();
         let error = open_error(&session, &path);
         assert!(error.contains(&format!("{shown}:2:")), "{error}");
-        assert!(error.contains("unknown op \"annotate\""), "{error}");
+        assert!(error.contains("unknown op \"annotated\""), "{error}");
 
         let misspelled = good.replace("\"provenance\"", "\"provenence\"");
         std::fs::write(&path, format!("{}{misspelled}\n", header(&session))).unwrap();
@@ -1792,5 +1876,98 @@ mod tests {
         overlay.compact().unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o640);
+    }
+
+    const ANNOTATE_TAIL: &str =
+        r#""verdict":"infeasible","confidence":"high","provenance":["t.c:4: n = min(len, CAP)"]"#;
+
+    #[test]
+    fn an_annotate_record_parses_with_either_site_spelling() {
+        let by_line = format!(
+            r#"{{"op":"annotate","anchor":{{"kind":"argument","site":"t.c:4","operand":0}},{ANNOTATE_TAIL}}}"#
+        );
+        let Record::Annotate {
+            anchor,
+            from,
+            verdict,
+            confidence,
+            provenance,
+        } = by_line.parse().unwrap()
+        else {
+            panic!("not an annotate record");
+        };
+        assert_eq!(
+            anchor,
+            AnchorSpec::Argument {
+                site: SiteSpec::At("t.c:4".into()),
+                operand: 0
+            }
+        );
+        assert_eq!(anchor.to_parts().at.as_deref(), Some("t.c:4"));
+        assert_eq!(anchor.to_parts().operand, Some(0));
+        assert_eq!(
+            (from, verdict, confidence),
+            (None, Feasibility::Infeasible, Confidence::High)
+        );
+        assert_eq!(provenance.len(), 1);
+
+        let id =
+            r#"{"function":{"module_id":"m","symbol":"f"},"block_index":1,"instruction_index":2}"#;
+        let by_id = format!(
+            r#"{{"op":"annotate","from":"main","anchor":{{"kind":"return","site":{id}}},{ANNOTATE_TAIL}}}"#
+        );
+        let Record::Annotate {
+            anchor: AnchorSpec::Return {
+                site: SiteSpec::Id(site),
+            },
+            from,
+            ..
+        } = by_id.parse().unwrap()
+        else {
+            panic!("not a return annotate by id");
+        };
+        assert_eq!(from.as_deref(), Some("main"));
+        let parts = AnchorSpec::Return {
+            site: SiteSpec::Id(site.clone()),
+        }
+        .to_parts();
+        assert!(parts.ret);
+        assert_eq!(
+            serde_json::from_str::<CallSiteId>(&parts.at.unwrap()).unwrap(),
+            site
+        );
+
+        let local = format!(
+            r#"{{"op":"annotate","anchor":{{"kind":"local","function":"f","name":"n"}},{ANNOTATE_TAIL}}}"#
+        );
+        assert!(matches!(
+            local.parse::<Record>().unwrap(),
+            Record::Annotate {
+                anchor: AnchorSpec::Local { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_malformed_annotate_record_is_rejected_by_name() {
+        let anchor = r#""anchor":{"kind":"local","function":"f","name":"n"}"#;
+        let line = |rest: &str| format!(r#"{{"op":"annotate",{anchor},{rest}}}"#);
+        let error = |rest: &str| line(rest).parse::<Record>().unwrap_err().to_string();
+        assert!(error(r#""verdict":"feasible","confidence":"low""#).contains("provenance"));
+        let empty = error(r#""verdict":"feasible","confidence":"low","provenance":[]"#);
+        assert!(empty.contains("non-empty `provenance`"), "{empty}");
+        let unknown = error(&format!("{ANNOTATE_TAIL},\"why\":1"));
+        assert!(unknown.contains("why"), "{unknown}");
+        let bad = error(r#""verdict":"maybe","confidence":"low","provenance":["x"]"#);
+        assert!(bad.contains("maybe"), "{bad}");
+        let stray = r#"{"op":"annotate","anchor":{"kind":"local","function":"f","name":"n","x":1},"verdict":"feasible","confidence":"low","provenance":["x"]}"#;
+        assert!(
+            stray
+                .parse::<Record>()
+                .unwrap_err()
+                .to_string()
+                .contains("x")
+        );
     }
 }

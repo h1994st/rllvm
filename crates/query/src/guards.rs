@@ -26,7 +26,7 @@ use crate::{
 };
 
 /// The value whose constraints are asked for.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GuardAnchor {
     /// Operand `operand` of the call at `site`.
@@ -195,7 +195,7 @@ fn resolve_site(session: &Session, at: &str) -> Result<CallSiteId, String> {
     }
 }
 
-fn id_json(id: &CallSiteId) -> String {
+pub(crate) fn id_json(id: &CallSiteId) -> String {
     serde_json::to_string(id).unwrap_or_default()
 }
 

@@ -2143,7 +2143,7 @@ mod tests {
         let malformed = tool_error(
             &mut registry,
             "record_edges",
-            json!({ "records": [add_through(8, "h1"), { "op": "annotate" }] }),
+            json!({ "records": [add_through(8, "h1"), { "op": "annotated" }] }),
         );
         assert!(malformed.contains("record 2: "), "{malformed}");
         assert!(malformed.contains("unknown op"), "{malformed}");
