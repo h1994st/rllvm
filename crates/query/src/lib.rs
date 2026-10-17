@@ -52,6 +52,12 @@ pub use extract::{ModuleFacts, llvm_version};
 pub mod facts;
 pub use facts::*;
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the guards analysis, which lands next")
+)]
+pub(crate) mod ir;
+
 pub mod load;
 
 pub mod bind;

@@ -2,17 +2,21 @@
 //! `unsafe`, and no LLVM handle leaves it: every public value is owned Rust
 //! data.
 //!
-//! Changing what this module produces requires bumping `FACTS_FORMAT` in
-//! `cache.rs`: `the_facts_format_names_what_extraction_produces` says how.
+//! Changing the facts this module produces requires bumping `FACTS_FORMAT`
+//! in `cache.rs`: `the_facts_format_names_what_extraction_produces` says how.
+//! The instruction-level IR `read_module_ir` returns is never cached, so it
+//! does not.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     ffi::{CStr, c_char, c_int, c_void},
+    marker::PhantomData,
     path::PathBuf,
 };
 
 use llvm_sys::{
-    LLVMDiagnosticSeverity, LLVMLinkage, LLVMOpcode, LLVMTypeKind,
+    LLVMDbgRecordKind, LLVMDiagnosticSeverity, LLVMIntPredicate, LLVMLinkage, LLVMOpcode,
+    LLVMTypeKind,
     bit_reader::LLVMParseBitcodeInContext2,
     core::*,
     debuginfo::{
@@ -35,6 +39,7 @@ use rllvm_core::error::Error;
 
 use crate::{
     facts::*,
+    ir::*,
     load::{LoadedModule, SourceState},
 };
 
@@ -58,6 +63,12 @@ unsafe extern "C" {
     /// through a `libc` dependency, matching how this module already reaches
     /// the C API through `std::ffi` alone.
     fn free(pointer: *mut c_void);
+
+    /// The expression a debug record binds its variable through. llvm-sys
+    /// 231 binds this as `LVMDbgVariableRecordGetExpression`, a symbol LLVM
+    /// does not export, so it is declared here under the name `llvm-c`
+    /// gives it.
+    fn LLVMDbgVariableRecordGetExpression(record: LLVMDbgRecordRef) -> LLVMMetadataRef;
 }
 
 /// The C++ reading of a mangled symbol, or `None` when the name is not
@@ -244,7 +255,7 @@ struct Context(LLVMContextRef);
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // SAFETY: the pointer came from `LLVMContextCreate` in `extract_inner`
+        // SAFETY: the pointer came from `LLVMContextCreate` in `parse_bitcode`
         // and is disposed exactly once, after every module in it is disposed.
         unsafe { LLVMContextDispose(self.0) };
     }
@@ -300,6 +311,82 @@ impl Drop for DiagnosticSink {
         // SAFETY: reclaims the box `new` leaked, exactly once.
         drop(unsafe { Box::from_raw(self.0) });
     }
+}
+
+/// A parsed module with everything that must outlive it. Fields drop in
+/// declaration order: the module first, then the buffer, then the context,
+/// and the diagnostic sink last because the context can still reach it while
+/// it is being disposed. The lifetime ties the buffer to the borrowed bytes.
+struct Parsed<'bytes> {
+    module: ParsedModule,
+    buffer: Buffer,
+    context: Context,
+    sink: DiagnosticSink,
+    bytes: PhantomData<&'bytes [u8]>,
+}
+
+impl Parsed<'_> {
+    /// Disposes the module and its context, then returns every diagnostic
+    /// LLVM raised, including any it emits while tearing the module down.
+    fn finish(self) -> Vec<String> {
+        let Self {
+            module,
+            buffer,
+            context,
+            sink,
+            ..
+        } = self;
+        drop(module);
+        drop(buffer);
+        drop(context);
+        sink.take()
+    }
+}
+
+/// Parses `bytes` in a fresh context whose diagnostics are collected rather
+/// than printed. A refused module yields what LLVM said about it.
+///
+/// # Safety
+/// No preconditions: every handle is created here and owned by the result.
+/// It is `unsafe` only because it drives the C API directly.
+unsafe fn parse_bitcode(bytes: &[u8]) -> Result<Parsed<'_>, Vec<String>> {
+    let sink = DiagnosticSink::new();
+    // SAFETY: `LLVMContextCreate` allocates a fresh context; the guard
+    // disposes it on every exit path, including the error return below.
+    let context = Context(unsafe { LLVMContextCreate() });
+    // SAFETY: the context is live, `collect_diagnostic` is an `extern "C"`
+    // function that cannot unwind into LLVM, and the sink it writes to
+    // outlives the context.
+    unsafe { LLVMContextSetDiagnosticHandler(context.0, Some(collect_diagnostic), sink.0.cast()) };
+
+    // SAFETY: the range is `bytes`, borrowed for the result's lifetime, so
+    // it outlives the buffer. The name is a NUL-terminated literal, and
+    // bitcode needs no NUL terminator.
+    let buffer = Buffer(unsafe {
+        LLVMCreateMemoryBufferWithMemoryRange(
+            bytes.as_ptr().cast::<c_char>(),
+            bytes.len(),
+            c"rllvm-module".as_ptr(),
+            0,
+        )
+    });
+
+    let mut parsed: LLVMModuleRef = std::ptr::null_mut();
+    // SAFETY: context and buffer are live and `parsed` is a valid out
+    // pointer. The parse reads the buffer without taking ownership of it.
+    let failed = unsafe { LLVMParseBitcodeInContext2(context.0, buffer.0, &mut parsed) } != 0;
+    if failed || parsed.is_null() {
+        drop(buffer);
+        drop(context);
+        return Err(sink.take());
+    }
+    Ok(Parsed {
+        module: ParsedModule(parsed),
+        buffer,
+        context,
+        sink,
+        bytes: PhantomData,
+    })
 }
 
 /// Collects LLVM's diagnostics instead of leaving the default handler in
@@ -790,6 +877,23 @@ unsafe fn indirect_target_bound(
     )
 }
 
+/// The name a call's callee is called by: a function's own, or an alias's.
+/// A call through an alias calls the function the alias stands for, under
+/// the alias's own name, so it is not indirect: nothing about the target is
+/// unknown. `None` for anything else called.
+///
+/// # Safety
+/// `called` must be a live value.
+unsafe fn named_callee(called: LLVMValueRef) -> Option<String> {
+    // SAFETY: the caller guarantees a live value; `alias_target` is reached
+    // only for an alias.
+    unsafe {
+        let named = !LLVMIsAFunction(called).is_null()
+            || (!LLVMIsAGlobalAlias(called).is_null() && alias_target(called).is_some());
+        named.then(|| value_name(called))
+    }
+}
+
 /// Classifies a call or invoke by what it actually calls in this module.
 /// A name is never rebound: a direct call records the callee as referenced
 /// here.
@@ -809,9 +913,7 @@ unsafe fn call_target(
     let called = unsafe { LLVMGetCalledValue(instruction) };
     if !called.is_null() {
         // SAFETY: `called` is a live value in this module.
-        if !unsafe { LLVMIsAFunction(called) }.is_null() {
-            // SAFETY: as above.
-            let symbol = unsafe { value_name(called) };
+        if let Some(symbol) = unsafe { named_callee(called) } {
             return if symbol.starts_with("llvm.") {
                 CallTarget::Intrinsic { name: symbol }
             } else {
@@ -821,21 +923,6 @@ unsafe fn call_target(
                         symbol,
                     },
                 }
-            };
-        }
-        // A call through an alias calls the function the alias stands for,
-        // under the alias's own name. It is not indirect: nothing about the
-        // target is unknown.
-        // SAFETY: as above; `alias_target` is reached only for an alias.
-        if !unsafe { LLVMIsAGlobalAlias(called) }.is_null()
-            && unsafe { alias_target(called) }.is_some()
-        {
-            return CallTarget::Direct {
-                callee: FunctionId {
-                    module_id: module_id.to_string(),
-                    // SAFETY: as above.
-                    symbol: unsafe { value_name(called) },
-                },
             };
         }
         // SAFETY: as above.
@@ -1247,6 +1334,7 @@ const DI_BASE_TYPE_OPERAND: usize = DI_TYPE_OPERANDS;
 const DI_COMPOSITE_ELEMENTS_OPERAND: usize = DI_TYPE_OPERANDS + 1;
 const DI_COMPOSITE_IDENTIFIER_OPERAND: usize = DI_TYPE_OPERANDS + 4;
 const DI_SUBROUTINE_TYPES_OPERAND: usize = DI_TYPE_OPERANDS;
+const DI_VARIABLE_NAME_OPERAND: usize = 1;
 const DI_VARIABLE_TYPE_OPERAND: usize = 3;
 const SUBPROGRAM_TYPE_OPERAND: usize = 4;
 
@@ -2135,22 +2223,25 @@ unsafe fn use_slot(
 /// version mismatch, not an unexplained parse failure, and the catalog
 /// already recorded which compiler wrote it.
 fn parse_error(module: &LoadedModule, diagnostics: &[String]) -> Error {
+    let subject = match module.record.compiler.as_ref() {
+        Some(compiler) => format!(
+            "module {} was produced by {} and",
+            module.id, compiler.version
+        ),
+        None => format!("module {}", module.id),
+    };
+    unreadable(&subject, diagnostics)
+}
+
+/// `subject` cannot be read by the linked LLVM, with what LLVM said.
+fn unreadable(subject: &str, diagnostics: &[String]) -> Error {
     let reader = llvm_version();
     let detail = if diagnostics.is_empty() {
         String::new()
     } else {
         format!(" ({})", diagnostics.join("; "))
     };
-    match module.record.compiler.as_ref() {
-        Some(compiler) => Error::InvalidArguments(format!(
-            "module {} was produced by {} and cannot be read by LLVM {reader}{detail}",
-            module.id, compiler.version
-        )),
-        None => Error::InvalidArguments(format!(
-            "module {} cannot be read by LLVM {reader}{detail}",
-            module.id
-        )),
-    }
+    Error::InvalidArguments(format!("{subject} cannot be read by LLVM {reader}{detail}"))
 }
 
 /// Facts that depend on the bytes alone: every module id is empty and every
@@ -2177,52 +2268,23 @@ pub fn extract(
 /// No preconditions: every handle this touches is created, used and disposed
 /// inside it. It is `unsafe` only because it drives the C API directly.
 unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
-    // Declaration order is drop order reversed: the parsed module is disposed
-    // first, then the buffer, then the context, and the diagnostic sink last
-    // because the context can still reach it while it is being disposed.
-    let sink = DiagnosticSink::new();
-    // SAFETY: `LLVMContextCreate` allocates a fresh context; the guard
-    // disposes it on every exit path, including the error returns below.
-    let context = Context(unsafe { LLVMContextCreate() });
-    // SAFETY: the context is live, `collect_diagnostic` is an `extern "C"`
-    // function that cannot unwind into LLVM, and the sink it writes to
-    // outlives the context.
-    unsafe { LLVMContextSetDiagnosticHandler(context.0, Some(collect_diagnostic), sink.0.cast()) };
-
-    let bytes = &module.bytes;
-    // SAFETY: the range is `module.bytes`, borrowed from the caller, so it
-    // outlives this function and therefore the buffer. The name is a
-    // NUL-terminated literal, and bitcode needs no NUL terminator.
-    let buffer = Buffer(unsafe {
-        LLVMCreateMemoryBufferWithMemoryRange(
-            bytes.as_ptr().cast::<c_char>(),
-            bytes.len(),
-            c"rllvm-module".as_ptr(),
-            0,
-        )
-    });
-
-    let mut parsed: LLVMModuleRef = std::ptr::null_mut();
-    // SAFETY: context and buffer are live and `parsed` is a valid out
-    // pointer. The parse reads the buffer without taking ownership of it.
-    let failed = unsafe { LLVMParseBitcodeInContext2(context.0, buffer.0, &mut parsed) } != 0;
-    if failed || parsed.is_null() {
-        return Err(parse_error(module, &sink.take()));
-    }
-    let parsed = ParsedModule(parsed);
+    // SAFETY: no preconditions; the result owns every handle it created.
+    let parsed = unsafe { parse_bitcode(&module.bytes) }
+        .map_err(|diagnostics| parse_error(module, &diagnostics))?;
 
     let mut pass_diagnostics = Vec::new();
     // CVP only attaches metadata; it rewrites no instructions, and the
     // bitcode on disk is never touched. Propagation is per module: a
     // callback assigned in another translation unit stays unresolved.
-    // SAFETY: `parsed.0` is the module just parsed, live in `context.0`.
-    // The target machine is null because `called-value-propagation` is a
-    // module pass that needs none, which `LLVMRunPasses` accepts. `options`
-    // is created and disposed within this block, never used afterward.
+    // SAFETY: `parsed.module` is the module just parsed, live in its
+    // context. The target machine is null because `called-value-propagation`
+    // is a module pass that needs none, which `LLVMRunPasses` accepts.
+    // `options` is created and disposed within this block, never used
+    // afterward.
     unsafe {
         let options = LLVMCreatePassBuilderOptions();
         let error = LLVMRunPasses(
-            parsed.0,
+            parsed.module.0,
             c"called-value-propagation".as_ptr(),
             std::ptr::null_mut(),
             options,
@@ -2237,15 +2299,16 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
         }
     }
 
-    // SAFETY: `context.0` is live; "callees" is 7 bytes, the metadata kind
-    // CVP attaches its upper bound under.
-    let callees_kind = unsafe { LLVMGetMDKindIDInContext(context.0, c"callees".as_ptr(), 7) };
+    // SAFETY: `parsed.context` is live; "callees" is 7 bytes, the metadata
+    // kind CVP attaches its upper bound under.
+    let callees_kind =
+        unsafe { LLVMGetMDKindIDInContext(parsed.context.0, c"callees".as_ptr(), 7) };
     // SAFETY: `parsed` is a module in the live context, and the reader is
     // not used after the module is dropped below.
-    let fields = unsafe { FieldReader::new(context.0, parsed.0) };
+    let fields = unsafe { FieldReader::new(parsed.context.0, parsed.module.0) };
 
     // SAFETY: `parsed` is a module in the live context.
-    let producers = unsafe { read_producers(parsed.0) };
+    let producers = unsafe { read_producers(parsed.module.0) };
     let module_language = producer_language(&producers);
     let mut units = HashMap::new();
 
@@ -2255,7 +2318,7 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
     let mut flows = Flows::default();
 
     // SAFETY: `parsed` is a module in the live context.
-    let mut function = unsafe { LLVMGetFirstFunction(parsed.0) };
+    let mut function = unsafe { LLVMGetFirstFunction(parsed.module.0) };
     while !function.is_null() {
         let id = FunctionId {
             module_id: NEUTRAL_MODULE_ID.to_string(),
@@ -2327,7 +2390,9 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
             // borrowed unit would otherwise suggest one.
             // SAFETY: `function` is live in `context`.
             language: if is_definition {
-                unsafe { definition_language(context.0, function, &mut units, module_language) }
+                unsafe {
+                    definition_language(parsed.context.0, function, &mut units, module_language)
+                }
             } else {
                 None
             },
@@ -2354,7 +2419,7 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
     // language and location are its target's, and queries follow
     // `alias_of` to the target's calls. An alias of data is not a function.
     // SAFETY: `parsed` is a module in the live context.
-    let mut alias = unsafe { LLVMGetFirstGlobalAlias(parsed.0) };
+    let mut alias = unsafe { LLVMGetFirstGlobalAlias(parsed.module.0) };
     while !alias.is_null() {
         // SAFETY: `alias` is a live global alias in that module.
         if let Some(target) = unsafe { alias_target(alias) } {
@@ -2369,7 +2434,7 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
                 linkage: linkage_of(unsafe { LLVMGetLinkage(alias) }),
                 // SAFETY: `target` is a live function in `context`.
                 language: unsafe {
-                    definition_language(context.0, target, &mut units, module_language)
+                    definition_language(parsed.context.0, target, &mut units, module_language)
                 },
                 // SAFETY: as above, for the alias's own value type.
                 signature: unsafe {
@@ -2391,11 +2456,8 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
 
     // Dispose before reading the sink, so nothing LLVM emits while tearing
     // the module down is lost from the report.
-    drop(parsed);
-    drop(buffer);
-    drop(context);
     let mut diagnostics = pass_diagnostics;
-    diagnostics.extend(sink.take());
+    diagnostics.extend(parsed.finish());
 
     Ok(ModuleFacts {
         functions,
@@ -2407,6 +2469,501 @@ unsafe fn extract_inner(module: &LoadedModule) -> Result<ModuleFacts, Error> {
         producers,
         diagnostics,
     })
+}
+
+/// Intrinsics that clamp or saturate a value, by name prefix -- the overload
+/// suffix (`.i32`, `.v4i32`) follows it -- with the guard each makes and the
+/// predicate it reports.
+const GUARD_INTRINSICS: [(&str, GuardKind, &str); 8] = [
+    ("llvm.umin.", GuardKind::Clamp, "umin"),
+    ("llvm.umax.", GuardKind::Clamp, "umax"),
+    ("llvm.smin.", GuardKind::Clamp, "smin"),
+    ("llvm.smax.", GuardKind::Clamp, "smax"),
+    ("llvm.uadd.sat.", GuardKind::Saturate, "uadd.sat"),
+    ("llvm.usub.sat.", GuardKind::Saturate, "usub.sat"),
+    ("llvm.sadd.sat.", GuardKind::Saturate, "sadd.sat"),
+    ("llvm.ssub.sat.", GuardKind::Saturate, "ssub.sat"),
+];
+
+/// Every integer predicate as the IR spells it, with the clamp a `select`
+/// between the two compared values makes under it: the first when it picks
+/// the left-hand value on true, the second when it picks the right. An
+/// equality bounds nothing.
+const INT_PREDICATES: [(LLVMIntPredicate, &str, Option<[&str; 2]>); 10] = [
+    (LLVMIntPredicate::LLVMIntEQ, "eq", None),
+    (LLVMIntPredicate::LLVMIntNE, "ne", None),
+    (LLVMIntPredicate::LLVMIntUGT, "ugt", Some(["umax", "umin"])),
+    (LLVMIntPredicate::LLVMIntUGE, "uge", Some(["umax", "umin"])),
+    (LLVMIntPredicate::LLVMIntULT, "ult", Some(["umin", "umax"])),
+    (LLVMIntPredicate::LLVMIntULE, "ule", Some(["umin", "umax"])),
+    (LLVMIntPredicate::LLVMIntSGT, "sgt", Some(["smax", "smin"])),
+    (LLVMIntPredicate::LLVMIntSGE, "sge", Some(["smax", "smin"])),
+    (LLVMIntPredicate::LLVMIntSLT, "slt", Some(["smin", "smax"])),
+    (LLVMIntPredicate::LLVMIntSLE, "sle", Some(["smin", "smax"])),
+];
+
+/// How an empty `DIExpression` prints: a record with one binds its variable
+/// to the value itself rather than to something computed from it.
+const EMPTY_EXPRESSION: &str = "!DIExpression()";
+
+/// Owned instruction-level IR of every function `bytes` defines, for the
+/// guards analysis to walk in safe Rust.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the guards analysis, which lands next")
+)]
+pub(crate) fn read_module_ir(bytes: &[u8]) -> Result<ModuleIr, Error> {
+    // SAFETY: every handle this touches is created, used and disposed inside
+    // the call, and only owned data is returned.
+    unsafe { read_module_ir_inner(bytes) }
+}
+
+/// # Safety
+/// No preconditions: every handle this touches is created, used and disposed
+/// inside it. It is `unsafe` only because it drives the C API directly.
+unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
+    // SAFETY: no preconditions; the result owns every handle it created.
+    let parsed = unsafe { parse_bitcode(bytes) }
+        .map_err(|diagnostics| unreadable("bitcode", &diagnostics))?;
+    let mut functions = Vec::new();
+    // SAFETY: `parsed.module` is a module in its live context.
+    let mut function = unsafe { LLVMGetFirstFunction(parsed.module.0) };
+    while !function.is_null() {
+        // SAFETY: `function` is a live function in that module, and only a
+        // definition is read as one.
+        if unsafe { LLVMIsDeclaration(function) } == 0 {
+            functions.push(unsafe { read_function_ir(parsed.context.0, function) });
+        }
+        // SAFETY: as above.
+        function = unsafe { LLVMGetNextFunction(function) };
+    }
+    Ok(ModuleIr { functions })
+}
+
+/// # Safety
+/// `function` must be a live function definition in `context`.
+unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> FunctionIr {
+    // Every parameter and instruction is numbered before any is read, so an
+    // operand defined further on -- a loop's `phi` -- still resolves.
+    let mut handles = Vec::new();
+    let mut blocks = Vec::new();
+    // SAFETY: the caller guarantees a live function, and every handle below
+    // is read from it or from a block or instruction it owns.
+    unsafe {
+        let param_count = LLVMCountParams(function);
+        for index in 0..param_count {
+            handles.push((LLVMGetParam(function, index), 0));
+        }
+        let mut block = LLVMGetFirstBasicBlock(function);
+        while !block.is_null() {
+            let mut instruction = LLVMGetFirstInstruction(block);
+            while !instruction.is_null() {
+                handles.push((instruction, blocks.len()));
+                instruction = LLVMGetNextInstruction(instruction);
+            }
+            blocks.push(block);
+            block = LLVMGetNextBasicBlock(block);
+        }
+
+        let ids: HashMap<LLVMValueRef, ValueId> = handles
+            .iter()
+            .enumerate()
+            .map(|(id, &(handle, _))| (handle, id as ValueId))
+            .collect();
+        let block_ids: HashMap<LLVMBasicBlockRef, usize> = blocks
+            .iter()
+            .enumerate()
+            .map(|(index, &block)| (block, index))
+            .collect();
+
+        let mut block_irs: Vec<BlockIr> = blocks
+            .iter()
+            .map(|&block| BlockIr {
+                instrs: Vec::new(),
+                successors: successors(block, &block_ids),
+            })
+            .collect();
+        let mut values = Vec::with_capacity(handles.len());
+        let mut dbg_values = Vec::new();
+        for (id, &(handle, block)) in handles.iter().enumerate() {
+            let id = id as ValueId;
+            if id < param_count {
+                values.push(ValueNode {
+                    block,
+                    opcode: OpcodeIr::Param,
+                    operands: Vec::new(),
+                    call: None,
+                    guard: None,
+                    location: None,
+                });
+                continue;
+            }
+            block_irs[block].instrs.push(id);
+            values.push(read_instruction(handle, block, &ids));
+            read_bindings(context, handle, id, &ids, &mut dbg_values);
+        }
+
+        FunctionIr {
+            id: FunctionId {
+                module_id: NEUTRAL_MODULE_ID.to_string(),
+                symbol: value_name(function),
+            },
+            params: (0..param_count).collect(),
+            blocks: block_irs,
+            values,
+            dbg_values,
+        }
+    }
+}
+
+/// The blocks `block`'s terminator can branch to, in its order. A block
+/// still under construction has no terminator and no successors.
+///
+/// # Safety
+/// `block` must be a live block of the function `block_ids` numbers.
+unsafe fn successors(
+    block: LLVMBasicBlockRef,
+    block_ids: &HashMap<LLVMBasicBlockRef, usize>,
+) -> Vec<usize> {
+    // SAFETY: the caller guarantees a live block; the successor accessors
+    // are reached only for its terminator, below the count it reports.
+    unsafe {
+        let terminator = LLVMGetBasicBlockTerminator(block);
+        if terminator.is_null() {
+            return Vec::new();
+        }
+        (0..LLVMGetNumSuccessors(terminator))
+            .filter_map(|index| block_ids.get(&LLVMGetSuccessor(terminator, index)).copied())
+            .collect()
+    }
+}
+
+/// # Safety
+/// `instruction` must be a live instruction of the function `ids` numbers.
+unsafe fn read_instruction(
+    instruction: LLVMValueRef,
+    block: usize,
+    ids: &HashMap<LLVMValueRef, ValueId>,
+) -> ValueNode {
+    // SAFETY: the caller guarantees a live instruction; every operand index
+    // is below the count it reports, and the call accessors are reached only
+    // for a call or invoke.
+    unsafe {
+        let opcode = LLVMGetInstructionOpcode(instruction);
+        let operands = (0..LLVMGetNumOperands(instruction) as u32)
+            .map(|index| operand_ir(LLVMGetOperand(instruction, index), ids))
+            .collect();
+        let call = matches!(opcode, LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke)
+            .then(|| call_ir(instruction, ids));
+        ValueNode {
+            block,
+            opcode: opcode_ir(opcode),
+            operands,
+            guard: guard_of(instruction, opcode, call.as_ref()),
+            call,
+            location: location_of(instruction),
+        }
+    }
+}
+
+/// # Safety
+/// `value` must be null or a live value in the function `ids` numbers.
+unsafe fn operand_ir(value: LLVMValueRef, ids: &HashMap<LLVMValueRef, ValueId>) -> Operand {
+    if let Some(&id) = ids.get(&value) {
+        return Operand::Value(id);
+    }
+    // SAFETY: the caller guarantees a live value; each accessor is reached
+    // only for the kind of value it requires.
+    unsafe {
+        if value.is_null() {
+            Operand::Other
+        } else if !LLVMIsAConstantInt(value).is_null() {
+            Operand::Const(ConstVal {
+                value: constant_text(value),
+            })
+        } else if !LLVMIsAFunction(value).is_null() {
+            Operand::Func(FunctionId {
+                module_id: NEUTRAL_MODULE_ID.to_string(),
+                symbol: value_name(value),
+            })
+        } else {
+            Operand::Other
+        }
+    }
+}
+
+/// An integer constant as the IR prints it, without its type: `16` from
+/// `i32 16`. Printed rather than read as a `u64`, which would truncate a
+/// wider integer.
+///
+/// # Safety
+/// `constant` must be a live `ConstantInt`.
+unsafe fn constant_text(constant: LLVMValueRef) -> String {
+    // SAFETY: the caller guarantees a live value, and
+    // `LLVMPrintValueToString` hands over the string it returns.
+    let text = unsafe { owned_message(LLVMPrintValueToString(constant)) };
+    match text.split_once(' ') {
+        Some((_, value)) => value.to_string(),
+        None => text,
+    }
+}
+
+/// # Safety
+/// `instruction` must be a live call or invoke in the function `ids`
+/// numbers.
+unsafe fn call_ir(instruction: LLVMValueRef, ids: &HashMap<LLVMValueRef, ValueId>) -> CallIr {
+    // SAFETY: the caller guarantees a call or invoke, which these accessors
+    // require; every argument index is below the count it reports.
+    unsafe {
+        let called = LLVMGetCalledValue(instruction);
+        let named = (!called.is_null()).then(|| named_callee(called)).flatten();
+        CallIr {
+            callee: named.map(|symbol| FunctionId {
+                module_id: NEUTRAL_MODULE_ID.to_string(),
+                symbol,
+            }),
+            inline_asm: !called.is_null() && !LLVMIsAInlineAsm(called).is_null(),
+            args: (0..LLVMGetNumArgOperands(instruction))
+                .map(|index| operand_ir(LLVMGetOperand(instruction, index), ids))
+                .collect(),
+        }
+    }
+}
+
+fn opcode_ir(opcode: LLVMOpcode) -> OpcodeIr {
+    use LLVMOpcode::*;
+    let binary = |op| OpcodeIr::BinOp { op };
+    let cast = |op| OpcodeIr::Cast { op };
+    match opcode {
+        LLVMCall | LLVMInvoke => OpcodeIr::Call,
+        LLVMICmp => OpcodeIr::ICmp,
+        LLVMSelect => OpcodeIr::Select,
+        LLVMPHI => OpcodeIr::Phi,
+        LLVMLoad => OpcodeIr::Load,
+        LLVMStore => OpcodeIr::Store,
+        LLVMRet => OpcodeIr::Ret,
+        LLVMUncondBr | LLVMCondBr => OpcodeIr::Br,
+        LLVMAdd => binary(BinaryOp::Add),
+        LLVMFAdd => binary(BinaryOp::FAdd),
+        LLVMSub => binary(BinaryOp::Sub),
+        LLVMFSub => binary(BinaryOp::FSub),
+        LLVMMul => binary(BinaryOp::Mul),
+        LLVMFMul => binary(BinaryOp::FMul),
+        LLVMUDiv => binary(BinaryOp::UDiv),
+        LLVMSDiv => binary(BinaryOp::SDiv),
+        LLVMFDiv => binary(BinaryOp::FDiv),
+        LLVMURem => binary(BinaryOp::URem),
+        LLVMSRem => binary(BinaryOp::SRem),
+        LLVMFRem => binary(BinaryOp::FRem),
+        LLVMShl => binary(BinaryOp::Shl),
+        LLVMLShr => binary(BinaryOp::LShr),
+        LLVMAShr => binary(BinaryOp::AShr),
+        LLVMAnd => binary(BinaryOp::And),
+        LLVMOr => binary(BinaryOp::Or),
+        LLVMXor => binary(BinaryOp::Xor),
+        LLVMTrunc => cast(CastOp::Trunc),
+        LLVMZExt => cast(CastOp::ZExt),
+        LLVMSExt => cast(CastOp::SExt),
+        LLVMFPToUI => cast(CastOp::FPToUI),
+        LLVMFPToSI => cast(CastOp::FPToSI),
+        LLVMUIToFP => cast(CastOp::UIToFP),
+        LLVMSIToFP => cast(CastOp::SIToFP),
+        LLVMFPTrunc => cast(CastOp::FPTrunc),
+        LLVMFPExt => cast(CastOp::FPExt),
+        LLVMPtrToInt => cast(CastOp::PtrToInt),
+        LLVMPtrToAddr => cast(CastOp::PtrToAddr),
+        LLVMIntToPtr => cast(CastOp::IntToPtr),
+        LLVMBitCast => cast(CastOp::BitCast),
+        LLVMAddrSpaceCast => cast(CastOp::AddrSpaceCast),
+        _ => OpcodeIr::Other,
+    }
+}
+
+/// The guard an instruction makes, if it is one. `call` is the instruction's
+/// own, already read.
+///
+/// # Safety
+/// `instruction` must be a live instruction whose opcode is `opcode`.
+unsafe fn guard_of(
+    instruction: LLVMValueRef,
+    opcode: LLVMOpcode,
+    call: Option<&CallIr>,
+) -> Option<GuardOpRaw> {
+    let raw = |kind, predicate: Option<&str>, bound| GuardOpRaw {
+        kind,
+        predicate: predicate.map(str::to_string),
+        bound,
+    };
+    // SAFETY: the caller guarantees a live instruction of this opcode, and
+    // each accessor is reached only for the opcode it requires.
+    unsafe {
+        match opcode {
+            LLVMOpcode::LLVMICmp => Some(raw(
+                GuardKind::Compare,
+                predicate_row(LLVMGetICmpPredicate(instruction)).map(|row| row.1),
+                constant_operand(instruction, &[0, 1]),
+            )),
+            LLVMOpcode::LLVMSelect => select_clamp(instruction),
+            LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke => {
+                let call = call?;
+                let symbol = &call.callee.as_ref()?.symbol;
+                let &(_, kind, predicate) = GUARD_INTRINSICS
+                    .iter()
+                    .find(|(prefix, ..)| symbol.starts_with(prefix))?;
+                let bound = call.args.iter().find_map(|arg| match arg {
+                    Operand::Const(constant) => Some(constant.value.clone()),
+                    _ => None,
+                });
+                Some(raw(kind, Some(predicate), bound))
+            }
+            LLVMOpcode::LLVMAnd => constant_operand(instruction, &[0, 1])
+                .map(|mask| raw(GuardKind::Mask, None, Some(mask))),
+            LLVMOpcode::LLVMURem => constant_operand(instruction, &[1])
+                .map(|divisor| raw(GuardKind::Modulo, Some("urem"), Some(divisor))),
+            LLVMOpcode::LLVMSRem => constant_operand(instruction, &[1])
+                .map(|divisor| raw(GuardKind::Modulo, Some("srem"), Some(divisor))),
+            _ => None,
+        }
+    }
+}
+
+fn predicate_row(
+    predicate: LLVMIntPredicate,
+) -> Option<&'static (LLVMIntPredicate, &'static str, Option<[&'static str; 2]>)> {
+    INT_PREDICATES.iter().find(|row| row.0 == predicate)
+}
+
+/// The first of `indices`' operands that is an integer constant, as text.
+///
+/// # Safety
+/// `instruction` must be a live instruction with an operand at every index.
+unsafe fn constant_operand(instruction: LLVMValueRef, indices: &[u32]) -> Option<String> {
+    indices.iter().find_map(|&index| {
+        // SAFETY: the caller guarantees the operand exists; the constant is
+        // printed only once it is known to be one.
+        unsafe {
+            let operand = LLVMGetOperand(instruction, index);
+            (!LLVMIsAConstantInt(operand).is_null()).then(|| constant_text(operand))
+        }
+    })
+}
+
+/// A `select` choosing between the two values its `icmp` condition
+/// compares -- the min/max idiom -- read as the clamp it makes. A select
+/// over anything else is not a guard.
+///
+/// # Safety
+/// `select` must be a live `select` instruction.
+unsafe fn select_clamp(select: LLVMValueRef) -> Option<GuardOpRaw> {
+    // SAFETY: a select has three operands, and the comparison's are read
+    // only once it is known to be an `icmp`. Constants are uniqued per
+    // context, so the same constant is the same handle on both sides.
+    unsafe {
+        let condition = LLVMGetOperand(select, 0);
+        if LLVMIsAICmpInst(condition).is_null() {
+            return None;
+        }
+        let arms = [LLVMGetOperand(select, 1), LLVMGetOperand(select, 2)];
+        let compared = [LLVMGetOperand(condition, 0), LLVMGetOperand(condition, 1)];
+        let picks = if arms == compared {
+            0
+        } else if arms == [compared[1], compared[0]] {
+            1
+        } else {
+            return None;
+        };
+        let clamps = predicate_row(LLVMGetICmpPredicate(condition))?.2?;
+        let bound = arms
+            .into_iter()
+            .find(|&arm| !LLVMIsAConstantInt(arm).is_null())
+            .map(|arm| constant_text(arm));
+        Some(GuardOpRaw {
+            kind: GuardKind::Clamp,
+            predicate: Some(clamps[picks].to_string()),
+            bound,
+        })
+    }
+}
+
+/// Every variable binding recorded before `instruction`, appended to `out`.
+/// LLVM 19 and later attach these as debug records rather than calls to
+/// `llvm.dbg.value`.
+///
+/// # Safety
+/// `instruction` must be a live instruction in `context`, of the function
+/// `ids` numbers, and `at` its id.
+unsafe fn read_bindings(
+    context: LLVMContextRef,
+    instruction: LLVMValueRef,
+    at: ValueId,
+    ids: &HashMap<LLVMValueRef, ValueId>,
+    out: &mut Vec<DbgValue>,
+) {
+    // SAFETY: the caller guarantees a live instruction; each record is read
+    // only while it is live, and the variable accessors only for a record
+    // that is not a label.
+    unsafe {
+        let mut record = LLVMGetFirstDbgRecord(instruction);
+        while !record.is_null() {
+            let kind = LLVMDbgRecordGetKind(record);
+            let name = (kind != LLVMDbgRecordKind::LLVMDbgRecordLabel)
+                .then(|| variable_name(context, LLVMDbgVariableRecordGetVariable(record)))
+                .flatten();
+            if let Some(name) = name {
+                let direct = kind != LLVMDbgRecordKind::LLVMDbgRecordDeclare
+                    && is_empty_expression(context, LLVMDbgVariableRecordGetExpression(record));
+                let value = if direct {
+                    operand_ir(LLVMDbgVariableRecordGetValue(record, 0), ids)
+                } else {
+                    Operand::Other
+                };
+                out.push(DbgValue { name, value, at });
+            }
+            record = LLVMGetNextDbgRecord(record);
+        }
+    }
+}
+
+/// A `DILocalVariable`'s source name. `None` for anything else, and for a
+/// variable with no name, which no query can ask for.
+///
+/// # Safety
+/// `variable` must be null or live metadata in `context`.
+unsafe fn variable_name(context: LLVMContextRef, variable: LLVMMetadataRef) -> Option<String> {
+    // SAFETY: the caller guarantees live metadata; its operands are read
+    // only once it is known to be a local variable.
+    unsafe {
+        if variable.is_null()
+            || !matches!(
+                LLVMGetMetadataKind(variable),
+                LLVMMetadataKind::LLVMDILocalVariableMetadataKind
+            )
+        {
+            return None;
+        }
+        let operands = md_node_operands(LLVMMetadataAsValue(context, variable));
+        operand_string(*operands.get(DI_VARIABLE_NAME_OPERAND)?).filter(|name| !name.is_empty())
+    }
+}
+
+/// Whether `expression` is empty, so its record binds the variable to the
+/// value itself. The C API exposes no expression elements, so it is read
+/// from how the expression prints.
+///
+/// # Safety
+/// `expression` must be null or live metadata in `context`.
+unsafe fn is_empty_expression(context: LLVMContextRef, expression: LLVMMetadataRef) -> bool {
+    if expression.is_null() {
+        return false;
+    }
+    // SAFETY: the caller guarantees live metadata, and
+    // `LLVMPrintValueToString` hands over the string it returns.
+    let text = unsafe {
+        owned_message(LLVMPrintValueToString(LLVMMetadataAsValue(
+            context, expression,
+        )))
+    };
+    text.trim() == EMPTY_EXPRESSION
 }
 
 #[cfg(test)]
@@ -2522,5 +3079,240 @@ mod tests {
             demangle("_ZN4core3fmt5write17h1234567890abcdefE").as_deref(),
             Some("core::fmt::write::h1234567890abcdef")
         );
+    }
+
+    /// A length clamped to a capacity: `-O1` folds it into `llvm.umin`,
+    /// while `-O0` branches over two stack slots.
+    const CLAMP_SOURCE: &str =
+        "unsigned f(unsigned len) { unsigned cap = 16; return len < cap ? len : cap; }\n";
+
+    /// `y` is dead at `-O1`, so its binding is salvaged into an expression
+    /// over `x` rather than bound to a value of its own.
+    const SALVAGED_SOURCE: &str = "int g(int x) { int y = x * 3; (void)y; return x; }\n";
+
+    /// Every guard shape the classifier knows, the near misses it must
+    /// refuse, both kinds of call it cannot name, and a loop whose `phi`
+    /// uses a value defined after it.
+    const GUARD_SHAPES_IR: &str = r#"
+declare i32 @llvm.uadd.sat.i32(i32, i32)
+
+define i32 @shapes(i32 %x, i32 %y, ptr %fp) {
+entry:
+  %lt = icmp ult i32 %x, 16
+  %min = select i1 %lt, i32 %x, i32 16
+  %gt = icmp sgt i32 %y, 100
+  %max = select i1 %gt, i32 100, i32 %y
+  %eq = icmp eq i32 %x, 0
+  %pick = select i1 %eq, i32 %x, i32 0
+  %sat = call i32 @llvm.uadd.sat.i32(i32 %x, i32 7)
+  %mask = and i32 %y, 255
+  %mod = urem i32 %x, 10
+  %smod = srem i32 %y, %x
+  %ind = call i32 %fp(i32 %mask)
+  %asm = call i32 asm "", "=r,r"(i32 %mod)
+  br label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %loop ]
+  %next = add i32 %i, 1
+  %done = icmp eq i32 %next, %min
+  br i1 %done, label %exit, label %loop
+exit:
+  ret i32 %next
+}
+"#;
+
+    /// Compiles `source` with the configured clang, which reads C and
+    /// textual IR alike, and returns the bitcode.
+    fn bitcode(name: &str, source: &str, flags: &[&str]) -> Vec<u8> {
+        let scratch = tempfile::tempdir().unwrap();
+        let path = scratch.path().join(name);
+        std::fs::write(&path, source).unwrap();
+        std::fs::read(rllvm_testkit::compile_bitcode_file(&path, flags)).unwrap()
+    }
+
+    fn defined<'a>(ir: &'a ModuleIr, symbol: &str) -> &'a FunctionIr {
+        ir.functions
+            .iter()
+            .find(|function| function.id.symbol == symbol)
+            .unwrap_or_else(|| panic!("no {symbol} in {ir:#?}"))
+    }
+
+    /// The `n`th instruction of block `block`, with its id.
+    fn instruction(function: &FunctionIr, block: usize, n: usize) -> (ValueId, &ValueNode) {
+        let id = function.blocks[block].instrs[n];
+        (id, &function.values[id as usize])
+    }
+
+    fn guard(kind: GuardKind, predicate: Option<&str>, bound: Option<&str>) -> Option<GuardOpRaw> {
+        Some(GuardOpRaw {
+            kind,
+            predicate: predicate.map(str::to_string),
+            bound: bound.map(str::to_string),
+        })
+    }
+
+    fn constant(value: &str) -> Operand {
+        Operand::Const(ConstVal {
+            value: value.to_string(),
+        })
+    }
+
+    #[test]
+    fn read_module_ir_surfaces_a_clamp_and_its_comparison() {
+        let ir = read_module_ir(&bitcode("clamp.c", CLAMP_SOURCE, &["-O1", "-g"])).unwrap();
+        assert_eq!(ir.functions.len(), 1, "the intrinsic is only declared");
+        let f = defined(&ir, "f");
+        assert_eq!(f.params, [0]);
+        assert_eq!(f.values[0].opcode, OpcodeIr::Param);
+
+        let (umin, node) = instruction(f, 0, 0);
+        assert_eq!(node.opcode, OpcodeIr::Call);
+        assert_eq!(
+            node.guard,
+            guard(GuardKind::Clamp, Some("umin"), Some("16"))
+        );
+        let call = node.call.as_ref().unwrap();
+        assert!(
+            call.callee
+                .as_ref()
+                .is_some_and(|callee| callee.symbol.starts_with("llvm.umin.")),
+            "{call:?}"
+        );
+        assert_eq!(call.args, [Operand::Value(f.params[0]), constant("16")]);
+        assert!(node.location.as_ref().is_some_and(|at| at.line == 1));
+
+        let (_, ret) = instruction(f, 0, 1);
+        assert_eq!(ret.opcode, OpcodeIr::Ret);
+        assert_eq!(ret.operands, [Operand::Value(umin)]);
+
+        // Both locals are bound, the constant one included, and each binding
+        // takes effect before the clamp.
+        let bindings: Vec<_> = f
+            .dbg_values
+            .iter()
+            .map(|binding| (binding.name.as_str(), &binding.value, binding.at))
+            .collect();
+        assert_eq!(
+            bindings,
+            [
+                ("len", &Operand::Value(f.params[0]), umin),
+                ("cap", &constant("16"), umin),
+            ]
+        );
+    }
+
+    /// Unoptimized code compares two loads and joins the arms in a `phi`:
+    /// the comparison is still a guard, with no constant to quote.
+    #[test]
+    fn unoptimized_code_keeps_its_comparison_and_branches() {
+        let ir = read_module_ir(&bitcode("clamp.c", CLAMP_SOURCE, &["-O0", "-g"])).unwrap();
+        let f = defined(&ir, "f");
+        let compare = f
+            .values
+            .iter()
+            .find(|node| node.opcode == OpcodeIr::ICmp)
+            .unwrap();
+        assert_eq!(compare.guard, guard(GuardKind::Compare, Some("ult"), None));
+        assert!(
+            f.values.iter().all(|node| node.opcode != OpcodeIr::Select),
+            "-O0 lowers `?:` to branches"
+        );
+
+        let successors: Vec<_> = f.blocks.iter().map(|block| &block.successors[..]).collect();
+        assert_eq!(successors, [&[1, 2][..], &[3], &[3], &[]]);
+        let (_, phi) = instruction(f, 3, 0);
+        assert_eq!(phi.opcode, OpcodeIr::Phi);
+        assert_eq!(phi.block, 3);
+
+        // At `-O0` both locals live in stack slots: their records give an
+        // address, never a value.
+        let names: Vec<_> = f.dbg_values.iter().map(|binding| &binding.name).collect();
+        assert_eq!(names, ["len", "cap"]);
+        assert!(
+            f.dbg_values
+                .iter()
+                .all(|binding| binding.value == Operand::Other)
+        );
+    }
+
+    #[test]
+    fn every_guard_shape_is_classified_and_near_misses_are_not() {
+        let ir = read_module_ir(&bitcode(
+            "shapes.ll",
+            GUARD_SHAPES_IR,
+            &["-Wno-override-module"],
+        ))
+        .unwrap();
+        let f = defined(&ir, "shapes");
+        assert_eq!(f.params, [0, 1, 2]);
+        let guard_at = |n| instruction(f, 0, n).1.guard.clone();
+
+        assert_eq!(
+            guard_at(0),
+            guard(GuardKind::Compare, Some("ult"), Some("16"))
+        );
+        assert_eq!(
+            guard_at(1),
+            guard(GuardKind::Clamp, Some("umin"), Some("16"))
+        );
+        assert_eq!(
+            guard_at(3),
+            guard(GuardKind::Clamp, Some("smin"), Some("100")),
+            "picking the compared constant on true is the other bound"
+        );
+        assert_eq!(guard_at(5), None, "an equality select bounds nothing");
+        assert_eq!(
+            guard_at(6),
+            guard(GuardKind::Saturate, Some("uadd.sat"), Some("7"))
+        );
+        assert_eq!(guard_at(7), guard(GuardKind::Mask, None, Some("255")));
+        assert_eq!(
+            guard_at(8),
+            guard(GuardKind::Modulo, Some("urem"), Some("10"))
+        );
+        assert_eq!(guard_at(9), None, "a variable divisor bounds nothing");
+        assert_eq!(
+            instruction(f, 0, 7).1.opcode,
+            OpcodeIr::BinOp { op: BinaryOp::And }
+        );
+
+        let call_at = |n| instruction(f, 0, n).1.call.clone().unwrap();
+        let indirect = call_at(10);
+        assert_eq!((indirect.callee, indirect.inline_asm), (None, false));
+        assert_eq!(indirect.args, [Operand::Value(instruction(f, 0, 7).0)]);
+        let asm = call_at(11);
+        assert_eq!((asm.callee, asm.inline_asm), (None, true));
+
+        // The `phi` names `%next`, which is defined after it.
+        let (next, _) = instruction(f, 1, 1);
+        let (_, phi) = instruction(f, 1, 0);
+        assert_eq!(phi.operands, [constant("0"), Operand::Value(next)]);
+        let successors: Vec<_> = f.blocks.iter().map(|block| &block.successors[..]).collect();
+        assert_eq!(successors, [&[1][..], &[2, 1], &[]]);
+        assert_eq!(instruction(f, 1, 3).1.opcode, OpcodeIr::Br);
+        assert!(f.dbg_values.is_empty(), "no debug info");
+    }
+
+    /// A binding through an expression says the variable is computed from
+    /// the value, not that it is the value.
+    #[test]
+    fn a_salvaged_binding_is_not_read_as_the_value() {
+        let ir = read_module_ir(&bitcode("salvaged.c", SALVAGED_SOURCE, &["-O1", "-g"])).unwrap();
+        let g = defined(&ir, "g");
+        let bindings: Vec<_> = g
+            .dbg_values
+            .iter()
+            .map(|binding| (binding.name.as_str(), &binding.value))
+            .collect();
+        assert_eq!(
+            bindings,
+            [("x", &Operand::Value(g.params[0])), ("y", &Operand::Other)]
+        );
+    }
+
+    #[test]
+    fn unreadable_bytes_are_an_error_naming_the_reader() {
+        let error = read_module_ir(b"not bitcode").unwrap_err().to_string();
+        assert!(error.contains("cannot be read by LLVM"), "{error}");
     }
 }
