@@ -438,6 +438,9 @@ fn walks_call_edges(results: &QueryResults) -> bool {
         | QueryResults::Closure(_)
         | QueryResults::Reach(_)
         | QueryResults::Slice(_) => true,
+        // A parameter's crossings come from the traced function's callers,
+        // which an unresolved indirect site can hide as it hides a caller.
+        QueryResults::Guards(_) => true,
         QueryResults::Defs(_)
         | QueryResults::At(_)
         | QueryResults::Callees(_)
@@ -445,8 +448,7 @@ fn walks_call_edges(results: &QueryResults) -> bool {
         | QueryResults::Externals(_)
         | QueryResults::FfiExports(_)
         | QueryResults::IndirectTargets(_)
-        | QueryResults::ResolutionCandidates(_)
-        | QueryResults::Guards(_) => false,
+        | QueryResults::ResolutionCandidates(_) => false,
     }
 }
 

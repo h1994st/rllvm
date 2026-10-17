@@ -6,13 +6,20 @@
 //! trace found nothing constraining the value, not that the value is
 //! unbounded.
 
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use rllvm_core::error::Error;
 
 use crate::bind::collapse_odr_duplicates;
-use crate::ir::{CallIr, FunctionIr, ModuleIr, Operand, ValueId};
+use crate::extract::read_module_ir;
+use crate::ir::{
+    CallIr, CastOp, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand, ValueId, ValueNode,
+    int_predicate,
+};
 use crate::overlay::function_label;
+use crate::slice::promote_anchor_module;
 use crate::{CallSiteId, CallTarget, FunctionId, GuardKind, Linkage, Session, SourceLocation};
 
 /// The value whose constraints are asked for.
@@ -28,7 +35,7 @@ pub enum GuardAnchor {
 }
 
 /// How a guard relates to the anchored value.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GuardRelation {
     /// The guard produces the value.
@@ -43,6 +50,9 @@ pub enum GuardRelation {
 #[derive(Clone, Debug, Serialize)]
 pub struct GuardSite {
     pub op: GuardKind,
+    /// Reads with the traced value on the left, `value ult bound`, however
+    /// the instruction orders its operands. A saturating subtraction from
+    /// the bound, `bound - value`, has a `.rev` suffix: `usub.sat.rev`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,7 +63,7 @@ pub struct GuardSite {
 }
 
 /// Which way a trace crossed a call boundary.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossingDir {
     /// Into a callee, through a parameter.
@@ -77,7 +87,8 @@ pub struct GuardsResult {
     pub anchor: Option<GuardAnchor>,
     pub guards: Vec<GuardSite>,
     pub crossings: Vec<Crossing>,
-    /// Why the trace stopped early, when it did.
+    /// Why the trace stopped early, when it did: every reason, in the order
+    /// met. The guards found before it stopped are still reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lost: Option<String>,
 }
@@ -88,15 +99,548 @@ impl GuardsResult {
     }
 }
 
-/// Trace the guards of `anchor`, optionally starting from `from`.
+/// Saturating operations whose operands do not commute, with how each reads
+/// when the traced value is the right-hand operand: the bound minus it.
+const REVERSED_SATURATES: [(&str, &str); 2] =
+    [("usub.sat", "usub.sat.rev"), ("ssub.sat", "ssub.sat.rev")];
+
+/// Casts after which the integer is no longer the value its guards bound:
+/// one through a pointer, or the same bits read as another type.
+const UNTRACED_CASTS: [(CastOp, &str); 4] = [
+    (CastOp::PtrToInt, "ptrtoint"),
+    (CastOp::PtrToAddr, "ptrtoaddr"),
+    (CastOp::IntToPtr, "inttoptr"),
+    (CastOp::BitCast, "bitcast"),
+];
+
+/// How intrinsic names begin. An intrinsic's result is computed from its
+/// arguments, so the trace reads through it rather than crossing into it.
+const INTRINSIC_PREFIX: &str = "llvm.";
+
+/// The position a value crossing out of a callee holds.
+const RETURN_POSITION: &str = "return";
+
+/// What separates the reasons a trace was lost.
+const LOST_SEPARATOR: &str = "; ";
+
+/// The guards on the value `anchor` names, read from its function's own
+/// module once `mem2reg` has promoted it. The trace walks the value's
+/// definitions back within that function and stops at a call boundary,
+/// which it reports as a crossing: into the function from each caller of
+/// a parameter, bounded to the callers on a path from `from` when given,
+/// and out of a callee whose result it is.
 ///
-/// Scaffold: returns an empty result until the analysis lands.
+/// Evidence, never a verdict: no guard found is an empty list. Where the
+/// trace cannot follow the value it says so in `lost` and still returns
+/// what it found.
 pub fn guards(
-    _session: &Session,
-    _anchor: &GuardAnchor,
-    _from: Option<&str>,
+    session: &Session,
+    anchor: &GuardAnchor,
+    from: Option<&str>,
 ) -> Result<GuardsResult, Error> {
-    Ok(GuardsResult::default())
+    let function = anchor_function(session, anchor)?;
+    let scope = from
+        .map(|from| caller_scope(session, from, &function))
+        .transpose()?;
+    let promoted = promote_anchor_module(session, &function)?;
+    let ir = read_module_ir(&promoted.bytes)?;
+    let mut lost: Vec<String> = promoted
+        .diagnostics
+        .iter()
+        .chain(&ir.diagnostics)
+        .map(|diagnostic| {
+            format!(
+                "LLVM reported on module {}: {diagnostic}",
+                function.module_id
+            )
+        })
+        .collect();
+    let mut result = GuardsResult {
+        anchor: Some(anchor.clone()),
+        ..GuardsResult::default()
+    };
+    match resolve_anchor(&ir, session, anchor)? {
+        Resolved::Ambiguous(values) => {
+            let name = match anchor {
+                GuardAnchor::Local { name, .. } => name.as_str(),
+                GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => "?",
+            };
+            lost.push(format!(
+                "local `{name}` in {} is bound to more than one value over its lifetime ({} of \
+                 them SSA values), so none is traced",
+                function_label(&function),
+                values.len()
+            ));
+        }
+        Resolved::One {
+            function: index,
+            value,
+        } => {
+            let body = &ir.functions[index];
+            let trace = Trace {
+                session,
+                body,
+                function: &function,
+                scope: scope.as_ref(),
+                doms: dominators(body),
+            };
+            let at = use_point(body, session, anchor, value)?;
+            let walk = trace.walk(value);
+            result.guards = trace.guard_sites(&walk, at);
+            result.crossings = walk.crossings;
+            lost.extend(walk.lost);
+        }
+    }
+    let mut seen = HashSet::new();
+    lost.retain(|reason| seen.insert(reason.clone()));
+    result.lost = (!lost.is_empty()).then(|| lost.join(LOST_SEPARATOR));
+    Ok(result)
+}
+
+/// The functions on a path from `from` to `function`: the callers a
+/// parameter may cross from when the trace is bounded to that slice.
+fn caller_scope(
+    session: &Session,
+    from: &str,
+    function: &FunctionId,
+) -> Result<HashSet<FunctionId>, Error> {
+    if session.resolve(from).is_none() {
+        return Err(Error::InvalidArguments(format!(
+            "no function named {from:?} in the catalog to bound the trace from"
+        )));
+    }
+    Ok(session
+        .slice_with(from, &function.symbol, None)
+        .functions
+        .into_iter()
+        .collect())
+}
+
+/// The instruction the anchored `value` is used at: the call, for a call
+/// site's argument or result; for a local, the first binding to `value`.
+fn use_point(
+    body: &FunctionIr,
+    session: &Session,
+    anchor: &GuardAnchor,
+    value: ValueId,
+) -> Result<ValueId, Error> {
+    Ok(match anchor {
+        GuardAnchor::Argument { site, .. } | GuardAnchor::Return { site } => {
+            promoted_call(body, session, site)?.0
+        }
+        GuardAnchor::Local { name, .. } => body
+            .dbg_values
+            .iter()
+            .find(|binding| binding.name == *name && binding.value == Operand::Value(value))
+            .map_or(value, |binding| binding.at),
+    })
+}
+
+/// The definition `callee` runs: the one its declaration binds to, through
+/// an alias to the function it stands for. The callee as referenced when
+/// nothing binds it.
+fn definition_of(session: &Session, callee: &FunctionId) -> FunctionId {
+    let Some(definition) = session.bound_definition(callee) else {
+        return callee.clone();
+    };
+    session
+        .function(&definition)
+        .and_then(|function| function.alias_of.clone())
+        .unwrap_or(definition)
+}
+
+/// One function's trace of a value.
+struct Trace<'a> {
+    session: &'a Session,
+    body: &'a FunctionIr,
+    /// The catalog's identity of `body`.
+    function: &'a FunctionId,
+    /// When the trace is bounded by `from`: the functions whose calls a
+    /// parameter may cross from.
+    scope: Option<&'a HashSet<FunctionId>>,
+    doms: Doms,
+}
+
+/// What a backward walk over a value's definitions found.
+#[derive(Default)]
+struct Walk {
+    /// Every value the anchored one is computed from, itself included.
+    chain: BTreeSet<ValueId>,
+    /// The guards among them, by the instruction that makes each.
+    defining: BTreeMap<ValueId, GuardSite>,
+    /// Comparisons a clamp in the chain is made of, which it reports.
+    folded: HashSet<ValueId>,
+    crossings: Vec<Crossing>,
+    lost: Vec<String>,
+}
+
+impl Trace<'_> {
+    fn node(&self, id: ValueId) -> &ValueNode {
+        &self.body.values[id as usize]
+    }
+
+    /// Walks back from `value` through every operand it is computed from,
+    /// recording the guards that make it, the call boundaries it crosses,
+    /// and where it cannot be followed.
+    fn walk(&self, value: ValueId) -> Walk {
+        let mut walk = Walk::default();
+        let mut pending = vec![value];
+        while let Some(id) = pending.pop() {
+            if !walk.chain.insert(id) {
+                continue;
+            }
+            let node = self.node(id);
+            let mut follow = |operands: &[Operand]| {
+                pending.extend(operands.iter().filter_map(|operand| match operand {
+                    Operand::Value(value) => Some(*value),
+                    _ => None,
+                }));
+            };
+            match node.opcode {
+                OpcodeIr::Param => {
+                    let index = self.body.params.iter().position(|&param| param == id);
+                    walk.crossings
+                        .extend(self.crossings_into(index.unwrap_or_default()));
+                }
+                OpcodeIr::Call => {
+                    let Some(call) = &node.call else { continue };
+                    if call.inline_asm {
+                        walk.lost.push(format!(
+                            "inline assembly produces the value{}, which the IR does not describe",
+                            place(node)
+                        ));
+                    } else if let Some(raw) = &node.guard {
+                        walk.defining.insert(id, defining(raw, node, &call.args));
+                        follow(&call.args);
+                    } else {
+                        match &call.callee {
+                            Some(callee) if callee.symbol.starts_with(INTRINSIC_PREFIX) => {
+                                follow(&call.args);
+                            }
+                            Some(_) => match self.crossing_from(id) {
+                                Ok(crossing) => walk.crossings.push(crossing),
+                                Err(reason) => walk.lost.push(reason),
+                            },
+                            None => walk.lost.push(format!(
+                                "an indirect call returns the value{}, and its callee is not known",
+                                place(node)
+                            )),
+                        }
+                    }
+                }
+                OpcodeIr::CallBr => walk.lost.push(format!(
+                    "asm goto produces the value{}, which the IR does not describe",
+                    place(node)
+                )),
+                OpcodeIr::Cast { op } => {
+                    match UNTRACED_CASTS.iter().find(|(untraced, _)| *untraced == op) {
+                        Some((_, name)) => walk.lost.push(format!(
+                            "the value goes through `{name}`{}, after which its guards no longer \
+                             bound it",
+                            place(node)
+                        )),
+                        None => follow(&node.operands),
+                    }
+                }
+                OpcodeIr::Select => {
+                    if let Some(raw) = &node.guard {
+                        walk.defining
+                            .insert(id, defining(raw, node, &node.operands));
+                        if let Some(Operand::Value(compare)) = node.operands.first() {
+                            walk.folded.insert(*compare);
+                        }
+                    }
+                    // The condition picks an arm; the arms are the value.
+                    follow(node.operands.get(1..).unwrap_or_default());
+                }
+                OpcodeIr::Phi => {
+                    if let Some((site, compare)) = self.phi_clamp(node) {
+                        walk.defining.insert(id, site);
+                        walk.folded.insert(compare);
+                    }
+                    follow(&node.operands);
+                }
+                OpcodeIr::BinOp { .. } | OpcodeIr::ICmp => {
+                    if let Some(raw) = &node.guard {
+                        walk.defining
+                            .insert(id, defining(raw, node, &node.operands));
+                    }
+                    follow(&node.operands);
+                }
+                OpcodeIr::Load => walk.lost.push(format!(
+                    "the value is loaded from memory{}, and what was stored there is not traced",
+                    place(node)
+                )),
+                OpcodeIr::Other => walk.lost.push(format!(
+                    "the value comes from an instruction the trace does not read through{}",
+                    place(node)
+                )),
+                // None of these produces a value another instruction uses.
+                OpcodeIr::Store | OpcodeIr::Ret | OpcodeIr::Br => {}
+            }
+        }
+        walk
+    }
+
+    /// The guards `walk` found, then each comparison on a value of its chain
+    /// that does not make it: one that dominates `at`, the instruction the
+    /// value is used at, or one on a path to it. A comparison on no path to
+    /// `at` is left out. In instruction order.
+    fn guard_sites(&self, walk: &Walk, at: ValueId) -> Vec<GuardSite> {
+        let mut sites = walk.defining.clone();
+        let reaching = self.blocks_reaching(self.node(at).block);
+        for (id, node) in self.body.values.iter().enumerate() {
+            let id = id as ValueId;
+            if node.opcode != OpcodeIr::ICmp
+                || walk.chain.contains(&id)
+                || walk.folded.contains(&id)
+            {
+                continue;
+            }
+            let Some(raw) = &node.guard else { continue };
+            let Some(side) = node.operands.iter().position(
+                |operand| matches!(operand, Operand::Value(value) if walk.chain.contains(value)),
+            ) else {
+                continue;
+            };
+            let relation = if self.runs_before(id, at) {
+                GuardRelation::Dominates
+            } else if self.doms.dominates(0, node.block) && reaching[node.block] {
+                GuardRelation::OnPath
+            } else {
+                continue;
+            };
+            sites.insert(
+                id,
+                surfaced(raw, side == 1, node.location.clone(), relation),
+            );
+        }
+        sites.into_values().collect()
+    }
+
+    /// Whether instruction `a` runs before `b` on every path to `b`.
+    fn runs_before(&self, a: ValueId, b: ValueId) -> bool {
+        let (block_a, block_b) = (self.node(a).block, self.node(b).block);
+        if block_a != block_b {
+            return self.doms.dominates(block_a, block_b);
+        }
+        let instrs = &self.body.blocks[block_a].instrs;
+        let index = |id| instrs.iter().position(|&instr| instr == id);
+        self.doms.dominates(block_a, block_b) && index(a) < index(b)
+    }
+
+    /// Which blocks have a path of at least one edge to `target`.
+    fn blocks_reaching(&self, target: usize) -> Vec<bool> {
+        let blocks = &self.body.blocks;
+        let mut predecessors = vec![Vec::new(); blocks.len()];
+        for (block, ir) in blocks.iter().enumerate() {
+            for &successor in &ir.successors {
+                if let Some(into) = predecessors.get_mut(successor) {
+                    into.push(block);
+                }
+            }
+        }
+        let mut reaching = vec![false; blocks.len()];
+        let mut pending = predecessors.get(target).cloned().unwrap_or_default();
+        while let Some(block) = pending.pop() {
+            if !std::mem::replace(&mut reaching[block], true) {
+                pending.extend(&predecessors[block]);
+            }
+        }
+        reaching
+    }
+
+    /// `phi` read as the `-O0` lowering of a min/max: two incoming values,
+    /// chosen by a branch on a comparison of exactly those two. Clang emits
+    /// no `select` at `-O0`, and `mem2reg` does not make one. The clamp,
+    /// with the comparison it is made of.
+    fn phi_clamp(&self, phi: &ValueNode) -> Option<(GuardSite, ValueId)> {
+        let ([a, b], &[from_a, from_b]) = (phi.operands.as_slice(), phi.incoming.as_slice()) else {
+            return None;
+        };
+        if a == b {
+            return None;
+        }
+        // The nearest block above the `phi` that branches on such a
+        // comparison. Every candidate dominates the `phi`, so they lie on
+        // one chain of the dominator tree.
+        let (compare, on_true) = (0..self.body.blocks.len())
+            .filter(|&block| block != phi.block && self.doms.dominates(block, phi.block))
+            .filter_map(|block| {
+                let (compare, on_true, on_false) = self.branch_on(block)?;
+                let [x, y] = self.node(compare).operands.as_slice() else {
+                    return None;
+                };
+                if !((x == a && y == b) || (x == b && y == a)) {
+                    return None;
+                }
+                // Whether the edge from `predecessor` leaves `block` by
+                // `successor`.
+                let by = |predecessor: usize, successor: usize| {
+                    self.doms.dominates(successor, predecessor)
+                        || (predecessor == block && successor == phi.block)
+                };
+                let only = |predecessor, successor, other| {
+                    by(predecessor, successor) && !by(predecessor, other)
+                };
+                let picked = if only(from_a, on_true, on_false) && only(from_b, on_false, on_true) {
+                    a
+                } else if only(from_b, on_true, on_false) && only(from_a, on_false, on_true) {
+                    b
+                } else {
+                    return None;
+                };
+                Some((block, compare, picked))
+            })
+            .reduce(|nearest, candidate| {
+                if self.doms.dominates(nearest.0, candidate.0) {
+                    candidate
+                } else {
+                    nearest
+                }
+            })
+            .map(|(_, compare, picked)| (compare, picked))?;
+        let node = self.node(compare);
+        let predicate = int_predicate(node.guard.as_ref()?.predicate.as_deref()?)?;
+        let picks = usize::from(node.operands.first() != Some(on_true));
+        let bound = [a, b].into_iter().find_map(|operand| match operand {
+            Operand::Const(constant) => Some(constant.value.clone()),
+            _ => None,
+        });
+        let site = GuardSite {
+            op: GuardKind::Clamp,
+            predicate: Some(predicate.clamps?[picks].to_string()),
+            bound,
+            location: node.location.clone().or_else(|| phi.location.clone()),
+            relation: GuardRelation::Defines,
+        };
+        Some((site, compare))
+    }
+
+    /// The comparison `block` ends by branching on, with the blocks it goes
+    /// to when that is true and when false.
+    fn branch_on(&self, block: usize) -> Option<(ValueId, usize, usize)> {
+        let ir = &self.body.blocks[block];
+        let terminator = self.node(*ir.instrs.last()?);
+        let (OpcodeIr::Br, Some(Operand::Value(compare)), &[on_true, on_false]) = (
+            terminator.opcode,
+            terminator.operands.first(),
+            ir.successors.as_slice(),
+        ) else {
+            return None;
+        };
+        (self.node(*compare).opcode == OpcodeIr::ICmp && on_true != on_false)
+            .then_some((*compare, on_true, on_false))
+    }
+
+    /// The crossings into parameter `index` of the traced function: one per
+    /// call site that calls it, bounded to the slice from `from` when given.
+    fn crossings_into(&self, index: usize) -> Vec<Crossing> {
+        let calls_traced =
+            |callee: &FunctionId| definition_of(self.session, callee) == *self.function;
+        self.session
+            .callers(&self.function.symbol)
+            .into_iter()
+            .filter(|site| match &site.target {
+                CallTarget::Direct { callee } => calls_traced(callee),
+                CallTarget::Indirect {
+                    llvm_target_bound: Some(bound),
+                    ..
+                } => bound.iter().any(calls_traced),
+                _ => false,
+            })
+            .filter(|site| {
+                self.scope
+                    .is_none_or(|scope| scope.contains(&site.id.function))
+            })
+            .map(|site| Crossing {
+                site: site.id,
+                direction: CrossingDir::Into,
+                function: self.function.clone(),
+                position: format!("parameter {index}"),
+            })
+            .collect()
+    }
+
+    /// The crossing out of the callee of call `id`, or why there is none.
+    fn crossing_from(&self, id: ValueId) -> Result<Crossing, String> {
+        let node = self.node(id);
+        let missing = || {
+            format!(
+                "the call returning the value{} has no counterpart in the catalog",
+                place(node)
+            )
+        };
+        let site = catalog_site(self.body, self.session, self.function, id).ok_or_else(missing)?;
+        match &self.session.call_site(&site).ok_or_else(missing)?.target {
+            CallTarget::Direct { callee } => Ok(Crossing {
+                site,
+                direction: CrossingDir::From,
+                function: definition_of(self.session, callee),
+                position: RETURN_POSITION.to_string(),
+            }),
+            _ => Err(missing()),
+        }
+    }
+}
+
+/// The guard `raw` makes as one that produces the traced value, read from
+/// its first operand among `operands` that is a value.
+fn defining(raw: &GuardOpRaw, node: &ValueNode, operands: &[Operand]) -> GuardSite {
+    let traced = operands
+        .iter()
+        .position(|operand| matches!(operand, Operand::Value(_)));
+    surfaced(
+        raw,
+        traced == Some(1),
+        node.location.clone(),
+        GuardRelation::Defines,
+    )
+}
+
+/// `raw` as a guard site, its predicate read with the traced value on the
+/// left: swapped when the traced value is the right-hand operand.
+fn surfaced(
+    raw: &GuardOpRaw,
+    traced_on_right: bool,
+    location: Option<SourceLocation>,
+    relation: GuardRelation,
+) -> GuardSite {
+    let predicate = raw.predicate.as_deref().map(|predicate| {
+        if traced_on_right {
+            read_from_right(raw.kind, predicate)
+        } else {
+            predicate
+        }
+    });
+    GuardSite {
+        op: raw.kind,
+        predicate: predicate.map(str::to_string),
+        bound: raw.bound.clone(),
+        location,
+        relation,
+    }
+}
+
+/// How `predicate` reads once its operands swap sides.
+fn read_from_right(kind: GuardKind, predicate: &str) -> &str {
+    match kind {
+        GuardKind::Compare => int_predicate(predicate).map_or(predicate, |row| row.swapped),
+        GuardKind::Saturate => REVERSED_SATURATES
+            .iter()
+            .find(|(forward, _)| *forward == predicate)
+            .map_or(predicate, |(_, reversed)| reversed),
+        // Min, max and masks commute; a remainder is a guard only when its
+        // divisor, on the right, is the constant.
+        GuardKind::Clamp | GuardKind::Mask | GuardKind::Modulo => predicate,
+    }
+}
+
+/// ` at file:line` for `node`'s location, or nothing without one.
+fn place(node: &ValueNode) -> String {
+    node.location.as_ref().map_or_else(String::new, |location| {
+        format!(" at {}:{}", location.file.display(), location.line)
+    })
 }
 
 /// Intrinsic calls `mem2reg` deletes along with the stack slot they mark,
@@ -117,10 +661,6 @@ pub(crate) enum Resolved {
 
 /// The function `anchor` lies in: its call site's, or the one definition
 /// a `local`'s function name names. ODR copies count as one definition.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the guard trace starts from it, which lands next")
-)]
 pub(crate) fn anchor_function(
     session: &Session,
     anchor: &GuardAnchor,
@@ -159,10 +699,6 @@ pub(crate) fn anchor_function(
 /// location and its order among the calls sharing it, which promotion keeps:
 /// `mem2reg` deletes slot accesses before a call, shifting its index, but
 /// never the call itself.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the guard trace starts from it, which lands next")
-)]
 pub(crate) fn resolve_anchor(
     ir: &ModuleIr,
     session: &Session,
@@ -214,7 +750,15 @@ pub(crate) fn resolve_anchor(
             }
         }
         GuardAnchor::Return { site } => {
-            let (value, _) = promoted_call(body, session, site)?;
+            let (value, call) = promoted_call(body, session, site)?;
+            // Read from the call's type in the IR: a `void` call has no
+            // result to trace.
+            if call.returns_void {
+                return Err(Error::InvalidArguments(format!(
+                    "the call at {} returns no value: its callee returns void",
+                    site_label(site)
+                )));
+            }
             Ok(Resolved::One { function, value })
         }
         GuardAnchor::Local { name, .. } => resolve_local(body, function, name),
@@ -232,10 +776,47 @@ fn promoted_call<'a>(
         Error::InvalidArguments(format!("no call {} in the catalog", site_label(site)))
     })?;
     let location = fact.location.as_ref();
+    let missing = || {
+        Error::InvalidArguments(format!(
+            "the call at {} has no counterpart in the promoted module",
+            site_label(site)
+        ))
+    };
+    let ordinal = catalog_peers(session, &site.function, location)
+        .iter()
+        .position(|peer| *peer == site)
+        .ok_or_else(missing)?;
+    promoted_peers(body, location)
+        .nth(ordinal)
+        .ok_or_else(missing)
+}
+
+/// The catalog's call site for call `id` of `body`, the promoted `function`:
+/// [`promoted_call`] the other way round.
+fn catalog_site(
+    body: &FunctionIr,
+    session: &Session,
+    function: &FunctionId,
+    id: ValueId,
+) -> Option<CallSiteId> {
+    let location = body.values.get(id as usize)?.location.as_ref();
+    let ordinal = promoted_peers(body, location).position(|(call, _)| call == id)?;
+    catalog_peers(session, function, location)
+        .get(ordinal)
+        .map(|&peer| peer.clone())
+}
+
+/// The catalog's call sites in `function` recorded at `location`, in order,
+/// without those promotion deletes.
+fn catalog_peers<'s>(
+    session: &'s Session,
+    function: &FunctionId,
+    location: Option<&SourceLocation>,
+) -> Vec<&'s CallSiteId> {
     let mut peers: Vec<&CallSiteId> = session
         .call_sites()
         .iter()
-        .filter(|peer| peer.id.function == site.function)
+        .filter(|peer| peer.id.function == *function)
         .filter(|peer| same_place(peer.location.as_ref(), location))
         .filter(|peer| match &peer.target {
             CallTarget::Intrinsic { name } => !deleted_by_promotion(name),
@@ -244,30 +825,26 @@ fn promoted_call<'a>(
         .map(|peer| &peer.id)
         .collect();
     peers.sort_by_key(|peer| (peer.block_index, peer.instruction_index));
-    let missing = || {
-        Error::InvalidArguments(format!(
-            "the call at {} has no counterpart in the promoted module",
-            site_label(site)
-        ))
-    };
-    let ordinal = peers
-        .iter()
-        .position(|peer| *peer == site)
-        .ok_or_else(missing)?;
+    peers
+}
+
+/// `body`'s calls at `location`, in order, without those promotion deletes.
+fn promoted_peers<'a>(
+    body: &'a FunctionIr,
+    location: Option<&SourceLocation>,
+) -> impl Iterator<Item = (ValueId, &'a CallIr)> {
     body.values
         .iter()
         .enumerate()
         .filter_map(|(id, node)| Some((id as ValueId, node, node.call.as_ref()?)))
-        .filter(|(_, node, _)| same_place(node.location.as_ref(), location))
+        .filter(move |(_, node, _)| same_place(node.location.as_ref(), location))
         .filter(|(_, _, call)| {
             !call
                 .callee
                 .as_ref()
                 .is_some_and(|callee| deleted_by_promotion(&callee.symbol))
         })
-        .nth(ordinal)
         .map(|(id, _, call)| (id, call))
-        .ok_or_else(missing)
 }
 
 /// The value the source variable `name` is bound to in `body`, which is
@@ -365,20 +942,12 @@ fn site_label(site: &CallSiteId) -> String {
 /// Immediate dominators of a function's blocks, entry = block 0.
 ///
 /// Blocks the entry cannot reach have no dominator information.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the guard trace, which lands next")
-)]
 pub(crate) struct Doms {
     /// `idom[b]` is `b`'s immediate dominator; the entry is its own. `None`
     /// for a block unreachable from the entry.
     idom: Vec<Option<usize>>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the guard trace, which lands next")
-)]
 impl Doms {
     /// Whether every path from the entry to `b` passes through `a`. A block
     /// dominates itself. False for any pair involving a block unreachable
@@ -403,10 +972,6 @@ impl Doms {
 }
 
 /// Cooper, Harvey and Kennedy's iterative algorithm over the owned CFG.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the guard trace, which lands next")
-)]
 pub(crate) fn dominators(f: &FunctionIr) -> Doms {
     let n = f.blocks.len();
     if n == 0 {
@@ -488,7 +1053,7 @@ mod tests {
         extract::read_module_ir,
         ir::{BinaryOp, BlockIr, OpcodeIr, Operand, ValueNode},
         slice::promote_anchor_module,
-        testing::compiled_session,
+        testing::{compiled_session, module_session, stale_debug_info_module},
     };
 
     /// A function whose block `i` branches to `successors[i]`.
@@ -559,7 +1124,7 @@ void f(unsigned a, unsigned b) {
             module_id: "m".into(),
             symbol: function.into(),
         };
-        let bytes = promote_anchor_module(&session, &anchor).unwrap();
+        let bytes = promote_anchor_module(&session, &anchor).unwrap().bytes;
         (session, read_module_ir(&bytes).unwrap())
     }
 
@@ -742,6 +1307,371 @@ void f(unsigned a, unsigned b) {
             node(&ir, &y, "f").1.opcode,
             OpcodeIr::BinOp { op: BinaryOp::Mul }
         );
+    }
+
+    /// `n` is `len` clamped to `CAP`, then passed on.
+    const CLAMP_SOURCE: &str = "#define CAP 16
+extern void sink(unsigned);
+void f(unsigned len) {
+  unsigned n = len < CAP ? len : CAP;
+  sink(n);
+}
+";
+
+    const DOMINATING_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len) {
+  if (len > 16)
+    return;
+  sink(len);
+}
+";
+
+    /// The constant is on the left of the comparison as written.
+    const BOUND_ON_LEFT_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len) {
+  if (16 > len)
+    sink(len);
+}
+";
+
+    /// The comparison runs only when `flag` is set, so it does not dominate
+    /// the call; the one after the call is on no path to it.
+    const ON_PATH_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len, int flag) {
+  if (flag) {
+    if (len > 16)
+      return;
+  }
+  sink(len);
+  if (len < 4)
+    sink(0);
+}
+";
+
+    const UNGUARDED_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len) { sink(len); }
+";
+
+    /// The clamped value is mixed with an integer that went through a
+    /// pointer.
+    const ROUND_TRIP_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len, char *p) {
+  unsigned n = len < 16 ? len : 16;
+  sink(n + (unsigned)(__UINTPTR_TYPE__)p);
+}
+";
+
+    /// `callee`'s parameter is passed by two callers.
+    const CROSSING_SOURCE: &str = "extern void sink(unsigned);
+void callee(unsigned n) { sink(n); }
+void caller(unsigned x) { callee(x); }
+void other(unsigned y) { callee(y); }
+";
+
+    /// The value comes out of an `asm goto`.
+    const ASM_GOTO_SOURCE: &str = "extern void sink(unsigned);
+void f(void) {
+  unsigned v;
+  asm goto(\"\" : \"=r\"(v) : : : out);
+  sink(v);
+out:
+  return;
+}
+";
+
+    const VOID_RETURN_SOURCE: &str = "extern void act(void);
+void f(void) { act(); }
+";
+
+    /// The lifetime markers of `t`'s slot share the macro's location with
+    /// both calls.
+    const LIFETIME_SOURCE: &str = "extern unsigned get(void);
+extern void sink(unsigned);
+#define M() do { unsigned t = get(); sink(t); } while (0)
+void f(void) { M(); }
+";
+
+    /// A saturating subtraction from the bound: `16 - len`, floored at 0.
+    const SATURATE_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
+";
+
+    /// `source` compiled with `flags` as the one module of a session.
+    fn session(scratch: &tempfile::TempDir, source: &str, flags: &[&str]) -> Session {
+        compiled_session(scratch.path(), "t.c", source, flags)
+    }
+
+    /// Operand 0 of `function`'s `n`th call to `sink`.
+    fn sink_argument(session: &Session, function: &str, n: usize) -> GuardAnchor {
+        argument(&sites_calling(session, function, "sink")[n], 0)
+    }
+
+    /// Each guard as (op, predicate, bound, relation).
+    fn sites(result: &GuardsResult) -> Vec<(GuardKind, Option<&str>, Option<&str>, GuardRelation)> {
+        result
+            .guards
+            .iter()
+            .map(|guard| {
+                (
+                    guard.op,
+                    guard.predicate.as_deref(),
+                    guard.bound.as_deref(),
+                    guard.relation,
+                )
+            })
+            .collect()
+    }
+
+    /// Each crossing as (calling function, direction, function, position).
+    fn crossings(result: &GuardsResult) -> Vec<(&str, CrossingDir, &str, &str)> {
+        result
+            .crossings
+            .iter()
+            .map(|crossing| {
+                (
+                    crossing.site.function.symbol.as_str(),
+                    crossing.direction,
+                    crossing.function.symbol.as_str(),
+                    crossing.position.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_min_clamp_is_surfaced_as_a_defining_guard() {
+        for optimization in ["-O0", "-O1"] {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session(&scratch, CLAMP_SOURCE, &[optimization, "-g"]);
+            let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+            assert_eq!(
+                sites(&r),
+                [(
+                    GuardKind::Clamp,
+                    Some("umin"),
+                    Some("16"),
+                    GuardRelation::Defines
+                )],
+                "{optimization}: {r:?}"
+            );
+            assert!(
+                r.guards[0].location.as_ref().is_some_and(|at| at.line == 4),
+                "{optimization}: {r:?}"
+            );
+            assert!(r.lost.is_none(), "{optimization}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn a_dominating_comparison_is_surfaced() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, DOMINATING_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Compare,
+                Some("ugt"),
+                Some("16"),
+                GuardRelation::Dominates
+            )]
+        );
+        assert!(r.lost.is_none(), "{r:?}");
+    }
+
+    /// `16 > len` reads as `len < 16`: the traced value goes on the left.
+    #[test]
+    fn a_bound_on_the_left_is_read_from_the_traced_value() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, BOUND_ON_LEFT_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Compare,
+                Some("ult"),
+                Some("16"),
+                GuardRelation::Dominates
+            )]
+        );
+    }
+
+    #[test]
+    fn a_saturation_from_the_bound_is_read_from_the_traced_value() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, SATURATE_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Saturate,
+                Some("usub.sat.rev"),
+                Some("16"),
+                GuardRelation::Defines
+            )]
+        );
+    }
+
+    #[test]
+    fn a_comparison_that_does_not_dominate_the_use_is_on_path() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, ON_PATH_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Compare,
+                Some("ugt"),
+                Some("16"),
+                GuardRelation::OnPath
+            )],
+            "the comparison after the call is on no path to it"
+        );
+    }
+
+    #[test]
+    fn a_value_with_no_guard_has_none_and_is_not_lost() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, UNGUARDED_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert!(r.guards.is_empty(), "{r:?}");
+        assert!(r.lost.is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn a_pointer_round_trip_loses_the_trace_but_keeps_the_guards() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, ROUND_TRIP_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Clamp,
+                Some("umin"),
+                Some("16"),
+                GuardRelation::Defines
+            )]
+        );
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(lost.contains("ptrtoint"), "{lost}");
+    }
+
+    #[test]
+    fn a_parameter_crosses_into_the_anchor_from_each_caller() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, CROSSING_SOURCE, &["-O0", "-g"]);
+        let anchor = sink_argument(&session, "callee", 0);
+        let r = guards(&session, &anchor, None).unwrap();
+        assert_eq!(
+            crossings(&r),
+            [
+                ("caller", CrossingDir::Into, "callee", "parameter 0"),
+                ("other", CrossingDir::Into, "callee", "parameter 0"),
+            ]
+        );
+        assert_eq!(
+            r.crossings[0].site,
+            sites_calling(&session, "caller", "callee")[0]
+        );
+
+        let bounded = guards(&session, &anchor, Some("caller")).unwrap();
+        assert_eq!(
+            crossings(&bounded),
+            [("caller", CrossingDir::Into, "callee", "parameter 0")],
+            "only callers on the slice from `caller`"
+        );
+        let error = guards(&session, &anchor, Some("nowhere"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("nowhere"), "{error}");
+    }
+
+    #[test]
+    fn a_call_result_crosses_from_its_callee() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, RETURN_SOURCE, &["-O0", "-g"]);
+        let get = sites_calling(&session, "f", "get")[0].clone();
+        let r = guards(&session, &GuardAnchor::Return { site: get.clone() }, None).unwrap();
+        assert_eq!(crossings(&r), [("f", CrossingDir::From, "get", "return")]);
+        assert_eq!(r.crossings[0].site, get);
+
+        let passed = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            crossings(&passed),
+            [("f", CrossingDir::From, "get", "return")]
+        );
+    }
+
+    /// The lifetime markers `mem2reg` deletes share the calls' location;
+    /// counting them would map the `sink` call onto another.
+    #[test]
+    fn a_macro_call_resolves_past_its_deleted_lifetime_markers() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(
+            &scratch,
+            LIFETIME_SOURCE,
+            &["-O1", "-Xclang", "-disable-llvm-passes", "-g"],
+        );
+        assert!(
+            session.call_sites().iter().any(|site| matches!(
+                &site.target,
+                CallTarget::Intrinsic { name } if name.starts_with("llvm.lifetime.")
+            )),
+            "the fixture must keep its lifetime markers"
+        );
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(crossings(&r), [("f", CrossingDir::From, "get", "return")]);
+        assert!(r.lost.is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn a_value_out_of_asm_goto_loses_the_trace() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, ASM_GOTO_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(lost.contains("asm goto"), "{r:?}");
+        assert!(r.guards.is_empty() && r.crossings.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn the_result_of_a_void_call_is_refused_naming_the_site() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, VOID_RETURN_SOURCE, &["-O0", "-g"]);
+        let site = sites_calling(&session, "f", "act")[0].clone();
+        let error = guards(&session, &GuardAnchor::Return { site }, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("returns no value") && error.contains("in f"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_local_is_reported_not_traced() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, LOCAL_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &local("g", "x"), None).unwrap();
+        assert!(r.guards.is_empty() && r.crossings.is_empty(), "{r:?}");
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(
+            lost.contains("`x`") && lost.contains("more than one value"),
+            "{lost}"
+        );
+
+        let a = guards(&session, &local("g", "a"), None).unwrap();
+        assert!(a.lost.is_none(), "{a:?}");
+    }
+
+    #[test]
+    fn llvm_diagnostics_on_the_anchor_module_are_reported() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = stale_debug_info_module(scratch.path());
+        let session = module_session(scratch.path(), &module);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(lost.contains("invalid version"), "{r:?}");
     }
 
     #[test]

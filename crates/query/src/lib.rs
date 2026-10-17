@@ -52,10 +52,6 @@ pub use extract::{ModuleFacts, llvm_version};
 pub mod facts;
 pub use facts::*;
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the guards analysis, which lands next")
-)]
 pub(crate) mod ir;
 
 pub mod load;
@@ -1618,15 +1614,20 @@ mod tests {
 
     #[test]
     fn a_guards_query_returns_a_well_formed_envelope() {
-        let session = session_from(&[("a", "b")]);
-        let site = CallSiteId {
-            function: FunctionId {
-                module_id: "m".to_string(),
-                symbol: "a".to_string(),
-            },
-            block_index: 0,
-            instruction_index: 0,
-        };
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void b(unsigned);\nvoid a(unsigned n) { b(n); }\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| site.id.function.symbol == "a")
+            .unwrap()
+            .id
+            .clone();
         let query = Query::Guards {
             anchor: GuardAnchor::Argument { site, operand: 0 },
             from: None,
@@ -1637,6 +1638,7 @@ mod tests {
             panic!("expected a guards answer, got {:?}", answer.results);
         };
         assert!(result.guards.is_empty() && result.crossings.is_empty());
+        assert!(result.lost.is_none(), "{result:?}");
         let json = serde_json::to_value(&answer).unwrap();
         for block in ["scope", "analysis", "uncertainty"] {
             assert!(json.get(block).is_some(), "missing `{block}` block");

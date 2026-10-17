@@ -15,6 +15,9 @@ pub(crate) type ValueId = u32;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModuleIr {
     pub(crate) functions: Vec<FunctionIr>,
+    /// What LLVM reported while reading the module, such as debug info it
+    /// stripped. Empty when it said nothing.
+    pub(crate) diagnostics: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,6 +50,9 @@ pub(crate) struct ValueNode {
     pub(crate) opcode: OpcodeIr,
     /// In LLVM's operand order. A call's callee is its last operand.
     pub(crate) operands: Vec<Operand>,
+    /// For a `phi`, the block each operand arrives from, in operand order.
+    /// Empty for every other instruction.
+    pub(crate) incoming: Vec<usize>,
     /// `Some` exactly when `opcode` is [`OpcodeIr::Call`].
     pub(crate) call: Option<CallIr>,
     pub(crate) guard: Option<GuardOpRaw>,
@@ -60,6 +66,9 @@ pub(crate) enum OpcodeIr {
     Param,
     /// A `call` or an `invoke`.
     Call,
+    /// A `callbr`: `asm goto`, whose effect on a value the IR does not
+    /// describe.
+    CallBr,
     ICmp,
     Select,
     BinOp {
@@ -144,6 +153,8 @@ pub(crate) struct CallIr {
     /// Set when the callee is inline assembly, whose effect on a value the
     /// IR does not describe.
     pub(crate) inline_asm: bool,
+    /// Set when the call produces no value: its type is `void`.
+    pub(crate) returns_void: bool,
     pub(crate) args: Vec<Operand>,
 }
 
@@ -159,6 +170,48 @@ pub(crate) struct GuardOpRaw {
     pub(crate) predicate: Option<String>,
     /// The constant operand, when there is one.
     pub(crate) bound: Option<String>,
+}
+
+/// An integer comparison predicate as the IR spells it.
+pub(crate) struct IntPredicate {
+    pub(crate) spelling: &'static str,
+    /// The same comparison with its operands swapped: `ugt` for `ult`.
+    pub(crate) swapped: &'static str,
+    /// The clamp a choice between the two compared values makes under it:
+    /// the first when it picks the left-hand value on true, the second when
+    /// it picks the right. `None` for an equality, which bounds nothing.
+    pub(crate) clamps: Option<[&'static str; 2]>,
+}
+
+/// Every integer predicate.
+pub(crate) const INT_PREDICATES: [IntPredicate; 10] = [
+    predicate("eq", "eq", None),
+    predicate("ne", "ne", None),
+    predicate("ugt", "ult", Some(["umax", "umin"])),
+    predicate("uge", "ule", Some(["umax", "umin"])),
+    predicate("ult", "ugt", Some(["umin", "umax"])),
+    predicate("ule", "uge", Some(["umin", "umax"])),
+    predicate("sgt", "slt", Some(["smax", "smin"])),
+    predicate("sge", "sle", Some(["smax", "smin"])),
+    predicate("slt", "sgt", Some(["smin", "smax"])),
+    predicate("sle", "sge", Some(["smin", "smax"])),
+];
+
+const fn predicate(
+    spelling: &'static str,
+    swapped: &'static str,
+    clamps: Option<[&'static str; 2]>,
+) -> IntPredicate {
+    IntPredicate {
+        spelling,
+        swapped,
+        clamps,
+    }
+}
+
+/// The predicate spelled `spelling`, if it is one.
+pub(crate) fn int_predicate(spelling: &str) -> Option<&'static IntPredicate> {
+    INT_PREDICATES.iter().find(|row| row.spelling == spelling)
 }
 
 /// A source variable's binding from a debug record.

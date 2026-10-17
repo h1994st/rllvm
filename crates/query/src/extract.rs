@@ -2485,21 +2485,18 @@ const GUARD_INTRINSICS: [(&str, GuardKind, &str); 8] = [
     ("llvm.ssub.sat.", GuardKind::Saturate, "ssub.sat"),
 ];
 
-/// Every integer predicate as the IR spells it, with the clamp a `select`
-/// between the two compared values makes under it: the first when it picks
-/// the left-hand value on true, the second when it picks the right. An
-/// equality bounds nothing.
-const INT_PREDICATES: [(LLVMIntPredicate, &str, Option<[&str; 2]>); 10] = [
-    (LLVMIntPredicate::LLVMIntEQ, "eq", None),
-    (LLVMIntPredicate::LLVMIntNE, "ne", None),
-    (LLVMIntPredicate::LLVMIntUGT, "ugt", Some(["umax", "umin"])),
-    (LLVMIntPredicate::LLVMIntUGE, "uge", Some(["umax", "umin"])),
-    (LLVMIntPredicate::LLVMIntULT, "ult", Some(["umin", "umax"])),
-    (LLVMIntPredicate::LLVMIntULE, "ule", Some(["umin", "umax"])),
-    (LLVMIntPredicate::LLVMIntSGT, "sgt", Some(["smax", "smin"])),
-    (LLVMIntPredicate::LLVMIntSGE, "sge", Some(["smax", "smin"])),
-    (LLVMIntPredicate::LLVMIntSLT, "slt", Some(["smin", "smax"])),
-    (LLVMIntPredicate::LLVMIntSLE, "sle", Some(["smin", "smax"])),
+/// Every integer predicate LLVM names, with how the IR spells it.
+const LLVM_PREDICATES: [(LLVMIntPredicate, &str); 10] = [
+    (LLVMIntPredicate::LLVMIntEQ, "eq"),
+    (LLVMIntPredicate::LLVMIntNE, "ne"),
+    (LLVMIntPredicate::LLVMIntUGT, "ugt"),
+    (LLVMIntPredicate::LLVMIntUGE, "uge"),
+    (LLVMIntPredicate::LLVMIntULT, "ult"),
+    (LLVMIntPredicate::LLVMIntULE, "ule"),
+    (LLVMIntPredicate::LLVMIntSGT, "sgt"),
+    (LLVMIntPredicate::LLVMIntSGE, "sge"),
+    (LLVMIntPredicate::LLVMIntSLT, "slt"),
+    (LLVMIntPredicate::LLVMIntSLE, "sle"),
 ];
 
 /// How an empty `DIExpression` prints: a record with one binds its variable
@@ -2508,10 +2505,6 @@ const EMPTY_EXPRESSION: &str = "!DIExpression()";
 
 /// Owned instruction-level IR of every function `bytes` defines, for the
 /// guards analysis to walk in safe Rust.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "read by the guards analysis, which lands next")
-)]
 pub(crate) fn read_module_ir(bytes: &[u8]) -> Result<ModuleIr, Error> {
     // SAFETY: every handle this touches is created, used and disposed inside
     // the call, and only owned data is returned.
@@ -2537,7 +2530,10 @@ unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
         // SAFETY: as above.
         function = unsafe { LLVMGetNextFunction(function) };
     }
-    Ok(ModuleIr { functions })
+    Ok(ModuleIr {
+        functions,
+        diagnostics: parsed.finish(),
+    })
 }
 
 /// # Safety
@@ -2592,6 +2588,7 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
                     block,
                     opcode: OpcodeIr::Param,
                     operands: Vec::new(),
+                    incoming: Vec::new(),
                     call: None,
                     guard: None,
                     location: None,
@@ -2599,7 +2596,7 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
                 continue;
             }
             block_irs[block].instrs.push(id);
-            values.push(read_instruction(handle, block, &ids));
+            values.push(read_instruction(handle, block, &ids, &block_ids));
             read_bindings(context, handle, id, &ids, &mut dbg_values);
         }
 
@@ -2639,26 +2636,42 @@ unsafe fn successors(
 }
 
 /// # Safety
-/// `instruction` must be a live instruction of the function `ids` numbers.
+/// `instruction` must be a live instruction of the function `ids` and
+/// `block_ids` number.
 unsafe fn read_instruction(
     instruction: LLVMValueRef,
     block: usize,
     ids: &HashMap<LLVMValueRef, ValueId>,
+    block_ids: &HashMap<LLVMBasicBlockRef, usize>,
 ) -> ValueNode {
-    // SAFETY: the caller guarantees a live instruction; every operand index
-    // is below the count it reports, and the call accessors are reached only
-    // for a call or invoke.
+    // SAFETY: the caller guarantees a live instruction; every operand and
+    // incoming index is below the count it reports, the incoming accessors
+    // are reached only for a `phi`, and the call accessors only for a call
+    // or invoke.
     unsafe {
         let opcode = LLVMGetInstructionOpcode(instruction);
         let operands = (0..LLVMGetNumOperands(instruction) as u32)
             .map(|index| operand_ir(LLVMGetOperand(instruction, index), ids))
             .collect();
+        // A `phi`'s incoming blocks are all its function's own.
+        let incoming = if opcode == LLVMOpcode::LLVMPHI {
+            (0..LLVMCountIncoming(instruction))
+                .filter_map(|index| {
+                    block_ids
+                        .get(&LLVMGetIncomingBlock(instruction, index))
+                        .copied()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let call = matches!(opcode, LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke)
             .then(|| call_ir(instruction, ids));
         ValueNode {
             block,
             opcode: opcode_ir(opcode),
             operands,
+            incoming,
             guard: guard_of(instruction, opcode, call.as_ref()),
             call,
             location: location_of(instruction),
@@ -2723,6 +2736,8 @@ unsafe fn call_ir(instruction: LLVMValueRef, ids: &HashMap<LLVMValueRef, ValueId
                 symbol,
             }),
             inline_asm: !called.is_null() && !LLVMIsAInlineAsm(called).is_null(),
+            returns_void: LLVMGetTypeKind(LLVMTypeOf(instruction))
+                == LLVMTypeKind::LLVMVoidTypeKind,
             args: (0..LLVMGetNumArgOperands(instruction))
                 .map(|index| operand_ir(LLVMGetOperand(instruction, index), ids))
                 .collect(),
@@ -2736,6 +2751,7 @@ fn opcode_ir(opcode: LLVMOpcode) -> OpcodeIr {
     let cast = |op| OpcodeIr::Cast { op };
     match opcode {
         LLVMCall | LLVMInvoke => OpcodeIr::Call,
+        LLVMCallBr => OpcodeIr::CallBr,
         LLVMICmp => OpcodeIr::ICmp,
         LLVMSelect => OpcodeIr::Select,
         LLVMPHI => OpcodeIr::Phi,
@@ -2800,7 +2816,7 @@ unsafe fn guard_of(
         match opcode {
             LLVMOpcode::LLVMICmp => Some(raw(
                 GuardKind::Compare,
-                predicate_row(LLVMGetICmpPredicate(instruction)).map(|row| row.1),
+                predicate_row(LLVMGetICmpPredicate(instruction)).map(|row| row.spelling),
                 constant_operand(instruction, &[0, 1]),
             )),
             LLVMOpcode::LLVMSelect => select_clamp(instruction),
@@ -2827,10 +2843,9 @@ unsafe fn guard_of(
     }
 }
 
-fn predicate_row(
-    predicate: LLVMIntPredicate,
-) -> Option<&'static (LLVMIntPredicate, &'static str, Option<[&'static str; 2]>)> {
-    INT_PREDICATES.iter().find(|row| row.0 == predicate)
+fn predicate_row(predicate: LLVMIntPredicate) -> Option<&'static IntPredicate> {
+    let (_, spelling) = LLVM_PREDICATES.iter().find(|row| row.0 == predicate)?;
+    int_predicate(spelling)
 }
 
 /// The first of `indices`' operands that is an integer constant, as text.
@@ -2872,7 +2887,7 @@ unsafe fn select_clamp(select: LLVMValueRef) -> Option<GuardOpRaw> {
         } else {
             return None;
         };
-        let clamps = predicate_row(LLVMGetICmpPredicate(condition))?.2?;
+        let clamps = predicate_row(LLVMGetICmpPredicate(condition))?.clamps?;
         let bound = arms
             .into_iter()
             .find(|&arm| !LLVMIsAConstantInt(arm).is_null())
@@ -3308,6 +3323,31 @@ exit:
             bindings,
             [("x", &Operand::Value(g.params[0])), ("y", &Operand::Other)]
         );
+    }
+
+    /// What LLVM says on reading is kept: here, that it dropped the debug
+    /// info, so no instruction has a location any more.
+    #[test]
+    fn read_module_ir_keeps_what_llvm_reported() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = crate::testing::stale_debug_info_module(scratch.path());
+        let ir = read_module_ir(&std::fs::read(module).unwrap()).unwrap();
+        assert!(
+            ir.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("invalid version")),
+            "{:?}",
+            ir.diagnostics
+        );
+        assert!(
+            defined(&ir, "f")
+                .values
+                .iter()
+                .all(|v| v.location.is_none())
+        );
+
+        let clean = read_module_ir(&bitcode("clamp.c", CLAMP_SOURCE, &["-O1", "-g"])).unwrap();
+        assert!(clean.diagnostics.is_empty(), "{:?}", clean.diagnostics);
     }
 
     #[test]

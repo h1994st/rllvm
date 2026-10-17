@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
+    process::Output,
 };
 
 use serde::Serialize;
@@ -284,6 +285,15 @@ pub fn check_opt_llvm(
     Ok(())
 }
 
+/// A module [`promote`] wrote, and what `opt` reported while it did.
+#[derive(Clone, Debug)]
+pub struct PromotedModule {
+    pub bytes: Vec<u8>,
+    /// Each line `opt` wrote to stderr: a warning such as debug info it
+    /// stripped on reading, which changes what the module still says.
+    pub diagnostics: Vec<String>,
+}
+
 /// Runs `mem2reg` over `module_bytes` with `llvm_bindir`'s `opt`, in
 /// `scratch`, and answers the promoted bitcode. Stack slots become SSA
 /// values, so a guard on a `-O0` local is visible to a walk of the IR.
@@ -291,7 +301,7 @@ pub fn promote(
     module_bytes: &[u8],
     llvm_bindir: &LlvmBindir,
     scratch: &Path,
-) -> Result<Vec<u8>, Error> {
+) -> Result<PromotedModule, Error> {
     let opt = llvm_bindir.tool(OPT)?;
     let input = scratch.join("promote.in.bc");
     let output = scratch.join("promote.out.bc");
@@ -302,15 +312,26 @@ pub fn promote(
         "-o".into(),
         output.clone().into_os_string(),
     ]);
-    run_tool(&opt, &arguments, scratch, &inherited_environment())?;
-    Ok(std::fs::read(output)?)
+    let stderr = run_tool_output(&opt, &arguments, scratch, &inherited_environment())?.stderr;
+    Ok(PromotedModule {
+        bytes: std::fs::read(output)?,
+        diagnostics: String::from_utf8_lossy(&stderr)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    })
 }
 
-/// The bytes of the module that defines `anchor`, `mem2reg`-promoted. Only
+/// The module that defines `anchor`, `mem2reg`-promoted. Only
 /// that one module is read, never linked with another. The catalog and the
 /// LLVM bindir are the ones `session` was given; a session without either
 /// cannot promote, and says which is missing.
-pub fn promote_anchor_module(session: &Session, anchor: &FunctionId) -> Result<Vec<u8>, Error> {
+pub fn promote_anchor_module(
+    session: &Session,
+    anchor: &FunctionId,
+) -> Result<PromotedModule, Error> {
     let catalog = session.catalog_path().ok_or_else(|| {
         Error::InvalidArguments(
             "this session was not opened from a catalog file, so there are no module bytes to \
@@ -547,9 +568,19 @@ fn run_tool<S: AsRef<OsStr>>(
     directory: &Path,
     environment: &BTreeMap<String, String>,
 ) -> Result<Vec<u8>, Error> {
+    Ok(run_tool_output(tool, arguments, directory, environment)?.stdout)
+}
+
+/// [`run_tool`], answering everything the tool wrote.
+fn run_tool_output<S: AsRef<OsStr>>(
+    tool: &Path,
+    arguments: &[S],
+    directory: &Path,
+    environment: &BTreeMap<String, String>,
+) -> Result<Output, Error> {
     let output = execute_llvm_tool_in_for_output(tool, arguments, directory, environment)?;
     if output.status.success() {
-        return Ok(output.stdout);
+        return Ok(output);
     }
     Err(Error::ExecutionFailure(format!(
         "{} failed ({}): {}",
@@ -631,7 +662,7 @@ mod tests {
             .unwrap();
         assert!(before.values.iter().any(|v| v.opcode == OpcodeIr::Load));
 
-        let bytes = promote_anchor_module(&session, &fid("f")).unwrap();
+        let bytes = promote_anchor_module(&session, &fid("f")).unwrap().bytes;
         let ir = read_module_ir(&bytes).unwrap();
         let f = ir.functions.iter().find(|f| f.id.symbol == "f").unwrap();
         assert!(
