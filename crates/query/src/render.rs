@@ -870,6 +870,9 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
             if let Some(lost) = &result.lost {
                 out.push_str(&format!("trace lost: {lost}\n"));
             }
+            for diagnostic in &result.diagnostics {
+                out.push_str(&format!("LLVM reported: {diagnostic}\n"));
+            }
         }
         QueryResults::Closure(functions) => {
             let agent_reached = &result.uncertainty.agent_reached;

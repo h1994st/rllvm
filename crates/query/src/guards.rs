@@ -91,6 +91,11 @@ pub struct GuardsResult {
     /// met. The guards found before it stopped are still reported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lost: Option<String>,
+    /// What LLVM reported while reading the anchor function's module, such
+    /// as debug info it stripped: not a lost trace, but the module says less
+    /// than it did.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 impl GuardsResult {
@@ -111,6 +116,23 @@ const UNTRACED_CASTS: [(CastOp, &str); 4] = [
     (CastOp::PtrToAddr, "ptrtoaddr"),
     (CastOp::IntToPtr, "inttoptr"),
     (CastOp::BitCast, "bitcast"),
+];
+
+/// Casts that keep an integer's value, only resizing it.
+const RESIZING_CASTS: [CastOp; 3] = [CastOp::Trunc, CastOp::ZExt, CastOp::SExt];
+
+/// Intrinsics, by name prefix, whose result is read from memory or a
+/// register rather than computed from their arguments.
+const READING_INTRINSICS: [&str; 9] = [
+    "llvm.masked.load.",
+    "llvm.masked.gather.",
+    "llvm.masked.expandload.",
+    "llvm.vp.load.",
+    "llvm.vp.gather.",
+    "llvm.experimental.vp.strided.load.",
+    "llvm.load.relative.",
+    "llvm.read_register.",
+    "llvm.read_volatile_register.",
 ];
 
 /// How intrinsic names begin. An intrinsic's result is computed from its
@@ -144,19 +166,14 @@ pub fn guards(
         .transpose()?;
     let promoted = promote_anchor_module(session, &function)?;
     let ir = read_module_ir(&promoted.bytes)?;
-    let mut lost: Vec<String> = promoted
-        .diagnostics
-        .iter()
-        .chain(&ir.diagnostics)
-        .map(|diagnostic| {
-            format!(
-                "LLVM reported on module {}: {diagnostic}",
-                function.module_id
-            )
-        })
-        .collect();
+    let mut lost = Vec::new();
     let mut result = GuardsResult {
         anchor: Some(anchor.clone()),
+        diagnostics: promoted
+            .diagnostics
+            .into_iter()
+            .chain(ir.diagnostics.iter().cloned())
+            .collect(),
         ..GuardsResult::default()
     };
     match resolve_anchor(&ir, session, anchor)? {
@@ -186,7 +203,7 @@ pub fn guards(
             };
             let at = use_point(body, session, anchor, value)?;
             let walk = trace.walk(value);
-            result.guards = trace.guard_sites(&walk, at);
+            result.guards = trace.guard_sites(&walk, value, at);
             result.crossings = walk.crossings;
             lost.extend(walk.lost);
         }
@@ -198,7 +215,8 @@ pub fn guards(
 }
 
 /// The functions on a path from `from` to `function`: the callers a
-/// parameter may cross from when the trace is bounded to that slice.
+/// parameter may cross from when the trace is bounded to that slice. An
+/// error when `function` is on no such path.
 fn caller_scope(
     session: &Session,
     from: &str,
@@ -209,11 +227,19 @@ fn caller_scope(
             "no function named {from:?} in the catalog to bound the trace from"
         )));
     }
-    Ok(session
+    let scope: HashSet<FunctionId> = session
         .slice_with(from, &function.symbol, None)
         .functions
         .into_iter()
-        .collect())
+        .collect();
+    if !scope.contains(function) {
+        return Err(Error::InvalidArguments(format!(
+            "{} is not on a path from {from:?} over the call graph, so there is no slice to \
+             bound the trace to",
+            function_label(function)
+        )));
+    }
+    Ok(scope)
 }
 
 /// The instruction the anchored `value` is used at: the call, for a call
@@ -314,6 +340,18 @@ impl Trace<'_> {
                         follow(&call.args);
                     } else {
                         match &call.callee {
+                            Some(callee)
+                                if READING_INTRINSICS
+                                    .iter()
+                                    .any(|prefix| callee.symbol.starts_with(prefix)) =>
+                            {
+                                walk.lost.push(format!(
+                                    "`{}` reads the value from memory or a register{}, and what \
+                                     was stored there is not traced",
+                                    callee.symbol,
+                                    place(node)
+                                ));
+                            }
                             Some(callee) if callee.symbol.starts_with(INTRINSIC_PREFIX) => {
                                 follow(&call.args);
                             }
@@ -382,33 +420,62 @@ impl Trace<'_> {
         walk
     }
 
-    /// The guards `walk` found, then each comparison on a value of its chain
-    /// that does not make it: one that dominates `at`, the instruction the
-    /// value is used at, or one on a path to it. A comparison on no path to
-    /// `at` is left out. In instruction order.
-    fn guard_sites(&self, walk: &Walk, at: ValueId) -> Vec<GuardSite> {
+    /// The guards `walk` found; then each guard op that consumes the
+    /// anchored `value` downstream, which lies on its path; then each
+    /// comparison on a value of the chain, or on `value` downstream, that
+    /// does not make it: dominating when it runs before `at`, the
+    /// instruction the value is used at, and on its path otherwise. In
+    /// instruction order.
+    fn guard_sites(&self, walk: &Walk, value: ValueId, at: ValueId) -> Vec<GuardSite> {
         let mut sites = walk.defining.clone();
-        let reaching = self.blocks_reaching(self.node(at).block);
+        let mut folded = walk.folded.clone();
+        let downstream = self.downstream(value);
+        let traced = |operand: &Operand| {
+            matches!(operand, Operand::Value(value)
+                if walk.chain.contains(value) || downstream.contains(value))
+        };
         for (id, node) in self.body.values.iter().enumerate() {
             let id = id as ValueId;
-            if node.opcode != OpcodeIr::ICmp
-                || walk.chain.contains(&id)
-                || walk.folded.contains(&id)
-            {
+            if walk.chain.contains(&id) || node.opcode == OpcodeIr::ICmp {
+                continue;
+            }
+            let operands = node.call.as_ref().map_or(&node.operands, |call| &call.args);
+            let Some(side) = operands.iter().position(
+                |operand| matches!(operand, Operand::Value(used) if downstream.contains(used)),
+            ) else {
+                continue;
+            };
+            if node.opcode == OpcodeIr::Phi {
+                if let Some((mut site, compare)) = self.phi_clamp(node) {
+                    site.relation = GuardRelation::OnPath;
+                    sites.insert(id, site);
+                    folded.insert(compare);
+                }
+            } else if let Some(raw) = &node.guard {
+                sites.insert(
+                    id,
+                    surfaced(raw, side == 1, node.location.clone(), GuardRelation::OnPath),
+                );
+                if let (OpcodeIr::Select, Some(Operand::Value(compare))) =
+                    (node.opcode, node.operands.first())
+                {
+                    folded.insert(*compare);
+                }
+            }
+        }
+        for (id, node) in self.body.values.iter().enumerate() {
+            let id = id as ValueId;
+            if node.opcode != OpcodeIr::ICmp || sites.contains_key(&id) || folded.contains(&id) {
                 continue;
             }
             let Some(raw) = &node.guard else { continue };
-            let Some(side) = node.operands.iter().position(
-                |operand| matches!(operand, Operand::Value(value) if walk.chain.contains(value)),
-            ) else {
+            let Some(side) = node.operands.iter().position(traced) else {
                 continue;
             };
             let relation = if self.runs_before(id, at) {
                 GuardRelation::Dominates
-            } else if self.doms.dominates(0, node.block) && reaching[node.block] {
-                GuardRelation::OnPath
             } else {
-                continue;
+                GuardRelation::OnPath
             };
             sites.insert(
                 id,
@@ -416,6 +483,26 @@ impl Trace<'_> {
             );
         }
         sites.into_values().collect()
+    }
+
+    /// `value`, and what it is only widened or narrowed into downstream:
+    /// a guard on those constrains it too.
+    fn downstream(&self, value: ValueId) -> BTreeSet<ValueId> {
+        let mut values = BTreeSet::from([value]);
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for (id, node) in self.body.values.iter().enumerate() {
+                if let (OpcodeIr::Cast { op }, Some(Operand::Value(from))) =
+                    (node.opcode, node.operands.first())
+                    && RESIZING_CASTS.contains(&op)
+                    && values.contains(from)
+                {
+                    grew |= values.insert(id as ValueId);
+                }
+            }
+        }
+        values
     }
 
     /// Whether instruction `a` runs before `b` on every path to `b`.
@@ -429,25 +516,22 @@ impl Trace<'_> {
         self.doms.dominates(block_a, block_b) && index(a) < index(b)
     }
 
-    /// Which blocks have a path of at least one edge to `target`.
-    fn blocks_reaching(&self, target: usize) -> Vec<bool> {
+    /// Which blocks `start` reaches, itself included, on paths that never
+    /// enter `avoid`. Nothing when `start` is `avoid`.
+    fn reachable_avoiding(&self, start: usize, avoid: usize) -> Vec<bool> {
         let blocks = &self.body.blocks;
-        let mut predecessors = vec![Vec::new(); blocks.len()];
-        for (block, ir) in blocks.iter().enumerate() {
-            for &successor in &ir.successors {
-                if let Some(into) = predecessors.get_mut(successor) {
-                    into.push(block);
-                }
-            }
-        }
-        let mut reaching = vec![false; blocks.len()];
-        let mut pending = predecessors.get(target).cloned().unwrap_or_default();
+        let mut reached = vec![false; blocks.len()];
+        let mut pending = vec![start];
         while let Some(block) = pending.pop() {
-            if !std::mem::replace(&mut reaching[block], true) {
-                pending.extend(&predecessors[block]);
+            if block == avoid
+                || block >= blocks.len()
+                || std::mem::replace(&mut reached[block], true)
+            {
+                continue;
             }
+            pending.extend(&blocks[block].successors);
         }
-        reaching
+        reached
     }
 
     /// `phi` read as the `-O0` lowering of a min/max: two incoming values,
@@ -474,21 +558,30 @@ impl Trace<'_> {
                 if !((x == a && y == b) || (x == b && y == a)) {
                     return None;
                 }
-                // Whether the edge from `predecessor` leaves `block` by
-                // `successor`.
-                let by = |predecessor: usize, successor: usize| {
-                    self.doms.dominates(successor, predecessor)
-                        || (predecessor == block && successor == phi.block)
+                // Which way out of `block` a value arriving from
+                // `predecessor` left it: `true` when every path from `block`
+                // to `predecessor` leaves by `on_true`. Dominance would not
+                // do: a successor can be entered from elsewhere too.
+                let from_true = self.reachable_avoiding(on_true, block);
+                let from_false = self.reachable_avoiding(on_false, block);
+                let side = |predecessor: usize| {
+                    if predecessor == block {
+                        return match (on_true == phi.block, on_false == phi.block) {
+                            (true, false) => Some(true),
+                            (false, true) => Some(false),
+                            _ => None,
+                        };
+                    }
+                    match (from_true[predecessor], from_false[predecessor]) {
+                        (true, false) => Some(true),
+                        (false, true) => Some(false),
+                        _ => None,
+                    }
                 };
-                let only = |predecessor, successor, other| {
-                    by(predecessor, successor) && !by(predecessor, other)
-                };
-                let picked = if only(from_a, on_true, on_false) && only(from_b, on_false, on_true) {
-                    a
-                } else if only(from_b, on_true, on_false) && only(from_a, on_false, on_true) {
-                    b
-                } else {
-                    return None;
+                let picked = match (side(from_a)?, side(from_b)?) {
+                    (true, false) => a,
+                    (false, true) => b,
+                    _ => return None,
                 };
                 Some((block, compare, picked))
             })
@@ -1335,7 +1428,7 @@ void f(unsigned len) {
 ";
 
     /// The comparison runs only when `flag` is set, so it does not dominate
-    /// the call; the one after the call is on no path to it.
+    /// the call; nor does the one after the call.
     const ON_PATH_SOURCE: &str = "extern void sink(unsigned);
 void f(unsigned len, int flag) {
   if (flag) {
@@ -1361,12 +1454,69 @@ void f(unsigned len, char *p) {
 }
 ";
 
-    /// `callee`'s parameter is passed by two callers.
+    /// `callee`'s parameter is passed by two callers; `lone` calls nothing.
     const CROSSING_SOURCE: &str = "extern void sink(unsigned);
 void callee(unsigned n) { sink(n); }
 void caller(unsigned x) { callee(x); }
 void other(unsigned y) { callee(y); }
+void lone(void) {}
 ";
+
+    /// `len` reaches `n` past the comparison either way when `flag` is set:
+    /// the branch on `len < 16` does not decide which value `n` takes.
+    const GOTO_SOURCE: &str = "extern void sink(unsigned);
+extern void side(void);
+void f(unsigned len, int flag) {
+  unsigned n;
+  if (len < 16) goto A;
+  side();
+  if (flag) goto A;
+  n = 16;
+  goto done;
+A:
+  n = len;
+done:
+  sink(n);
+}
+";
+
+    /// A choice between `len` and the bound on something else entirely.
+    const UNRELATED_CHOICE_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned len, int flag) {
+  unsigned n = flag ? len : 16;
+  sink(n);
+}
+";
+
+    /// The call's result is compared after the call, and clamped.
+    const RESULT_SOURCE: &str = "extern unsigned get(void);
+extern void sink(unsigned);
+void f(void) {
+  unsigned r = get();
+  if (r > 100)
+    return;
+  unsigned n = r < 16 ? r : 16;
+  sink(n);
+}
+";
+
+    /// Results read from a register and from memory by intrinsics.
+    const READING_INTRINSIC_IR: &str = r#"
+declare i64 @llvm.read_register.i64(metadata)
+declare <2 x i32> @llvm.masked.load.v2i32.p0(ptr, <2 x i1>, <2 x i32>)
+declare void @sink(i64)
+declare void @sinkv(<2 x i32>)
+
+define void @f(ptr %p) {
+  %v = call i64 @llvm.read_register.i64(metadata !0)
+  call void @sink(i64 %v)
+  %w = call <2 x i32> @llvm.masked.load.v2i32.p0(ptr align 4 %p, <2 x i1> <i1 true, i1 true>, <2 x i32> zeroinitializer)
+  call void @sinkv(<2 x i32> %w)
+  ret void
+}
+
+!0 = !{!"sp"}
+"#;
 
     /// The value comes out of an `asm goto`.
     const ASM_GOTO_SOURCE: &str = "extern void sink(unsigned);
@@ -1519,13 +1669,20 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
         assert_eq!(
             sites(&r),
-            [(
-                GuardKind::Compare,
-                Some("ugt"),
-                Some("16"),
-                GuardRelation::OnPath
-            )],
-            "the comparison after the call is on no path to it"
+            [
+                (
+                    GuardKind::Compare,
+                    Some("ugt"),
+                    Some("16"),
+                    GuardRelation::OnPath
+                ),
+                (
+                    GuardKind::Compare,
+                    Some("ult"),
+                    Some("4"),
+                    GuardRelation::OnPath
+                ),
+            ]
         );
     }
 
@@ -1584,6 +1741,10 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             .unwrap_err()
             .to_string();
         assert!(error.contains("nowhere"), "{error}");
+        let error = guards(&session, &anchor, Some("lone"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not on a path from \"lone\""), "{error}");
     }
 
     #[test]
@@ -1670,8 +1831,99 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         let module = stale_debug_info_module(scratch.path());
         let session = module_session(scratch.path(), &module);
         let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
-        let lost = r.lost.as_deref().unwrap_or_default();
-        assert!(lost.contains("invalid version"), "{r:?}");
+        assert!(
+            r.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("invalid version")),
+            "{r:?}"
+        );
+        assert!(r.lost.is_none(), "a diagnostic is not a lost trace: {r:?}");
+    }
+
+    #[test]
+    fn a_branch_that_does_not_decide_the_value_is_no_clamp() {
+        for (source, flags) in [
+            (GOTO_SOURCE, &["-O1", "-g"][..]),
+            (GOTO_SOURCE, &["-O0", "-g"]),
+            (UNRELATED_CHOICE_SOURCE, &["-O0", "-g"]),
+            (UNRELATED_CHOICE_SOURCE, &["-O1", "-g"]),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session(&scratch, source, flags);
+            let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+            assert!(
+                r.guards.iter().all(|guard| guard.op != GuardKind::Clamp),
+                "{flags:?}: {r:?}"
+            );
+        }
+    }
+
+    /// The result is constrained only after the call: those guards consume
+    /// it and lie on its path.
+    #[test]
+    fn a_call_result_surfaces_the_guards_that_consume_it() {
+        for optimization in ["-O0", "-O1"] {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session(&scratch, RESULT_SOURCE, &[optimization, "-g"]);
+            let get = sites_calling(&session, "f", "get")[0].clone();
+            let r = guards(&session, &GuardAnchor::Return { site: get }, None).unwrap();
+            assert_eq!(
+                sites(&r),
+                [
+                    (
+                        GuardKind::Compare,
+                        Some("ugt"),
+                        Some("100"),
+                        GuardRelation::OnPath
+                    ),
+                    (
+                        GuardKind::Clamp,
+                        Some("umin"),
+                        Some("16"),
+                        GuardRelation::OnPath
+                    ),
+                ],
+                "{optimization}: {r:?}"
+            );
+            assert_eq!(crossings(&r), [("f", CrossingDir::From, "get", "return")]);
+        }
+    }
+
+    #[test]
+    fn a_local_surfaces_the_guards_on_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, DOMINATING_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &local("f", "len"), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Compare,
+                Some("ugt"),
+                Some("16"),
+                GuardRelation::OnPath
+            )]
+        );
+        assert!(r.lost.is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn a_value_an_intrinsic_reads_from_memory_loses_the_trace() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            READING_INTRINSIC_IR,
+            &["-Wno-override-module"],
+        );
+        for (n, callee, intrinsic) in [
+            (0, "sink", "llvm.read_register."),
+            (0, "sinkv", "llvm.masked.load."),
+        ] {
+            let site = sites_calling(&session, "f", callee)[n].clone();
+            let r = guards(&session, &argument(&site, 0), None).unwrap();
+            let lost = r.lost.as_deref().unwrap_or_default();
+            assert!(lost.contains(intrinsic), "{r:?}");
+        }
     }
 
     #[test]
