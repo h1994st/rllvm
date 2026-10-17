@@ -396,6 +396,14 @@ pub struct Uncertainty {
     /// Present only when the query included the overlay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<OverlayCoverage>,
+    /// `guards` only: why the value trace stopped early, when it did. The
+    /// guards found before it stopped are still in the results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_trace_lost: Option<String>,
+    /// `guards` only: what LLVM reported while reading the anchor module.
+    /// Not a lost trace: kept apart so harmless output never reads as one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub value_trace_diagnostics: Vec<String>,
     /// `ffi-exports` only: external definitions whose symbol is fully
     /// unmangled but whose language neither debug info nor the producer
     /// could establish. They might be exports and were not searched.
@@ -669,6 +677,8 @@ pub fn run_with_overlay(
     let mut agent_path_steps = 0;
     let mut agent_reached = Vec::new();
     let mut unknown_language = None;
+    let mut value_trace_lost = None;
+    let mut value_trace_diagnostics = Vec::new();
 
     let results = match query {
         Query::Defs { name } => QueryResults::Defs(defs(session, name)),
@@ -716,7 +726,10 @@ pub fn run_with_overlay(
             QueryResults::ResolutionCandidates(resolution_candidates(session))
         }
         Query::Guards { anchor, from, .. } => {
-            QueryResults::Guards(guards(session, anchor, from.as_deref())?)
+            let result = guards(session, anchor, from.as_deref())?;
+            value_trace_lost = result.lost.clone();
+            value_trace_diagnostics = result.diagnostics.clone();
+            QueryResults::Guards(result)
         }
     };
 
@@ -746,6 +759,8 @@ pub fn run_with_overlay(
             agent_reached,
             overlay: view.map(|view| view.coverage().clone()),
             functions_of_unknown_language: unknown_language,
+            value_trace_lost,
+            value_trace_diagnostics,
             ..uncertainty_of(session, frontier, conditional_path_steps)
         },
         provenance: Provenance {
@@ -1600,6 +1615,9 @@ fn uncertainty_of(
         // Overwritten by `run` for `Query::FfiExports`; every other query
         // leaves it absent.
         functions_of_unknown_language: None,
+        // Overwritten by `run` for `Query::Guards`; absent otherwise.
+        value_trace_lost: None,
+        value_trace_diagnostics: Vec::new(),
     }
 }
 
@@ -1643,6 +1661,49 @@ mod tests {
         for block in ["scope", "analysis", "uncertainty"] {
             assert!(json.get(block).is_some(), "missing `{block}` block");
         }
+    }
+
+    #[test]
+    fn a_lost_value_trace_reaches_uncertainty() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned len, char *p) {\n  unsigned n = len < 16 ? len : 16;\n  sink(n + (unsigned)(__UINTPTR_TYPE__)p);\n}\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| site.id.function.symbol == "f")
+            .unwrap()
+            .id
+            .clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: None,
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let QueryResults::Guards(result) = &answer.results else {
+            panic!("expected a guards answer, got {:?}", answer.results);
+        };
+        assert!(!result.guards.is_empty(), "partial guards are kept");
+        let lost = answer.uncertainty.value_trace_lost.as_deref();
+        assert!(lost.is_some_and(|l| l.contains("ptrtoint")), "{lost:?}");
+        assert_eq!(answer.uncertainty.agent_path_steps, 0);
+    }
+
+    #[test]
+    fn value_trace_fields_are_absent_from_other_answers() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(scratch.path(), "t.c", "void a(void) {}\n", &["-O0"]);
+        let answer = run(&session, &Query::Externals).unwrap();
+        assert!(answer.uncertainty.value_trace_lost.is_none());
+        assert!(answer.uncertainty.value_trace_diagnostics.is_empty());
+        let json = serde_json::to_value(&answer).unwrap();
+        assert!(json["uncertainty"].get("value_trace_lost").is_none());
+        assert!(json["uncertainty"].get("value_trace_diagnostics").is_none());
     }
 
     #[test]
