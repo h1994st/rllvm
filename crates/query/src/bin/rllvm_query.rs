@@ -11,8 +11,8 @@ use rllvm_core::{
     utils::{print_stdout, split_response_arguments},
 };
 use rllvm_query::{
-    AnchorParts, Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session, TextMode,
-    anchor_from_parts, check_anchor_parts,
+    AnchorParts, AnchorSurface, Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session,
+    TextMode, anchor_from_parts, check_anchor_parts,
     cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
     default_overlay_path, emit_slice,
     index::Direction,
@@ -138,7 +138,8 @@ impl Planned {
                         "guards cannot write a module yet: drop --emit-module".to_string(),
                     ));
                 }
-                check_anchor_parts(&request.parts).map_err(Error::InvalidArguments)
+                check_anchor_parts(&request.parts, AnchorSurface::Cli)
+                    .map_err(Error::InvalidArguments)
             }
         }
     }
@@ -149,7 +150,7 @@ impl Planned {
         match self {
             Planned::Ready(query) => Ok(query),
             Planned::Guards(request) => Ok(Query::Guards {
-                anchor: anchor_from_parts(session, &request.parts)
+                anchor: anchor_from_parts(session, &request.parts, AnchorSurface::Cli)
                     .map_err(Error::InvalidArguments)?,
                 from: request.from,
                 emit_module: request.emit_module,
@@ -1117,7 +1118,7 @@ mod tests {
         for (input, expected) in [
             ("guards\n", "name a value"),
             ("guards --operand 0\n", "need --at"),
-            ("guards --at t.c:4\n", "--operand N"),
+            ("guards --at t.c:4\n", "needs --operand"),
             ("guards --at t.c:4 --operand 0 --return\n", "give one"),
             ("guards --local n\n", "needs --function"),
             ("guards --function f\n", "needs --local"),

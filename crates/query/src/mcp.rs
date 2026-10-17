@@ -59,9 +59,9 @@ use serde_json::{Value, json};
 use rllvm_core::{config::LlvmBindir, error::Error};
 
 use super::{
-    AnchorParts, Confidence, Direction, FactsCache, GuardAnchor, Overlay, Query, Record, Session,
-    analysis_of, anchor_from_parts, check_anchor_parts, default_overlay_path, emit_slice,
-    open_catalog_with_cache, open_with_cache, overlay::fingerprint, run_with_overlay,
+    AnchorParts, AnchorSurface, Confidence, Direction, FactsCache, GuardAnchor, Overlay, Query,
+    Record, Session, analysis_of, anchor_from_parts, check_anchor_parts, default_overlay_path,
+    emit_slice, open_catalog_with_cache, open_with_cache, overlay::fingerprint, run_with_overlay,
 };
 
 /// The modern protocol revision this server has been checked against.
@@ -1152,8 +1152,8 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Query::Guards {
             from, emit_module, ..
         } => {
-            let anchor =
-                guard_parts(&arguments).and_then(|parts| anchor_from_parts(session, &parts));
+            let anchor = guard_parts(&arguments)
+                .and_then(|parts| anchor_from_parts(session, &parts, AnchorSurface::Tool));
             match anchor {
                 Ok(anchor) => Query::Guards {
                     anchor,
@@ -1331,8 +1331,11 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
         }),
         "resolution_candidates" => Ok(Query::ResolutionCandidates),
         "guards" => {
-            check_anchor_parts(&guard_parts(arguments)?)?;
-            if arguments.get("emit_module").is_some() {
+            check_anchor_parts(&guard_parts(arguments)?, AnchorSurface::Tool)?;
+            if arguments
+                .get("emit_module")
+                .is_some_and(|value| !value.is_null())
+            {
                 return Err("guards cannot write a module yet: drop `emit_module`".to_string());
             }
             // The call site an `at` names needs a catalog; `tool_call_outcome`
@@ -1422,11 +1425,6 @@ mod tests {
             .to_string()
     }
 
-    /// The guard the fixed-length `[Query; 9]` could not give: every variant
-    /// declared in `query_tool_surface!` -- and the macro's `tool_name_of`
-    /// match makes that every variant, or the crate does not compile --
-    /// reaches `tools/list` under its own name and comes back through
-    /// `query_from_call` as the same variant.
     #[test]
     fn the_guards_tool_is_listed_with_every_anchor_part_optional() {
         let tools = tools_list_result()["tools"].as_array().unwrap().clone();
@@ -1456,12 +1454,12 @@ mod tests {
         let mut registry = one_catalog();
         for (arguments, fragment) in [
             (json!({}), "name a value"),
-            (json!({ "at": "t.c:4" }), "--operand N"),
+            (json!({ "at": "t.c:4" }), "`at` needs `operand`"),
             (
                 json!({ "at": "t.c:4", "operand": 0, "return": true }),
                 "give one",
             ),
-            (json!({ "function": "f" }), "needs --local"),
+            (json!({ "function": "f" }), "`function` needs `local`"),
             (json!({ "at": "t.c:4", "operand": -1 }), "operand"),
             (json!({ "at": 4, "operand": 0 }), "`at`"),
             (
@@ -1498,13 +1496,41 @@ mod tests {
             "{text}"
         );
         let id = text.split("=> ").nth(1).unwrap().split(';').next().unwrap();
-        // The id is accepted as an anchor; what follows is the analysis, which
-        // this synthetic registry has no tools for -- never an anchor error.
-        let result = call(&mut registry, "guards", json!({ "at": id, "return": true }));
-        let text = result["content"][0]["text"].as_str().unwrap();
+        // The id is accepted as an anchor: the call is answered.
+        let answered = answer(&mut registry, "guards", json!({ "at": id, "return": true }));
+        assert_eq!(answered["results"]["anchor"]["kind"], "return");
+    }
+
+    #[test]
+    fn a_guards_call_answers_with_its_anchor_and_guard() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  if (n < 8)\n    sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        let at = format!("{}:4", scratch.path().join("t.c").display());
+        let result = call(
+            &mut registry,
+            "guards",
+            json!({ "at": at, "operand": 0, "emit_module": null }),
+        );
+        assert_eq!(result["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        let found = &payload["results"];
+        assert_eq!(found["anchor"]["kind"], "argument", "{payload}");
+        assert_eq!(found["anchor"]["operand"], 0, "{payload}");
+        assert_eq!(
+            found["anchor"]["site"]["function"]["symbol"], "f",
+            "{payload}"
+        );
+        let guards = found["guards"].as_array().unwrap();
         assert!(
-            !text.contains("call site") && !text.contains("name a value"),
-            "{text}"
+            guards.iter().any(|guard| guard["bound"] == "8"),
+            "{payload}"
         );
     }
 

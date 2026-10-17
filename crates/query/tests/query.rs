@@ -4519,7 +4519,7 @@ fn the_guards_flags_name_a_call_site_argument_and_print_snake_case() {
     );
 
     let error = guards_failure(&scratch, &catalog, &["--at", &line(5)]);
-    assert!(error.contains("--operand N"), "{error}");
+    assert!(error.contains("needs --operand"), "{error}");
     let error = guards_failure(&scratch, &catalog, &["--function", "f"]);
     assert!(error.contains("needs --local"), "{error}");
 }
