@@ -95,7 +95,7 @@ pub mod overlay;
 pub use overlay::{
     Annotation, AnnotationKey, AnnotationRef, Confidence, EdgeKey, Feasibility, OVERLAY_VERSION,
     Overlay, OverlayCoverage, OverlayEdge, OverlaySummary, OverlayView, Record, SummaryEdge,
-    TargetSpec, Verdict, Verification, VerifyTarget, default_overlay_path,
+    TargetSpec, Verdict, Verification, default_overlay_path,
 };
 
 pub mod mcp;

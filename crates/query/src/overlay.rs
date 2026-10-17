@@ -17,7 +17,9 @@
 //! The file is append-only between compactions, so a crash or a concurrent
 //! reader never sees an earlier line rewritten. Every line is validated when
 //! the file is folded, and any bad one fails the load naming its line: a
-//! record silently skipped would change what the overlay claims.
+//! record silently skipped would change what the overlay claims. An
+//! annotation is canonicalized and checked against the catalog on load; its
+//! value is grounded in the promoted module only when it is written.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -40,7 +42,7 @@ use crate::{
     },
     guards::{
         AnchorParts, AnchorSurface, GuardAnchor, anchor_from_parts, anchor_function, caller_scope,
-        ground_anchor,
+        ground_anchor, one_definition,
     },
     index::{NameMatch, NameResolution, PathStep, Session},
 };
@@ -514,7 +516,7 @@ impl Annotation {
 
 /// What a `verify` or `retract` judges or removes.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum VerifyTarget {
+pub(crate) enum VerifyTarget {
     Edge(EdgeKey),
     Annotation(AnnotationKey),
 }
@@ -529,11 +531,9 @@ impl VerifyTarget {
     ) -> Result<VerifyTarget, String> {
         match (edge, annotation) {
             (Some(edge), None) => Ok(VerifyTarget::Edge(edge)),
-            (None, Some(annotation)) => Ok(VerifyTarget::Annotation(annotation_key(
-                session,
-                annotation.from,
-                &annotation.anchor,
-            )?)),
+            (None, Some(annotation)) => Ok(VerifyTarget::Annotation(
+                annotation_key(session, annotation.from.as_deref(), &annotation.anchor)?.0,
+            )),
             _ => Err("a verify or retract names exactly one of edge and annotation".to_string()),
         }
     }
@@ -1199,25 +1199,30 @@ fn annotate_record(annotation: &Annotation) -> Record {
     }
 }
 
-/// The canonical key of the annotation on `anchor` reached from `from`: a
-/// call site resolved to its id -- a `file:line` holding several is an
-/// error naming each -- and a local's function to the one definition's
-/// symbol, so two spellings of one value are one key.
+/// The canonical key of the annotation on `anchor` reached from `from`,
+/// with the function the anchor lies in: a call site resolved to its id --
+/// a `file:line` holding several is an error naming each -- and a local's
+/// function and `from` each to the one definition's symbol, so every
+/// spelling of one value reached from one function is one key.
 fn annotation_key(
     session: &Session,
-    from: Option<String>,
+    from: Option<&str>,
     anchor: &AnchorSpec,
-) -> Result<AnnotationKey, String> {
+) -> Result<(AnnotationKey, FunctionId), String> {
     let anchor = anchor_from_parts(session, &anchor.to_parts(), AnchorSurface::Tool)?;
     let function = anchor_function(session, &anchor).map_err(bare)?;
     let anchor = match anchor {
         GuardAnchor::Local { name, .. } => GuardAnchor::Local {
-            function: function.symbol,
+            function: function.symbol.clone(),
             name,
         },
         call => call,
     };
-    Ok(AnnotationKey { from, anchor })
+    let from = from
+        .map(|from| one_definition(session, from, "`from`").map(|id| id.symbol))
+        .transpose()
+        .map_err(bare)?;
+    Ok((AnnotationKey { from, anchor }, function))
 }
 
 /// An error's message without the variant's prefix, for a caller that adds
@@ -1367,21 +1372,25 @@ fn apply(
             if provenance.is_empty() {
                 return Err(ANNOTATE_NEEDS_PROVENANCE.to_string());
             }
-            let key = annotation_key(session, from, &anchor)?;
+            let (key, function) = annotation_key(session, from.as_deref(), &anchor)?;
             if let Some(from) = &key.from {
-                let function = anchor_function(session, &key.anchor).map_err(bare)?;
                 caller_scope(session, from, &function).map_err(bare)?;
             }
             if grounding == Grounding::Value {
                 ground_anchor(session, &key.anchor).map_err(bare)?;
             }
-            // Replaced whole: a verification judged the verdict it replaces.
+            // A verification judged a verdict: it stands while the verdict
+            // does, and goes with it.
+            let verification = annotations
+                .get(&key)
+                .filter(|current| current.feasibility == verdict)
+                .and_then(|current| current.verification.clone());
             let annotation = Annotation {
                 key: key.clone(),
                 feasibility: verdict,
                 confidence,
                 provenance,
-                verification: None,
+                verification,
             };
             let record = annotate_record(&annotation);
             annotations.insert(key, annotation);
@@ -2651,6 +2660,19 @@ int main(void) { f(3); return 0; }
         );
         assert!(annotation.is_refuted());
 
+        // The same verdict again keeps the check that judged it.
+        overlay
+            .record(
+                &session,
+                vec![annotate(
+                    argument(SiteSpec::Id(site.clone()), 0),
+                    None,
+                    Feasibility::Infeasible,
+                )],
+            )
+            .unwrap();
+        assert!(overlay.annotations().values().next().unwrap().is_refuted());
+
         // A new verdict replaces the one the refutation judged.
         overlay
             .record(
@@ -2779,6 +2801,83 @@ int main(void) { f(3); return 0; }
         assert_eq!(listed["feasibility"], "conditional", "{summary}");
         assert_eq!(listed["key"]["anchor"]["kind"], "argument", "{summary}");
         assert_eq!(listed["verification"]["verdict"], "confirmed", "{summary}");
+    }
+
+    /// `lib::parse` calls `lib::f`, which passes `len` to the one call on
+    /// line 3; `other::parse` shares the identifier `parse`.
+    const SPELLED_FROM_SOURCE: &str = "extern \"C\" void sink(unsigned);
+namespace lib {
+void f(unsigned len) { sink(len); }
+unsigned parse() { f(3); return 0; }
+}
+namespace other { unsigned parse(int x) { return x; } }
+";
+
+    #[test]
+    fn every_spelling_of_one_from_is_one_key() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.cpp",
+            SPELLED_FROM_SOURCE,
+            &["-O0", "-g"],
+        );
+        let site = SiteSpec::At(format!("{}:3", scratch.path().join("t.cpp").display()));
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        for from in ["_ZN3lib5parseEv", "lib::parse()", "lib::parse"] {
+            overlay
+                .record(
+                    &session,
+                    vec![annotate(
+                        argument(site.clone(), 0),
+                        Some(from),
+                        Feasibility::Infeasible,
+                    )],
+                )
+                .unwrap();
+        }
+        let keys: Vec<_> = overlay.annotations().keys().collect();
+        assert_eq!(keys.len(), 1, "{keys:?}");
+        assert_eq!(keys[0].from.as_deref(), Some("_ZN3lib5parseEv"));
+
+        // A verify under another spelling reaches it.
+        overlay
+            .record(
+                &session,
+                vec![Record::Verify {
+                    edge: None,
+                    annotation: Some(AnnotationRef {
+                        from: Some("lib::parse()".into()),
+                        anchor: argument(site.clone(), 0),
+                    }),
+                    tool: "reread".into(),
+                    verdict: Verdict::Confirmed,
+                    at: None,
+                }],
+            )
+            .unwrap();
+        assert!(
+            overlay
+                .annotations()
+                .values()
+                .next()
+                .unwrap()
+                .verification
+                .is_some()
+        );
+
+        let error = record_error(
+            &session,
+            vec![annotate(
+                argument(site, 0),
+                Some("parse"),
+                Feasibility::Infeasible,
+            )],
+        );
+        assert!(
+            error.contains("_ZN3lib5parseEv") && error.contains("_ZN5other5parseEi"),
+            "{error}"
+        );
     }
 
     #[test]
