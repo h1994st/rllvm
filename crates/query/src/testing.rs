@@ -4,9 +4,15 @@
 //! test modules cannot import each other's `#[cfg(test)] mod tests` and more
 //! than one submodule's tests build on these fixtures.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
+use rllvm_core::{
+    catalog::{
+        CatalogOrigin, CatalogScope, ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes,
+        write_catalog,
+    },
+    config::LlvmBindir,
+};
 
 use crate::{
     bind::{BindingCandidate, BindingStatus, SymbolBinding},
@@ -193,6 +199,39 @@ pub(crate) fn facts(functions: Vec<FunctionFact>, call_sites: Vec<CallSiteFact>)
         },
         modules: Vec::new(),
     }
+}
+
+/// A catalog of module `m`: `source`, written to `scratch` as `file_name`
+/// and compiled with `flags`. Opened as a session whose LLVM bindir is the
+/// configured toolchain's, so it can promote the module.
+pub(crate) fn compiled_session(
+    scratch: &Path,
+    file_name: &str,
+    source: &str,
+    flags: &[&str],
+) -> Session {
+    let source_path = scratch.join(file_name);
+    std::fs::write(&source_path, source).unwrap();
+    let module = rllvm_testkit::compile_bitcode_file(&source_path, flags);
+    let mut record = ModuleRecord::new("m");
+    record.path = Some(module.file_name().unwrap().into());
+    record.content_sha256 = Some(hash_bytes(&std::fs::read(&module).unwrap()));
+    record.status = ModuleStatus::Available;
+    let catalog = ModuleCatalog::new(
+        CatalogOrigin {
+            kind: "test".into(),
+            input: PathBuf::from("test"),
+            sha256: None,
+        },
+        "test",
+        vec![record],
+    );
+    let path = scratch.join("catalog.json");
+    write_catalog(&path, &catalog).unwrap();
+    let mut session = crate::open(&path).unwrap();
+    let opt = rllvm_testkit::llvm_bin("opt");
+    session.set_llvm_bindir(Ok(LlvmBindir::configured(opt.parent().unwrap())));
+    session
 }
 
 /// One module, one edge per pair.

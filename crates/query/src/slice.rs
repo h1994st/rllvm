@@ -575,12 +575,8 @@ mod tests {
         extract::read_module_ir,
         facts::ModuleAnalysis,
         ir::{OpcodeIr, Operand},
-        testing::{facts, report},
+        testing::{compiled_session, facts, report},
     };
-    use rllvm_core::catalog::{
-        CatalogOrigin, ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes, write_catalog,
-    };
-    use rllvm_testkit::llvm_bin;
 
     /// A length clamped to a capacity.
     const CLAMP_SOURCE: &str =
@@ -593,34 +589,10 @@ mod tests {
         }
     }
 
-    fn real_bindir() -> LlvmBindir {
-        LlvmBindir::configured(llvm_bin("opt").parent().unwrap())
-    }
-
     /// A catalog of `source` compiled at `-O0` (so `optnone` stays), opened
     /// as a session with the real LLVM bindir.
     fn clamp_session(scratch: &tempfile::TempDir) -> Session {
-        let source = scratch.path().join("clamp.c");
-        std::fs::write(&source, CLAMP_SOURCE).unwrap();
-        let module = rllvm_testkit::compile_bitcode_file(&source, &["-O0", "-g"]);
-        let mut record = ModuleRecord::new("m");
-        record.path = Some(module.file_name().unwrap().into());
-        record.content_sha256 = Some(hash_bytes(&std::fs::read(&module).unwrap()));
-        record.status = ModuleStatus::Available;
-        let catalog = ModuleCatalog::new(
-            CatalogOrigin {
-                kind: "test".into(),
-                input: PathBuf::from("test"),
-                sha256: None,
-            },
-            "test",
-            vec![record],
-        );
-        let path = scratch.path().join("catalog.json");
-        write_catalog(&path, &catalog).unwrap();
-        let mut session = crate::open(&path).unwrap();
-        session.set_llvm_bindir(Ok(real_bindir()));
-        session
+        compiled_session(scratch.path(), "clamp.c", CLAMP_SOURCE, &["-O0", "-g"])
     }
 
     /// A bindir whose `opt` only reports `major`.
