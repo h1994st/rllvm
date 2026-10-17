@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use rllvm_core::error::Error;
 
+use crate::ir::FunctionIr;
 use crate::{CallSiteId, FunctionId, GuardKind, Session, SourceLocation};
 
 /// The value whose constraints are asked for.
@@ -94,4 +95,185 @@ pub fn guards(
     _from: Option<&str>,
 ) -> Result<GuardsResult, Error> {
     Ok(GuardsResult::default())
+}
+
+/// Immediate dominators of a function's blocks, entry = block 0.
+///
+/// Blocks the entry cannot reach have no dominator information.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the guard trace, which lands next")
+)]
+pub(crate) struct Doms {
+    /// `idom[b]` is `b`'s immediate dominator; the entry is its own. `None`
+    /// for a block unreachable from the entry.
+    idom: Vec<Option<usize>>,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the guard trace, which lands next")
+)]
+impl Doms {
+    /// Whether every path from the entry to `b` passes through `a`. A block
+    /// dominates itself. False for any pair involving a block unreachable
+    /// from the entry (itself included) or an index out of range: nothing is
+    /// claimed about code that cannot run.
+    pub(crate) fn dominates(&self, a: usize, b: usize) -> bool {
+        if !matches!(self.idom.get(a), Some(Some(_))) {
+            return false;
+        }
+        let mut at = b;
+        while let Some(Some(up)) = self.idom.get(at) {
+            if at == a {
+                return true;
+            }
+            if *up == at {
+                return false;
+            }
+            at = *up;
+        }
+        false
+    }
+}
+
+/// Cooper, Harvey and Kennedy's iterative algorithm over the owned CFG.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "read by the guard trace, which lands next")
+)]
+pub(crate) fn dominators(f: &FunctionIr) -> Doms {
+    let n = f.blocks.len();
+    if n == 0 {
+        return Doms { idom: Vec::new() };
+    }
+    // Reverse postorder of the blocks reachable from the entry.
+    let mut post = Vec::with_capacity(n);
+    let mut seen = vec![false; n];
+    seen[0] = true;
+    let mut stack = vec![(0usize, 0usize)];
+    while let Some((block, next)) = stack.pop() {
+        match f.blocks[block].successors.get(next) {
+            Some(&succ) => {
+                stack.push((block, next + 1));
+                if succ < n && !seen[succ] {
+                    seen[succ] = true;
+                    stack.push((succ, 0));
+                }
+            }
+            None => post.push(block),
+        }
+    }
+    let mut rpo_number = vec![usize::MAX; n];
+    for (i, &block) in post.iter().rev().enumerate() {
+        rpo_number[block] = i;
+    }
+    let mut preds = vec![Vec::new(); n];
+    for &block in &post {
+        for &succ in &f.blocks[block].successors {
+            if succ < n {
+                preds[succ].push(block);
+            }
+        }
+    }
+
+    let mut idom: Vec<Option<usize>> = vec![None; n];
+    idom[0] = Some(0);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for &block in post.iter().rev().skip(1) {
+            let mut new_idom: Option<usize> = None;
+            for &pred in &preds[block] {
+                if idom[pred].is_none() {
+                    continue;
+                }
+                new_idom = Some(match new_idom {
+                    None => pred,
+                    Some(cur) => intersect(&idom, &rpo_number, pred, cur),
+                });
+            }
+            if new_idom.is_some() && idom[block] != new_idom {
+                idom[block] = new_idom;
+                changed = true;
+            }
+        }
+    }
+    Doms { idom }
+}
+
+/// The nearest common dominator of `a` and `b` among those found so far.
+fn intersect(idom: &[Option<usize>], rpo_number: &[usize], mut a: usize, mut b: usize) -> usize {
+    while a != b {
+        while rpo_number[a] > rpo_number[b] {
+            a = idom[a].expect("processed block has an idom");
+        }
+        while rpo_number[b] > rpo_number[a] {
+            b = idom[b].expect("processed block has an idom");
+        }
+    }
+    a
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::FunctionId;
+    use crate::ir::BlockIr;
+
+    /// A function whose block `i` branches to `successors[i]`.
+    fn cfg(successors: &[&[usize]]) -> FunctionIr {
+        FunctionIr {
+            id: FunctionId {
+                module_id: "m".into(),
+                symbol: "f".into(),
+            },
+            params: Vec::new(),
+            blocks: successors
+                .iter()
+                .map(|s| BlockIr {
+                    instrs: Vec::new(),
+                    successors: s.to_vec(),
+                })
+                .collect(),
+            values: Vec::new(),
+            dbg_values: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn dominators_on_a_diamond() {
+        let d = dominators(&cfg(&[&[1, 2], &[3], &[3], &[]]));
+        for b in 0..4 {
+            assert!(d.dominates(0, b));
+            assert!(d.dominates(b, b));
+        }
+        assert!(!d.dominates(1, 3));
+        assert!(!d.dominates(2, 3));
+        assert!(!d.dominates(1, 2));
+        assert!(!d.dominates(3, 0));
+    }
+
+    #[test]
+    fn dominators_through_a_loop_back_edge() {
+        // 0 -> 1 -> 2 -> {1, 3}
+        let d = dominators(&cfg(&[&[1], &[2], &[1, 3], &[]]));
+        assert!(d.dominates(1, 2));
+        assert!(d.dominates(1, 3));
+        assert!(d.dominates(2, 3));
+        assert!(!d.dominates(2, 1));
+        assert!(!d.dominates(3, 1));
+    }
+
+    #[test]
+    fn dominators_ignore_unreachable_blocks() {
+        // Block 2 and 3 are unreachable; 3 branches into the reachable 1.
+        let d = dominators(&cfg(&[&[1], &[], &[1], &[1, 2]]));
+        assert!(d.dominates(0, 1));
+        assert!(!d.dominates(2, 1));
+        assert!(!d.dominates(3, 1));
+        assert!(!d.dominates(0, 2));
+        assert!(!d.dominates(2, 2));
+        assert!(!d.dominates(0, 99));
+    }
 }
