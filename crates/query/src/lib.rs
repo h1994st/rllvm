@@ -78,6 +78,11 @@ pub struct CacheReport {
     pub over_threshold: bool,
 }
 
+pub mod guards;
+pub use guards::{
+    Crossing, CrossingDir, GuardAnchor, GuardRelation, GuardSite, GuardsResult, guards,
+};
+
 pub mod index;
 pub use index::{
     Direction, NameMatch, NameResolution, PathStep, ReachResult, Session, SliceEdge, SliceResult,
@@ -171,6 +176,17 @@ pub enum Query {
     /// callee from, with the functions whose addresses flow there. A join of
     /// facts: candidates, never edges.
     ResolutionCandidates,
+    /// The comparisons, clamps, masks and moduli that constrain a value: a
+    /// call argument, a call result, or a named local. Evidence, never a
+    /// verdict: no guard found is an empty list, not "unbounded".
+    Guards {
+        anchor: GuardAnchor,
+        /// Where the trace starts, when not the anchor's own function.
+        from: Option<String>,
+        /// Write the traced slice as a module here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emit_module: Option<PathBuf>,
+    },
 }
 
 /// One definition of a queried symbol.
@@ -289,6 +305,7 @@ pub enum QueryResults {
     FfiExports(Vec<DefEntry>),
     IndirectTargets(Vec<IndirectTargetsResult>),
     ResolutionCandidates(Vec<CandidateGroup>),
+    Guards(GuardsResult),
 }
 
 impl QueryResults {
@@ -309,6 +326,7 @@ impl QueryResults {
             QueryResults::FfiExports(items) => items.is_empty(),
             QueryResults::IndirectTargets(items) => items.is_empty(),
             QueryResults::ResolutionCandidates(items) => items.is_empty(),
+            QueryResults::Guards(result) => result.is_empty(),
         }
     }
 }
@@ -695,6 +713,9 @@ pub fn run_with_overlay(
         Query::ResolutionCandidates => {
             QueryResults::ResolutionCandidates(resolution_candidates(session))
         }
+        Query::Guards { anchor, from, .. } => {
+            QueryResults::Guards(guards(session, anchor, from.as_deref())?)
+        }
     };
 
     // Reach reports exactly the ambiguous bindings its own walk hit, which
@@ -854,6 +875,21 @@ impl QueryResults {
                             }
                         }
                     }
+                }
+            }
+            QueryResults::Guards(result) => {
+                match &result.anchor {
+                    Some(GuardAnchor::Argument { site, .. } | GuardAnchor::Return { site }) => {
+                        collect_function(&site.function, into);
+                    }
+                    Some(GuardAnchor::Local { function, .. }) => {
+                        into.insert(function.clone());
+                    }
+                    None => {}
+                }
+                for crossing in &result.crossings {
+                    collect_function(&crossing.site.function, into);
+                    collect_function(&crossing.function, into);
                 }
             }
             QueryResults::IndirectTargets(entries) => {
@@ -1367,12 +1403,17 @@ impl Query {
             | Query::Uses { name }
             | Query::Closure { name, .. } => vec![name],
             Query::Reach { from, to, .. } | Query::Slice { from, to, .. } => vec![from, to],
+            Query::Guards {
+                anchor: GuardAnchor::Local { function, .. },
+                ..
+            } => vec![function],
             // These take a location or nothing at all.
             Query::At { .. }
             | Query::Externals
             | Query::FfiExports
             | Query::IndirectTargets { .. }
-            | Query::ResolutionCandidates => Vec::new(),
+            | Query::ResolutionCandidates
+            | Query::Guards { .. } => Vec::new(),
         }
     }
 
@@ -1568,6 +1609,33 @@ mod tests {
     };
 
     use crate::{facts::Language, load::load_catalog, testing::*};
+
+    #[test]
+    fn a_guards_query_returns_a_well_formed_envelope() {
+        let session = session_from(&[("a", "b")]);
+        let site = CallSiteId {
+            function: FunctionId {
+                module_id: "m".to_string(),
+                symbol: "a".to_string(),
+            },
+            block_index: 0,
+            instruction_index: 0,
+        };
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: None,
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let QueryResults::Guards(result) = &answer.results else {
+            panic!("expected a guards answer, got {:?}", answer.results);
+        };
+        assert!(result.guards.is_empty() && result.crossings.is_empty());
+        let json = serde_json::to_value(&answer).unwrap();
+        for block in ["scope", "analysis", "uncertainty"] {
+            assert!(json.get(block).is_some(), "missing `{block}` block");
+        }
+    }
 
     #[test]
     fn a_module_is_analyzed_only_after_it_parses() {

@@ -195,6 +195,15 @@ pub enum QueryCommand {
     },
     /// Unresolved indirect call sites grouped by the field, global, parameter or accessor they call through, with the functions whose addresses flow there. Candidates, not edges.
     ResolutionCandidates,
+    /// The comparisons, clamps, masks and moduli that constrain a value. Evidence, not a verdict: no guard found is not "unbounded".
+    Guards {
+        /// The value, as JSON: `{"kind":"local","function":"f","name":"n"}`, `{"kind":"return","site":...}` or `{"kind":"argument","site":...,"operand":0}`
+        #[arg(value_parser = parse_guard_anchor)]
+        anchor: crate::GuardAnchor,
+        /// Where the trace starts, when not the anchor's own function
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Serve the twelve queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
     Mcp,
     /// Print a shell completion script for `rllvm-query`
@@ -239,4 +248,8 @@ pub enum CacheAction {
         #[arg(long)]
         stale: bool,
     },
+}
+
+fn parse_guard_anchor(text: &str) -> Result<crate::GuardAnchor, String> {
+    serde_json::from_str(text).map_err(|error| format!("invalid anchor: {error}"))
 }

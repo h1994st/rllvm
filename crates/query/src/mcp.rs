@@ -59,7 +59,7 @@ use serde_json::{Value, json};
 use rllvm_core::{config::LlvmBindir, error::Error};
 
 use super::{
-    Confidence, Direction, FactsCache, Overlay, Query, Record, Session, analysis_of,
+    Confidence, Direction, FactsCache, GuardAnchor, Overlay, Query, Record, Session, analysis_of,
     default_overlay_path, emit_slice, open_catalog_with_cache, open_with_cache,
     overlay::fingerprint, run_with_overlay,
 };
@@ -880,6 +880,7 @@ query_tool_surface! {
     Query::FfiExports => Query::FfiExports, "ffi_exports";
     Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
     Query::ResolutionCandidates => Query::ResolutionCandidates, "resolution_candidates";
+    Query::Guards { .. } => Query::Guards { anchor: GuardAnchor::Local { function: String::new(), name: String::new() }, from: None, emit_module: None }, "guards";
 }
 
 /// The `name` argument four of the twelve tools take, identically. Spelled
@@ -1062,6 +1063,21 @@ fn query_tool(query: &Query) -> Value {
             "name": name,
             "description": "Unresolved indirect call sites grouped by the record field they dispatch through (`field`) or the global, parameter or accessor they read their callee from (`slot`), with the functions whose addresses flow there. Candidates, not edges.",
             "inputSchema": { "type": "object", "properties": {} }
+        }),
+        Query::Guards { .. } => json!({
+            "name": name,
+            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument, a call result, or a named local. Evidence, not a verdict: no guard found is an empty list, not \"unbounded\".",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "anchor": {
+                        "type": "object",
+                        "description": "The value: `{kind: argument, site, operand}`, `{kind: return, site}` or `{kind: local, function, name}`"
+                    },
+                    "from": { "type": "string", "description": "Where the trace starts, when not the anchor's own function" }
+                },
+                "required": ["anchor"]
+            }
         }),
         Query::IndirectTargets { .. } => json!({
             "name": name,
@@ -1260,6 +1276,21 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                 .unwrap_or(false),
         }),
         "resolution_candidates" => Ok(Query::ResolutionCandidates),
+        "guards" => Ok(Query::Guards {
+            anchor: arguments
+                .get("anchor")
+                .cloned()
+                .ok_or_else(|| "missing argument `anchor`".to_string())
+                .and_then(|anchor| {
+                    serde_json::from_value(anchor)
+                        .map_err(|error| format!("invalid argument `anchor`: {error}"))
+                })?,
+            from: arguments
+                .get("from")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            emit_module: None,
+        }),
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -1303,6 +1334,9 @@ mod tests {
             Query::FfiExports => json!({}),
             Query::IndirectTargets { .. } => json!({ "at": "t.c:4" }),
             Query::ResolutionCandidates => json!({}),
+            Query::Guards { .. } => {
+                json!({ "anchor": { "kind": "local", "function": "a", "name": "x" } })
+            }
         }
     }
 

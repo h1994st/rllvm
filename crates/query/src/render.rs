@@ -407,6 +407,9 @@ fn shown_in(results: &QueryResults) -> Shown {
             // Every group is made of unresolved indirect call sites.
             shown.indirect_call_site = !groups.is_empty();
         }
+        QueryResults::Guards(result) => {
+            shown.missing_location = result.guards.iter().any(|guard| guard.location.is_none());
+        }
         // Neither prints a location nor a call site: `closure` prints bare
         // names, `externals` a symbol and its binding status.
         QueryResults::Closure(_) | QueryResults::Externals(_) => {}
@@ -442,7 +445,8 @@ fn walks_call_edges(results: &QueryResults) -> bool {
         | QueryResults::Externals(_)
         | QueryResults::FfiExports(_)
         | QueryResults::IndirectTargets(_)
-        | QueryResults::ResolutionCandidates(_) => false,
+        | QueryResults::ResolutionCandidates(_)
+        | QueryResults::Guards(_) => false,
     }
 }
 
@@ -468,6 +472,9 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         }
         QueryResults::ResolutionCandidates(_) => {
             "no unresolved indirect call site in the selected scope"
+        }
+        QueryResults::Guards(_) => {
+            "no guard was found on the traced value; not a claim that it is unbounded"
         }
         // Accurate for `Defs`, `At` and `IndirectTargets`: each takes a name
         // or a location and an empty result there really does mean nothing
@@ -839,6 +846,27 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                     location(entry.location.as_ref(), ctx),
                     name(symbols, &entry.function.symbol, ctx)
                 ));
+            }
+        }
+        QueryResults::Guards(result) => {
+            for guard in &result.guards {
+                out.push_str(&format!(
+                    "{}  {:?}{}{} ({:?})\n",
+                    location(guard.location.as_ref(), ctx),
+                    guard.op,
+                    guard
+                        .predicate
+                        .as_ref()
+                        .map_or(String::new(), |p| format!(" {p}")),
+                    guard
+                        .bound
+                        .as_ref()
+                        .map_or(String::new(), |b| format!(" {b}")),
+                    guard.relation
+                ));
+            }
+            if let Some(lost) = &result.lost {
+                out.push_str(&format!("trace lost: {lost}\n"));
             }
         }
         QueryResults::Closure(functions) => {

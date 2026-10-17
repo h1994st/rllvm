@@ -74,6 +74,11 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Query> {
         QueryCommand::FfiExports => Query::FfiExports,
         QueryCommand::IndirectTargets { at } => Query::IndirectTargets { at, heuristics },
         QueryCommand::ResolutionCandidates => Query::ResolutionCandidates,
+        QueryCommand::Guards { anchor, from } => Query::Guards {
+            anchor,
+            from,
+            emit_module: None,
+        },
         QueryCommand::Mcp => return None,
         // `main` answers this one before `run_query` is ever called; the arm
         // is here so adding a mode variant cannot compile without a decision.
@@ -442,7 +447,8 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         | QueryCommand::Externals
         | QueryCommand::FfiExports
         | QueryCommand::IndirectTargets { .. }
-        | QueryCommand::ResolutionCandidates => {}
+        | QueryCommand::ResolutionCandidates
+        | QueryCommand::Guards { .. } => {}
     }
 
     let emit_module = match &command {
@@ -630,6 +636,10 @@ mod tests {
             Query::FfiExports => QueryCommand::FfiExports,
             Query::IndirectTargets { at, .. } => QueryCommand::IndirectTargets { at: at.clone() },
             Query::ResolutionCandidates => QueryCommand::ResolutionCandidates,
+            Query::Guards { anchor, from, .. } => QueryCommand::Guards {
+                anchor: anchor.clone(),
+                from: from.clone(),
+            },
         }
     }
 

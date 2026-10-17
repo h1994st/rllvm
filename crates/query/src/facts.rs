@@ -42,6 +42,17 @@ pub enum SourceStatus {
     Unknown,
 }
 
+/// What a guard does to the value it constrains.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardKind {
+    Compare,
+    Clamp,
+    Saturate,
+    Mask,
+    Modulo,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceLocation {
     pub file: PathBuf,
