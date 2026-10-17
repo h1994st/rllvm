@@ -206,17 +206,44 @@ pub enum AnchorSpec {
     Local { function: String, name: String },
 }
 
+/// What `site` must be, quoted in every rejection of one.
+const SITE_EXPECTED: &str = "`site` is a `file:line` string or a call site id object";
+
+/// The keys a call site id object may carry, and those of its `function`.
+const SITE_ID_KEYS: &[&str] = &["function", "block_index", "instruction_index"];
+const FUNCTION_ID_KEYS: &[&str] = &["module_id", "symbol"];
+
+/// The first key of `object` that is not in `allowed`, as a message.
+fn stray_key(
+    object: &serde_json::Map<String, serde_json::Value>,
+    allowed: &[&str],
+    what: &str,
+) -> Result<(), String> {
+    match object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        Some(key) => Err(format!(
+            "{SITE_EXPECTED}; unknown field `{key}` in {what} (expected one of {})",
+            allowed.join(", ")
+        )),
+        None => Ok(()),
+    }
+}
+
 impl TryFrom<serde_json::Value> for SiteSpec {
     type Error = String;
 
     fn try_from(value: serde_json::Value) -> Result<Self, String> {
-        const EXPECTED: &str = "`site` is a `file:line` string or a call site id object";
         match value {
             serde_json::Value::String(at) => Ok(SiteSpec::At(at)),
-            serde_json::Value::Object(_) => serde_json::from_value(value)
-                .map(SiteSpec::Id)
-                .map_err(|error| format!("{EXPECTED}; this object is not one: {error}")),
-            other => Err(format!("{EXPECTED}, not {other}")),
+            serde_json::Value::Object(object) => {
+                stray_key(&object, SITE_ID_KEYS, "the call site id")?;
+                if let Some(serde_json::Value::Object(function)) = object.get("function") {
+                    stray_key(function, FUNCTION_ID_KEYS, "the call site's function")?;
+                }
+                serde_json::from_value(serde_json::Value::Object(object))
+                    .map(SiteSpec::Id)
+                    .map_err(|error| format!("{SITE_EXPECTED}; this object is not one: {error}"))
+            }
+            other => Err(format!("{SITE_EXPECTED}, not {other}")),
         }
     }
 }
@@ -1978,12 +2005,42 @@ mod tests {
         let bad = error(r#""verdict":"maybe","confidence":"low","provenance":["x"]"#);
         assert!(bad.contains("maybe"), "{bad}");
         let stray = r#"{"op":"annotate","anchor":{"kind":"local","function":"f","name":"n","x":1},"verdict":"feasible","confidence":"low","provenance":["x"]}"#;
+        let error = stray.parse::<Record>().unwrap_err().to_string();
+        assert!(error.contains("unknown field `x`"), "{error}");
+        assert!(stray.replace(r#","x":1"#, "").parse::<Record>().is_ok());
+    }
+
+    #[test]
+    fn a_malformed_annotate_site_names_site_and_its_spellings() {
+        let site = |site: &str| {
+            format!(
+                r#"{{"op":"annotate","anchor":{{"kind":"return","site":{site}}},{ANNOTATE_TAIL}}}"#
+            )
+            .parse::<Record>()
+            .unwrap_err()
+            .to_string()
+        };
+        let number = site("7");
+        let partial = site(r#"{"function":{"module_id":"m","symbol":"f"},"block_index":1}"#);
+        for error in [&number, &partial] {
+            assert!(
+                error.contains("`site` is a `file:line` string or a call site id object"),
+                "{error}"
+            );
+        }
+        assert!(partial.contains("instruction_index"), "{partial}");
+        let id =
+            r#""function":{"module_id":"m","symbol":"f"},"block_index":1,"instruction_index":2"#;
+        let junk = site(&format!("{{{id},\"junk\":1}}"));
+        assert!(junk.contains("unknown field `junk`"), "{junk}");
+        let nested = site(
+            r#"{"function":{"module_id":"m","symbol":"f","junk2":1},"block_index":1,"instruction_index":2}"#,
+        );
+        assert!(nested.contains("unknown field `junk2`"), "{nested}");
         assert!(
-            stray
+            format!(r#"{{"op":"annotate","anchor":{{"kind":"return","site":{{{id}}}}},{ANNOTATE_TAIL}}}"#)
                 .parse::<Record>()
-                .unwrap_err()
-                .to_string()
-                .contains("x")
+                .is_ok()
         );
     }
 }

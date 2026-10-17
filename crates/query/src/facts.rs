@@ -15,7 +15,6 @@ use rllvm_core::{
 /// A function is identified by module and symbol, never by symbol alone: the
 /// catalog preserves separate compilations of one source on purpose.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FunctionId {
     pub module_id: String,
     pub symbol: String,
@@ -23,7 +22,6 @@ pub struct FunctionId {
 
 /// Distinct for two calls on the same source line.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct CallSiteId {
     pub function: FunctionId,
     pub block_index: u32,
