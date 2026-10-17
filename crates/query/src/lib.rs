@@ -167,8 +167,9 @@ pub enum Query {
     /// unresolved. `at` is a `file:line` location, e.g. `"t.c:4"`.
     IndirectTargets { at: String, heuristics: bool },
     /// Unresolved indirect call sites grouped by the record field they
-    /// dispatch through, with the functions stored into that field. A join
-    /// of facts: candidates, never edges.
+    /// dispatch through or the global, parameter or accessor they read their
+    /// callee from, with the functions whose addresses flow there. A join of
+    /// facts: candidates, never edges.
     ResolutionCandidates,
 }
 
@@ -233,6 +234,10 @@ pub struct CandidateGroup {
     /// unresolved sites whose pointer was not traced to a field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field: Option<FieldRef>,
+    /// The global or parameter every site in the group calls through, for
+    /// sites no field names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<Slot>,
     /// Display only: the member name, when any site or assignment knew it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub field_name: Option<String>,
@@ -496,6 +501,9 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
     let mut functions: Vec<FunctionFact> = Vec::new();
     let mut call_sites: Vec<CallSiteFact> = Vec::new();
     let mut uses: Vec<UseFact> = Vec::new();
+    let mut slot_flows: Vec<SlotFlow> = Vec::new();
+    let mut field_flows: Vec<FieldFlow> = Vec::new();
+    let mut returned_addresses: Vec<ReturnedAddress> = Vec::new();
     let mut reports = loaded.reports.clone();
 
     let mut report = cache.map(|cache| CacheReport {
@@ -560,6 +568,9 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
                 functions.extend(facts.functions);
                 call_sites.extend(facts.call_sites);
                 uses.extend(facts.uses);
+                slot_flows.extend(facts.slot_flows);
+                field_flows.extend(facts.field_flows);
+                returned_addresses.extend(facts.returned_addresses);
             }
             Err(error) => {
                 tracing::warn!(module = %pending.id, %error, "module failed to extract");
@@ -587,6 +598,9 @@ fn session_from_loaded(loaded: load::Loaded, cache: Option<&FactsCache>) -> Resu
         functions,
         call_sites,
         uses,
+        slot_flows,
+        field_flows,
+        returned_addresses,
         scope: loaded.scope.clone(),
         origin: loaded.origin.clone(),
         modules: reports,
@@ -1112,40 +1126,172 @@ fn address_taken_inventory(session: &Session) -> Vec<FunctionId> {
     inventory
 }
 
-/// Joins each unresolved indirect site to the functions stored into the field
-/// it dispatches through. A site with no traced field falls back to the
-/// address-taken functions of its signature.
+/// What an unresolved site dispatches through, in the order groups are
+/// listed: a field, then a slot, then neither.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Dispatch {
+    Field(FieldRef),
+    Slot(Slot),
+    Signature,
+}
+
+/// A location in the flow graph: one slot, or every instance of a field.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FlowNode {
+    Slot(Slot),
+    Field(FieldRef),
+}
+
+/// The functions whose addresses flow into each slot and field, solved over
+/// the whole program: direct assignments, then every location that passes
+/// its pointer on. Parameters and accessors are keyed by the definition they
+/// belong to, so a flow seen at a call in one module meets the parameter or
+/// the returned location in another.
+struct FlowSolution<'a> {
+    session: &'a Session,
+    assigned: HashMap<FlowNode, Vec<&'a UseFact>>,
+    incoming: HashMap<FlowNode, Vec<FlowNode>>,
+}
+
+impl<'a> FlowSolution<'a> {
+    fn new(session: &'a Session) -> Self {
+        let mut solution = Self {
+            session,
+            assigned: HashMap::new(),
+            incoming: HashMap::new(),
+        };
+        for use_fact in session.uses() {
+            if let Some(slot) = &use_fact.into_slot {
+                let node = FlowNode::Slot(session.canonical_slot(slot));
+                solution.assigned.entry(node).or_default().push(use_fact);
+            }
+            if let Some(evidence) = &use_fact.field {
+                let node = FlowNode::Field(evidence.field.clone());
+                solution.assigned.entry(node).or_default().push(use_fact);
+            }
+        }
+        for flow in session.slot_flows() {
+            let from = FlowNode::Slot(session.canonical_slot(&flow.from));
+            let into = FlowNode::Slot(session.canonical_slot(&flow.into));
+            solution.flow(from, into);
+        }
+        for flow in session.field_flows() {
+            let from = FlowNode::Slot(session.canonical_slot(&flow.from));
+            solution.flow(from, FlowNode::Field(flow.into.field.clone()));
+        }
+        // An accessor's result is the location it returns the address of:
+        // what is stored through one is read through the other.
+        for returned in session.returned_addresses() {
+            let result = FlowNode::Slot(session.canonical_slot(&Slot::Returned {
+                function: returned.function.clone(),
+            }));
+            let location = match (&returned.global, &returned.field) {
+                (Some(global), _) => FlowNode::Slot(global.clone()),
+                (None, Some(evidence)) => FlowNode::Field(evidence.field.clone()),
+                (None, None) => continue,
+            };
+            solution.flow(result.clone(), location.clone());
+            solution.flow(location, result);
+        }
+        solution
+    }
+
+    fn flow(&mut self, from: FlowNode, into: FlowNode) {
+        self.incoming.entry(into).or_default().push(from);
+    }
+
+    /// The assignments of every function whose address reaches `root`.
+    fn sources(&self, root: FlowNode) -> BTreeMap<FunctionId, Vec<UseFact>> {
+        let mut seen = HashSet::new();
+        let mut pending = vec![root];
+        let mut by_function: BTreeMap<FunctionId, Vec<UseFact>> = BTreeMap::new();
+        while let Some(node) = pending.pop() {
+            if !seen.insert(node.clone()) {
+                continue;
+            }
+            for use_fact in self.assigned.get(&node).into_iter().flatten() {
+                let function = self
+                    .session
+                    .bound_definition(&use_fact.used)
+                    .unwrap_or_else(|| use_fact.used.clone());
+                by_function
+                    .entry(function)
+                    .or_default()
+                    .push((*use_fact).clone());
+            }
+            pending.extend(self.incoming.get(&node).into_iter().flatten().cloned());
+        }
+        by_function
+    }
+}
+
+fn candidates_from(
+    session: &Session,
+    by_function: BTreeMap<FunctionId, Vec<UseFact>>,
+    signature: &str,
+) -> Vec<Candidate> {
+    by_function
+        .into_iter()
+        .map(|(function, assignments)| Candidate {
+            signature_matches: session
+                .function(&function)
+                .is_some_and(|fact| fact.signature == signature),
+            function,
+            assignments,
+        })
+        .collect()
+}
+
+/// Joins each unresolved indirect site to the functions that can reach what
+/// it dispatches through: those stored into its field, or flowing into its
+/// global or parameter. A site with neither falls back to the address-taken
+/// functions of its signature.
 fn resolution_candidates(session: &Session) -> Vec<CandidateGroup> {
-    let mut grouped: BTreeMap<(Option<FieldRef>, String), Vec<&CallSiteFact>> = BTreeMap::new();
+    let flows = FlowSolution::new(session);
+    let mut grouped: BTreeMap<(Dispatch, String), Vec<&CallSiteFact>> = BTreeMap::new();
     for site in session.call_sites() {
         if let CallTarget::Indirect {
             signature,
             llvm_target_bound: None,
             via_field,
+            via_slot,
         } = &site.target
         {
-            let field = via_field.as_ref().map(|evidence| evidence.field.clone());
+            let dispatch = match (via_field, via_slot) {
+                (Some(evidence), _) => Dispatch::Field(evidence.field.clone()),
+                (None, Some(slot)) => Dispatch::Slot(session.canonical_slot(slot)),
+                (None, None) => Dispatch::Signature,
+            };
             grouped
-                .entry((field, signature.clone()))
+                .entry((dispatch, signature.clone()))
                 .or_default()
                 .push(site);
         }
     }
 
-    // `None` sorts first in an `Option` key; the no-field groups go last.
-    let (without_field, with_field): (Vec<_>, Vec<_>) = grouped
+    grouped
         .into_iter()
-        .partition(|((field, _), _)| field.is_none());
-    with_field
-        .into_iter()
-        .chain(without_field)
-        .map(|((field, signature), mut sites)| {
+        .map(|((dispatch, signature), mut sites)| {
             sites.sort_by(|left, right| left.id.cmp(&right.id));
-            let mut candidates = match &field {
-                Some(field) => field_candidates(session, field, &signature),
-                None => signature_candidates(session, &signature),
+            let mut candidates = match &dispatch {
+                Dispatch::Field(field) => candidates_from(
+                    session,
+                    flows.sources(FlowNode::Field(field.clone())),
+                    &signature,
+                ),
+                Dispatch::Slot(slot) => candidates_from(
+                    session,
+                    flows.sources(FlowNode::Slot(slot.clone())),
+                    &signature,
+                ),
+                Dispatch::Signature => signature_candidates(session, &signature),
             };
             candidates.sort_by(|left, right| left.function.cmp(&right.function));
+            let (field, slot) = match dispatch {
+                Dispatch::Field(field) => (Some(field), None),
+                Dispatch::Slot(slot) => (None, Some(slot)),
+                Dispatch::Signature => (None, None),
+            };
             let field_name = sites
                 .iter()
                 .find_map(|site| match &site.target {
@@ -1168,6 +1314,7 @@ fn resolution_candidates(session: &Session) -> Vec<CandidateGroup> {
             let single_candidate = candidates.len() == 1 && candidates[0].assignments.len() == 1;
             CandidateGroup {
                 field,
+                slot,
                 field_name,
                 signature,
                 sites: sites
@@ -1180,34 +1327,6 @@ fn resolution_candidates(session: &Session) -> Vec<CandidateGroup> {
                 candidates,
                 single_candidate,
             }
-        })
-        .collect()
-}
-
-/// Every function with a use that puts its address into `field`, under any
-/// `kind`.
-fn field_candidates(session: &Session, field: &FieldRef, signature: &str) -> Vec<Candidate> {
-    let mut by_function: BTreeMap<FunctionId, Vec<UseFact>> = BTreeMap::new();
-    for use_fact in session.uses() {
-        if use_fact
-            .field
-            .as_ref()
-            .is_some_and(|evidence| &evidence.field == field)
-        {
-            by_function
-                .entry(use_fact.used.clone())
-                .or_default()
-                .push(use_fact.clone());
-        }
-    }
-    by_function
-        .into_iter()
-        .map(|(function, assignments)| Candidate {
-            signature_matches: session
-                .function(&function)
-                .is_some_and(|fact| fact.signature == signature),
-            function,
-            assignments,
         })
         .collect()
 }
@@ -2022,6 +2141,7 @@ mod tests {
             in_global: None,
             location: Some(source_location("t.c", line)),
             kind: UseKind::StoredToMemory,
+            into_slot: None,
             field: Some(FieldEvidence {
                 field,
                 basis: FieldBasis::StructGep,
@@ -2160,6 +2280,7 @@ mod tests {
         fn add(to: &str, confidence: Confidence) -> Record {
             Record::Add {
                 via_field: Some(ops(8)),
+                via_slot: None,
                 site: None,
                 to: TargetSpec::Symbol(to.into()),
                 confidence,

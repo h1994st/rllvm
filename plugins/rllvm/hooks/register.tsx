@@ -15,6 +15,7 @@ import type {
   OverlayGroup,
   OverlaySite,
   OverlaySiteAt,
+  OverlaySlot,
   OverlayVerdict,
   OverlayView,
 } from '../types'
@@ -88,6 +89,21 @@ const parseField = (value: unknown): OverlayField | undefined =>
     ? { record: value.record, offset: value.offset }
     : undefined
 
+const parseSlot = (value: unknown): OverlaySlot | undefined => {
+  if (!isObject(value)) return undefined
+  if (value.kind === 'global' && typeof value.name === 'string') {
+    const module_id = value.module_id ?? null
+    return module_id === null || typeof module_id === 'string'
+      ? { kind: 'global', name: value.name, module_id }
+      : undefined
+  }
+  const fn = parseFunction(value.function)
+  if (!fn) return undefined
+  if (value.kind === 'param' && typeof value.index === 'number')
+    return { kind: 'param', function: fn, index: value.index }
+  return value.kind === 'returned' ? { kind: 'returned', function: fn } : undefined
+}
+
 const parseSite = (value: unknown): OverlaySite | undefined => {
   if (!isObject(value)) return undefined
   const fn = parseFunction(value.function)
@@ -110,13 +126,15 @@ const parseSiteAt = (value: unknown): OverlaySiteAt | undefined => {
 const parseGroup = (value: unknown): OverlayGroup | undefined => {
   if (!isObject(value) || typeof value.signature !== 'string') return undefined
   const field = value.field === undefined || value.field === null ? null : parseField(value.field)
+  const slot = value.slot === undefined || value.slot === null ? null : parseSlot(value.slot)
   const sites = allOf(value.sites, parseSiteAt)
   const candidates = allOf(value.candidates, one =>
     isObject(one) ? parseFunction(one.function) : undefined,
   )
-  if (field === undefined || !sites || !candidates) return undefined
+  if (field === undefined || slot === undefined || !sites || !candidates) return undefined
   return {
     field,
+    slot,
     field_name: typeof value.field_name === 'string' ? value.field_name : null,
     signature: value.signature,
     sites,
@@ -132,6 +150,10 @@ const parseKey = (value: unknown): OverlayEdgeKey | undefined => {
   if ('via_field' in value) {
     const via_field = parseField(value.via_field)
     return via_field && { via_field, to }
+  }
+  if ('via_slot' in value) {
+    const via_slot = parseSlot(value.via_slot)
+    return via_slot && { via_slot, to }
   }
   const site = parseSite(value.site)
   return site && { site, to }
@@ -171,8 +193,9 @@ const remember = async ($: StateDollar, tool: string, payload: unknown) => {
   if (tool === CANDIDATES_TOOL) {
     const parsed = isObject(payload) ? allOf(payload.results, parseGroup) : undefined
     if (!parsed) return
-    // The server lists field groups first, the ones an edge can cover most
-    // sites through, so the first are kept and the rest only counted.
+    // The server lists field and slot groups first, the ones an edge can
+    // cover most sites through, so the first are kept and the rest only
+    // counted.
     await update($, groups, () => parsed.slice(0, GROUP_LIMIT))
     await update($, droppedGroups, () => Math.max(0, parsed.length - GROUP_LIMIT))
   } else if (tool === SAVE_TOOL) {
@@ -193,6 +216,37 @@ const remember = async ($: StateDollar, tool: string, payload: unknown) => {
 // Labels.
 
 const fieldLabel = (field: OverlayField) => `${field.record}@${field.offset}`
+
+const slotLabel = (slot: OverlaySlot) =>
+  slot.kind === 'global'
+    ? `global ${slot.name}`
+    : slot.kind === 'param'
+      ? `param ${slot.index} of ${slot.function.symbol}`
+      : `*${slot.function.symbol}()`
+
+/** Identifies a slot exactly, where its label may repeat across modules. */
+const slotId = (slot: OverlaySlot) =>
+  slot.kind === 'global'
+    ? `global:${slot.module_id ?? ''}:${slot.name}`
+    : slot.kind === 'param'
+      ? `param:${slot.function.module_id}:${slot.function.symbol}:${slot.index}`
+      : `returned:${slot.function.module_id}:${slot.function.symbol}`
+
+/** The field or slot a group dispatches through: its id and label, or null for neither. */
+const groupPattern = (group: OverlayGroup) =>
+  group.field
+    ? { id: fieldLabel(group.field), label: fieldLabel(group.field) }
+    : group.slot
+      ? { id: slotId(group.slot), label: slotLabel(group.slot) }
+      : null
+
+/** The field or slot an edge covers, or null for a site edge. */
+const edgePattern = (key: OverlayEdgeKey) =>
+  'via_field' in key
+    ? { id: fieldLabel(key.via_field), label: fieldLabel(key.via_field) }
+    : 'via_slot' in key
+      ? { id: slotId(key.via_slot), label: slotLabel(key.via_slot) }
+      : null
 
 const siteId = (site: OverlaySite) =>
   `${site.function.module_id}:${site.function.symbol}:${site.block_index}:${site.instruction_index}`
@@ -218,21 +272,20 @@ const groupLines = (group: OverlayGroup, edges: readonly OverlayEdge[]): Line[] 
   // A group with no field is named by its first site, where the call is.
   const first = group.sites[0]
   const where = first ? [first.site.function.symbol, first.location ?? ''].join(' ').trim() : ''
-  const id = group.field
-    ? fieldLabel(group.field)
-    : `site-${first ? siteId(first.site) : group.signature}`
-  const head = group.field
-    ? `${fieldLabel(group.field)}${group.field_name ? ` (${group.field_name})` : ''}`
+  const pattern = groupPattern(group)
+  const id = pattern ? pattern.id : `site-${first ? siteId(first.site) : group.signature}`
+  const head = pattern
+    ? `${pattern.label}${group.field_name ? ` (${group.field_name})` : ''}`
     : `${where || 'sites'} (${group.signature})`
   const details = [plural(group.sites.length, 'site')]
-  if (group.field) details.push(group.signature)
+  if (pattern) details.push(group.signature)
   if (group.single_candidate) details.push('single candidate')
   const sites = new Set(group.sites.map(one => siteId(one.site)))
-  const claims = edges.filter(edge =>
-    'via_field' in edge.key
-      ? group.field !== null && fieldLabel(edge.key.via_field) === fieldLabel(group.field)
-      : group.field === null && sites.has(siteId(edge.key.site)),
-  )
+  const claims = edges.filter(edge => {
+    const covers = edgePattern(edge.key)
+    if (covers) return pattern !== null && covers.id === pattern.id
+    return pattern === null && 'site' in edge.key && sites.has(siteId(edge.key.site))
+  })
   // An edge to a function the candidates do not list still belongs here.
   const targets = [
     ...group.candidates,
@@ -256,26 +309,27 @@ const groupLines = (group: OverlayGroup, edges: readonly OverlayEdge[]): Line[] 
   ]
 }
 
-/** Field edges whose field no group lists, one block per field. */
-const orphanFieldBlocks = (
-  fieldEdges: readonly OverlayEdge[],
+/** Field and slot edges whose pattern no group lists, one block per pattern. */
+const orphanPatternBlocks = (
+  patternEdges: readonly OverlayEdge[],
   known: ReadonlySet<string>,
 ): Line[][] => {
-  const byField = new Map<string, OverlayEdge[]>()
-  for (const edge of fieldEdges) {
-    if (!('via_field' in edge.key)) continue
-    const label = fieldLabel(edge.key.via_field)
-    if (!known.has(label)) byField.set(label, [...(byField.get(label) ?? []), edge])
+  const byPattern = new Map<string, { label: string; edges: OverlayEdge[] }>()
+  for (const edge of patternEdges) {
+    const pattern = edgePattern(edge.key)
+    if (!pattern || known.has(pattern.id)) continue
+    const entry = byPattern.get(pattern.id) ?? { label: pattern.label, edges: [] }
+    byPattern.set(pattern.id, { ...entry, edges: [...entry.edges, edge] })
   }
-  return [...byField].map(([label, edges]) => [
-    { key: `group-${label}`, text: label, isBold: true },
+  return [...byPattern].map(([id, { label, edges }]) => [
+    { key: `group-${id}`, text: label, isBold: true },
     ...edges.map(edge => {
       const name = functionLabel(
         edge.key.to,
         edges.map(one => one.key.to),
       )
       return {
-        key: `candidate-${label}-${name}`,
+        key: `candidate-${id}-${name}`,
         text: `→ ${name}  ${edgeMark(edge)}`,
         isDim: edge.verdict === 'refuted',
       }
@@ -330,13 +384,13 @@ const paneLines = (
   if (view?.path) head.push({ key: 'path', text: view.path, isDim: true })
   if (list.length === 0) head.push({ key: 'empty', text: EMPTY, isDim: true })
 
-  const known = new Set(list.flatMap(group => (group.field ? [fieldLabel(group.field)] : [])))
+  const known = new Set(list.flatMap(group => groupPattern(group)?.id ?? []))
   const at = new Map(
     list.flatMap(group => group.sites.map(one => [siteId(one.site), one.location] as const)),
   )
   const blocks = [
     ...list.map(group => groupLines(group, edges)),
-    ...orphanFieldBlocks(edges, known),
+    ...orphanPatternBlocks(edges, known),
     siteBlock(edges, at),
   ].filter(block => block.length > 0)
 

@@ -25,7 +25,8 @@ dependence, do not start; completing a whole program is rarely the goal.
    indirect sites by the record field they dispatch through, with `field`
    (`ops@8`: record and byte offset), `field_name`, `signature`, `sites`, and
    `candidates`: functions stored into that field, each with its
-   `assignments` and whether `signature_matches`.
+   `assignments` and whether `signature_matches`. A site no field names is
+   grouped by its `slot` instead when one is traced (below).
 2. For each group, read the source of every assignment: `at` (with the
    assignment's `file` and `line`) shows what runs at that line; read the
    file itself for the source. Confirm the member is `field_name` and the
@@ -33,33 +34,43 @@ dependence, do not start; completing a whole program is rarely the goal.
    `uses` on a candidate lists every place its address is taken.
 3. Decide the targets. A candidate is not a target until you have read the
    assignment. `single_candidate` is a hint to check, not an answer.
-4. `record_edges` with `add` records (below): `via_field`, `to`, `confidence`
-   and `provenance`, quoting each assignment as `file:line: text`.
+4. `record_edges` with `add` records (below): `via_field` or `via_slot`, `to`,
+   `confidence` and `provenance`, quoting each assignment as
+   `file:line: text`.
 5. `list_overlay` to see the edges and the sites they cover, then
    `save_overlay`. Records stay in memory until it runs.
 6. Ask the question again with `include_overlay` on `reach`, `closure` or
    `slice`.
 
 The user can watch progress with `/overlay-view`, a read-only pane of each
-unresolved field, its candidates and the edges recorded so far.
+unresolved field or slot, its candidates and the edges recorded so far.
 
-## Two kinds of group
+## Three kinds of group
 
-`resolution_candidates` returns groups of two shapes, and `field` tells them
-apart. They call for opposite discipline.
+`resolution_candidates` returns groups of three shapes, told apart by `field`
+and `slot`. The first two record once for every site; the third never does.
 
 - A group with a `field` (`ops@8`: record and offset) dispatches every site
   through that one member, and `candidates` are the functions stored into it.
   Record once with `via_field`: the edge covers every unresolved site through
   the field, and a `single_candidate` field whose signature matches is the
   `high`-confidence case.
-- A group with no `field` was not traced to a member, so `candidates` are
-  every function of that `signature` in the program: a cross-product, not a
-  call set. Recording them onto the group's sites manufactures false edges.
+- A group with a `slot` reads every site's callee from one location: a
+  `global`, a function's `param`, or the location an accessor `returned` the
+  address of. `candidates` are the functions found flowing into it, through
+  stores, arguments and accessors, each with the `assignments` that put it
+  there. Read those assignments as for a field, then record once with
+  `via_slot`, copying the group's `slot` verbatim. A path the facts do not
+  follow (`memcpy`, pointer arithmetic, a function pointer a call returns) can
+  add targets the list lacks, and an empty list means only that nothing in the
+  captured program assigns the slot.
+- A group with neither was not traced to a member or a slot, so `candidates`
+  are every function of that `signature` in the program: a cross-product, not
+  a call set. Recording them onto the group's sites manufactures false edges.
   Do not bulk-record it. Resolve one site at a time -- read which container
-  instance reaches the site, confirm the function it was initialized with,
-  and record a single `site` edge with that assignment as provenance. The
-  more sites and candidates such a group has, the more a blanket recording
+  instance reaches the site, confirm the function it was initialized with, and
+  record a single `site` edge with that assignment as provenance. The more
+  sites and candidates such a group has, the more a blanket recording
   misleads: treat its candidates as leads to check, never as targets.
 
 ## Confidence
@@ -74,9 +85,9 @@ apart. They call for opposite discipline.
 
 ## Disciplines
 
-- Patterns, not sites: when a group has a `field`, record with `via_field` so
-  the edge covers every unresolved site through that field. Use `site` only
-  for a site with no field.
+- Patterns, not sites: when a group has a `field` or a `slot`, record with
+  `via_field` or `via_slot` so the edge covers every unresolved site through
+  it. Use `site` only for a site with neither.
 - Never record without provenance. It is required, and it is what a reader
   checks.
 - Never call an agent edge proven. When reporting a path that uses one, say
@@ -130,7 +141,8 @@ A `confirmed` verdict from `reread` is still your judgment, not proof.
 them as JSON lines on stdin.
 
 The `edge` of a `verify` or `retract` is the `key` object of an edge in
-`list_overlay`, either `{via_field, to}` or `{site, to}`; copy it verbatim.
+`list_overlay`, one of `{via_field, to}`, `{via_slot, to}` or `{site, to}`;
+copy it verbatim.
 
 ```json
 {"op":"add","via_field":{"record":"ops","offset":8},"to":"handler","confidence":"high","provenance":["ops.c:8: o->cb = handler"]}
