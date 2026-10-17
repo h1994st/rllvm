@@ -141,7 +141,7 @@ impl EdgeKey {
 }
 
 /// `symbol [module]`: both halves of a function's identity.
-fn function_label(id: &FunctionId) -> String {
+pub(crate) fn function_label(id: &FunctionId) -> String {
     format!("{} [{}]", id.symbol, id.module_id)
 }
 

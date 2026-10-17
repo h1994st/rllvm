@@ -10,9 +10,9 @@ use std::collections::{BTreeMap, HashSet};
 use owo_colors::OwoColorize;
 
 use crate::{
-    EdgeKey, PathStep, QueryResult, QueryResults,
+    EdgeKey, GuardSite, PathStep, QueryResult, QueryResults,
     bind::BindingStatus,
-    facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, Slot, SourceLocation},
+    facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, GuardKind, Slot, SourceLocation},
     overlay::verdict_label,
 };
 
@@ -132,6 +132,27 @@ fn paint(text: &str, color: Color, style: Paint) -> String {
         Paint::Uncertain => format!("{}", text.yellow()),
         Paint::Absent => format!("{}", text.red()),
         Paint::Muted => format!("{}", text.dimmed()),
+    }
+}
+
+/// A guard's bound as the text shows it: a mask in hex, since its bits are
+/// what it keeps; any other bound as the answer gives it, already unsigned
+/// for an unsigned operation.
+fn guard_bound(guard: &GuardSite) -> Option<String> {
+    let bound = guard.bound.as_deref()?;
+    Some(match (guard.op, bound.parse::<u128>()) {
+        (GuardKind::Mask, Ok(value)) => format!("{value:#x}"),
+        _ => bound.to_string(),
+    })
+}
+
+/// How far up the chain the anchored value is computed from a guard's value
+/// lies, as the text says it.
+fn guard_depth(depth: u32) -> String {
+    match depth {
+        0 => "on the anchor".to_string(),
+        1 => "1 step upstream".to_string(),
+        n => format!("{n} steps upstream"),
     }
 }
 
@@ -407,6 +428,9 @@ fn shown_in(results: &QueryResults) -> Shown {
             // Every group is made of unresolved indirect call sites.
             shown.indirect_call_site = !groups.is_empty();
         }
+        QueryResults::Guards(result) => {
+            shown.missing_location = result.guards.iter().any(|guard| guard.location.is_none());
+        }
         // Neither prints a location nor a call site: `closure` prints bare
         // names, `externals` a symbol and its binding status.
         QueryResults::Closure(_) | QueryResults::Externals(_) => {}
@@ -435,6 +459,9 @@ fn walks_call_edges(results: &QueryResults) -> bool {
         | QueryResults::Closure(_)
         | QueryResults::Reach(_)
         | QueryResults::Slice(_) => true,
+        // A parameter's crossings come from the traced function's callers,
+        // which an unresolved indirect site can hide as it hides a caller.
+        QueryResults::Guards(_) => true,
         QueryResults::Defs(_)
         | QueryResults::At(_)
         | QueryResults::Callees(_)
@@ -468,6 +495,9 @@ fn empty_meaning(results: &QueryResults) -> &'static str {
         }
         QueryResults::ResolutionCandidates(_) => {
             "no unresolved indirect call site in the selected scope"
+        }
+        QueryResults::Guards(_) => {
+            "no guard was found on the traced value; not a claim that it is unbounded"
         }
         // Accurate for `Defs`, `At` and `IndirectTargets`: each takes a name
         // or a location and an empty result there really does mean nothing
@@ -839,6 +869,37 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                     location(entry.location.as_ref(), ctx),
                     name(symbols, &entry.function.symbol, ctx)
                 ));
+            }
+        }
+        QueryResults::Guards(result) => {
+            for guard in &result.guards {
+                out.push_str(&format!(
+                    "{}  {}{}{} ({}, {})\n",
+                    location(guard.location.as_ref(), ctx),
+                    serde_name(&guard.op),
+                    guard
+                        .predicate
+                        .as_ref()
+                        .map_or(String::new(), |p| format!(" {p}")),
+                    guard_bound(guard).map_or(String::new(), |b| format!(" {b}")),
+                    serde_name(&guard.relation),
+                    guard_depth(guard.depth)
+                ));
+            }
+            for crossing in &result.crossings {
+                out.push_str(&format!(
+                    "crossing {} {} {}  via a call in {}\n",
+                    serde_name(&crossing.direction),
+                    name(symbols, &crossing.function.symbol, ctx),
+                    crossing.position,
+                    name(symbols, &crossing.site.function.symbol, ctx)
+                ));
+            }
+            if let Some(lost) = &result.lost {
+                out.push_str(&format!("trace lost: {lost}\n"));
+            }
+            for diagnostic in &result.diagnostics {
+                out.push_str(&format!("LLVM reported: {diagnostic}\n"));
             }
         }
         QueryResults::Closure(functions) => {
@@ -2220,5 +2281,74 @@ mod tests {
         assert_eq!(human_bytes(GIB - 1), "1024.0 MB");
         assert_eq!(human_bytes(GIB), "1.0 GB");
         assert_eq!(human_bytes(1_363_148_800), "1.3 GB");
+    }
+
+    fn guard(
+        op: GuardKind,
+        predicate: Option<&str>,
+        bound: &str,
+        relation: crate::GuardRelation,
+        depth: u32,
+    ) -> GuardSite {
+        GuardSite {
+            op,
+            predicate: predicate.map(str::to_string),
+            bound: Some(bound.to_string()),
+            location: None,
+            relation,
+            depth,
+        }
+    }
+
+    #[test]
+    fn guards_print_snake_case_names_hex_masks_depths_and_crossings() {
+        use crate::{CrossingDir, GuardRelation::*, GuardsResult};
+        let session = session_from(&[("a", "b")]);
+        let mut answer = run(&session, &Query::Externals).unwrap();
+        let site = crate::CallSiteId {
+            function: FunctionId {
+                module_id: "m".into(),
+                symbol: "a".into(),
+            },
+            block_index: 0,
+            instruction_index: 0,
+        };
+        answer.results = QueryResults::Guards(GuardsResult {
+            guards: vec![
+                guard(GuardKind::Compare, Some("ult"), "2147483648", Dominates, 0),
+                guard(GuardKind::Mask, None, "4294967280", OnPath, 1),
+                guard(GuardKind::Compare, Some("slt"), "-16", Defines, 2),
+                guard(GuardKind::Mask, None, "-1", Defines, 0),
+            ],
+            crossings: vec![crate::Crossing {
+                site: site.clone(),
+                direction: CrossingDir::Into,
+                function: FunctionId {
+                    module_id: "m".into(),
+                    symbol: "b".into(),
+                },
+                position: "parameter 0".into(),
+            }],
+            ..GuardsResult::default()
+        });
+        let text = render(&answer, TextMode::Full, Color::Never);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "<no location>  compare ult 2147483648 (dominates, on the anchor)"
+        );
+        assert_eq!(
+            lines[1],
+            "<no location>  mask 0xfffffff0 (on_path, 1 step upstream)"
+        );
+        assert_eq!(
+            lines[2],
+            "<no location>  compare slt -16 (defines, 2 steps upstream)"
+        );
+        assert_eq!(
+            lines[3], "<no location>  mask -1 (defines, on the anchor)",
+            "a bound read signed, for want of a width, stays as the IR spells it"
+        );
+        assert_eq!(lines[4], "crossing into b parameter 0  via a call in a");
     }
 }

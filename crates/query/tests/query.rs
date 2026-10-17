@@ -4448,3 +4448,225 @@ fn the_overlay_cli_records_lists_and_compacts() {
         "{written}"
     );
 }
+
+const GUARDED_CALLS: &str = "extern unsigned a(unsigned);\n\
+     extern void b(unsigned);\n\
+     void f(unsigned n) {\n\
+       if (n > 15) return;\n\
+       b(a(n));\n\
+     }\n";
+
+fn guards_failure(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(catalog)
+        .arg("guards")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "guards {args:?} should fail");
+    String::from_utf8(output.stderr).unwrap()
+}
+
+#[test]
+fn the_guards_flags_name_a_call_site_argument_and_print_snake_case() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "g.c", GUARDED_CALLS);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let line = |n: u32| format!("{}:{n}", scratch.path().join("g.c").display());
+
+    // Line 5 holds two calls: the id of either is the way to name one.
+    let error = guards_failure(&scratch, &catalog, &["--at", &line(5), "--operand", "0"]);
+    assert!(
+        error.contains("holds 2 call sites")
+            && error.contains("a in f")
+            && error.contains("b in f"),
+        "{error}"
+    );
+    let id = error
+        .split("a in f")
+        .nth(1)
+        .and_then(|rest| rest.split("=> ").nth(1))
+        .and_then(|rest| rest.split(';').next())
+        .map(str::trim)
+        .unwrap()
+        .to_string();
+
+    let json = query_json(
+        &scratch,
+        &catalog,
+        &["guards", "--at", &id, "--operand", "0"],
+    );
+    let guards = json["results"]["guards"].as_array().unwrap();
+    assert!(
+        guards.iter().any(|guard| guard["op"] == "compare"),
+        "{json}"
+    );
+
+    let text = query_text(
+        &scratch,
+        &catalog,
+        &["--full", "guards", "--at", &id, "--operand", "0"],
+    );
+    assert!(
+        text.contains("compare") && !text.contains("Compare") && !text.contains("Dominates"),
+        "{text}"
+    );
+    assert!(
+        text.contains("(dominates, ") || text.contains("(on_path, "),
+        "{text}"
+    );
+
+    let error = guards_failure(&scratch, &catalog, &["--at", &line(5)]);
+    assert!(error.contains("needs --operand"), "{error}");
+    let error = guards_failure(&scratch, &catalog, &["--function", "f"]);
+    assert!(error.contains("needs --local"), "{error}");
+}
+
+/// The IR prints the mask `0xfffffff0` as `-16` and the bound `0x80000000`
+/// as `-2147483648`.
+const UNSIGNED_GUARDS_SOURCE: &str = "extern void sink(unsigned);\n\
+     void f(unsigned len) {\n\
+       if (len < 0x80000000u)\n\
+         sink(len & 0xfffffff0u);\n\
+     }\n";
+
+#[test]
+fn guards_read_unsigned_bounds_unsigned_and_print_masks_in_hex() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "u.c", UNSIGNED_GUARDS_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let at = format!("{}:4", scratch.path().join("u.c").display());
+    let args = ["guards", "--at", at.as_str(), "--operand", "0"];
+
+    let json = query_json(&scratch, &catalog, &args);
+    let bounds: Vec<(&str, &str, u64)> = json["results"]["guards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|guard| {
+            (
+                guard["op"].as_str().unwrap(),
+                guard["bound"].as_str().unwrap(),
+                guard["depth"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        bounds,
+        [("compare", "2147483648", 1), ("mask", "4294967280", 0)],
+        "{json}"
+    );
+
+    let text = query_text(&scratch, &catalog, &args);
+    assert!(
+        text.contains("compare ult 2147483648 (dominates, 1 step upstream)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("mask 0xfffffff0 (defines, on the anchor)"),
+        "{text}"
+    );
+}
+
+const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\
+     void callee(unsigned n) {\n\
+       if (n > 15) return;\n\
+       sink(n);\n\
+     }\n\
+     void caller(void) { callee(3); }\n\
+     void unrelated(void) {}\n";
+
+#[test]
+fn guards_emits_its_promoted_slice_module() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "g.c", GUARDS_SLICE_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let out = scratch.path().join("guards.bc");
+    let answer = query_json(
+        &scratch,
+        &catalog,
+        &[
+            "guards",
+            "--function",
+            "callee",
+            "--local",
+            "n",
+            "--emit-module",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(answer["emitted"]["functions"], 2, "{answer}");
+    assert_eq!(
+        defined_symbols(&out),
+        BTreeSet::from(["callee".to_string(), "caller".to_string()]),
+        "the anchor's function and its caller, and not `unrelated`"
+    );
+    let listing = Command::new(llvm_bin("llvm-dis"))
+        .arg(&out)
+        .arg("-o")
+        .arg("-")
+        .output()
+        .unwrap();
+    assert!(listing.status.success());
+    assert!(
+        !String::from_utf8_lossy(&listing.stdout).contains("alloca"),
+        "the emitted module is mem2reg-promoted"
+    );
+
+    // Written with the mode `slice --emit-module` gives its module, not a
+    // temporary file's owner-only one.
+    use std::os::unix::fs::PermissionsExt;
+    let slice_out = scratch.path().join("slice.bc");
+    query_json(
+        &scratch,
+        &catalog,
+        &[
+            "slice",
+            "caller",
+            "callee",
+            "--emit-module",
+            slice_out.to_str().unwrap(),
+        ],
+    );
+    let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&out), mode(&slice_out));
+}
+
+#[test]
+fn guards_emits_only_the_callers_of_its_own_anchor_function() {
+    let scratch = tempfile::tempdir().unwrap();
+    let a = compile_bitcode(
+        &scratch,
+        "a.c",
+        "extern void sink(unsigned);\nvoid f(unsigned n) { sink(n); }\nvoid caller_a(void) { f(3); }\n",
+    );
+    // Another module's own `static f`, called by `caller_b`: not this `f`.
+    let b = compile_bitcode(
+        &scratch,
+        "b.c",
+        "extern void sink(unsigned);\nstatic void f(unsigned n) { sink(n); }\nvoid caller_b(void) { f(1); }\n",
+    );
+    let catalog = plain_module_catalog(&scratch, &[a, b]);
+    let out = scratch.path().join("guards.bc");
+    let at = format!("{}:2", scratch.path().join("a.c").display());
+    query_json(
+        &scratch,
+        &catalog,
+        &[
+            "guards",
+            "--at",
+            &at,
+            "--operand",
+            "0",
+            "--emit-module",
+            out.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        defined_symbols(&out),
+        BTreeSet::from(["f".to_string(), "caller_a".to_string()]),
+        "`caller_b` calls B's own static `f`"
+    );
+}

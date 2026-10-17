@@ -110,13 +110,13 @@ pub enum ClosureDirection {
     Out,
 }
 
-/// The twelve source-level queries `rllvm-query` answers, plus `Mcp` to serve
+/// The thirteen source-level queries `rllvm-query` answers, plus `Mcp` to serve
 /// them over MCP stdio instead of running one and exiting, `Completions` to
 /// print a shell completion script, `Cache` to inspect or prune the
 /// per-module facts cache, and `Overlay` to keep agent-authored call-graph
 /// edges.
 ///
-/// The twelve query variants mirror [`crate::Query`] field-for-field, for the
+/// The thirteen query variants mirror [`crate::Query`] field-for-field, for the
 /// same reason [`ClosureDirection`] mirrors [`crate::Direction`]. The binary
 /// converts a parsed variant into a [`crate::Query`] before running it;
 /// `Mcp`, `Completions`, `Cache` and `Overlay` have no counterpart there --
@@ -195,7 +195,33 @@ pub enum QueryCommand {
     },
     /// Unresolved indirect call sites grouped by the field, global, parameter or accessor they call through, with the functions whose addresses flow there. Candidates, not edges.
     ResolutionCandidates,
-    /// Serve the twelve queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
+    /// The comparisons, clamps, masks and moduli that constrain a value. Evidence, not a verdict: no guard found is not "unbounded".
+    ///
+    /// Name the value by a call site (`--at t.c:40` with `--operand N` for an argument or `--return` for the result) or by a named local (`--function f --local n`, needs `-g`).
+    Guards {
+        /// Call site: `file:line`, or a call site id as JSON when a line holds several calls
+        #[arg(long, value_name = "FILE:LINE")]
+        at: Option<String>,
+        /// Trace argument N (zero-based) of the call given by `--at`
+        #[arg(long, value_name = "N")]
+        operand: Option<usize>,
+        /// Trace the result of the call given by `--at`
+        #[arg(long = "return")]
+        ret: bool,
+        /// Function holding the local given by `--local`
+        #[arg(long)]
+        function: Option<String>,
+        /// Source variable to trace in `--function`
+        #[arg(long)]
+        local: Option<String>,
+        /// Bound a parameter's callers to those on a path from this function
+        #[arg(long)]
+        from: Option<String>,
+        /// Write the promoted slice module here
+        #[arg(long, value_name = "OUT.bc")]
+        emit_module: Option<PathBuf>,
+    },
+    /// Serve the thirteen queries over MCP stdio: JSON-RPC 2.0, newline-delimited.
     Mcp,
     /// Print a shell completion script for `rllvm-query`
     ///

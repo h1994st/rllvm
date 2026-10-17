@@ -4,9 +4,15 @@
 //! test modules cannot import each other's `#[cfg(test)] mod tests` and more
 //! than one submodule's tests build on these fixtures.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
+use rllvm_core::{
+    catalog::{
+        CatalogOrigin, CatalogScope, ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes,
+        write_catalog,
+    },
+    config::LlvmBindir,
+};
 
 use crate::{
     bind::{BindingCandidate, BindingStatus, SymbolBinding},
@@ -193,6 +199,83 @@ pub(crate) fn facts(functions: Vec<FunctionFact>, call_sites: Vec<CallSiteFact>)
         },
         modules: Vec::new(),
     }
+}
+
+/// A catalog of module `m`: `source`, written to `scratch` as `file_name`
+/// and compiled with `flags`. Opened as a session whose LLVM bindir is the
+/// configured toolchain's, so it can promote the module.
+pub(crate) fn compiled_session(
+    scratch: &Path,
+    file_name: &str,
+    source: &str,
+    flags: &[&str],
+) -> Session {
+    let source_path = scratch.join(file_name);
+    std::fs::write(&source_path, source).unwrap();
+    let module = rllvm_testkit::compile_bitcode_file(&source_path, flags);
+    module_session(scratch, &module)
+}
+
+/// A module whose debug info is from an unsupported version, which LLVM
+/// strips with a warning when it reads it. `f` passes its parameter to
+/// `sink`.
+const STALE_DEBUG_INFO_IR: &str = r#"
+declare void @sink(i32)
+
+define void @f(i32 %x) !dbg !5 {
+  call void @sink(i32 %x), !dbg !8
+  ret void, !dbg !8
+}
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!3}
+!0 = distinct !DICompileUnit(language: DW_LANG_C99, file: !1, producer: "clang", emissionKind: FullDebug)
+!1 = !DIFile(filename: "t.c", directory: "/tmp")
+!3 = !{i32 2, !"Debug Info Version", i32 2}
+!5 = distinct !DISubprogram(name: "f", scope: !1, file: !1, line: 1, type: !9, unit: !0, spFlags: DISPFlagDefinition)
+!8 = !DILocation(line: 1, column: 1, scope: !5)
+!9 = !DISubroutineType(types: !{})
+"#;
+
+/// [`STALE_DEBUG_INFO_IR`] assembled into `scratch`, its debug info kept:
+/// `llvm-as` would strip it as LLVM's reader does.
+pub(crate) fn stale_debug_info_module(scratch: &Path) -> PathBuf {
+    let source = scratch.join("stale.ll");
+    std::fs::write(&source, STALE_DEBUG_INFO_IR).unwrap();
+    let module = scratch.join("stale.bc");
+    let status = std::process::Command::new(rllvm_testkit::llvm_bin("llvm-as"))
+        .arg("-disable-auto-upgrade-debug-info")
+        .arg(&source)
+        .arg("-o")
+        .arg(&module)
+        .status()
+        .unwrap();
+    assert!(status.success(), "llvm-as failed on {}", source.display());
+    module
+}
+
+/// A catalog of the one bitcode file `module`, which lies in `scratch`, as
+/// module `m`. Opened as [`compiled_session`] opens its own.
+pub(crate) fn module_session(scratch: &Path, module: &Path) -> Session {
+    let mut record = ModuleRecord::new("m");
+    record.path = Some(module.file_name().unwrap().into());
+    record.content_sha256 = Some(hash_bytes(&std::fs::read(module).unwrap()));
+    record.status = ModuleStatus::Available;
+    let catalog = ModuleCatalog::new(
+        CatalogOrigin {
+            kind: "test".into(),
+            input: PathBuf::from("test"),
+            sha256: None,
+        },
+        "test",
+        vec![record],
+    );
+    let path = scratch.join("catalog.json");
+    write_catalog(&path, &catalog).unwrap();
+    let mut session = crate::open(&path).unwrap();
+    let opt = rllvm_testkit::llvm_bin("opt");
+    session.set_llvm_bindir(Ok(LlvmBindir::configured(opt.parent().unwrap())));
+    session
 }
 
 /// One module, one edge per pair.

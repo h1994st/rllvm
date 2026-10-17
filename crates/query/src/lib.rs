@@ -52,6 +52,8 @@ pub use extract::{ModuleFacts, llvm_version};
 pub mod facts;
 pub use facts::*;
 
+pub(crate) mod ir;
+
 pub mod load;
 
 pub mod bind;
@@ -78,6 +80,12 @@ pub struct CacheReport {
     pub over_threshold: bool,
 }
 
+pub mod guards;
+pub use guards::{
+    AnchorParts, AnchorSurface, Crossing, CrossingDir, GuardAnchor, GuardRelation, GuardSite,
+    GuardsResult, anchor_from_parts, check_anchor_parts, emit_guards_module, guards,
+};
+
 pub mod index;
 pub use index::{
     Direction, NameMatch, NameResolution, PathStep, ReachResult, Session, SliceEdge, SliceResult,
@@ -100,7 +108,7 @@ pub use slice::{EmittedModule, emit_module, emit_slice};
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// One of the twelve source-level queries. Serializes with a `kind` tag, e.g.
+/// One of the thirteen source-level queries. Serializes with a `kind` tag, e.g.
 /// `{"kind": "callers", "name": "parse_frame"}`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -171,6 +179,19 @@ pub enum Query {
     /// callee from, with the functions whose addresses flow there. A join of
     /// facts: candidates, never edges.
     ResolutionCandidates,
+    /// The comparisons, clamps, masks and moduli that constrain a value: a
+    /// call argument, a call result, or a named local. Evidence, never a
+    /// verdict: no guard found is an empty list, not "unbounded".
+    Guards {
+        anchor: GuardAnchor,
+        /// Bounds the crossings into a parameter to the callers on a path
+        /// from this function, which must name exactly one definition. The
+        /// trace itself never leaves the anchor's function.
+        from: Option<String>,
+        /// Write the traced slice as a module here.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        emit_module: Option<PathBuf>,
+    },
 }
 
 /// One definition of a queried symbol.
@@ -289,6 +310,7 @@ pub enum QueryResults {
     FfiExports(Vec<DefEntry>),
     IndirectTargets(Vec<IndirectTargetsResult>),
     ResolutionCandidates(Vec<CandidateGroup>),
+    Guards(GuardsResult),
 }
 
 impl QueryResults {
@@ -309,6 +331,7 @@ impl QueryResults {
             QueryResults::FfiExports(items) => items.is_empty(),
             QueryResults::IndirectTargets(items) => items.is_empty(),
             QueryResults::ResolutionCandidates(items) => items.is_empty(),
+            QueryResults::Guards(result) => result.is_empty(),
         }
     }
 }
@@ -376,6 +399,14 @@ pub struct Uncertainty {
     /// Present only when the query included the overlay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<OverlayCoverage>,
+    /// `guards` only: why the value trace stopped early, when it did. The
+    /// guards found before it stopped are still in the results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value_trace_lost: Option<String>,
+    /// `guards` only: what LLVM reported while reading the anchor module.
+    /// Not a lost trace: kept apart so harmless output never reads as one.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub value_trace_diagnostics: Vec<String>,
     /// `ffi-exports` only: external definitions whose symbol is fully
     /// unmangled but whose language neither debug info nor the producer
     /// could establish. They might be exports and were not searched.
@@ -461,7 +492,7 @@ pub fn open(catalog: &Path) -> Result<Session, Error> {
 /// on a miss. Every module is bound to this catalog's ids and source status
 /// the same way regardless of which path produced its facts.
 pub fn open_with_cache(catalog: &Path, cache: Option<&FactsCache>) -> Result<Session, Error> {
-    session_from_loaded(load::load_catalog(catalog)?, cache)
+    Ok(session_from_loaded(load::load_catalog(catalog)?, cache)?.with_catalog_path(catalog))
 }
 
 /// [`open`] for a catalog already in memory, resolving its relative module
@@ -649,6 +680,8 @@ pub fn run_with_overlay(
     let mut agent_path_steps = 0;
     let mut agent_reached = Vec::new();
     let mut unknown_language = None;
+    let mut value_trace_lost = None;
+    let mut value_trace_diagnostics = Vec::new();
 
     let results = match query {
         Query::Defs { name } => QueryResults::Defs(defs(session, name)),
@@ -695,6 +728,12 @@ pub fn run_with_overlay(
         Query::ResolutionCandidates => {
             QueryResults::ResolutionCandidates(resolution_candidates(session))
         }
+        Query::Guards { anchor, from, .. } => {
+            let result = guards(session, anchor, from.as_deref())?;
+            value_trace_lost = result.lost.clone();
+            value_trace_diagnostics = result.diagnostics.clone();
+            QueryResults::Guards(result)
+        }
     };
 
     // Reach reports exactly the ambiguous bindings its own walk hit, which
@@ -723,6 +762,8 @@ pub fn run_with_overlay(
             agent_reached,
             overlay: view.map(|view| view.coverage().clone()),
             functions_of_unknown_language: unknown_language,
+            value_trace_lost,
+            value_trace_diagnostics,
             ..uncertainty_of(session, frontier, conditional_path_steps)
         },
         provenance: Provenance {
@@ -854,6 +895,21 @@ impl QueryResults {
                             }
                         }
                     }
+                }
+            }
+            QueryResults::Guards(result) => {
+                match &result.anchor {
+                    Some(GuardAnchor::Argument { site, .. } | GuardAnchor::Return { site }) => {
+                        collect_function(&site.function, into);
+                    }
+                    Some(GuardAnchor::Local { function, .. }) => {
+                        into.insert(function.clone());
+                    }
+                    None => {}
+                }
+                for crossing in &result.crossings {
+                    collect_function(&crossing.site.function, into);
+                    collect_function(&crossing.function, into);
                 }
             }
             QueryResults::IndirectTargets(entries) => {
@@ -1367,6 +1423,13 @@ impl Query {
             | Query::Uses { name }
             | Query::Closure { name, .. } => vec![name],
             Query::Reach { from, to, .. } | Query::Slice { from, to, .. } => vec![from, to],
+            Query::Guards { anchor, from, .. } => {
+                let function = match anchor {
+                    GuardAnchor::Local { function, .. } => Some(function.as_str()),
+                    GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => None,
+                };
+                function.into_iter().chain(from.as_deref()).collect()
+            }
             // These take a location or nothing at all.
             Query::At { .. }
             | Query::Externals
@@ -1557,6 +1620,9 @@ fn uncertainty_of(
         // Overwritten by `run` for `Query::FfiExports`; every other query
         // leaves it absent.
         functions_of_unknown_language: None,
+        // Overwritten by `run` for `Query::Guards`; absent otherwise.
+        value_trace_lost: None,
+        value_trace_diagnostics: Vec::new(),
     }
 }
 
@@ -1568,6 +1634,136 @@ mod tests {
     };
 
     use crate::{facts::Language, load::load_catalog, testing::*};
+
+    #[test]
+    fn a_guards_query_returns_a_well_formed_envelope() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void b(unsigned);\nvoid a(unsigned n) { b(n); }\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| site.id.function.symbol == "a")
+            .unwrap()
+            .id
+            .clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: None,
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let QueryResults::Guards(result) = &answer.results else {
+            panic!("expected a guards answer, got {:?}", answer.results);
+        };
+        assert!(result.guards.is_empty() && result.crossings.is_empty());
+        assert!(result.lost.is_none(), "{result:?}");
+        let json = serde_json::to_value(&answer).unwrap();
+        for block in ["scope", "analysis", "uncertainty"] {
+            assert!(json.get(block).is_some(), "missing `{block}` block");
+        }
+    }
+
+    #[test]
+    fn a_lost_value_trace_reaches_uncertainty() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned len, char *p) {\n  unsigned n = len < 16 ? len : 16;\n  sink(n + (unsigned)(__UINTPTR_TYPE__)p);\n}\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| site.id.function.symbol == "f")
+            .unwrap()
+            .id
+            .clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: None,
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let QueryResults::Guards(result) = &answer.results else {
+            panic!("expected a guards answer, got {:?}", answer.results);
+        };
+        assert!(!result.guards.is_empty(), "partial guards are kept");
+        let lost = answer.uncertainty.value_trace_lost.as_deref();
+        assert!(lost.is_some_and(|l| l.contains("ptrtoint")), "{lost:?}");
+        assert_eq!(answer.uncertainty.agent_path_steps, 0);
+    }
+
+    #[test]
+    fn llvm_diagnostics_on_the_anchor_module_reach_uncertainty() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = stale_debug_info_module(scratch.path());
+        let session = module_session(scratch.path(), &module);
+        let site = session.call_sites()[0].id.clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: None,
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let diagnostics = &answer.uncertainty.value_trace_diagnostics;
+        assert!(
+            diagnostics.iter().any(|d| d.contains("invalid version")),
+            "{diagnostics:?}"
+        );
+        assert!(answer.uncertainty.value_trace_lost.is_none());
+    }
+
+    /// `from` is a name like any other, so the answer says how it matched.
+    #[test]
+    fn a_guards_from_is_reported_in_the_resolution() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) { sink(n); }\nvoid g(void) { f(3); }\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| site.id.function.symbol == "f")
+            .unwrap()
+            .id
+            .clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            from: Some("g".into()),
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let from = answer
+            .resolution
+            .iter()
+            .find(|resolution| resolution.requested == "g");
+        assert!(
+            from.is_some_and(|from| from.matched.is_some() && from.symbols == ["g"]),
+            "{:?}",
+            answer.resolution
+        );
+    }
+
+    #[test]
+    fn value_trace_fields_are_absent_from_other_answers() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(scratch.path(), "t.c", "void a(void) {}\n", &["-O0"]);
+        let answer = run(&session, &Query::Externals).unwrap();
+        assert!(answer.uncertainty.value_trace_lost.is_none());
+        assert!(answer.uncertainty.value_trace_diagnostics.is_empty());
+        let json = serde_json::to_value(&answer).unwrap();
+        assert!(json["uncertainty"].get("value_trace_lost").is_none());
+        assert!(json["uncertainty"].get("value_trace_diagnostics").is_none());
+    }
 
     #[test]
     fn a_module_is_analyzed_only_after_it_parses() {

@@ -1,4 +1,4 @@
-//! MCP stdio server: the twelve source-level queries as JSON-RPC 2.0 tools,
+//! MCP stdio server: the thirteen source-level queries as JSON-RPC 2.0 tools,
 //! newline-delimited over stdin/stdout, plus four that decide which catalogs
 //! they run against and four that keep a call-graph overlay beside each.
 //!
@@ -33,8 +33,8 @@
 //! The overlay tools change state, and two calls write files. Records an
 //! agent sends are held in memory, where `reach`, `closure` and `slice` can
 //! already walk them, and only `save_overlay` writes them to disk. The one
-//! other write is `slice` with `emit_module`, which writes the new module it
-//! names. The catalog is never written at all.
+//! other write is `slice` or `guards` with `emit_module`, which writes the new
+//! module it names. The catalog is never written at all.
 //!
 //! stdout carries protocol frames only, the same rule the compiler wrappers
 //! follow for their own stdout: every diagnostic belongs on stderr, and
@@ -59,9 +59,10 @@ use serde_json::{Value, json};
 use rllvm_core::{config::LlvmBindir, error::Error};
 
 use super::{
-    Confidence, Direction, FactsCache, Overlay, Query, Record, Session, analysis_of,
-    default_overlay_path, emit_slice, open_catalog_with_cache, open_with_cache,
-    overlay::fingerprint, run_with_overlay,
+    AnchorParts, AnchorSurface, Confidence, Direction, FactsCache, GuardAnchor, Overlay, Query,
+    Record, Session, analysis_of, anchor_from_parts, check_anchor_parts, default_overlay_path,
+    emit_guards_module, emit_slice, open_catalog_with_cache, open_with_cache, overlay::fingerprint,
+    run_with_overlay,
 };
 
 /// The modern protocol revision this server has been checked against.
@@ -88,6 +89,11 @@ const EMIT_NEEDS_CATALOG: &str = "`emit_module` reads the modules a catalog file
                                   artifact loaded by `inventory` has none: load its catalog \
                                   with `load_catalog` first";
 
+/// What `guards` answers for an `inventory` artifact.
+const GUARDS_NEEDS_CATALOG: &str = "`guards` reads the anchor's module through the catalog file \
+                                    that names it, and an artifact loaded by `inventory` has \
+                                    none: load its catalog with `load_catalog` first";
+
 /// The catalogs one MCP session has loaded, keyed by the canonical path they
 /// came from: the catalog JSON for `load_catalog`, the artifact itself for
 /// `inventory`. Loading the same path twice replaces its entry, which is
@@ -107,9 +113,9 @@ pub struct Registry {
     artifacts: BTreeSet<PathBuf>,
     /// The facts cache every load reads and fills; `None` when disabled.
     cache: Option<FactsCache>,
-    /// What `slice` needs to emit a module: the configured `llvm-link`, and
-    /// the LLVM bindir holding the other tools, or why it could not be
-    /// found, which is what an `emit_module` is then told.
+    /// The configured `llvm-link`, and the LLVM bindir holding the other
+    /// tools, or why it could not be found: what an `emit_module` and every
+    /// `guards` call, which runs `opt`, are then told.
     slice_tools: Option<(PathBuf, Result<LlvmBindir, String>)>,
 }
 
@@ -126,9 +132,10 @@ impl Registry {
         }
     }
 
-    /// This registry, emitting `slice` modules with `llvm_link` and the
-    /// `llvm-extract` and `llvm-nm` in `llvm_bindir`. A bindir that could not
-    /// be found fails only `emit_module`, with that error.
+    /// This registry, emitting modules with `llvm_link` and the
+    /// `llvm-extract` and `llvm-nm` in `llvm_bindir`, and promoting a
+    /// `guards` anchor's module with its `opt`. A bindir that could not be
+    /// found fails only `emit_module` and `guards`, with that error.
     pub fn with_llvm_tools(
         self,
         llvm_link: PathBuf,
@@ -179,7 +186,10 @@ impl Registry {
     /// to this build: after a rebuild its edges name call sites that may no
     /// longer exist, so it is dropped, and the answer says how many unsaved
     /// records went with it.
-    fn insert(&mut self, key: PathBuf, session: Session, artifact: bool) -> Value {
+    fn insert(&mut self, key: PathBuf, mut session: Session, artifact: bool) -> Value {
+        if let Some((_, llvm_bindir)) = &self.slice_tools {
+            session.set_llvm_bindir(llvm_bindir.clone());
+        }
         let mut summary = catalog_summary(&key, &session);
         let current = fingerprint(&session).ok();
         let stale = self
@@ -638,7 +648,7 @@ fn tools_list_result() -> Value {
 macro_rules! management_tool_surface {
     ($($variant:ident => $name:literal, $description:literal, $schema:expr;)+) => {
         /// A tool that decides which catalogs are loaded, or keeps the
-        /// overlay beside one, as opposed to the twelve that ask a question
+        /// overlay beside one, as opposed to the thirteen that ask a question
         /// of one.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum Management { $($variant),+ }
@@ -880,9 +890,10 @@ query_tool_surface! {
     Query::FfiExports => Query::FfiExports, "ffi_exports";
     Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
     Query::ResolutionCandidates => Query::ResolutionCandidates, "resolution_candidates";
+    Query::Guards { .. } => Query::Guards { anchor: GuardAnchor::Local { function: String::new(), name: String::new() }, from: None, emit_module: None }, "guards";
 }
 
-/// The `name` argument four of the twelve tools take, identically. Spelled
+/// The `name` argument four of the thirteen tools take, identically. Spelled
 /// once: four copies of one schema drift apart, and a client reads the
 /// drifted one as a real difference between the tools.
 fn symbol_property() -> Value {
@@ -940,8 +951,8 @@ fn symbol_tool(name: &str, description: &str) -> Value {
     })
 }
 
-/// Which loaded catalog a query or an overlay tool uses. Added to all twelve
-/// query schemas at one point below rather than written into each: twelve
+/// Which loaded catalog a query or an overlay tool uses. Added to all thirteen
+/// query schemas at one point below rather than written into each: thirteen
 /// copies of an optional argument drift, and a client reads the drift as a
 /// real difference.
 fn catalog_property() -> Value {
@@ -1063,6 +1074,23 @@ fn query_tool(query: &Query) -> Value {
             "description": "Unresolved indirect call sites grouped by the record field they dispatch through (`field`) or the global, parameter or accessor they read their callee from (`slot`), with the functions whose addresses flow there. Candidates, not edges.",
             "inputSchema": { "type": "object", "properties": {} }
         }),
+        Query::Guards { .. } => json!({
+            "name": name,
+            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `relation` `on_path` runs on some path to the use but not every one. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "at": { "type": "string", "description": "The call site: a `file:line` location, e.g. `t.c:4`, or a call site id as JSON (`{\"function\": ..., \"block_index\": ..., \"instruction_index\": ...}`) for a line that holds several calls. An ambiguous `file:line` is an error naming each candidate's id." },
+                    "operand": { "type": "integer", "minimum": 0, "description": "With `at`: the call's argument to trace, counting from 0" },
+                    "return": { "type": "boolean", "description": "With `at`: trace the call's result instead of an argument" },
+                    "function": { "type": "string", "description": "With `local`: the function that holds the variable" },
+                    "local": { "type": "string", "description": "With `function`: the source variable to trace" },
+                    "from": { "type": "string", "description": "Bound the crossings into a parameter to the callers on a path from this function, which must name exactly one definition. The trace still stays in the anchor's function: guards between `from` and it are not examined." },
+                    "emit_module": { "type": "string", "description": "Write the promoted slice a scoped re-read would use (from `from` to the anchor's function, else the function and its callers) to this .bc file, relative to the server's working directory; the answer gains `emitted`. Needs a catalog loaded by `load_catalog`." }
+                },
+                "required": []
+            }
+        }),
         Query::IndirectTargets { .. } => json!({
             "name": name,
             "description": "`!callees` at a call site, when CVP produced it; otherwise unresolved.",
@@ -1114,21 +1142,43 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
     let emit_module = match (&query, arguments.get("emit_module")) {
-        (Query::Slice { .. }, Some(value)) => match value.as_str() {
-            Some(path) => Some(PathBuf::from(path)),
-            None => {
-                let message = "non-string argument `emit_module`";
-                return Outcome::Result(call_tool_result(true, message), false);
+        (Query::Slice { .. } | Query::Guards { .. }, Some(value)) if !value.is_null() => {
+            match value.as_str() {
+                Some(path) => Some(PathBuf::from(path)),
+                None => {
+                    let message = "non-string argument `emit_module`";
+                    return Outcome::Result(call_tool_result(true, message), false);
+                }
             }
-        },
+        }
         _ => None,
     };
     let (key, session, overlay) = match registry.session(catalog_argument(&arguments)) {
         Ok(loaded) => loaded,
         Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
     };
+    let query = match query {
+        Query::Guards {
+            from, emit_module, ..
+        } => {
+            let anchor = guard_parts(&arguments)
+                .and_then(|parts| anchor_from_parts(session, &parts, AnchorSurface::Tool));
+            match anchor {
+                Ok(anchor) => Query::Guards {
+                    anchor,
+                    from,
+                    emit_module,
+                },
+                Err(message) => return Outcome::Result(call_tool_result(true, &message), false),
+            }
+        }
+        other => other,
+    };
     // Before the query runs: the modules are read through the catalog file,
     // which an artifact does not have.
+    if matches!(query, Query::Guards { .. }) && registry.artifacts.contains(&key) {
+        return Outcome::Result(call_tool_result(true, GUARDS_NEEDS_CATALOG), false);
+    }
     if emit_module.is_some() && registry.artifacts.contains(&key) {
         return Outcome::Result(call_tool_result(true, EMIT_NEEDS_CATALOG), false);
     }
@@ -1166,7 +1216,19 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
             Ok(llvm_bindir) => llvm_bindir,
             Err(message) => return Outcome::Result(call_tool_result(true, message), false),
         };
-        match emit_slice(session, &key, &result, llvm_link, llvm_bindir, &out) {
+        let emitted = match &query {
+            Query::Guards { anchor, from, .. } => emit_guards_module(
+                session,
+                &key,
+                anchor,
+                from.as_deref(),
+                llvm_link,
+                llvm_bindir,
+                &out,
+            ),
+            _ => emit_slice(session, &key, &result, llvm_link, llvm_bindir, &out),
+        };
+        match emitted {
             Ok(emitted) => payload["emitted"] = json!(emitted),
             Err(error) => {
                 return Outcome::Result(call_tool_result(true, &error.to_string()), false);
@@ -1174,6 +1236,44 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         }
     }
     Outcome::Result(call_tool_result(false, &payload.to_string()), false)
+}
+
+/// The string argument `key`, absent when missing or `null`; any other type
+/// is an error, never read as absent.
+fn optional_string(arguments: &Value, key: &str) -> Result<Option<String>, String> {
+    match arguments.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(_) => Err(format!("non-string argument `{key}`")),
+    }
+}
+
+/// The anchor parts a `guards` call names; the combination is checked by
+/// `check_anchor_parts` and resolved by `anchor_from_parts`, as on the CLI.
+fn guard_parts(arguments: &Value) -> Result<AnchorParts, String> {
+    let text = |key: &str| optional_string(arguments, key);
+    let operand = match arguments.get("operand") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|operand| usize::try_from(operand).ok())
+                .ok_or_else(|| "invalid argument `operand`".to_string())?,
+        ),
+    };
+    let ret = match arguments.get("return") {
+        None | Some(Value::Null) => false,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| "non-boolean argument `return`".to_string())?,
+    };
+    Ok(AnchorParts {
+        at: text("at")?,
+        operand,
+        ret,
+        function: text("function")?,
+        local: text("local")?,
+    })
 }
 
 fn call_tool_result(is_error: bool, text: &str) -> Value {
@@ -1260,6 +1360,19 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                 .unwrap_or(false),
         }),
         "resolution_candidates" => Ok(Query::ResolutionCandidates),
+        "guards" => {
+            check_anchor_parts(&guard_parts(arguments)?, AnchorSurface::Tool)?;
+            // The call site an `at` names needs a catalog; `tool_call_outcome`
+            // resolves the anchor once the session is loaded.
+            Ok(Query::Guards {
+                anchor: GuardAnchor::Local {
+                    function: String::new(),
+                    name: String::new(),
+                },
+                from: optional_string(arguments, "from")?,
+                emit_module: None,
+            })
+        }
         other => Err(format!("unknown tool `{other}`")),
     }
 }
@@ -1303,6 +1416,7 @@ mod tests {
             Query::FfiExports => json!({}),
             Query::IndirectTargets { .. } => json!({ "at": "t.c:4" }),
             Query::ResolutionCandidates => json!({}),
+            Query::Guards { .. } => json!({ "function": "a", "local": "x" }),
         }
     }
 
@@ -1330,6 +1444,147 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .to_string()
+    }
+
+    #[test]
+    fn the_guards_tool_is_listed_with_every_anchor_part_optional() {
+        let tools = tools_list_result()["tools"].as_array().unwrap().clone();
+        let tool = tools.iter().find(|tool| tool["name"] == "guards").unwrap();
+        let schema = &tool["inputSchema"];
+        for part in [
+            "at",
+            "operand",
+            "return",
+            "function",
+            "local",
+            "from",
+            "emit_module",
+        ] {
+            assert!(schema["properties"].get(part).is_some(), "{part}");
+        }
+        assert_eq!(schema["required"], json!([]));
+        let at = schema["properties"]["at"]["description"].as_str().unwrap();
+        assert!(
+            at.contains("file:line") && at.contains("block_index"),
+            "{at}"
+        );
+    }
+
+    #[test]
+    fn guards_arguments_that_name_no_value_are_tool_errors() {
+        let mut registry = one_catalog();
+        for (arguments, fragment) in [
+            (json!({}), "name a value"),
+            (json!({ "at": "t.c:4" }), "`at` needs `operand`"),
+            (
+                json!({ "at": "t.c:4", "operand": 0, "return": true }),
+                "give one",
+            ),
+            (json!({ "function": "f" }), "`function` needs `local`"),
+            (json!({ "at": "t.c:4", "operand": -1 }), "operand"),
+            (json!({ "at": 4, "operand": 0 }), "`at`"),
+        ] {
+            let text = tool_error(&mut registry, "guards", arguments);
+            assert!(text.contains(fragment), "{fragment}: {text}");
+        }
+        // A well-formed combination reaches the resolver, which reads the catalog.
+        let text = tool_error(
+            &mut registry,
+            "guards",
+            json!({ "at": "t.c:4", "operand": 0 }),
+        );
+        assert!(text.contains("no call site at t.c:4"), "{text}");
+    }
+
+    #[test]
+    fn an_ambiguous_guards_line_names_the_candidates_and_an_id_resolves_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern unsigned a(unsigned);\nextern void b(unsigned);\nvoid f(unsigned n) {\n  b(a(n));\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        let at = format!("{}:4", scratch.path().join("t.c").display());
+        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
+        assert!(
+            text.contains("holds 2 call sites") && text.contains("a in f"),
+            "{text}"
+        );
+        let id = text.split("=> ").nth(1).unwrap().split(';').next().unwrap();
+        // The id is accepted as an anchor: the call is answered.
+        let answered = answer(&mut registry, "guards", json!({ "at": id, "return": true }));
+        assert_eq!(answered["results"]["anchor"]["kind"], "return");
+    }
+
+    #[test]
+    fn a_guards_call_answers_with_its_anchor_and_guard() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  if (n < 8)\n    sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        let at = format!("{}:4", scratch.path().join("t.c").display());
+        let result = call(
+            &mut registry,
+            "guards",
+            json!({ "at": at, "operand": 0, "emit_module": null }),
+        );
+        assert_eq!(result["isError"], false, "{result}");
+        let payload: Value =
+            serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+        let found = &payload["results"];
+        assert_eq!(found["anchor"]["kind"], "argument", "{payload}");
+        assert_eq!(found["anchor"]["operand"], 0, "{payload}");
+        assert_eq!(
+            found["anchor"]["site"]["function"]["symbol"], "f",
+            "{payload}"
+        );
+        let guards = found["guards"].as_array().unwrap();
+        assert!(
+            guards.iter().any(|guard| guard["bound"] == "8"),
+            "{payload}"
+        );
+    }
+
+    /// A `from` that is not a name would otherwise be dropped, turning a
+    /// bounded request into an unbounded answer.
+    #[test]
+    fn a_guards_from_that_is_not_a_string_is_a_tool_error() {
+        let mut registry = one_catalog();
+        let text = tool_error(
+            &mut registry,
+            "guards",
+            json!({ "function": "a", "local": "x", "from": 7 }),
+        );
+        assert!(text.contains("`from`"), "{text}");
+    }
+
+    /// An `inventory` artifact has no catalog file to read the anchor's
+    /// module through: the error says so and names the way out.
+    #[test]
+    fn guards_on_an_inventory_artifact_names_load_catalog() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        registry.artifacts.insert(PathBuf::from("first"));
+        let at = format!("{}:3", scratch.path().join("t.c").display());
+        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
+        assert!(
+            text.contains("`guards`")
+                && text.contains("inventory")
+                && text.contains("load_catalog"),
+            "{text}"
+        );
     }
 
     /// The guard the fixed-length `[Query; 9]` could not give: every variant
@@ -1398,7 +1653,7 @@ mod tests {
 
     /// Every query tool takes the same optional `catalog` argument. It is
     /// added at one point in `tool_for`, and this is what says it reached
-    /// all twelve.
+    /// all thirteen.
     #[test]
     fn every_query_tool_accepts_a_catalog_argument() {
         for query in sample_queries() {

@@ -462,6 +462,37 @@ in the configured `llvm_bindir` and joined with the configured `llvm-link`; an
 alias comes with the function it stands for, and an empty slice writes nothing.
 See the [call-graph overlay example](examples/callgraph-overlay/).
 
+### Value guards
+
+```bash
+rllvm-query --catalog catalog.json guards --at clamp.c:14 --operand 2 --from copy
+rllvm-query --catalog catalog.json guards --function copy --local n
+```
+
+`guards` lists the comparisons, clamps, masks and moduli that constrain a
+value: a call's argument (`--at FILE:LINE --operand N`, counting from 0) or
+result (`--return`), or a `-g` local (`--function F --local NAME`). Each guard
+gives its bound and source line, and whether it `defines` the value,
+`dominates` its use (runs first on every path, whichever way it branches) or
+is only `on_path` to it. Its `depth` is 0 on the value itself, or on a value
+it only widens (a bound holds across `zext` or `sext` when the guard's
+signedness matches the cast's), and N on a value N steps up the chain the
+value is computed from, a truncation counting as a step. A guard at depth N is
+not by itself a bound on the value. It is evidence, never a verdict: no guard
+found is an empty list, not "unbounded".
+
+The trace stays in the anchor's function. Where the value enters through a
+parameter or leaves a call, `crossings` name the call to ask `guards` about
+next; `--from F` keeps only the callers on a path from `F`, which must name
+one function, and examines nothing between them. When the trace cannot follow
+the value (a load, a pointer round trip, inline assembly, an intrinsic it
+does not read through), `uncertainty.value_trace_lost` says where, and the
+list is partial. A line holding several calls is named by the call site id
+the error prints, and `--emit-module OUT.bc` writes the slice behind the
+answer. It reads the anchor's module through `opt` from the configured
+`llvm_bindir`; over MCP it needs a program loaded with `load_catalog`, as
+`emit_module` does. See the [value guards example](examples/value-guards/).
+
 ### MCP server
 
 ```bash
