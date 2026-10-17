@@ -12,6 +12,7 @@ use rllvm_core::{
 };
 use rllvm_query::{
     Color, FactsCache, Overlay, OverlaySummary, Query, Record, Session, TextMode,
+    anchor_from_parts, check_anchor_parts,
     cli::{CacheAction, ClosureDirection, OverlayAction, QueryArgs, QueryCommand, QueryModifiers},
     default_overlay_path, emit_slice,
     index::Direction,
@@ -35,13 +36,36 @@ use tracing_subscriber::FmtSubscriber;
 /// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
 /// fails to compile there instead, until this file is updated to drive it
 /// from the command line.
-fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Query> {
+fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned> {
     let QueryModifiers {
         heuristics,
         include_overlay,
         min_confidence,
     } = modifiers;
-    Some(match command {
+    // `guards` is the one query whose arguments need the catalog: a
+    // `file:line` is resolved to a call site against it. It is carried as
+    // its flags until the session exists.
+    if let QueryCommand::Guards {
+        at,
+        operand,
+        ret,
+        function,
+        local,
+        from,
+        emit_module,
+    } = command
+    {
+        return Some(Planned::Guards(GuardsRequest {
+            at,
+            operand,
+            ret,
+            function,
+            local,
+            from,
+            emit_module,
+        }));
+    }
+    Some(Planned::Ready(match command {
         QueryCommand::Defs { name } => Query::Defs { name },
         QueryCommand::At { file, line } => Query::At { file, line },
         QueryCommand::Callers { name } => Query::Callers { name },
@@ -74,18 +98,80 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Query> {
         QueryCommand::FfiExports => Query::FfiExports,
         QueryCommand::IndirectTargets { at } => Query::IndirectTargets { at, heuristics },
         QueryCommand::ResolutionCandidates => Query::ResolutionCandidates,
-        QueryCommand::Guards { anchor, from } => Query::Guards {
-            anchor,
-            from,
-            emit_module: None,
-        },
+        // Returned above.
+        QueryCommand::Guards { .. } => return None,
         QueryCommand::Mcp => return None,
         // `main` answers this one before `run_query` is ever called; the arm
         // is here so adding a mode variant cannot compile without a decision.
         QueryCommand::Completions { .. } => return None,
         QueryCommand::Cache { .. } => return None,
         QueryCommand::Overlay { .. } => return None,
-    })
+    }))
+}
+
+/// A parsed query, ready to run or waiting on the catalog.
+#[derive(Debug)]
+enum Planned {
+    Ready(Query),
+    Guards(GuardsRequest),
+}
+
+/// The flags of a `guards` query, kept as written until the catalog can
+/// resolve the call site they name.
+#[derive(Debug, PartialEq)]
+struct GuardsRequest {
+    at: Option<String>,
+    operand: Option<usize>,
+    ret: bool,
+    function: Option<String>,
+    local: Option<String>,
+    from: Option<String>,
+    emit_module: Option<PathBuf>,
+}
+
+impl Planned {
+    /// What can be rejected before any bitcode is read.
+    fn validate(&self) -> Result<(), Error> {
+        match self {
+            Planned::Ready(query) => query.validate(),
+            Planned::Guards(request) => {
+                if request.emit_module.is_some() {
+                    return Err(Error::InvalidArguments(
+                        "guards cannot write a module yet: drop --emit-module".to_string(),
+                    ));
+                }
+                check_anchor_parts(
+                    request.at.as_deref(),
+                    request.operand,
+                    request.ret,
+                    request.function.as_deref(),
+                    request.local.as_deref(),
+                )
+                .map_err(Error::InvalidArguments)
+            }
+        }
+    }
+
+    /// The query to run against `session`, whose call sites resolve a
+    /// `guards` anchor.
+    fn into_query(self, session: &Session) -> Result<Query, Error> {
+        match self {
+            Planned::Ready(query) => Ok(query),
+            Planned::Guards(request) => Ok(Query::Guards {
+                anchor: anchor_from_parts(
+                    session,
+                    request.at.as_deref(),
+                    request.operand,
+                    request.ret,
+                    request.function.as_deref(),
+                    request.local.as_deref(),
+                )
+                .map_err(Error::InvalidArguments)?,
+                from: request.from,
+                emit_module: request.emit_module,
+            }),
+        }
+    }
 }
 
 /// One line of stdin: a query subcommand, written as it would follow
@@ -105,7 +191,7 @@ struct QueryLine {
 /// Parses and validates every query on stdin, before any catalog is read,
 /// so a typo on the last line costs a diagnostic rather than a full load.
 /// Each query is returned with its line as written, which heads its answer.
-fn parse_queries(input: &str, modifiers: QueryModifiers) -> Result<Vec<(String, Query)>, Error> {
+fn parse_queries(input: &str, modifiers: QueryModifiers) -> Result<Vec<(String, Planned)>, Error> {
     let mut queries = Vec::new();
     for (index, line) in input.lines().enumerate() {
         let line = line.trim();
@@ -142,6 +228,15 @@ fn parse_queries(input: &str, modifiers: QueryModifiers) -> Result<Vec<(String, 
         queries.push((line.to_string(), query));
     }
     Ok(queries)
+}
+
+/// A bindir that cannot be found fails only a query that runs `opt`.
+fn set_llvm_bindir(session: &mut Session) {
+    session.set_llvm_bindir(
+        try_rllvm_config()
+            .and_then(|config| config.llvm_bindir().cloned())
+            .map_err(|error| error.to_string()),
+    );
 }
 
 /// The facts cache the configuration asks for, or `None` when disabled.
@@ -339,10 +434,12 @@ fn run_stdin_queries(
         return Ok(());
     }
     init_logging()?;
-    let session = open_with_cache(catalog, facts_cache()?.as_ref())?;
+    let mut session = open_with_cache(catalog, facts_cache()?.as_ref())?;
+    set_llvm_bindir(&mut session);
     let named = overlay;
     let mut opened = None;
     for (line, query) in queries {
+        let query = query.into_query(&session)?;
         let overlay = overlay_for(&mut opened, &session, catalog, named, &query)?;
         let result = run_with_overlay(&session, overlay, &query)?;
         let answer = match format {
@@ -471,12 +568,8 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
         Error::InvalidArguments("--catalog is required to run a query".to_string())
     })?;
     let mut session = open_with_cache(&catalog, facts_cache()?.as_ref())?;
-    // A bindir that cannot be found fails only a query that runs `opt`.
-    session.set_llvm_bindir(
-        try_rllvm_config()
-            .and_then(|config| config.llvm_bindir().cloned())
-            .map_err(|error| error.to_string()),
-    );
+    set_llvm_bindir(&mut session);
+    let query = query.into_query(&session)?;
     let mut opened = None;
     let overlay = overlay_for(
         &mut opened,
@@ -602,7 +695,16 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rllvm_query::Confidence;
+    use rllvm_query::{Confidence, GuardAnchor};
+
+    /// The query a parsed line names, for one that needs nothing from the
+    /// catalog.
+    fn ready(planned: &Planned) -> &Query {
+        match planned {
+            Planned::Ready(query) => query,
+            Planned::Guards(_) => panic!("a guards line waits on the catalog"),
+        }
+    }
 
     /// The reverse of `to_query`'s exhaustiveness: every [`Query`]
     /// variant must appear here, with no wildcard arm. A `Query` variant
@@ -642,10 +744,37 @@ mod tests {
             Query::FfiExports => QueryCommand::FfiExports,
             Query::IndirectTargets { at, .. } => QueryCommand::IndirectTargets { at: at.clone() },
             Query::ResolutionCandidates => QueryCommand::ResolutionCandidates,
-            Query::Guards { anchor, from, .. } => QueryCommand::Guards {
-                anchor: anchor.clone(),
-                from: from.clone(),
-            },
+            Query::Guards {
+                anchor,
+                from,
+                emit_module,
+            } => {
+                let (mut at, mut operand, mut ret, mut function, mut local) =
+                    (None, None, false, None, None);
+                match anchor {
+                    GuardAnchor::Argument { site, operand: n } => {
+                        at = Some(serde_json::to_string(site).unwrap());
+                        operand = Some(*n);
+                    }
+                    GuardAnchor::Return { site } => {
+                        at = Some(serde_json::to_string(site).unwrap());
+                        ret = true;
+                    }
+                    GuardAnchor::Local { function: f, name } => {
+                        function = Some(f.clone());
+                        local = Some(name.clone());
+                    }
+                }
+                QueryCommand::Guards {
+                    at,
+                    operand,
+                    ret,
+                    function,
+                    local,
+                    from: from.clone(),
+                    emit_module: emit_module.clone(),
+                }
+            }
         }
     }
 
@@ -666,7 +795,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            format!("{:?}", queries[1].1),
+            format!("{:?}", ready(&queries[1].1)),
             format!(
                 "{:?}",
                 Query::Defs {
@@ -675,7 +804,7 @@ mod tests {
             )
         );
         assert!(matches!(
-            queries[2].1,
+            ready(&queries[2].1),
             Query::IndirectTargets {
                 heuristics: true,
                 ..
@@ -691,7 +820,7 @@ mod tests {
         };
         let queries = parse_queries("indirect-targets t.c:4\n", heuristics).unwrap();
         assert!(matches!(
-            queries[0].1,
+            ready(&queries[0].1),
             Query::IndirectTargets {
                 heuristics: true,
                 ..
@@ -707,15 +836,18 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            queries[0].1,
+            ready(&queries[0].1),
             Query::Reach {
                 include_overlay: true,
                 min_confidence: Some(Confidence::Medium),
                 ..
             }
         ));
-        assert!(queries[0].1.walks_overlay());
-        assert!(!queries[1].1.walks_overlay(), "each line asks for itself");
+        assert!(ready(&queries[0].1).walks_overlay());
+        assert!(
+            !ready(&queries[1].1).walks_overlay(),
+            "each line asks for itself"
+        );
 
         let error = parse_queries(
             "reach main handler --min-confidence high\n",
@@ -735,13 +867,13 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            queries[0].1,
+            ready(&queries[0].1),
             Query::Slice {
                 include_overlay: true,
                 ..
             }
         ));
-        assert!(queries[0].1.walks_overlay());
+        assert!(ready(&queries[0].1).walks_overlay());
 
         let error = parse_queries(
             "callees a\nslice main handler --emit-module out.bc\n",
@@ -884,12 +1016,137 @@ mod tests {
         ];
         for query in queries {
             let command = cli_command_for(&query);
-            let round_tripped =
-                to_query(command, modifiers).expect("every QueryCommand but Mcp names a query");
+            let Some(Planned::Ready(round_tripped)) = to_query(command, modifiers) else {
+                panic!("{query:?} should be ready to run");
+            };
             assert_eq!(
                 format!("{round_tripped:?}"),
                 format!("{query:?}"),
                 "CLI round-trip must preserve every field"
+            );
+        }
+    }
+
+    /// `guards` waits on the catalog, so its round trip is through the
+    /// flags it was written with rather than through a `Query`.
+    #[test]
+    fn a_guards_query_round_trips_through_its_flags() {
+        let site = rllvm_query::CallSiteId {
+            function: rllvm_query::FunctionId {
+                module_id: "m".into(),
+                symbol: "f".into(),
+            },
+            block_index: 1,
+            instruction_index: 2,
+        };
+        for (anchor, from) in [
+            (
+                GuardAnchor::Argument {
+                    site: site.clone(),
+                    operand: 3,
+                },
+                Some("main".to_string()),
+            ),
+            (GuardAnchor::Return { site: site.clone() }, None),
+            (
+                GuardAnchor::Local {
+                    function: "parse".into(),
+                    name: "len".into(),
+                },
+                None,
+            ),
+        ] {
+            let query = Query::Guards {
+                anchor: anchor.clone(),
+                from: from.clone(),
+                emit_module: Some("out.bc".into()),
+            };
+            let command = cli_command_for(&query);
+            let Some(Planned::Guards(request)) = to_query(command, QueryModifiers::default())
+            else {
+                panic!("{query:?} should wait on the catalog");
+            };
+            let site_json = serde_json::to_string(&site).unwrap();
+            let expected = match &anchor {
+                GuardAnchor::Argument { operand, .. } => GuardsRequest {
+                    at: Some(site_json),
+                    operand: Some(*operand),
+                    ret: false,
+                    function: None,
+                    local: None,
+                    from,
+                    emit_module: Some("out.bc".into()),
+                },
+                GuardAnchor::Return { .. } => GuardsRequest {
+                    at: Some(site_json),
+                    operand: None,
+                    ret: true,
+                    function: None,
+                    local: None,
+                    from,
+                    emit_module: Some("out.bc".into()),
+                },
+                GuardAnchor::Local { function, name } => GuardsRequest {
+                    at: None,
+                    operand: None,
+                    ret: false,
+                    function: Some(function.clone()),
+                    local: Some(name.clone()),
+                    from,
+                    emit_module: Some("out.bc".into()),
+                },
+            };
+            assert_eq!(request, expected);
+        }
+    }
+
+    #[test]
+    fn guards_flags_parse_into_a_request() {
+        let queries = parse_queries(
+            "guards --at t.c:4 --operand 0 --from main\nguards --at t.c:4 --return\nguards --function parse --local len\n",
+            QueryModifiers::default(),
+        )
+        .unwrap();
+        let requests: Vec<&GuardsRequest> = queries
+            .iter()
+            .map(|(_, planned)| match planned {
+                Planned::Guards(request) => request,
+                Planned::Ready(query) => panic!("{query:?}"),
+            })
+            .collect();
+        assert_eq!(requests[0].at.as_deref(), Some("t.c:4"));
+        assert_eq!(requests[0].operand, Some(0));
+        assert_eq!(requests[0].from.as_deref(), Some("main"));
+        assert!(requests[1].ret && requests[1].operand.is_none());
+        assert_eq!(requests[2].function.as_deref(), Some("parse"));
+        assert_eq!(requests[2].local.as_deref(), Some("len"));
+    }
+
+    #[test]
+    fn a_guards_line_naming_no_value_is_rejected_by_its_number() {
+        for (input, expected) in [
+            ("guards\n", "name a value"),
+            ("guards --operand 0\n", "need --at"),
+            ("guards --at t.c:4\n", "--operand N"),
+            ("guards --at t.c:4 --operand 0 --return\n", "give one"),
+            ("guards --local n\n", "needs --function"),
+            ("guards --function f\n", "needs --local"),
+            (
+                "guards --at t.c:4 --return --local n --function f\n",
+                "give one",
+            ),
+            (
+                "callees a\nguards --at t.c:4 --return --emit-module o.bc\n",
+                "--emit-module",
+            ),
+        ] {
+            let error = parse_queries(input, QueryModifiers::default())
+                .map(|_| ())
+                .expect_err(input)
+                .to_string();
+            assert!(
+                error.contains("line") && error.contains(expected),
+                "{input:?} gave {error:?}"
             );
         }
     }

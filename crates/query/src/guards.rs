@@ -34,6 +34,143 @@ pub enum GuardAnchor {
     Local { function: String, name: String },
 }
 
+/// The value a flag combination names, before any call site is looked up.
+enum AnchorShape<'a> {
+    Argument { at: &'a str, operand: usize },
+    Return { at: &'a str },
+    Local { function: &'a str, name: &'a str },
+}
+
+/// What the parts of an anchor name, or why they do not name one. Needs no
+/// catalog, so a surface can reject a bad combination before loading one.
+fn anchor_shape<'a>(
+    at: Option<&'a str>,
+    operand: Option<usize>,
+    ret: bool,
+    function: Option<&'a str>,
+    local: Option<&'a str>,
+) -> Result<AnchorShape<'a>, String> {
+    let call = at.is_some() || operand.is_some() || ret;
+    let named = function.is_some() || local.is_some();
+    match (call, named) {
+        (false, false) => Err(
+            "name a value: --at with --operand or --return, or --function with \
+             --local"
+                .to_string(),
+        ),
+        (true, true) => Err(
+            "a call site (--at) and a local (--function, --local) name two values: give one"
+                .to_string(),
+        ),
+        (true, false) => {
+            let at = at.ok_or("--operand and --return need --at, the call site they refer to")?;
+            match (operand, ret) {
+                (Some(_), true) => {
+                    Err("--operand and --return name two values: give one".to_string())
+                }
+                (Some(operand), false) => Ok(AnchorShape::Argument { at, operand }),
+                (None, true) => Ok(AnchorShape::Return { at }),
+                (None, false) => Err("--at needs --operand N (an argument) or --return (the \
+                     result)"
+                    .to_string()),
+            }
+        }
+        (false, true) => match (function, local) {
+            (Some(function), Some(name)) => Ok(AnchorShape::Local { function, name }),
+            (None, _) => Err("--local needs --function, the function that holds it".to_string()),
+            (_, None) => Err("--function needs --local, the variable to trace".to_string()),
+        },
+    }
+}
+
+/// Rejects a combination of anchor parts that names no value, without
+/// reading a catalog. [`anchor_from_parts`] makes the same check.
+pub fn check_anchor_parts(
+    at: Option<&str>,
+    operand: Option<usize>,
+    ret: bool,
+    function: Option<&str>,
+    local: Option<&str>,
+) -> Result<(), String> {
+    anchor_shape(at, operand, ret, function, local).map(|_| ())
+}
+
+/// The anchor a surface's flags name: `at` with `operand` or `ret`, or
+/// `function` with `local`. `at` is a `file:line`, or a call site id as JSON
+/// for a line that holds several calls. A line must hold exactly one call
+/// site: with several, the error names each so the caller can pick one.
+///
+/// Surface-neutral on purpose: the CLI, the MCP tool and `annotate` all
+/// resolve a call site the same way.
+pub fn anchor_from_parts(
+    session: &Session,
+    at: Option<&str>,
+    operand: Option<usize>,
+    ret: bool,
+    function: Option<&str>,
+    local: Option<&str>,
+) -> Result<GuardAnchor, String> {
+    Ok(match anchor_shape(at, operand, ret, function, local)? {
+        AnchorShape::Argument { at, operand } => GuardAnchor::Argument {
+            site: resolve_site(session, at)?,
+            operand,
+        },
+        AnchorShape::Return { at } => GuardAnchor::Return {
+            site: resolve_site(session, at)?,
+        },
+        AnchorShape::Local { function, name } => GuardAnchor::Local {
+            function: function.to_string(),
+            name: name.to_string(),
+        },
+    })
+}
+
+/// The one call site `at` names: a call site id spelled as JSON, which must
+/// be in the catalog, or the single call site on a `file:line`.
+fn resolve_site(session: &Session, at: &str) -> Result<CallSiteId, String> {
+    let at = at.trim();
+    if at.starts_with('{') {
+        let id: CallSiteId =
+            serde_json::from_str(at).map_err(|error| format!("invalid call site id: {error}"))?;
+        return if session.call_sites().iter().any(|site| site.id == id) {
+            Ok(id)
+        } else {
+            Err(format!("no such call site in the catalog: {at}"))
+        };
+    }
+    let (file, line) = crate::parse_location(at).map_err(|error| error.to_string())?;
+    let sites = session.call_sites_at(&file, line);
+    match sites.as_slice() {
+        [] => Err(format!("no call site at {at}")),
+        [one] => Ok(one.id.clone()),
+        several => Err(format!(
+            "{at} holds {} call sites; name one by its call site id as JSON: {}",
+            several.len(),
+            several
+                .iter()
+                .map(|site| format!("{} => {}", candidate_label(site), id_json(&site.id)))
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+    }
+}
+
+fn id_json(id: &CallSiteId) -> String {
+    serde_json::to_string(id).unwrap_or_default()
+}
+
+/// A call site by what it calls and where in its function: enough to pick it.
+fn candidate_label(site: &crate::facts::CallSiteFact) -> String {
+    let callee = match &site.target {
+        CallTarget::Direct { callee } => callee.symbol.as_str(),
+        _ => "an indirect or intrinsic call",
+    };
+    format!(
+        "{callee} in {} (block {}, instruction {})",
+        site.id.function.symbol, site.id.block_index, site.id.instruction_index
+    )
+}
+
 /// How a guard relates to the anchored value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -57,6 +194,10 @@ pub struct GuardSite {
     pub predicate: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bound: Option<String>,
+    /// The width in bits of the guarded integer: not part of the answer's
+    /// JSON, only what lets the text show a bound unsigned or in hex.
+    #[serde(skip)]
+    pub(crate) bits: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<SourceLocation>,
     pub relation: GuardRelation,
@@ -596,14 +737,18 @@ impl Trace<'_> {
         let node = self.node(compare);
         let predicate = int_predicate(node.guard.as_ref()?.predicate.as_deref()?)?;
         let picks = usize::from(node.operands.first() != Some(on_true));
-        let bound = [a, b].into_iter().find_map(|operand| match operand {
-            Operand::Const(constant) => Some(constant.value.clone()),
-            _ => None,
-        });
+        let (bound, bits) = [a, b]
+            .into_iter()
+            .find_map(|operand| match operand {
+                Operand::Const(constant) => Some((constant.value.clone(), constant.bits)),
+                _ => None,
+            })
+            .unzip();
         let site = GuardSite {
             op: GuardKind::Clamp,
             predicate: Some(predicate.clamps?[picks].to_string()),
             bound,
+            bits: bits.flatten(),
             location: node.location.clone().or_else(|| phi.location.clone()),
             relation: GuardRelation::Defines,
         };
@@ -710,6 +855,7 @@ fn surfaced(
         op: raw.kind,
         predicate: predicate.map(str::to_string),
         bound: raw.bound.clone(),
+        bits: raw.bits,
         location,
         relation,
     }
@@ -1960,5 +2106,104 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         assert!(!d.dominates(0, 2));
         assert!(!d.dominates(2, 2));
         assert!(!d.dominates(0, 99));
+    }
+
+    #[test]
+    fn a_line_with_one_call_resolves_to_its_site() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| site.id.function.symbol == "f")
+            .unwrap()
+            .id
+            .clone();
+        let at = format!("{}:3", scratch.path().join("t.c").display());
+        let anchor = anchor_from_parts(&session, Some(&at), Some(0), false, None, None);
+        match anchor.unwrap() {
+            GuardAnchor::Argument {
+                site: found,
+                operand,
+            } => {
+                assert_eq!((found, operand), (site.clone(), 0));
+            }
+            other => panic!("{other:?}"),
+        }
+        let json = serde_json::to_string(&site).unwrap();
+        let spelled = anchor_from_parts(&session, Some(&json), None, true, None, None).unwrap();
+        assert!(matches!(spelled, GuardAnchor::Return { site: found } if found == site));
+        let blank = format!("{}:1", scratch.path().join("t.c").display());
+        let missing = anchor_from_parts(&session, Some(&blank), None, true, None, None);
+        assert!(missing.unwrap_err().contains("no call site at"));
+    }
+
+    #[test]
+    fn a_line_with_several_calls_is_ambiguous_and_names_each() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern unsigned a(unsigned);\nextern void b(unsigned);\nvoid f(unsigned n) {\n  b(a(n));\n}\n",
+            &["-O0", "-g"],
+        );
+        let at = format!("{}:4", scratch.path().join("t.c").display());
+        let error = anchor_from_parts(&session, Some(&at), Some(0), false, None, None).unwrap_err();
+        assert!(error.contains("holds 2 call sites"), "{error}");
+        assert!(
+            error.contains("a in f") && error.contains("b in f"),
+            "{error}"
+        );
+        // Each candidate carries the id to paste back.
+        assert_eq!(error.matches("\"block_index\"").count(), 2, "{error}");
+        let json = error
+            .split("=> ")
+            .nth(1)
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        assert!(anchor_from_parts(&session, Some(json), None, true, None, None).is_ok());
+    }
+
+    #[test]
+    fn a_call_site_id_the_catalog_lacks_is_rejected() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(scratch.path(), "t.c", "void a(void) {}\n", &["-O0"]);
+        let ghost =
+            r#"{"function":{"module_id":"x","symbol":"y"},"block_index":0,"instruction_index":0}"#;
+        let error = anchor_from_parts(&session, Some(ghost), None, true, None, None).unwrap_err();
+        assert!(error.contains("no such call site"), "{error}");
+    }
+
+    #[test]
+    fn a_combination_of_parts_that_names_no_single_value_is_rejected() {
+        let ok = |at, operand, ret, function, local| {
+            check_anchor_parts(at, operand, ret, function, local)
+        };
+        assert!(ok(Some("t.c:4"), Some(0), false, None, None).is_ok());
+        assert!(ok(Some("t.c:4"), None, true, None, None).is_ok());
+        assert!(ok(None, None, false, Some("f"), Some("n")).is_ok());
+        for (parts, fragment) in [
+            (ok(None, None, false, None, None), "name a value"),
+            (ok(None, Some(0), false, None, None), "need --at"),
+            (ok(None, None, true, None, None), "need --at"),
+            (ok(Some("t.c:4"), None, false, None, None), "--operand N"),
+            (ok(Some("t.c:4"), Some(0), true, None, None), "give one"),
+            (ok(None, None, false, None, Some("n")), "needs --function"),
+            (ok(None, None, false, Some("f"), None), "needs --local"),
+            (
+                ok(Some("t.c:4"), Some(0), false, Some("f"), Some("n")),
+                "give one",
+            ),
+        ] {
+            let error = parts.unwrap_err();
+            assert!(error.contains(fragment), "{error}");
+        }
     }
 }

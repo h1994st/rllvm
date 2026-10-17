@@ -2693,6 +2693,7 @@ unsafe fn operand_ir(value: LLVMValueRef, ids: &HashMap<LLVMValueRef, ValueId>) 
         } else if !LLVMIsAConstantInt(value).is_null() {
             Operand::Const(ConstVal {
                 value: constant_text(value),
+                bits: int_width(value),
             })
         } else if !LLVMIsAFunction(value).is_null() {
             Operand::Func(FunctionId {
@@ -2702,6 +2703,18 @@ unsafe fn operand_ir(value: LLVMValueRef, ids: &HashMap<LLVMValueRef, ValueId>) 
         } else {
             Operand::Other
         }
+    }
+}
+
+/// The bit width of `value`'s integer type, `None` when it is not one.
+///
+/// # Safety
+/// `value` must be a live value.
+unsafe fn int_width(value: LLVMValueRef) -> Option<u32> {
+    // SAFETY: the caller guarantees a live value, which has a type.
+    unsafe {
+        let ty = LLVMTypeOf(value);
+        (LLVMGetTypeKind(ty) == LLVMTypeKind::LLVMIntegerTypeKind).then(|| LLVMGetIntTypeWidth(ty))
     }
 }
 
@@ -2805,10 +2818,11 @@ unsafe fn guard_of(
     opcode: LLVMOpcode,
     call: Option<&CallIr>,
 ) -> Option<GuardOpRaw> {
-    let raw = |kind, predicate: Option<&str>, bound| GuardOpRaw {
+    let raw = |kind, predicate: Option<&str>, bound, bits| GuardOpRaw {
         kind,
         predicate: predicate.map(str::to_string),
         bound,
+        bits,
     };
     // SAFETY: the caller guarantees a live instruction of this opcode, and
     // each accessor is reached only for the opcode it requires.
@@ -2818,6 +2832,7 @@ unsafe fn guard_of(
                 GuardKind::Compare,
                 predicate_row(LLVMGetICmpPredicate(instruction)).map(|row| row.spelling),
                 constant_operand(instruction, &[0, 1]),
+                int_width(LLVMGetOperand(instruction, 0)),
             )),
             LLVMOpcode::LLVMSelect => select_clamp(instruction),
             LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke => {
@@ -2826,18 +2841,28 @@ unsafe fn guard_of(
                 let &(_, kind, predicate) = GUARD_INTRINSICS
                     .iter()
                     .find(|(prefix, ..)| symbol.starts_with(prefix))?;
-                let bound = call.args.iter().find_map(|arg| match arg {
-                    Operand::Const(constant) => Some(constant.value.clone()),
-                    _ => None,
-                });
-                Some(raw(kind, Some(predicate), bound))
+                let (bound, bits) = call
+                    .args
+                    .iter()
+                    .find_map(|arg| match arg {
+                        Operand::Const(constant) => Some((constant.value.clone(), constant.bits)),
+                        _ => None,
+                    })
+                    .unzip();
+                Some(raw(kind, Some(predicate), bound, bits.flatten()))
             }
-            LLVMOpcode::LLVMAnd => constant_operand(instruction, &[0, 1])
-                .map(|mask| raw(GuardKind::Mask, None, Some(mask))),
-            LLVMOpcode::LLVMURem => constant_operand(instruction, &[1])
-                .map(|divisor| raw(GuardKind::Modulo, Some("urem"), Some(divisor))),
-            LLVMOpcode::LLVMSRem => constant_operand(instruction, &[1])
-                .map(|divisor| raw(GuardKind::Modulo, Some("srem"), Some(divisor))),
+            LLVMOpcode::LLVMAnd => constant_operand(instruction, &[0, 1]).map(|mask| {
+                let bits = int_width(LLVMGetOperand(instruction, 0));
+                raw(GuardKind::Mask, None, Some(mask), bits)
+            }),
+            LLVMOpcode::LLVMURem => constant_operand(instruction, &[1]).map(|divisor| {
+                let bits = int_width(LLVMGetOperand(instruction, 1));
+                raw(GuardKind::Modulo, Some("urem"), Some(divisor), bits)
+            }),
+            LLVMOpcode::LLVMSRem => constant_operand(instruction, &[1]).map(|divisor| {
+                let bits = int_width(LLVMGetOperand(instruction, 1));
+                raw(GuardKind::Modulo, Some("srem"), Some(divisor), bits)
+            }),
             _ => None,
         }
     }
@@ -2896,6 +2921,7 @@ unsafe fn select_clamp(select: LLVMValueRef) -> Option<GuardOpRaw> {
             kind: GuardKind::Clamp,
             predicate: Some(clamps[picks].to_string()),
             bound,
+            bits: int_width(arms[0]),
         })
     }
 }
@@ -3158,17 +3184,20 @@ exit:
         (id, &function.values[id as usize])
     }
 
+    /// Over the 32-bit integers every fixture here uses.
     fn guard(kind: GuardKind, predicate: Option<&str>, bound: Option<&str>) -> Option<GuardOpRaw> {
         Some(GuardOpRaw {
             kind,
             predicate: predicate.map(str::to_string),
             bound: bound.map(str::to_string),
+            bits: Some(32),
         })
     }
 
     fn constant(value: &str) -> Operand {
         Operand::Const(ConstVal {
             value: value.to_string(),
+            bits: Some(32),
         })
     }
 

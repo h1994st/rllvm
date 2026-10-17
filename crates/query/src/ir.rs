@@ -143,6 +143,8 @@ pub(crate) enum Operand {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConstVal {
     pub(crate) value: String,
+    /// The integer type's width in bits, for rendering the value unsigned.
+    pub(crate) bits: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +172,8 @@ pub(crate) struct GuardOpRaw {
     pub(crate) predicate: Option<String>,
     /// The constant operand, when there is one.
     pub(crate) bound: Option<String>,
+    /// The width in bits of the integer the guard operates on.
+    pub(crate) bits: Option<u32>,
 }
 
 /// An integer comparison predicate as the IR spells it.

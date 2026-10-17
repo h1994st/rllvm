@@ -82,7 +82,8 @@ pub struct CacheReport {
 
 pub mod guards;
 pub use guards::{
-    Crossing, CrossingDir, GuardAnchor, GuardRelation, GuardSite, GuardsResult, guards,
+    Crossing, CrossingDir, GuardAnchor, GuardRelation, GuardSite, GuardsResult, anchor_from_parts,
+    check_anchor_parts, guards,
 };
 
 pub mod index;
@@ -107,7 +108,7 @@ pub use slice::{EmittedModule, emit_module, emit_slice};
 #[cfg(test)]
 pub(crate) mod testing;
 
-/// One of the twelve source-level queries. Serializes with a `kind` tag, e.g.
+/// One of the thirteen source-level queries. Serializes with a `kind` tag, e.g.
 /// `{"kind": "callers", "name": "parse_frame"}`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

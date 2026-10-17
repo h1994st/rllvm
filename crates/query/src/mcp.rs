@@ -1,4 +1,4 @@
-//! MCP stdio server: the twelve source-level queries as JSON-RPC 2.0 tools,
+//! MCP stdio server: the thirteen source-level queries as JSON-RPC 2.0 tools,
 //! newline-delimited over stdin/stdout, plus four that decide which catalogs
 //! they run against and four that keep a call-graph overlay beside each.
 //!
@@ -641,7 +641,7 @@ fn tools_list_result() -> Value {
 macro_rules! management_tool_surface {
     ($($variant:ident => $name:literal, $description:literal, $schema:expr;)+) => {
         /// A tool that decides which catalogs are loaded, or keeps the
-        /// overlay beside one, as opposed to the twelve that ask a question
+        /// overlay beside one, as opposed to the thirteen that ask a question
         /// of one.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum Management { $($variant),+ }
@@ -886,7 +886,7 @@ query_tool_surface! {
     Query::Guards { .. } => Query::Guards { anchor: GuardAnchor::Local { function: String::new(), name: String::new() }, from: None, emit_module: None }, "guards";
 }
 
-/// The `name` argument four of the twelve tools take, identically. Spelled
+/// The `name` argument four of the thirteen tools take, identically. Spelled
 /// once: four copies of one schema drift apart, and a client reads the
 /// drifted one as a real difference between the tools.
 fn symbol_property() -> Value {
@@ -944,8 +944,8 @@ fn symbol_tool(name: &str, description: &str) -> Value {
     })
 }
 
-/// Which loaded catalog a query or an overlay tool uses. Added to all twelve
-/// query schemas at one point below rather than written into each: twelve
+/// Which loaded catalog a query or an overlay tool uses. Added to all thirteen
+/// query schemas at one point below rather than written into each: thirteen
 /// copies of an optional argument drift, and a client reads the drift as a
 /// real difference.
 fn catalog_property() -> Value {
@@ -1435,7 +1435,7 @@ mod tests {
 
     /// Every query tool takes the same optional `catalog` argument. It is
     /// added at one point in `tool_for`, and this is what says it reached
-    /// all twelve.
+    /// all thirteen.
     #[test]
     fn every_query_tool_accepts_a_catalog_argument() {
         for query in sample_queries() {

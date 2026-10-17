@@ -4448,3 +4448,78 @@ fn the_overlay_cli_records_lists_and_compacts() {
         "{written}"
     );
 }
+
+const GUARDED_CALLS: &str = "extern unsigned a(unsigned);\n\
+     extern void b(unsigned);\n\
+     void f(unsigned n) {\n\
+       if (n > 15) return;\n\
+       b(a(n));\n\
+     }\n";
+
+fn guards_failure(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(catalog)
+        .arg("guards")
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "guards {args:?} should fail");
+    String::from_utf8(output.stderr).unwrap()
+}
+
+#[test]
+fn the_guards_flags_name_a_call_site_argument_and_print_snake_case() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "g.c", GUARDED_CALLS);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let line = |n: u32| format!("{}:{n}", scratch.path().join("g.c").display());
+
+    // Line 5 holds two calls: the id of either is the way to name one.
+    let error = guards_failure(&scratch, &catalog, &["--at", &line(5), "--operand", "0"]);
+    assert!(
+        error.contains("holds 2 call sites")
+            && error.contains("a in f")
+            && error.contains("b in f"),
+        "{error}"
+    );
+    let id = error
+        .split("a in f")
+        .nth(1)
+        .and_then(|rest| rest.split("=> ").nth(1))
+        .and_then(|rest| rest.split(';').next())
+        .map(str::trim)
+        .unwrap()
+        .to_string();
+
+    let json = query_json(
+        &scratch,
+        &catalog,
+        &["guards", "--at", &id, "--operand", "0"],
+    );
+    let guards = json["results"]["guards"].as_array().unwrap();
+    assert!(
+        guards.iter().any(|guard| guard["op"] == "compare"),
+        "{json}"
+    );
+
+    let text = query_text(
+        &scratch,
+        &catalog,
+        &["--full", "guards", "--at", &id, "--operand", "0"],
+    );
+    assert!(
+        text.contains("compare") && !text.contains("Compare") && !text.contains("Dominates"),
+        "{text}"
+    );
+    assert!(
+        text.contains("(dominates)") || text.contains("(on_path)"),
+        "{text}"
+    );
+
+    let error = guards_failure(&scratch, &catalog, &["--at", &line(5)]);
+    assert!(error.contains("--operand N"), "{error}");
+    let error = guards_failure(&scratch, &catalog, &["--function", "f"]);
+    assert!(error.contains("needs --local"), "{error}");
+}
