@@ -1534,6 +1534,11 @@ mod tests {
         );
     }
 
+    /// The guard the fixed-length `[Query; 9]` could not give: every variant
+    /// declared in `query_tool_surface!` -- and the macro's `tool_name_of`
+    /// match makes that every variant, or the crate does not compile --
+    /// reaches `tools/list` under its own name and comes back through
+    /// `query_from_call` as the same variant.
     #[test]
     fn every_query_variant_is_listed_and_resolves_through_a_call() {
         let listed = listed_tool_names();
