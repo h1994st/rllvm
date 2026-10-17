@@ -22,7 +22,7 @@
 //! value is grounded in the promoted module only when it is written.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     fs::OpenOptions,
     io::{Read, Seek, SeekFrom, Write},
@@ -38,7 +38,7 @@ use crate::{
     cache::FACTS_FORMAT,
     facts::{
         CallSiteFact, CallSiteId, CallTarget, FieldRef, FunctionFact, FunctionId, Linkage,
-        ModuleAnalysis, Slot,
+        ModuleAnalysis, Slot, SourceLocation,
     },
     guards::{
         AnchorParts, AnchorSurface, GuardAnchor, anchor_from_parts, anchor_function, caller_scope,
@@ -516,6 +516,22 @@ impl Annotation {
     }
 }
 
+/// An annotation on a value a walk's answer crosses, as the answer reports
+/// it: an `infeasible` or `conditional` verdict, quoted from the overlay.
+/// A hypothesis about the path, never proof that it cannot be taken: the
+/// path it sits on is returned unchanged.
+#[derive(Clone, Debug, Serialize)]
+pub struct AnnotatedFlow {
+    /// Always `agent`: who claims the verdict.
+    pub source: String,
+    #[serde(flatten)]
+    pub annotation: Annotation,
+    /// The anchor call's source location, so a reader can check the claim.
+    /// Absent for a local, and for a call without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<SourceLocation>,
+}
+
 /// What a `verify` or `retract` judges or removes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum VerifyTarget {
@@ -925,6 +941,65 @@ impl Overlay {
     /// those by [`Annotation::is_refuted`].
     pub fn annotations(&self) -> &BTreeMap<AnnotationKey, Annotation> {
         &self.folded.annotations
+    }
+
+    /// The `infeasible` and `conditional` annotations, refuted ones aside,
+    /// on a walk from `from` that crosses the call sites `sites` and the
+    /// definitions named `functions`: a call's value when its site is
+    /// crossed, a local when its function is. One recorded with a `from`
+    /// attaches only when the walk's `from` names that same one definition.
+    /// Matched by key alone: a loaded annotation's value was read only when
+    /// it was written, and nothing here assumes it still exists.
+    pub(crate) fn annotated_flows(
+        &self,
+        session: &Session,
+        from: &str,
+        sites: &HashSet<&CallSiteId>,
+        functions: &HashSet<&str>,
+    ) -> Vec<AnnotatedFlow> {
+        let walk_from = one_definition(session, from, "`from`")
+            .ok()
+            .map(|id| id.symbol);
+        self.folded
+            .annotations
+            .values()
+            .filter(|annotation| {
+                matches!(
+                    annotation.verdict,
+                    Feasibility::Infeasible | Feasibility::Conditional
+                ) && !annotation.is_refuted()
+            })
+            .filter(|annotation| {
+                annotation
+                    .key
+                    .from
+                    .as_ref()
+                    .is_none_or(|scoped| walk_from.as_ref() == Some(scoped))
+            })
+            .filter_map(|annotation| {
+                let location = match &annotation.key.anchor {
+                    GuardAnchor::Argument { site, .. } | GuardAnchor::Return { site } => {
+                        if !sites.contains(site) {
+                            return None;
+                        }
+                        session
+                            .call_site(site)
+                            .and_then(|fact| fact.location.clone())
+                    }
+                    GuardAnchor::Local { function, .. } => {
+                        if !functions.contains(function.as_str()) {
+                            return None;
+                        }
+                        None
+                    }
+                };
+                Some(AnnotatedFlow {
+                    source: agent(),
+                    annotation: annotation.clone(),
+                    location,
+                })
+            })
+            .collect()
     }
 
     pub fn pending(&self) -> usize {
@@ -1507,7 +1582,7 @@ mod tests {
         cache::FACTS_FORMAT,
         facts::{CallSiteId, FieldRef, FunctionId, Linkage, ProgramFacts},
         index::Session,
-        testing::{facts_with_overlay_sites, function},
+        testing::{facts_with_overlay_sites, function, overlay_header},
     };
 
     fn ops(offset: u64) -> FieldRef {
@@ -1587,13 +1662,6 @@ mod tests {
         message(Overlay::open(session, path).expect_err("open must fail"))
     }
 
-    fn header(session: &Session) -> String {
-        format!(
-            "{{\"v\":{OVERLAY_VERSION},\"fingerprint\":\"{}\",\"facts\":{FACTS_FORMAT}}}\n",
-            fingerprint(session).unwrap()
-        )
-    }
-
     #[test]
     fn a_field_edge_folds_and_survives_a_reopen() {
         let scratch = tempfile::tempdir().unwrap();
@@ -1617,7 +1685,7 @@ mod tests {
 
         let written = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = written.lines().collect();
-        assert_eq!(lines[0], header(&session).trim_end());
+        assert_eq!(lines[0], overlay_header(&session).trim_end());
         let stored: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
         assert_eq!(
             stored["to"],
@@ -1845,7 +1913,11 @@ mod tests {
         let good = serde_json::to_string(&add_field(8, "h3")).unwrap();
         let shown = path.display().to_string();
 
-        std::fs::write(&path, format!("{}{good}\n{{not json\n", header(&session))).unwrap();
+        std::fs::write(
+            &path,
+            format!("{}{good}\n{{not json\n", overlay_header(&session)),
+        )
+        .unwrap();
         let error = open_error(&session, &path);
         assert!(error.contains(&format!("{shown}:3:")), "{error}");
 
@@ -1863,7 +1935,7 @@ mod tests {
 
         std::fs::write(
             &path,
-            format!("{}{{\"op\":\"annotated\"}}\n", header(&session)),
+            format!("{}{{\"op\":\"annotated\"}}\n", overlay_header(&session)),
         )
         .unwrap();
         let error = open_error(&session, &path);
@@ -1871,13 +1943,13 @@ mod tests {
         assert!(error.contains("unknown op \"annotated\""), "{error}");
 
         let misspelled = good.replace("\"provenance\"", "\"provenence\"");
-        std::fs::write(&path, format!("{}{misspelled}\n", header(&session))).unwrap();
+        std::fs::write(&path, format!("{}{misspelled}\n", overlay_header(&session))).unwrap();
         let error = open_error(&session, &path);
         assert!(error.contains(&format!("{shown}:2:")), "{error}");
         assert!(error.contains("provenence"), "{error}");
 
         let ungrounded = serde_json::to_string(&add_field(16, "h3")).unwrap();
-        std::fs::write(&path, format!("{}{ungrounded}\n", header(&session))).unwrap();
+        std::fs::write(&path, format!("{}{ungrounded}\n", overlay_header(&session))).unwrap();
         let error = open_error(&session, &path);
         assert!(error.contains(&format!("{shown}:2:")), "{error}");
         assert!(error.contains("ops@16"), "{error}");
@@ -2897,7 +2969,11 @@ namespace other { unsigned parse(int x) { return x; } }
             Verdict::Inconclusive,
         ))
         .unwrap();
-        std::fs::write(&path, format!("{}{by_line}\n{by_id}\n", header(&session))).unwrap();
+        std::fs::write(
+            &path,
+            format!("{}{by_line}\n{by_id}\n", overlay_header(&session)),
+        )
+        .unwrap();
 
         // Opened without an LLVM bindir: a load reads only the catalog.
         let bare = crate::open(session.catalog_path().unwrap()).unwrap();

@@ -898,8 +898,8 @@ query_tool_surface! {
     Query::Callers { .. } => Query::Callers { name: String::new() }, "callers";
     Query::Callees { .. } => Query::Callees { name: String::new() }, "callees";
     Query::Uses { .. } => Query::Uses { name: String::new() }, "uses";
-    Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None }, "reach";
-    Query::Slice { .. } => Query::Slice { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None }, "slice";
+    Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None, include_annotations: false }, "reach";
+    Query::Slice { .. } => Query::Slice { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None, include_annotations: false }, "slice";
     Query::Closure { .. } => Query::Closure { name: String::new(), direction: Direction::In, include_overlay: false, min_confidence: None }, "closure";
     Query::Externals => Query::Externals, "externals";
     Query::FfiExports => Query::FfiExports, "ffi_exports";
@@ -939,6 +939,16 @@ fn overlay_properties() -> [(&'static str, Value); 2] {
             }),
         ),
     ]
+}
+
+/// The argument `reach` and `slice` take on top of the overlay ones, the
+/// only walks with a path to attach an annotation to.
+fn annotations_property() -> Value {
+    json!({
+        "type": "boolean",
+        "default": false,
+        "description": "Also surface the agent's annotations that anchor on the returned path: infeasible or conditional, not refuted, labeled `agent`. Never proof, and the path is never removed. Needs an overlay holding annotations (`load_overlay` or `record_edges`); independent of `include_overlay`."
+    })
 }
 
 /// `include_overlay` and `min_confidence`, as [`overlay_properties`] declares them.
@@ -991,6 +1001,9 @@ fn tool_for(query: &Query) -> Value {
             for (name, property) in overlay_properties() {
                 properties.insert(name.into(), property);
             }
+        }
+        if matches!(query, Query::Reach { .. } | Query::Slice { .. }) {
+            properties.insert("include_annotations".into(), annotations_property());
         }
     }
     tool
@@ -1209,6 +1222,10 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         let message = format!("`include_overlay` needs an overlay: {NO_OVERLAY}");
         return Outcome::Result(call_tool_result(true, &message), false);
     }
+    if overlay.is_none() && query.includes_annotations() {
+        let message = format!("`include_annotations` needs an overlay: {NO_OVERLAY}");
+        return Outcome::Result(call_tool_result(true, &message), false);
+    }
     let result = match run_with_overlay(session, overlay, &query) {
         Ok(result) => result,
         Err(error) => return Outcome::Result(call_tool_result(true, &error.to_string()), false),
@@ -1335,6 +1352,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                 to: string_field("to")?,
                 include_overlay,
                 min_confidence,
+                include_annotations: flag_argument(arguments, "include_annotations")?,
             })
         }
         "slice" => {
@@ -1344,6 +1362,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                 to: string_field("to")?,
                 include_overlay,
                 min_confidence,
+                include_annotations: flag_argument(arguments, "include_annotations")?,
             })
         }
         "closure" => {
@@ -1745,6 +1764,79 @@ mod tests {
             assert_eq!(properties.get("include_overlay").is_some(), walks, "{tool}");
             assert_eq!(properties.get("min_confidence").is_some(), walks, "{tool}");
         }
+    }
+
+    /// `reach` and `slice` take `include_annotations`; with no overlay
+    /// attached, or one holding no annotation, asking for it is a tool error
+    /// rather than an empty answer that would read as "nothing on the path".
+    #[test]
+    fn a_walk_asking_for_annotations_needs_an_overlay_holding_some() {
+        let arguments = json!({ "from": "a", "to": "b", "include_annotations": true });
+        assert!(matches!(
+            query_from_call("reach", &arguments),
+            Ok(Query::Reach {
+                include_annotations: true,
+                include_overlay: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            query_from_call("slice", &arguments),
+            Ok(Query::Slice {
+                include_annotations: true,
+                ..
+            })
+        ));
+        assert!(matches!(
+            query_from_call("reach", &json!({ "from": "a", "to": "b" })),
+            Ok(Query::Reach {
+                include_annotations: false,
+                ..
+            })
+        ));
+        assert!(
+            query_from_call(
+                "reach",
+                &json!({ "from": "a", "to": "b", "include_annotations": "yes" })
+            )
+            .is_err()
+        );
+
+        for tool in tools_list_result()["tools"].as_array().unwrap() {
+            let takes = matches!(tool["name"].as_str(), Some("reach" | "slice"));
+            let properties = &tool["inputSchema"]["properties"];
+            assert_eq!(
+                properties.get("include_annotations").is_some(),
+                takes,
+                "{tool}"
+            );
+        }
+
+        let scratch = tempfile::tempdir().unwrap();
+        let (mut registry, _catalog) = overlay_registry(&scratch);
+        for tool in ["reach", "slice"] {
+            let text = tool_error(&mut registry, tool, arguments.clone());
+            assert!(
+                text.contains("include_annotations") && text.contains("load_overlay"),
+                "no overlay loaded: {text}"
+            );
+        }
+
+        let recorded = answer(
+            &mut registry,
+            "record_edges",
+            json!({ "records": [add_through(8, "h3")] }),
+        );
+        assert_eq!(recorded["pending"], 1, "{recorded}");
+        let text = tool_error(
+            &mut registry,
+            "reach",
+            json!({ "from": "dispatch", "to": "h3", "include_annotations": true }),
+        );
+        assert!(
+            text.contains("include_annotations") && text.contains("holds none"),
+            "an overlay with edges only: {text}"
+        );
     }
 
     /// A bindir that could not be found fails `emit_module` with that error,

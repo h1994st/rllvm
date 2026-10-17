@@ -510,3 +510,14 @@ pub(crate) fn facts_with_one_verified_module() -> ProgramFacts {
     base.modules = vec![report("v", ModuleAnalysis::Verified)];
     base
 }
+
+/// The header line an overlay file for `session` starts with, for a test
+/// that writes the file's records by hand.
+pub(crate) fn overlay_header(session: &Session) -> String {
+    format!(
+        "{{\"v\":{},\"fingerprint\":\"{}\",\"facts\":{}}}\n",
+        crate::overlay::OVERLAY_VERSION,
+        crate::overlay::fingerprint(session).unwrap(),
+        crate::cache::FACTS_FORMAT
+    )
+}

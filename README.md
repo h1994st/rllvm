@@ -480,7 +480,19 @@ echo '{"op":"verify","annotation":{"anchor":{"kind":"argument","site":"clamp.c:1
   | rllvm-query --catalog catalog.json overlay record
 ```
 
-See the [call-graph overlay example](examples/callgraph-overlay/).
+`reach` and `slice` surface annotations only with `--annotations` (MCP:
+`include_annotations`, default off), independent of `--include-overlay`: each
+infeasible or conditional annotation, not refuted, whose anchor lies on the
+returned path comes back under `uncertainty.annotated_flows`, labeled `agent`.
+It is never proof and never removes the path. An annotation recorded with a
+`from` attaches only when the walk's `from` names that same single function; a
+`from` matching several functions shows none of them. `annotated_flows` is
+omitted from the JSON when none attach. The flag is an error when no overlay is
+attached (a missing overlay file, or over MCP none loaded) or the overlay holds
+no annotations.
+
+See the [call-graph overlay example](examples/callgraph-overlay/), and the
+[value guards example](examples/value-guards/) for an annotated `reach`.
 
 ### Value guards
 
@@ -539,7 +551,8 @@ Each is analyzed once and answers from memory after that.
 Four tools keep the [call-graph overlay](#completing-the-call-graph) over MCP.
 `record_edges` takes the records `overlay record` reads, all or none, attaching
 the overlay beside the catalog first if none is; `reach`, `closure` and `slice`
-walk them at once with `include_overlay` (and `min_confidence`), and `slice`'s
+walk them at once with `include_overlay` (and `min_confidence`), `reach` and
+`slice` surface annotations with `include_annotations`, and `slice`'s
 `emit_module` and an `annotate` record need a catalog from `load_catalog`.
 Only `save_overlay` writes, appending to the file. `load_overlay` attaches the
 default file or `path` (required after `inventory`) and refuses to drop
