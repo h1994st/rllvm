@@ -1238,6 +1238,7 @@ fn emit_main_to_add(
         to: "add".into(),
         include_overlay: false,
         min_confidence: None,
+        include_annotations: false,
     };
     let answer = rllvm_query::run(&session, &query).unwrap();
     let llvm_bindir = rllvm_core::config::LlvmBindir::configured(llvm_bindir);
@@ -4495,6 +4496,86 @@ fn the_overlay_cli_records_an_annotation_and_lists_it() {
     assert_eq!(annotations.len(), 1, "{listed}");
     assert_eq!(annotations[0]["verdict"], "infeasible", "{listed}");
     assert_eq!(annotations[0]["key"]["anchor"]["kind"], "local", "{listed}");
+}
+
+const ANNOTATED_PATH: &str = "unsigned sink(unsigned n) { return n + 1; }\n\
+     unsigned f(unsigned n) {\n\
+       if (n > 15) return 0;\n\
+       return sink(n);\n\
+     }\n\
+     int main(void) { return (int)f(3); }\n";
+
+/// An annotation written through `overlay record`, so its value was read in
+/// the promoted module, then loaded as a walk loads it: a `reach` that asks
+/// surfaces it beside the path it leaves whole.
+#[test]
+fn a_recorded_infeasible_annotation_rides_along_a_reach_that_asks() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "p.c", ANNOTATED_PATH);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let site = format!("{}:4", scratch.path().join("p.c").display());
+    let annotate = serde_json::json!({
+        "op": "annotate",
+        "anchor": { "kind": "argument", "site": site, "operand": 0 },
+        "verdict": "infeasible",
+        "confidence": "medium",
+        "provenance": ["p.c:3: if (n > 15) return 0"],
+    });
+    let output = query_stdin(
+        &scratch,
+        &catalog,
+        &["overlay", "record"],
+        &format!("{annotate}\n"),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let session = rllvm_query::open(&catalog).unwrap();
+    let overlay = rllvm_query::Overlay::open(
+        &session,
+        &scratch.path().join("plain-catalog.overlay.jsonl"),
+    )
+    .unwrap();
+    let reach = |include_annotations| {
+        let query = rllvm_query::Query::Reach {
+            from: "main".into(),
+            to: "sink".into(),
+            include_overlay: false,
+            min_confidence: None,
+            include_annotations,
+        };
+        let result = rllvm_query::run_with_overlay(&session, Some(&overlay), &query).unwrap();
+        serde_json::to_value(&result).unwrap()
+    };
+
+    let plain = reach(false);
+    let annotated = reach(true);
+    assert_eq!(annotated["results"], plain["results"], "{annotated}");
+    assert_eq!(
+        annotated["results"].as_array().map(Vec::len),
+        Some(2),
+        "main -> f -> sink: {annotated}"
+    );
+    assert!(
+        plain["uncertainty"].get("annotated_flows").is_none(),
+        "{plain}"
+    );
+    let flows = annotated["uncertainty"]["annotated_flows"]
+        .as_array()
+        .unwrap();
+    assert_eq!(flows.len(), 1, "{annotated}");
+    assert_eq!(flows[0]["source"], "agent");
+    assert_eq!(flows[0]["feasibility"], "infeasible");
+    assert_eq!(flows[0]["confidence"], "medium");
+    assert_eq!(
+        flows[0]["provenance"],
+        serde_json::json!(["p.c:3: if (n > 15) return 0"])
+    );
+    assert_eq!(flows[0]["key"]["anchor"]["site"]["function"]["symbol"], "f");
+    assert_eq!(flows[0]["location"]["line"], 4, "{annotated}");
 }
 
 const GUARDED_CALLS: &str = "extern unsigned a(unsigned);\n\

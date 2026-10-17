@@ -93,9 +93,9 @@ pub use index::{
 
 pub mod overlay;
 pub use overlay::{
-    Annotation, AnnotationKey, AnnotationRef, Confidence, EdgeKey, Feasibility, OVERLAY_VERSION,
-    Overlay, OverlayCoverage, OverlayEdge, OverlaySummary, OverlayView, Record, SummaryEdge,
-    TargetSpec, Verdict, Verification, default_overlay_path,
+    AnnotatedFlow, Annotation, AnnotationKey, AnnotationRef, Confidence, EdgeKey, Feasibility,
+    OVERLAY_VERSION, Overlay, OverlayCoverage, OverlayEdge, OverlaySummary, OverlayView, Record,
+    SummaryEdge, TargetSpec, Verdict, Verification, default_overlay_path,
 };
 
 pub mod mcp;
@@ -141,6 +141,11 @@ pub enum Query {
         /// not refuted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_confidence: Option<Confidence>,
+        /// Also surface the overlay's `infeasible` and `conditional`
+        /// annotations on the returned path, in `uncertainty`. Never proof:
+        /// each is labeled `agent`, and the path is returned unchanged.
+        #[serde(default, skip_serializing_if = "is_false")]
+        include_annotations: bool,
     },
     /// Every function on some path from `from` to `to`, with the edges
     /// among them. Empty when no path exists over the edges walked.
@@ -153,6 +158,9 @@ pub enum Query {
         /// As for `Reach`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_confidence: Option<Confidence>,
+        /// As for `Reach`, over every edge of the slice.
+        #[serde(default, skip_serializing_if = "is_false")]
+        include_annotations: bool,
     },
     /// The set that can reach the target (`In`) or that it can reach
     /// (`Out`).
@@ -400,6 +408,12 @@ pub struct Uncertainty {
     /// Present only when the query included the overlay.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<OverlayCoverage>,
+    /// `reach` or `slice` with `include_annotations`: the overlay's
+    /// `infeasible` and `conditional` annotations on a value the returned
+    /// path or slice crosses, each labeled `agent`. Hypotheses: the path is
+    /// returned unchanged, and an annotation is never proof it cannot run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub annotated_flows: Vec<AnnotatedFlow>,
     /// `guards` only: why the value trace stopped early, when it did. The
     /// guards found before it stopped are still in the results.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -654,9 +668,10 @@ pub fn run(session: &Session, query: &Query) -> Result<QueryResult, Error> {
 }
 
 /// [`run`], with an overlay of agent-proposed edges that `reach`, `closure`
-/// and `slice` walk when the query sets `include_overlay`. A query that asks
-/// for the overlay when `overlay` is `None` is an argument error, never a
-/// silent direct-only answer.
+/// and `slice` walk when the query sets `include_overlay`, and whose
+/// annotations `reach` and `slice` surface when it sets
+/// `include_annotations`. A query that asks for the overlay when `overlay` is
+/// `None` is an argument error, never a silent direct-only answer.
 pub fn run_with_overlay(
     session: &Session,
     overlay: Option<&Overlay>,
@@ -675,11 +690,22 @@ pub fn run_with_overlay(
         None => None,
     };
     let view = view.as_ref();
+    let annotations = if query.includes_annotations() {
+        Some(overlay.ok_or_else(|| {
+            Error::InvalidArguments(
+                "`include_annotations` needs an overlay: none is loaded for this catalog"
+                    .to_string(),
+            )
+        })?)
+    } else {
+        None
+    };
 
     let mut reach_frontier: Option<Vec<SymbolBinding>> = None;
     let mut conditional_path_steps = 0;
     let mut agent_path_steps = 0;
     let mut agent_reached = Vec::new();
+    let mut annotated_flows = Vec::new();
     let mut unknown_language = None;
     let mut value_trace_lost = None;
     let mut value_trace_diagnostics = Vec::new();
@@ -691,15 +717,24 @@ pub fn run_with_overlay(
         Query::Callees { name } => QueryResults::Callees(session.callees(name)),
         Query::Uses { name } => QueryResults::Uses(uses_of(session, name)),
         Query::Reach { from, to, .. } => {
-            let reach = session.reach_with(from, to, view);
+            let (reach, destination) = session.reach_to(from, to, view);
             reach_frontier = Some(reach.frontier);
             (conditional_path_steps, agent_path_steps) = hedged_steps(reach.path.iter().flatten());
+            if let (Some(overlay), Some(path)) = (annotations, &reach.path) {
+                annotated_flows =
+                    flows_on_walk(session, overlay, from, path.iter(), destination.iter());
+            }
             QueryResults::Reach(reach.path)
         }
         Query::Slice { from, to, .. } => {
             let slice = session.slice_with(from, to, view);
             (conditional_path_steps, agent_path_steps) =
                 hedged_steps(slice.edges.iter().map(|edge| &edge.step));
+            if let Some(overlay) = annotations {
+                let steps = slice.edges.iter().map(|edge| &edge.step);
+                annotated_flows =
+                    flows_on_walk(session, overlay, from, steps, slice.functions.iter());
+            }
             QueryResults::Slice(slice)
         }
         Query::Closure {
@@ -762,6 +797,7 @@ pub fn run_with_overlay(
             agent_path_steps,
             agent_reached,
             overlay: view.map(|view| view.coverage().clone()),
+            annotated_flows,
             functions_of_unknown_language: unknown_language,
             value_trace_lost,
             value_trace_diagnostics,
@@ -783,6 +819,27 @@ fn hedged_steps<'s>(steps: impl Iterator<Item = &'s PathStep>) -> (usize, usize)
         PathStep::Agent { .. } => (conditional, agent + 1),
         PathStep::Call(_) | PathStep::Binding(_) | PathStep::Alias { .. } => (conditional, agent),
     })
+}
+
+/// The annotations `overlay` holds on a walk from `from` over `steps`: on a
+/// call any step makes, or a local of any function a step calls from or of
+/// `members`, the walk's other definitions.
+fn flows_on_walk<'s>(
+    session: &Session,
+    overlay: &Overlay,
+    from: &str,
+    steps: impl Iterator<Item = &'s PathStep>,
+    members: impl Iterator<Item = &'s FunctionId>,
+) -> Vec<AnnotatedFlow> {
+    let sites: HashSet<&CallSiteId> = steps.filter_map(PathStep::site).collect();
+    // A declaration has no locals: only a definition's symbol names one.
+    let functions: HashSet<&str> = sites
+        .iter()
+        .map(|site| &site.function)
+        .chain(members.filter(|id| session.function(id).is_some_and(|fact| fact.is_definition)))
+        .map(|id| id.symbol.as_str())
+        .collect();
+    overlay.annotated_flows(session, from, &sites, &functions)
 }
 
 fn resolution_of(session: &Session, name: &str) -> Resolution {
@@ -1454,9 +1511,25 @@ impl Query {
         }
     }
 
-    /// Whether this query walks the overlay, and so needs one opened.
+    /// Whether this query reads the overlay -- walks its edges or surfaces
+    /// its annotations -- and so needs one opened.
     pub fn walks_overlay(&self) -> bool {
-        matches!(self.overlay_fields(), Some((true, _)))
+        matches!(self.overlay_fields(), Some((true, _))) || self.includes_annotations()
+    }
+
+    /// Whether this query asks for the annotations on its path.
+    fn includes_annotations(&self) -> bool {
+        match self {
+            Query::Reach {
+                include_annotations,
+                ..
+            }
+            | Query::Slice {
+                include_annotations,
+                ..
+            } => *include_annotations,
+            _ => false,
+        }
     }
 
     /// Whether this kind of query can walk the overlay, asked to or not:
@@ -1618,6 +1691,7 @@ fn uncertainty_of(
         agent_path_steps: 0,
         agent_reached: Vec::new(),
         overlay: None,
+        annotated_flows: Vec::new(),
         // Overwritten by `run` for `Query::FfiExports`; every other query
         // leaves it absent.
         functions_of_unknown_language: None,
@@ -1864,6 +1938,7 @@ mod tests {
                 to: "c".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -1886,6 +1961,7 @@ mod tests {
                 to: "a".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -1901,6 +1977,7 @@ mod tests {
                 to: "absent".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -2003,6 +2080,7 @@ mod tests {
                 to: "target".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -2032,6 +2110,7 @@ mod tests {
                 to: "target".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -2045,6 +2124,7 @@ mod tests {
                 to: "c".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -2218,6 +2298,7 @@ mod tests {
                 to: "b".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -2498,6 +2579,7 @@ mod tests {
                 to: "h3".into(),
                 include_overlay,
                 min_confidence,
+                include_annotations: false,
             }
         }
 
@@ -2700,6 +2782,7 @@ mod tests {
                 to: "h3".into(),
                 include_overlay,
                 min_confidence: None,
+                include_annotations: false,
             }
         }
 
@@ -2766,6 +2849,268 @@ mod tests {
                 result.uncertainty.overlay.as_ref().unwrap().covered_sites,
                 2
             );
+        }
+    }
+
+    /// Annotations surfaced on a walk: only when the query asks, only the
+    /// ones on the returned path, and never at the cost of the path.
+    mod annotated_walks {
+        use super::*;
+        use serde_json::json;
+
+        /// `main -> f -> sink`, with `g -> sink` and `other -> f` beside it.
+        fn session() -> Session {
+            session_from(&[("main", "f"), ("f", "sink"), ("g", "sink"), ("other", "f")])
+        }
+
+        /// The call `caller` makes as the `index`th edge of [`session`].
+        fn site(caller: &str, index: u32) -> serde_json::Value {
+            json!({
+                "function": { "module_id": "m", "symbol": caller },
+                "block_index": 0,
+                "instruction_index": index,
+            })
+        }
+
+        fn argument(caller: &str, index: u32, operand: usize) -> serde_json::Value {
+            json!({ "kind": "argument", "site": site(caller, index), "operand": operand })
+        }
+
+        fn local(function: &str, name: &str) -> serde_json::Value {
+            json!({ "kind": "local", "function": function, "name": name })
+        }
+
+        fn annotate(anchor: serde_json::Value, from: Option<&str>, verdict: &str) -> String {
+            let mut record = json!({
+                "op": "annotate",
+                "anchor": anchor,
+                "verdict": verdict,
+                "confidence": "medium",
+                "provenance": ["t.c:4: if (n > 15) return"],
+            });
+            if let Some(from) = from {
+                record["from"] = json!(from);
+            }
+            record.to_string()
+        }
+
+        /// An overlay loaded from a file written by hand, as a load reads
+        /// it: never grounded in a promoted module.
+        fn overlay_of(session: &Session, scratch: &tempfile::TempDir, lines: &[String]) -> Overlay {
+            let path = scratch.path().join("catalog.overlay.jsonl");
+            let mut text = overlay_header(session);
+            for line in lines {
+                text.push_str(line);
+                text.push('\n');
+            }
+            std::fs::write(&path, text).unwrap();
+            Overlay::open(session, &path).unwrap()
+        }
+
+        /// One annotation of each kind a walk from `main` to `sink` must
+        /// and must not surface.
+        fn every_case(session: &Session, scratch: &tempfile::TempDir) -> Overlay {
+            let refuted = json!({
+                "op": "verify",
+                "annotation": { "anchor": argument("main", 0, 0) },
+                "tool": "reread",
+                "verdict": "refuted",
+            });
+            overlay_of(
+                session,
+                scratch,
+                &[
+                    // On the path: surfaced.
+                    annotate(argument("f", 1, 0), None, "infeasible"),
+                    annotate(local("f", "n"), None, "conditional"),
+                    annotate(local("sink", "len"), None, "infeasible"),
+                    annotate(argument("f", 1, 1), Some("main"), "infeasible"),
+                    // Never surfaced: off the path, feasible, refuted, or
+                    // reached from another function.
+                    annotate(argument("g", 2, 0), None, "infeasible"),
+                    annotate(local("g", "x"), None, "infeasible"),
+                    annotate(
+                        json!({ "kind": "return", "site": site("main", 0) }),
+                        None,
+                        "feasible",
+                    ),
+                    annotate(argument("main", 0, 0), None, "infeasible"),
+                    refuted.to_string(),
+                    annotate(argument("f", 1, 2), Some("other"), "infeasible"),
+                ],
+            )
+        }
+
+        fn reach(from: &str, include_annotations: bool) -> Query {
+            Query::Reach {
+                from: from.into(),
+                to: "sink".into(),
+                include_overlay: false,
+                min_confidence: None,
+                include_annotations,
+            }
+        }
+
+        fn slice(from: &str, include_annotations: bool) -> Query {
+            Query::Slice {
+                from: from.into(),
+                to: "sink".into(),
+                include_overlay: false,
+                min_confidence: None,
+                include_annotations,
+            }
+        }
+
+        /// Each surfaced flow, by its key.
+        fn flows(result: &QueryResult) -> BTreeSet<String> {
+            result
+                .uncertainty
+                .annotated_flows
+                .iter()
+                .map(|flow| flow.annotation.key.to_string())
+                .collect()
+        }
+
+        fn names(keys: &[&str]) -> BTreeSet<String> {
+            keys.iter().map(|key| key.to_string()).collect()
+        }
+
+        const OPERAND_0: &str = "operand 0 of the call at site 0:1 in f [m]";
+        const LOCAL_N: &str = "local `n` in f";
+        const LOCAL_LEN: &str = "local `len` in sink";
+
+        #[test]
+        fn an_infeasible_annotation_on_the_path_is_surfaced_and_the_path_kept() {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session();
+            let overlay = every_case(&session, &scratch);
+            let plain = run_with_overlay(&session, Some(&overlay), &reach("main", false)).unwrap();
+            let annotated =
+                run_with_overlay(&session, Some(&overlay), &reach("main", true)).unwrap();
+
+            let QueryResults::Reach(Some(path)) = &annotated.results else {
+                panic!("the path is still returned: {:?}", annotated.results);
+            };
+            let QueryResults::Reach(Some(unannotated)) = &plain.results else {
+                panic!("fixture: main reaches sink");
+            };
+            assert_eq!(path, unannotated, "an annotation never changes the path");
+
+            assert_eq!(
+                flows(&annotated),
+                names(&[
+                    OPERAND_0,
+                    LOCAL_N,
+                    LOCAL_LEN,
+                    "operand 1 of the call at site 0:1 in f [m] from main",
+                ])
+            );
+            let json = serde_json::to_value(&annotated).unwrap();
+            let flow = json["uncertainty"]["annotated_flows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|flow| {
+                    flow["key"]["anchor"]["kind"] == "argument" && flow["key"].get("from").is_none()
+                })
+                .expect("the unscoped argument annotation");
+            assert_eq!(flow["source"], "agent");
+            assert_eq!(flow["feasibility"], "infeasible");
+            assert_eq!(flow["confidence"], "medium");
+            assert_eq!(flow["provenance"], json!(["t.c:4: if (n > 15) return"]));
+            assert_eq!(json["query"]["include_annotations"], true);
+        }
+
+        #[test]
+        fn annotations_stay_out_unless_asked() {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session();
+            let overlay = every_case(&session, &scratch);
+            for query in [reach("main", false), slice("main", false)] {
+                let result = run_with_overlay(&session, Some(&overlay), &query).unwrap();
+                assert!(result.uncertainty.annotated_flows.is_empty());
+                let json = serde_json::to_value(&result).unwrap();
+                assert!(
+                    json["uncertainty"].get("annotated_flows").is_none(),
+                    "{json}"
+                );
+                assert!(json["query"].get("include_annotations").is_none(), "{json}");
+            }
+        }
+
+        #[test]
+        fn a_scoped_annotation_attaches_only_to_a_walk_from_its_from() {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session();
+            let overlay = every_case(&session, &scratch);
+            let result = run_with_overlay(&session, Some(&overlay), &reach("other", true)).unwrap();
+            assert_eq!(
+                flows(&result),
+                names(&[
+                    OPERAND_0,
+                    LOCAL_N,
+                    LOCAL_LEN,
+                    "operand 2 of the call at site 0:1 in f [m] from other",
+                ])
+            );
+        }
+
+        #[test]
+        fn a_slice_surfaces_the_annotations_on_its_edges_and_members() {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session();
+            let overlay = every_case(&session, &scratch);
+            let plain = run_with_overlay(&session, Some(&overlay), &slice("main", false)).unwrap();
+            let result = run_with_overlay(&session, Some(&overlay), &slice("main", true)).unwrap();
+            assert_eq!(
+                serde_json::to_value(&result.results).unwrap(),
+                serde_json::to_value(&plain.results).unwrap(),
+                "an annotation never changes the slice"
+            );
+            assert_eq!(
+                flows(&result),
+                names(&[
+                    OPERAND_0,
+                    LOCAL_N,
+                    LOCAL_LEN,
+                    "operand 1 of the call at site 0:1 in f [m] from main",
+                ])
+            );
+        }
+
+        #[test]
+        fn no_path_surfaces_no_annotation() {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session();
+            let overlay = every_case(&session, &scratch);
+            let result = run_with_overlay(
+                &session,
+                Some(&overlay),
+                &Query::Reach {
+                    from: "sink".into(),
+                    to: "main".into(),
+                    include_overlay: false,
+                    min_confidence: None,
+                    include_annotations: true,
+                },
+            )
+            .unwrap();
+            assert!(matches!(result.results, QueryResults::Reach(None)));
+            assert!(result.uncertainty.annotated_flows.is_empty());
+        }
+
+        #[test]
+        fn including_annotations_without_an_overlay_is_an_argument_error() {
+            let session = session();
+            for query in [reach("main", true), slice("main", true)] {
+                assert!(query.walks_overlay(), "the overlay must be opened");
+                match run(&session, &query) {
+                    Err(Error::InvalidArguments(message)) => {
+                        assert!(message.contains("include_annotations"), "{message}")
+                    }
+                    other => panic!("expected an argument error, got {other:?}"),
+                }
+            }
         }
     }
 }

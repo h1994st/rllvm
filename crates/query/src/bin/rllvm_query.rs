@@ -78,6 +78,7 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
             to,
             include_overlay,
             min_confidence,
+            include_annotations: false,
         },
         // `--emit-module` acts on the answer rather than shaping the query,
         // so `run_query` reads it before the command is consumed here.
@@ -86,6 +87,7 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
             to,
             include_overlay,
             min_confidence,
+            include_annotations: false,
         },
         QueryCommand::Closure { name, direction } => Query::Closure {
             name,
@@ -994,12 +996,14 @@ mod tests {
                 to: "b".into(),
                 include_overlay: true,
                 min_confidence: Some(Confidence::High),
+                include_annotations: false,
             },
             Query::Slice {
                 from: "a".into(),
                 to: "b".into(),
                 include_overlay: true,
                 min_confidence: Some(Confidence::High),
+                include_annotations: false,
             },
             Query::Closure {
                 name: "f".into(),

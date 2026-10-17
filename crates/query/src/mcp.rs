@@ -898,8 +898,8 @@ query_tool_surface! {
     Query::Callers { .. } => Query::Callers { name: String::new() }, "callers";
     Query::Callees { .. } => Query::Callees { name: String::new() }, "callees";
     Query::Uses { .. } => Query::Uses { name: String::new() }, "uses";
-    Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None }, "reach";
-    Query::Slice { .. } => Query::Slice { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None }, "slice";
+    Query::Reach { .. } => Query::Reach { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None, include_annotations: false }, "reach";
+    Query::Slice { .. } => Query::Slice { from: String::new(), to: String::new(), include_overlay: false, min_confidence: None, include_annotations: false }, "slice";
     Query::Closure { .. } => Query::Closure { name: String::new(), direction: Direction::In, include_overlay: false, min_confidence: None }, "closure";
     Query::Externals => Query::Externals, "externals";
     Query::FfiExports => Query::FfiExports, "ffi_exports";
@@ -1335,6 +1335,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                 to: string_field("to")?,
                 include_overlay,
                 min_confidence,
+                include_annotations: false,
             })
         }
         "slice" => {
@@ -1344,6 +1345,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                 to: string_field("to")?,
                 include_overlay,
                 min_confidence,
+                include_annotations: false,
             })
         }
         "closure" => {

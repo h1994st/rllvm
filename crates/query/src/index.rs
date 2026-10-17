@@ -144,6 +144,19 @@ pub enum PathStep {
     },
 }
 
+impl PathStep {
+    /// The call site the step goes through; `None` for a binding or an
+    /// alias, which make no call.
+    pub(crate) fn site(&self) -> Option<&CallSiteId> {
+        match self {
+            PathStep::Call(site)
+            | PathStep::BoundedIndirect { site, .. }
+            | PathStep::Agent { site, .. } => Some(site),
+            PathStep::Binding(_) | PathStep::Alias { .. } => None,
+        }
+    }
+}
+
 /// The result of a `Session::reach` query.
 #[derive(Debug)]
 pub struct ReachResult {
@@ -624,6 +637,18 @@ impl Session {
     /// walk is breadth-first across functions, so it can return a path
     /// through agent edges as short as, or shorter than, a resolved one.
     pub fn reach_with(&self, from: &str, to: &str, overlay: Option<&OverlayView>) -> ReachResult {
+        self.reach_to(from, to, overlay).0
+    }
+
+    /// [`Session::reach_with`], with the definition the returned path ends
+    /// at. Not public API: internal plumbing for the annotations on a path,
+    /// whose last function no step names as a caller.
+    pub(crate) fn reach_to(
+        &self,
+        from: &str,
+        to: &str,
+        overlay: Option<&OverlayView>,
+    ) -> (ReachResult, Option<FunctionId>) {
         // A mere declaration is not a reached function: only a definition
         // among the functions named `to` counts as the destination.
         let targets: HashSet<FunctionId> = self
@@ -644,10 +669,11 @@ impl Session {
 
         while let Some((current, path)) = queue.pop_front() {
             if targets.contains(&current) {
-                return ReachResult {
+                let result = ReachResult {
                     path: Some(path),
                     frontier,
                 };
+                return (result, Some(current));
             }
 
             let (edges, ambiguous) = self.successors(&current, overlay);
@@ -669,10 +695,11 @@ impl Session {
             }
         }
 
-        ReachResult {
+        let result = ReachResult {
             path: None,
             frontier,
-        }
+        };
+        (result, None)
     }
 
     /// The same walk as `reach`, run to exhaustion in one direction and

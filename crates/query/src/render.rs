@@ -785,6 +785,13 @@ fn full_sections(result: &QueryResult, color: Color, out: &mut String) {
             overlay.covered_sites, overlay.unresolved_sites
         ));
     }
+    // Only for a walk that asked for its annotations, zero included.
+    if result.query.includes_annotations() {
+        out.push_str(&format!(
+            "  annotated_flows: {}\n",
+            uncertainty.annotated_flows.len()
+        ));
+    }
     // Every ambiguous binding `ambiguous_bindings` only counts: for `reach`
     // the ones that walk actually reached, for every other query the full
     // program-wide set. `ambiguous_bindings` says how many; this says which,
@@ -841,22 +848,68 @@ pub fn render(result: &QueryResult, mode: TextMode, color: Color) -> String {
     if mode == TextMode::Full {
         full_sections(result, color, &mut out);
     }
+    let walked = match result.results {
+        QueryResults::Slice(_) => "slice",
+        _ => "path",
+    };
+    annotated_flows(result, ctx, walked, &mut out);
     // Last, in every mode, so no reader stops before it.
     let agent_steps = result.uncertainty.agent_path_steps;
     if agent_steps > 0 {
         if !out.is_empty() {
             out.push('\n');
         }
-        let walked = match result.results {
-            QueryResults::Slice(_) => "slice",
-            _ => "path",
-        };
         out.push_str(&format!(
             "{} this {walked} uses {agent_steps} agent edge(s)\n",
             paint("not proven:", color, Paint::Uncertain)
         ));
     }
     out
+}
+
+/// The agent's annotations on the walk, each with its grounds, then a line
+/// saying they are hypotheses: the path above stands as found. Near the end
+/// in every mode, as the agent-edge line is, so no reader takes the path
+/// without them.
+fn annotated_flows(result: &QueryResult, ctx: Ctx, walked: &str, out: &mut String) {
+    let flows = &result.uncertainty.annotated_flows;
+    if flows.is_empty() {
+        return;
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    for flow in flows {
+        let annotation = &flow.annotation;
+        let at = flow
+            .location
+            .as_ref()
+            .map(|at| format!(" at {}", location(Some(at), ctx)))
+            .unwrap_or_default();
+        let verdict = verdict_label(annotation.verification.as_ref().map(|v| v.verdict));
+        out.push_str(&format!(
+            "{}  {}: {}{at} {}\n",
+            paint("agent annotation", ctx.color, Paint::Uncertain),
+            annotation.feasibility,
+            annotation.key,
+            paint(
+                &format!("[{}, {verdict}]", annotation.confidence),
+                ctx.color,
+                Paint::Uncertain
+            )
+        ));
+        for entry in &annotation.provenance {
+            out.push_str(&format!(
+                "{CALL_SITE_INDENT}{} {entry}\n",
+                paint("because", ctx.color, Paint::Muted)
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "{} this {walked} carries {} agent annotation(s), hypotheses that do not remove it\n",
+        paint("not proof:", ctx.color, Paint::Uncertain),
+        flows.len()
+    ));
 }
 
 fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
@@ -1393,6 +1446,7 @@ mod tests {
                 to: "b".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -1413,6 +1467,7 @@ mod tests {
                 to: "a".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -1438,6 +1493,7 @@ mod tests {
                 to: "target".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
@@ -1478,6 +1534,7 @@ mod tests {
             to: "h3".into(),
             include_overlay: true,
             min_confidence: None,
+            include_annotations: false,
         });
         for mode in [TextMode::Adaptive, TextMode::Full] {
             let text = render(&result, mode, Color::Never);
@@ -1496,6 +1553,72 @@ mod tests {
                 "got: {text}"
             );
         }
+    }
+
+    /// `main -> f -> sink`, with an agent's `infeasible` verdict on the
+    /// value `f` passes `sink`, loaded from a hand-written overlay.
+    fn annotated_answer(scratch: &tempfile::TempDir, include_annotations: bool) -> QueryResult {
+        let session = session_from(&[("main", "f"), ("f", "sink")]);
+        let path = scratch.path().join("catalog.overlay.jsonl");
+        let annotate = serde_json::json!({
+            "op": "annotate",
+            "anchor": {
+                "kind": "argument",
+                "site": {
+                    "function": { "module_id": "m", "symbol": "f" },
+                    "block_index": 0,
+                    "instruction_index": 1,
+                },
+                "operand": 0,
+            },
+            "verdict": "infeasible",
+            "confidence": "medium",
+            "provenance": ["t.c:4: if (n > 15) return"],
+        });
+        std::fs::write(&path, format!("{}{annotate}\n", overlay_header(&session))).unwrap();
+        let overlay = crate::overlay::Overlay::open(&session, &path).unwrap();
+        let query = Query::Slice {
+            from: "main".into(),
+            to: "sink".into(),
+            include_overlay: false,
+            min_confidence: None,
+            include_annotations,
+        };
+        crate::run_with_overlay(&session, Some(&overlay), &query).unwrap()
+    }
+
+    #[test]
+    fn an_annotation_is_labeled_agent_and_never_reads_as_proof() {
+        let scratch = tempfile::tempdir().unwrap();
+        let result = annotated_answer(&scratch, true);
+        for mode in [TextMode::Adaptive, TextMode::Full] {
+            let text = render(&result, mode, Color::Never);
+            assert!(
+                text.starts_with("f\nmain\nsink\nf -> sink (call)\nmain -> f (call)\n"),
+                "the slice prints as it would without the annotation: {text}"
+            );
+            assert!(
+                text.contains(
+                    "\nagent annotation  infeasible: operand 0 of the call at site 0:1 in f [m] [medium, unverified]\n    because t.c:4: if (n > 15) return\n"
+                ),
+                "got: {text}"
+            );
+            assert!(
+                text.ends_with(
+                    "\nnot proof: this slice carries 1 agent annotation(s), hypotheses that do not remove it\n"
+                ),
+                "got: {text}"
+            );
+        }
+        let full = render(&result, TextMode::Full, Color::Never);
+        assert!(full.contains("\n  annotated_flows: 1\n"), "got: {full}");
+
+        let unasked = render(
+            &annotated_answer(&scratch, false),
+            TextMode::Full,
+            Color::Never,
+        );
+        assert!(!unasked.contains("annotat"), "got: {unasked}");
     }
 
     #[test]
@@ -1700,6 +1823,7 @@ mod tests {
                 to: "c".into(),
                 include_overlay: false,
                 min_confidence: None,
+                include_annotations: false,
             },
         )
         .unwrap();
