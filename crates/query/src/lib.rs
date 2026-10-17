@@ -485,7 +485,7 @@ pub fn open(catalog: &Path) -> Result<Session, Error> {
 /// on a miss. Every module is bound to this catalog's ids and source status
 /// the same way regardless of which path produced its facts.
 pub fn open_with_cache(catalog: &Path, cache: Option<&FactsCache>) -> Result<Session, Error> {
-    session_from_loaded(load::load_catalog(catalog)?, cache)
+    Ok(session_from_loaded(load::load_catalog(catalog)?, cache)?.with_catalog_path(catalog))
 }
 
 /// [`open`] for a catalog already in memory, resolving its relative module

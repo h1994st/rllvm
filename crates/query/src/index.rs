@@ -19,7 +19,10 @@ use std::{
 
 use serde::Serialize;
 
-use rllvm_core::catalog::{CatalogOrigin, CatalogScope};
+use rllvm_core::{
+    catalog::{CatalogOrigin, CatalogScope},
+    config::LlvmBindir,
+};
 
 use crate::{
     CacheReport,
@@ -214,6 +217,12 @@ pub struct Session {
     /// How the facts cache served this session's load; `None` when the
     /// session was opened without one.
     cache_report: Option<CacheReport>,
+    /// The catalog file this session was opened from; `None` for one built
+    /// from facts or from a catalog held in memory.
+    catalog_path: Option<PathBuf>,
+    /// The LLVM bindir the tools that transform a module run from, or why
+    /// there is none; `None` until a caller says.
+    llvm_bindir: Option<Result<LlvmBindir, String>>,
 }
 
 impl Session {
@@ -343,6 +352,8 @@ impl Session {
             demangled,
             by_demangled,
             cache_report: None,
+            catalog_path: None,
+            llvm_bindir: None,
         };
         // Canonical slots need the bindings, so they are keyed once the
         // session can resolve them.
@@ -369,6 +380,26 @@ impl Session {
     pub fn with_cache_report(mut self, report: Option<CacheReport>) -> Session {
         self.cache_report = report;
         self
+    }
+
+    /// Records the catalog file this session was opened from.
+    pub fn with_catalog_path(mut self, path: &Path) -> Session {
+        self.catalog_path = Some(path.to_path_buf());
+        self
+    }
+
+    pub fn catalog_path(&self) -> Option<&Path> {
+        self.catalog_path.as_deref()
+    }
+
+    /// Records the LLVM bindir the module-transforming tools run from, or
+    /// the message saying why there is none.
+    pub fn set_llvm_bindir(&mut self, llvm_bindir: Result<LlvmBindir, String>) {
+        self.llvm_bindir = Some(llvm_bindir);
+    }
+
+    pub fn llvm_bindir(&self) -> Option<&Result<LlvmBindir, String>> {
+        self.llvm_bindir.as_ref()
     }
 
     pub fn cache_report(&self) -> Option<&CacheReport> {

@@ -179,7 +179,10 @@ impl Registry {
     /// to this build: after a rebuild its edges name call sites that may no
     /// longer exist, so it is dropped, and the answer says how many unsaved
     /// records went with it.
-    fn insert(&mut self, key: PathBuf, session: Session, artifact: bool) -> Value {
+    fn insert(&mut self, key: PathBuf, mut session: Session, artifact: bool) -> Value {
+        if let Some((_, llvm_bindir)) = &self.slice_tools {
+            session.set_llvm_bindir(llvm_bindir.clone());
+        }
         let mut summary = catalog_summary(&key, &session);
         let current = fingerprint(&session).ok();
         let stale = self

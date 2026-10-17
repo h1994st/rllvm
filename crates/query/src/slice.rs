@@ -13,17 +13,36 @@ use std::{
 use serde::Serialize;
 
 use rllvm_core::{
-    catalog::ArchiveCache, config::LlvmBindir, error::Error, utils::execute_llvm_tool_in_for_output,
+    catalog::ArchiveCache,
+    config::LlvmBindir,
+    diagnostics::{llvm_major_version, tool_llvm_major_version},
+    error::Error,
+    utils::execute_llvm_tool_in_for_output,
 };
 
 use crate::{
     Query, QueryResult, QueryResults, Session,
+    extract::llvm_version,
     facts::{FunctionId, Linkage},
-    load::{load_catalog, read_module},
+    load::{PendingModule, load_catalog, read_module},
 };
 
 /// `llvm-extract`'s file name, looked for in the LLVM bindir.
 const LLVM_EXTRACT: &str = "llvm-extract";
+
+/// `opt`'s file name, looked for in the LLVM bindir.
+const OPT: &str = "opt";
+
+/// What [`promote`] runs `opt` with. Clang marks every `-O0` function
+/// `optnone`, which `mem2reg` skips, so the attribute is removed first.
+const PROMOTE_ARGUMENTS: &[&str] = &[
+    "-force-remove-attribute=optnone",
+    "-passes=forceattrs,mem2reg",
+];
+
+/// What names the LLVM release in a producer string: clang's. Other
+/// producers, rustc's `rustc version 1.x`, number their own releases.
+const CLANG_PRODUCER: &str = "clang version";
 
 /// `llvm-nm`'s file name, looked for in the LLVM bindir.
 const LLVM_NM: &str = "llvm-nm";
@@ -103,20 +122,7 @@ pub fn emit_module(
         let Some(plan) = plans.remove(pending.id.as_str()) else {
             continue;
         };
-        // The facts above describe the bytes the session read; a catalog
-        // rewritten since names other bytes, which they do not describe.
-        let analyzed = session
-            .modules()
-            .iter()
-            .find(|report| report.id == pending.id)
-            .and_then(|report| report.content_sha256.as_ref());
-        if analyzed.is_some() && analyzed != pending.record.content_sha256.as_ref() {
-            return Err(Error::InvalidArguments(format!(
-                "module {} changed in {} since the query read it",
-                pending.id,
-                catalog.display()
-            )));
-        }
+        refuse_changed_module(session, pending, catalog)?;
         let module = read_module(pending, &mut archives)?;
         let piece = Piece {
             module: pending.id.clone(),
@@ -189,6 +195,167 @@ pub fn emit_module(
             .iter()
             .map(|piece| piece.plan.definitions.len())
             .sum(),
+    })
+}
+
+/// Refuses a module whose bytes changed in the catalog since `session` read
+/// them: the facts describe those bytes, not the ones now on disk.
+fn refuse_changed_module(
+    session: &Session,
+    pending: &PendingModule,
+    catalog: &Path,
+) -> Result<(), Error> {
+    let analyzed = session
+        .modules()
+        .iter()
+        .find(|report| report.id == pending.id)
+        .and_then(|report| report.content_sha256.as_ref());
+    if analyzed.is_some() && analyzed != pending.record.content_sha256.as_ref() {
+        return Err(Error::InvalidArguments(format!(
+            "module {} changed in {} since the query read it",
+            pending.id,
+            catalog.display()
+        )));
+    }
+    Ok(())
+}
+
+/// The LLVM major `module`'s producers name, the highest if several do.
+/// `None` when none names one: rustc's, or Apple clang's.
+fn producer_major(producers: &[String]) -> Option<u32> {
+    producers
+        .iter()
+        .filter(|producer| producer.contains(CLANG_PRODUCER))
+        .filter_map(|producer| llvm_major_version(producer))
+        .max()
+}
+
+/// The major of the LLVM linked into this process.
+fn linked_major() -> Option<u32> {
+    llvm_version().split('.').next()?.parse().ok()
+}
+
+/// `opt`'s LLVM major, or why it cannot be established.
+fn opt_major(opt: &Path) -> Result<u32, Error> {
+    tool_llvm_major_version(opt).ok_or_else(|| {
+        Error::InvalidArguments(format!(
+            "cannot establish the LLVM version of {}; `{OPT} --version` did not report one",
+            opt.display()
+        ))
+    })
+}
+
+/// Checks that `opt` can round-trip `module`: its LLVM major must reach the
+/// producer's (or it cannot read the bitcode) without passing the LLVM
+/// linked into this process (or that cannot read what `opt` writes). A
+/// producer that names no LLVM release, such as rustc, is left to `opt`'s own
+/// reader: [`promote_anchor_module`] names `opt`'s version if that fails.
+pub fn check_opt_llvm(
+    llvm_bindir: &LlvmBindir,
+    session: &Session,
+    module: &str,
+) -> Result<(), Error> {
+    let opt = llvm_bindir.tool(OPT)?;
+    let opt_major = opt_major(&opt)?;
+    if let Some(linked) = linked_major()
+        && opt_major > linked
+    {
+        return Err(Error::InvalidArguments(format!(
+            "{} is LLVM {opt_major}, newer than the LLVM {linked} rllvm-query is linked with, \
+             which could not read what it writes; point `llvm_bindir` at LLVM {linked} or older",
+            opt.display()
+        )));
+    }
+    let producers = session
+        .modules()
+        .iter()
+        .find(|report| report.id == module)
+        .map(|report| report.producers.as_slice())
+        .unwrap_or_default();
+    if let Some(producer) = producer_major(producers)
+        && opt_major < producer
+    {
+        return Err(Error::InvalidArguments(format!(
+            "{} is LLVM {opt_major}, older than the LLVM {producer} that produced module \
+             {module}, so it cannot read it; point `llvm_bindir` at LLVM {producer} or newer",
+            opt.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Runs `mem2reg` over `module_bytes` with `llvm_bindir`'s `opt`, in
+/// `scratch`, and answers the promoted bitcode. Stack slots become SSA
+/// values, so a guard on a `-O0` local is visible to a walk of the IR.
+pub fn promote(
+    module_bytes: &[u8],
+    llvm_bindir: &LlvmBindir,
+    scratch: &Path,
+) -> Result<Vec<u8>, Error> {
+    let opt = llvm_bindir.tool(OPT)?;
+    let input = scratch.join("promote.in.bc");
+    let output = scratch.join("promote.out.bc");
+    std::fs::write(&input, module_bytes)?;
+    let mut arguments: Vec<OsString> = PROMOTE_ARGUMENTS.iter().map(OsString::from).collect();
+    arguments.extend([
+        input.into_os_string(),
+        "-o".into(),
+        output.clone().into_os_string(),
+    ]);
+    run_tool(&opt, &arguments, scratch, &inherited_environment())?;
+    Ok(std::fs::read(output)?)
+}
+
+/// The bytes of the module that defines `anchor`, `mem2reg`-promoted. Only
+/// that one module is read, never linked with another. The catalog and the
+/// LLVM bindir are the ones `session` was given; a session without either
+/// cannot promote, and says which is missing.
+pub fn promote_anchor_module(session: &Session, anchor: &FunctionId) -> Result<Vec<u8>, Error> {
+    let catalog = session.catalog_path().ok_or_else(|| {
+        Error::InvalidArguments(
+            "this session was not opened from a catalog file, so there are no module bytes to \
+             promote"
+                .to_string(),
+        )
+    })?;
+    let llvm_bindir = match session.llvm_bindir() {
+        Some(Ok(llvm_bindir)) => llvm_bindir,
+        Some(Err(message)) => return Err(Error::InvalidArguments(message.clone())),
+        None => {
+            return Err(Error::InvalidArguments(
+                "no LLVM bindir was configured for this session, and `opt` is needed to promote \
+                 the module"
+                    .to_string(),
+            ));
+        }
+    };
+    let module = &anchor.module_id;
+    check_opt_llvm(llvm_bindir, session, module)?;
+
+    let loaded = load_catalog(catalog)?;
+    let pending = loaded
+        .pending
+        .iter()
+        .find(|pending| pending.id == *module)
+        .ok_or_else(|| {
+            Error::InvalidArguments(format!(
+                "module {module} is not among the readable modules of {}",
+                catalog.display()
+            ))
+        })?;
+    refuse_changed_module(session, pending, catalog)?;
+    let bytes = read_module(pending, &mut ArchiveCache::default())?.bytes;
+
+    let scratch = tempfile::TempDir::new()?;
+    promote(&bytes, llvm_bindir, scratch.path()).map_err(|error| {
+        let version = llvm_bindir
+            .tool(OPT)
+            .ok()
+            .and_then(|opt| tool_llvm_major_version(&opt))
+            .map_or_else(|| "of unknown version".to_string(), |v| format!("LLVM {v}"));
+        Error::InvalidArguments(format!(
+            "`{OPT}` ({version}) could not promote module {module}: {error}"
+        ))
     })
 }
 
@@ -404,6 +571,174 @@ fn inherited_environment() -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        extract::read_module_ir,
+        facts::ModuleAnalysis,
+        ir::{OpcodeIr, Operand},
+        testing::{facts, report},
+    };
+    use rllvm_core::catalog::{
+        CatalogOrigin, ModuleCatalog, ModuleRecord, ModuleStatus, hash_bytes, write_catalog,
+    };
+    use rllvm_testkit::llvm_bin;
+
+    /// A length clamped to a capacity.
+    const CLAMP_SOURCE: &str =
+        "unsigned f(unsigned len) { unsigned cap = 16; return len < cap ? len : cap; }\n";
+
+    fn fid(symbol: &str) -> FunctionId {
+        FunctionId {
+            module_id: "m".into(),
+            symbol: symbol.into(),
+        }
+    }
+
+    fn real_bindir() -> LlvmBindir {
+        LlvmBindir::configured(llvm_bin("opt").parent().unwrap())
+    }
+
+    /// A catalog of `source` compiled at `-O0` (so `optnone` stays), opened
+    /// as a session with the real LLVM bindir.
+    fn clamp_session(scratch: &tempfile::TempDir) -> Session {
+        let source = scratch.path().join("clamp.c");
+        std::fs::write(&source, CLAMP_SOURCE).unwrap();
+        let module = rllvm_testkit::compile_bitcode_file(&source, &["-O0", "-g"]);
+        let mut record = ModuleRecord::new("m");
+        record.path = Some(module.file_name().unwrap().into());
+        record.content_sha256 = Some(hash_bytes(&std::fs::read(&module).unwrap()));
+        record.status = ModuleStatus::Available;
+        let catalog = ModuleCatalog::new(
+            CatalogOrigin {
+                kind: "test".into(),
+                input: PathBuf::from("test"),
+                sha256: None,
+            },
+            "test",
+            vec![record],
+        );
+        let path = scratch.path().join("catalog.json");
+        write_catalog(&path, &catalog).unwrap();
+        let mut session = crate::open(&path).unwrap();
+        session.set_llvm_bindir(Ok(real_bindir()));
+        session
+    }
+
+    /// A bindir whose `opt` only reports `major`.
+    fn stub_bindir(scratch: &Path, major: u32) -> LlvmBindir {
+        use std::os::unix::fs::PermissionsExt;
+        let opt = scratch.join(OPT);
+        std::fs::write(
+            &opt,
+            format!("#!/bin/sh\necho 'LLVM version {major}.0.0'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&opt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        LlvmBindir::configured(scratch)
+    }
+
+    fn session_with_producer(producer: &str) -> Session {
+        let mut program = facts(Vec::new(), Vec::new());
+        let mut module = report("m", ModuleAnalysis::Analyzed);
+        module.producers = vec![producer.into()];
+        program.modules = vec![module];
+        Session::new(program, Vec::new())
+    }
+
+    #[test]
+    fn promote_anchor_module_promotes_stack_slots() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = clamp_session(&scratch);
+
+        // The module is genuinely `-O0`: unpromoted, the value lives in slots.
+        let source = std::fs::read(scratch.path().join("clamp.bc")).unwrap();
+        let before = read_module_ir(&source).unwrap();
+        let before = before
+            .functions
+            .iter()
+            .find(|f| f.id.symbol == "f")
+            .unwrap();
+        assert!(before.values.iter().any(|v| v.opcode == OpcodeIr::Load));
+
+        let bytes = promote_anchor_module(&session, &fid("f")).unwrap();
+        let ir = read_module_ir(&bytes).unwrap();
+        let f = ir.functions.iter().find(|f| f.id.symbol == "f").unwrap();
+        assert!(
+            f.values.iter().all(|v| v.opcode != OpcodeIr::Load),
+            "mem2reg removes the loads of the `-O0` slots"
+        );
+        let param = f.params[0];
+        assert!(
+            f.values.iter().any(|v| v.opcode == OpcodeIr::Phi
+                && v.operands.contains(&Operand::Value(param))
+                && v.operands
+                    .iter()
+                    .any(|o| matches!(o, Operand::Const(c) if c.value == "16"))),
+            "the clamp merges the parameter and the constant"
+        );
+        assert!(f.values.iter().any(|v| {
+            v.opcode == OpcodeIr::ICmp
+                && v.guard
+                    .as_ref()
+                    .is_some_and(|g| g.bound.as_deref() == Some("16"))
+        }));
+    }
+
+    #[test]
+    fn a_session_without_a_catalog_or_bindir_says_which_is_missing() {
+        let session = session_with_producer("clang version 20.1.0");
+        let error = promote_anchor_module(&session, &fid("f")).unwrap_err();
+        assert!(error.to_string().contains("catalog file"), "{error}");
+
+        let scratch = tempfile::tempdir().unwrap();
+        let catalog = clamp_session(&scratch)
+            .catalog_path()
+            .unwrap()
+            .to_path_buf();
+        let fresh = crate::open(&catalog).unwrap();
+        let error = promote_anchor_module(&fresh, &fid("f")).unwrap_err();
+        assert!(error.to_string().contains("no LLVM bindir"), "{error}");
+
+        let mut failed = crate::open(&catalog).unwrap();
+        failed.set_llvm_bindir(Err("llvm-config not found".into()));
+        let error = promote_anchor_module(&failed, &fid("f")).unwrap_err();
+        assert!(
+            error.to_string().contains("llvm-config not found"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_opt_older_than_the_producer_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session_with_producer("clang version 20.1.0 (https://example)");
+        let error = check_opt_llvm(&stub_bindir(scratch.path(), 12), &session, "m")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("LLVM 12") && error.contains("LLVM 20"),
+            "{error}"
+        );
+        check_opt_llvm(&stub_bindir(scratch.path(), 20), &session, "m").unwrap();
+    }
+
+    #[test]
+    fn an_opt_newer_than_the_linked_llvm_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session_with_producer("clang version 20.1.0");
+        let linked = linked_major().unwrap();
+        let error = check_opt_llvm(&stub_bindir(scratch.path(), linked + 1), &session, "m")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("LLVM {}", linked + 1)), "{error}");
+        assert!(error.contains(&format!("LLVM {linked}")), "{error}");
+    }
+
+    #[test]
+    fn a_producer_without_an_llvm_major_is_left_to_opts_reader() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session_with_producer("rustc version 1.90.0 (abc 2026-01-01)");
+        check_opt_llvm(&stub_bindir(scratch.path(), 12), &session, "m").unwrap();
+    }
 
     /// An Objective-C method's name holds a space, and an undefined symbol
     /// has no address.

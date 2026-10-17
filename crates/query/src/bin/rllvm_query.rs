@@ -470,7 +470,13 @@ fn run_query(args: QueryArgs) -> Result<(), Error> {
     let catalog = args.catalog.ok_or_else(|| {
         Error::InvalidArguments("--catalog is required to run a query".to_string())
     })?;
-    let session = open_with_cache(&catalog, facts_cache()?.as_ref())?;
+    let mut session = open_with_cache(&catalog, facts_cache()?.as_ref())?;
+    // A bindir that cannot be found fails only a query that runs `opt`.
+    session.set_llvm_bindir(
+        try_rllvm_config()
+            .and_then(|config| config.llvm_bindir().cloned())
+            .map_err(|error| error.to_string()),
+    );
     let mut opened = None;
     let overlay = overlay_for(
         &mut opened,
