@@ -128,12 +128,13 @@ jobs:
           version: ${{ env.LLVM_VERSION }}
           llvm-sys: ${{ env.LLVM_SYS_VERSION }}
 
+      # Linux builds and runs every Rust test once, instrumented, in the
+      # coverage step below; macOS builds and runs them plainly here and in the
+      # steps that follow.
       - name: Build
-        if: needs.changes.outputs.code == 'true'
+        if: needs.changes.outputs.code == 'true' && runner.os == 'macOS'
         run: cargo build --verbose
 
-      # Linux runs every Rust test once, instrumented, in the coverage step
-      # below; macOS runs them plainly here and in the two steps that follow.
       - name: Run tests
         if: needs.changes.outputs.code == 'true' && runner.os == 'macOS'
         run: cargo test -p rllvm-core -p rllvm --verbose
