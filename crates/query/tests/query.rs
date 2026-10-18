@@ -1197,7 +1197,7 @@ fn a_slice_is_emitted_with_the_configured_llvm_bindir() {
 #[cfg(unix)]
 #[test]
 fn a_failing_link_is_an_execution_failure_with_its_stderr() {
-    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::os::unix::fs::symlink;
 
     let scratch = tempfile::tempdir().unwrap();
     let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
@@ -1207,12 +1207,10 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
         symlink(llvm_bin(tool), tools.join(tool)).unwrap();
     }
     let llvm_link = tools.join("llvm-link");
-    std::fs::write(
+    rllvm_testkit::write_executable(
         &llvm_link,
         "#!/bin/sh\necho 'refusing to link today' >&2\nexit 1\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&llvm_link, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let out = scratch.path().join("slice.bc");
     match emit_main_to_add(&catalog, &llvm_link, &tools, &out) {

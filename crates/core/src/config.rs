@@ -938,17 +938,25 @@ mod tests {
 
     /// An executable `llvm-config` stand-in in `dir` that appends its
     /// arguments to `log` and then runs `body`.
+    ///
+    /// Written by a short-lived `sh`, as `rllvm_testkit::write_executable`
+    /// does for the other crates: a handle held here could leak into a child
+    /// another test thread forks, and executing the file while that copy is
+    /// open fails with `ETXTBSY` on Linux. This crate cannot depend on the
+    /// testkit, which depends on it.
     #[cfg(unix)]
     fn stand_in_llvm_config(dir: &Path, log: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
         let path = dir.join("llvm-config");
-        fs::write(
-            &path,
-            format!("#!/bin/sh\necho \"$@\" >> '{}'\n{body}\n", log.display()),
-        )
-        .unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+        let status = std::process::Command::new("sh")
+            .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(&path)
+            .arg(format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\n{body}\n",
+                log.display()
+            ))
+            .status()
+            .unwrap();
+        assert!(status.success(), "could not write {}", path.display());
         path
     }
 

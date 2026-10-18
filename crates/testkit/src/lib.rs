@@ -55,6 +55,23 @@ pub fn write_catalog_json(path: &Path, catalog: &rllvm_core::catalog::ModuleCata
     std::fs::write(path, serde_json::to_vec_pretty(catalog).unwrap()).unwrap();
 }
 
+/// Writes an executable script to `path` from a short-lived `sh`, so this
+/// process never holds a writable handle to it.
+///
+/// Writing it in-process would let another test thread fork while the
+/// handle is open; the child keeps a copy until it execs, and on Linux
+/// running the script in that window fails with `ETXTBSY`. Closing the
+/// handle, or renaming the file, cannot revoke a copy another process holds.
+pub fn write_executable(path: &Path, script: &str) {
+    let status = Command::new("sh")
+        .args(["-c", r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#, "sh"])
+        .arg(path)
+        .arg(script)
+        .status()
+        .unwrap();
+    assert!(status.success(), "could not write {}", path.display());
+}
+
 /// A translation unit that includes a header, compiled and inventoried the
 /// way `rllvm-get-bc` does.
 ///

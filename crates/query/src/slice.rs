@@ -628,14 +628,11 @@ mod tests {
 
     /// A bindir whose `opt` only reports `major`.
     fn stub_bindir(scratch: &Path, major: u32) -> LlvmBindir {
-        use std::os::unix::fs::PermissionsExt;
         let opt = scratch.join(OPT);
-        std::fs::write(
+        rllvm_testkit::write_executable(
             &opt,
-            format!("#!/bin/sh\necho 'LLVM version {major}.0.0'\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&opt, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho 'LLVM version {major}.0.0'\n"),
+        );
         LlvmBindir::configured(scratch)
     }
 
@@ -741,21 +738,18 @@ mod tests {
     /// module, not as a bare tool failure.
     #[test]
     fn a_failing_opt_is_named_with_its_llvm_version_and_the_module() {
-        use std::os::unix::fs::PermissionsExt;
         let scratch = tempfile::tempdir().unwrap();
         let mut session = clamp_session(&scratch);
         let bindir = scratch.path().join("bin");
         std::fs::create_dir(&bindir).unwrap();
         let major = linked_major().unwrap();
         let opt = bindir.join(OPT);
-        std::fs::write(
+        rllvm_testkit::write_executable(
             &opt,
-            format!(
+            &format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'LLVM version {major}.0.0'; exit 0; }}\necho 'error: cannot read' >&2\nexit 1\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&opt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         session.set_llvm_bindir(Ok(LlvmBindir::configured(&bindir)));
 
         let error = promote_anchor_module(&session, &fid("f"))

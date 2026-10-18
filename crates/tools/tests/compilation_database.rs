@@ -167,17 +167,13 @@ fn explicit_sysroots_and_analysis_overrides_select_the_requested_headers() {
 #[test]
 #[cfg(target_os = "macos")]
 fn sdk_discovery_failure_keeps_usable_entries_and_explains_the_override() {
-    use std::os::unix::fs::PermissionsExt;
-
     let scratch = tempfile::tempdir().unwrap();
     fs::create_dir(scratch.path().join("bin")).unwrap();
     let xcrun = scratch.path().join("bin/xcrun");
-    fs::write(
+    rllvm_testkit::write_executable(
         &xcrun,
         "#!/bin/sh\nprintf 'called\\n' >> xcrun-calls\nprintf 'SDK unavailable\\n' >&2\nexit 1\n",
-    )
-    .unwrap();
-    fs::set_permissions(&xcrun, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fs::write(
         scratch.path().join("system.c"),
         "#include <unistd.h>\nint sdk_value(void){return STDOUT_FILENO;}\n",
@@ -648,22 +644,19 @@ fn analysis_identity_tracks_expanded_override_response_contents() {
 #[test]
 #[cfg(unix)]
 fn generated_modules_are_read_with_the_configured_llvm_bindir() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = tempfile::tempdir().unwrap();
     let bindir = scratch.path().join("bindir");
     fs::create_dir(&bindir).unwrap();
     let log = scratch.path().join("llvm-dis.log");
     let llvm_dis = bindir.join("llvm-dis");
-    fs::write(
+    rllvm_testkit::write_executable(
         &llvm_dis,
-        format!(
+        &format!(
             "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
             log.display(),
             llvm_bin("llvm-dis").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&llvm_dis, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fs::write(
         scratch.path().join("source.c"),
         "int value(void) { return 2; }\n",
@@ -720,17 +713,14 @@ fn a_missing_llvm_dis_fails_before_the_output_directory_is_created() {
 /// real `clang` otherwise, with a database compiling one source through it.
 #[cfg(unix)]
 fn database_with_driver(scratch: &TempDir, version_line: &str) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
     let driver = scratch.path().join("clang");
-    fs::write(
+    rllvm_testkit::write_executable(
         &driver,
-        format!(
+        &format!(
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo '{version_line}'; exit 0; fi\nexec '{}' \"$@\"\n",
             llvm_bin("clang").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fs::write(
         scratch.path().join("source.c"),
         "int value(void) { return 2; }\n",
@@ -828,20 +818,17 @@ fn an_unknown_compiler_major_is_warned_about() {
 #[test]
 #[cfg(unix)]
 fn an_existing_output_directory_is_refused_before_compilers_run() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = tempfile::tempdir().unwrap();
     let driver = scratch.path().join("clang");
     let log = scratch.path().join("driver.log");
-    fs::write(
+    rllvm_testkit::write_executable(
         &driver,
-        format!(
+        &format!(
             "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
             log.display(),
             llvm_bin("clang").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fs::write(
         scratch.path().join("source.c"),
         "int value(void) { return 2; }\n",
@@ -871,21 +858,18 @@ fn an_existing_output_directory_is_refused_before_compilers_run() {
 
 #[test]
 fn compiler_metadata_is_resolved_once_per_distinct_driver() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = tempfile::tempdir().unwrap();
     let driver = scratch.path().join("clang");
     let log = scratch.path().join("versions.log");
     let quote = |path: &Path| format!("'{}'", path.to_string_lossy().replace('\'', "'\"'\"'"));
-    fs::write(
+    rllvm_testkit::write_executable(
         &driver,
-        format!(
+        &format!(
             "#!/bin/sh\nif [ \"$1\" = --version ]; then echo version >> {}; fi\nexec {} \"$@\"\n",
             quote(&log),
             quote(&llvm_bin("clang"))
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&driver, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     fs::write(
         scratch.path().join("source.c"),
         "int value(void) { return 2; }\n",

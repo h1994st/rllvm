@@ -2182,23 +2182,19 @@ fn info_reports_on_bitcode_and_on_object_files() {
 #[test]
 #[cfg(unix)]
 fn info_disassembles_with_the_configured_llvm_bindir() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = TempDir::new().unwrap();
     let bindir = tmp.path().join("bindir");
     fs::create_dir(&bindir).unwrap();
     let log = tmp.path().join("llvm-dis.log");
     let llvm_dis = bindir.join("llvm-dis");
-    fs::write(
+    rllvm_testkit::write_executable(
         &llvm_dis,
-        format!(
+        &format!(
             "#!/bin/sh\necho ran >> '{}'\nexec '{}' \"$@\"\n",
             log.display(),
             find_llvm_dis().expect("llvm-dis not found").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&llvm_dis, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let cfg = tmp.path().join("config.toml");
     fs::write(
         &cfg,
@@ -3701,22 +3697,18 @@ fn rustc_archive_is_patched_when_llvm_ar_lives_apart_from_llvm_nm() {
 #[test]
 #[cfg(unix)]
 fn rustc_archive_is_patched_with_the_configured_llvm_bindir() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let asked = root.join("asked-for-bindir");
     let stand_in = root.join("llvm-config");
-    fs::write(
+    rllvm_testkit::write_executable(
         &stand_in,
-        format!(
+        &format!(
             "#!/bin/sh\n[ \"$1\" = --bindir ] && touch '{}' && exit 1\nexec '{}' \"$@\"\n",
             asked.display(),
             find_llvm_config().expect("llvm-config not found").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let bindir = find_llvm_nm().expect("llvm-nm not found");
     let bindir = bindir.parent().unwrap();
 
@@ -3818,8 +3810,6 @@ fn rustc_split_codegen_units_still_record_the_whole_crate() {
 #[test]
 #[cfg(unix)]
 fn rustc_archive_patching_names_a_missing_llvm_nm() {
-    use std::os::unix::fs::PermissionsExt;
-
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let empty_bindir = root.join("empty-bindir");
@@ -3827,16 +3817,14 @@ fn rustc_archive_patching_names_a_missing_llvm_nm() {
     // An `llvm-config` whose bindir holds no tools; every other question
     // still goes to the real one.
     let stand_in = root.join("llvm-config");
-    fs::write(
+    rllvm_testkit::write_executable(
         &stand_in,
-        format!(
+        &format!(
             "#!/bin/sh\n[ \"$1\" = --bindir ] && echo '{}' && exit 0\nexec '{}' \"$@\"\n",
             empty_bindir.display(),
             find_llvm_config().expect("llvm-config not found").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let (output, _) = compile_rlib_with_llvm_ar_apart(&root, &stand_in, None);
     assert!(
@@ -4035,21 +4023,17 @@ fn cargo_build_bitcode_extractable_from_rlib() {
 #[test]
 #[cfg(unix)]
 fn rustc_wrapper_honours_rustc_filepath_from_config() {
-    use std::os::unix::fs::PermissionsExt;
-
     let rustc = which("rustc").expect("rustc not found");
     let tmp = TempDir::new().unwrap();
 
     let stand_in = tmp.path().join("marked-rustc");
-    fs::write(
+    rllvm_testkit::write_executable(
         &stand_in,
-        format!(
+        &format!(
             "#!/bin/sh\necho rllvm-stand-in-rustc\nexec {} \"$@\"\n",
             rustc.display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&stand_in, fs::Permissions::from_mode(0o755)).unwrap();
+    );
 
     let base = fs::read_to_string(shared_config_path()).unwrap();
     let cfg = tmp.path().join("config.toml");
