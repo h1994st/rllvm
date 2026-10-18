@@ -2544,7 +2544,6 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
     /// promotion that fails leaves no file behind.
     #[test]
     fn a_failed_promotion_leaves_no_emitted_module() {
-        use std::os::unix::fs::PermissionsExt;
         let scratch = tempfile::tempdir().unwrap();
         let session = session(&scratch, CROSSING_SOURCE, &["-O0", "-g"]);
         let bindir = scratch.path().join("bin");
@@ -2555,14 +2554,12 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         let real_opt = rllvm_testkit::llvm_bin("opt");
         let major = rllvm_core::diagnostics::tool_llvm_major_version(&real_opt).unwrap();
         let opt = bindir.join("opt");
-        std::fs::write(
+        rllvm_testkit::write_executable(
             &opt,
-            format!(
+            &format!(
                 "#!/bin/sh\n[ \"$1\" = --version ] && {{ echo 'LLVM version {major}.0.0'; exit 0; }}\nexit 1\n"
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&opt, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
 
         let out = scratch.path().join("guards.bc");
         let result = emit_guards_module(

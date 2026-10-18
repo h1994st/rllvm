@@ -290,7 +290,6 @@ fn bitcode_archive_inventory_and_copy_preserve_member_modules() {
 
 #[test]
 fn selected_partial_merge_preserves_original_directory_groups() {
-    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new();
     let a = f.module("first", "first.c", "int first(void){return 1;}");
     let b = f.module("second", "second.c", "int second(void){return 2;}");
@@ -309,16 +308,14 @@ fn selected_partial_merge_preserves_original_directory_groups() {
     let quote = |p: PathBuf| format!("'{}'", p.display().to_string().replace('\'', "'\"'\"'"));
     let log = f.root.path().join("link.log");
     let shim = f.root.path().join("linker");
-    fs::write(
+    rllvm_testkit::write_executable(
         &shim,
-        format!(
+        &format!(
             "#!/bin/sh\nprintf 'link\\n' >> {}\nexec {} \"$@\"\n",
             quote(log.clone()),
             quote(llvm_bin("llvm-link"))
         ),
-    )
-    .unwrap();
-    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     let config = fs::read_to_string(&f.config).unwrap().replace(
         &llvm_bin("llvm-link").display().to_string(),
         &shim.display().to_string(),
