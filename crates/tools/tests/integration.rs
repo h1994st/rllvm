@@ -3406,6 +3406,55 @@ fn rustc_wrapper_embeds_into_a_linked_binary() {
     assert_bitcode_magic(&paths[0]);
 }
 
+/// `rllvm-rustc -o prog` records `prog.bc`, which is also the default output
+/// of `rllvm-get-bc prog`: extraction must refuse rather than replace the
+/// module it reads, whether by default or by an explicit `-o`.
+#[test]
+fn get_bc_refuses_to_overwrite_a_recorded_module() {
+    let rustc = which("rustc").expect("rustc not found");
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("main.rs");
+    fs::write(&src, "fn main() { println!(\"hello\"); }\n").unwrap();
+    let exe = tmp.path().join("prog");
+    let output = rllvm("rllvm-rustc")
+        .arg(&rustc)
+        .arg("-o")
+        .arg(&exe)
+        .arg(&src)
+        .output()
+        .expect("Failed to run rllvm-rustc");
+    assert!(
+        output.status.success(),
+        "rustc wrapper failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recorded = tmp.path().join("prog.bc");
+    let before = fs::read(&recorded).expect("rllvm-rustc did not record prog.bc");
+
+    for extra in [&[][..], &["-b", "-o", "prog.bc"][..]] {
+        let output = rllvm("rllvm-get-bc")
+            .current_dir(tmp.path())
+            .arg("prog")
+            .args(extra)
+            .output()
+            .expect("Failed to run rllvm-get-bc");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success(),
+            "extraction {extra:?} overwrote its own input"
+        );
+        assert!(
+            stderr.contains("prog.bc") && stderr.contains("-o"),
+            "error should name the clash and suggest -o: {stderr}"
+        );
+        assert_eq!(
+            fs::read(&recorded).unwrap(),
+            before,
+            "extraction {extra:?} replaced the recorded module"
+        );
+    }
+}
+
 /// Archive patching must leave a shared library from the same invocation usable.
 #[cfg(unix)]
 #[test]
@@ -3685,7 +3734,7 @@ fn assert_rlib_records_bitcode(root: &Path, output: &std::process::Output, rlib:
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let bitcode = root.join("apart.bc");
+    let bitcode = root.join("extracted.bc");
     let output = rllvm("rllvm-get-bc")
         .arg(rlib)
         .arg("-o")

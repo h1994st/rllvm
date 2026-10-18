@@ -62,13 +62,15 @@ Compiler flags reach the real compiler unchanged. These need a decision:
 
 | Want | Command |
 | --- | --- |
-| Whole program | `rllvm-get-bc app -o app.bc` |
+| Whole program | `rllvm-get-bc app -o whole.bc` |
 | Look before extracting | `rllvm-info app` (`--json` lists every module) |
 | A catalog of the whole program | `rllvm-info app --json > catalog.json` |
 | A library as an archive of modules | `rllvm-get-bc --merge-strategy archive libfoo.a` |
 | A subset, as a catalog | `rllvm-get-bc app --source src/x.c --output-dir DIR` (also `--module`, `--configuration`) |
 
-`--output-dir` must be new; it writes `DIR/catalog.json`.
+`--output-dir` must be new; it writes `DIR/catalog.json`. Extraction refuses
+to write over a module it reads: `rllvm-rustc main.rs -o app` records `app.bc`,
+so `rllvm-get-bc app` needs another `-o`.
 
 **Handing a module to another tool** (PhASAR, SVF, KLEE, `opt`):
 
