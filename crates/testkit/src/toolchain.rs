@@ -7,14 +7,31 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
 };
+
+/// The configured LLVM's bindir, asked of `llvm-config` once per process.
+///
+/// Every fixture, config and tool path goes through here, and asking
+/// `llvm-config --bindir` (plus `brew --cellar` on a Mac without
+/// `llvm-config` on `PATH`) per call cost one query test run 1,141 spawns.
+/// No test changes `LLVM_CONFIG` or `PATH` in-process, so the answer cannot
+/// go stale within a run.
+static LLVM_BINDIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// The configured LLVM's bindir.
+pub fn llvm_bindir() -> &'static Path {
+    LLVM_BINDIR.get_or_init(|| {
+        let config = rllvm_core::utils::find_llvm_config().unwrap();
+        let output = Command::new(config).arg("--bindir").output().unwrap();
+        assert!(output.status.success());
+        PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+    })
+}
 
 /// A tool from the configured LLVM's bindir.
 pub fn llvm_bin(name: &str) -> PathBuf {
-    let config = rllvm_core::utils::find_llvm_config().unwrap();
-    let output = Command::new(config).arg("--bindir").output().unwrap();
-    assert!(output.status.success());
-    Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)
+    llvm_bindir().join(name)
 }
 
 /// Writes an `RLLVM_CONFIG` pointing at the configured toolchain. Tests must
@@ -47,7 +64,7 @@ pub fn scratch_rllvm_config(directory: &Path) -> PathBuf {
         llvm_bin("llvm-objcopy").display(),
         llvm_bin("llvm-ar").display(),
         llvm_bin("llvm-link").display(),
-        llvm_bin("llvm-link").parent().unwrap().display(),
+        llvm_bindir().display(),
         directory.join("cache").display(),
     );
     let path = directory.join("rllvm-config.toml");
