@@ -4178,8 +4178,7 @@ fn lto_static_archive_extracts_without_linking() {
             assert!(status.success(), "rllvm-cc {lto_flag} failed on {source:?}");
             objects.push(object);
         }
-        let nm = llvm_bin("llvm-nm");
-        let status = Command::new(nm.with_file_name("llvm-ar"))
+        let status = Command::new(llvm_bin("llvm-ar"))
             .arg("rcs")
             .arg(tmp.path().join("libfoo.a"))
             .args(&objects)
@@ -4200,7 +4199,7 @@ fn lto_static_archive_extracts_without_linking() {
         );
         let bitcode = tmp.path().join("libfoo.a.bc");
         assert_bitcode_magic(&bitcode);
-        let output = Command::new(nm)
+        let output = Command::new(llvm_bin("llvm-nm"))
             .arg(&bitcode)
             .output()
             .expect("llvm-nm failed");

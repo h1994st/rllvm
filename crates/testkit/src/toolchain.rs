@@ -22,7 +22,8 @@ static LLVM_BINDIR: OnceLock<PathBuf> = OnceLock::new();
 /// The configured LLVM's bindir.
 pub fn llvm_bindir() -> &'static Path {
     LLVM_BINDIR.get_or_init(|| {
-        let config = rllvm_core::utils::find_llvm_config().unwrap();
+        let config = rllvm_core::utils::find_llvm_config()
+            .expect("llvm-config not found; set LLVM_CONFIG or put llvm-config on PATH");
         let output = Command::new(config).arg("--bindir").output().unwrap();
         assert!(output.status.success());
         PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())

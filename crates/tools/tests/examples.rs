@@ -270,8 +270,7 @@ fn check_command(
 fn every_example_verifies_itself() {
     let home = tempfile::tempdir().unwrap();
     let config = rllvm_testkit::scratch_rllvm_config(home.path());
-    let llvm_config = rllvm_testkit::llvm_bin("llvm-config");
-    let bindir = llvm_config.parent().expect("llvm-config sits in a bindir");
+    let bindir = rllvm_testkit::llvm_bindir();
     let path = format!(
         "{}:{}",
         binary_directory().display(),
