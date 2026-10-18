@@ -1,7 +1,18 @@
 # Wrapper options + rllvm Example
 
 Wrapper options are long-only, prefixed `--rllvm-`, and come first. Every other
-argument reaches the real compiler untouched, including `@file` response files.
+argument reaches the real compiler untouched, including `-c`, `-v`, `--help`,
+`--version` and `@file` response files.
+
+```text
+--rllvm-compiler <PATH>   Override clang/clang++ (C/C++ wrappers only)
+--rllvm-verbose[=LEVEL]   Bare flag is 1; 3 logs subcommands, 4 enables trace
+--rllvm-help              Print wrapper help
+--rllvm-version           Print wrapper version
+```
+
+Response files follow Clang's GNU UTF-8 syntax, including quoting and nested
+references. Large generated commands use them automatically.
 
 ## Build and verify
 

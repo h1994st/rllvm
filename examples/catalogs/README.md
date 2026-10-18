@@ -1,7 +1,9 @@
 # Catalogs + rllvm Example
 
 A catalog is a JSON record of which modules were found and where each came
-from. Use one to extract a subset rather than the whole program.
+from. Use one to extract a subset rather than the whole program. It describes
+the evidence it collected and the scope it selected, not proven whole-program
+completeness.
 
 ## Build and verify
 

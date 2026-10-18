@@ -37,7 +37,13 @@ rllvm-get-bc build/analysis/catalog.json -o build/demo.bc
 ```
 
 `list` reports entry and configuration IDs without compiling. `generate` takes
-all entries by default; repeat `--source` or `--entry` to narrow.
+all entries by default; repeat `--source` or `--entry` to narrow, and combine
+them to intersect. The output directory must be new.
+
+Only direct `clang`/`clang++` drivers are supported. Modules are read with the
+`llvm-dis` in the configured `llvm_bindir`, so `generate` refuses a compiler
+from a newer LLVM major before compiling anything. Apple clang's version names
+no LLVM major, so it only draws a warning.
 
 ## Inspect the result
 

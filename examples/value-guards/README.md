@@ -7,7 +7,8 @@ constrains: no guard is an empty list, never "unbounded".
 ## Requirements
 
 `rllvm-query`, a separate crate that is not built by a default `cargo build`,
-and `opt` in the configured `llvm_bindir`.
+and `opt` in the configured `llvm_bindir`: `guards` reads the anchor's module
+through it.
 
 ## Build and verify
 
@@ -28,16 +29,34 @@ rllvm-query --catalog build/catalog.json guards --at clamp.c:14 --operand 2 --fr
 rllvm-query --catalog build/catalog.json guards --function copy --local n
 ```
 
-The first names argument 2 of the call on line 14 (`--operand` counts from
-0). The answer lists a `clamp` guard with bound 64 at `clamp.c:13`, and its
-relation is `defines`: the clamp produces the value rather than only branching
-on it. It is `on the anchor` (`depth` 0 in `--json`): it bounds the value
-itself, not one the value is computed from. `--json` gives the same as
-`results.guards[].op`, `relation` and `depth`. `--emit-module` writes the
-slice that holds the guard.
+The first names argument 2 of the call on line 14 (`--operand` counts from 0;
+`--return` names the call's result instead). The answer lists a `clamp` guard
+with bound 64 at `clamp.c:13`. It `defines` the value, producing it rather
+than only branching on it, and is `on the anchor` (`depth` 0): it bounds the
+value itself, not one the value is computed from. `--json` gives each guard's
+`op`, `relation` and `depth` under `results.guards[]`, and `--emit-module
+OUT.bc` writes the slice behind the answer. A line holding several calls is
+named by the call site id the error prints.
 
-The second names the same value as the source variable `n` in `copy`, which
-needs no call site but a module built with `-g`, and finds the same clamp.
+The second names the same value as the `-g` local `n` in `copy`, which needs
+no call site, and finds the same clamp.
+
+## Reading a guard
+
+- `relation`: the guard `defines` the value; `dominates` its use, running
+  first on every path whichever way it branches; or is only `on_path` to it.
+- `depth` 0 is the value itself, or a value it only widens: a bound holds
+  across `zext` or `sext` when the guard's signedness matches the cast's.
+  Depth N is N steps up the chain the value is computed from, a truncation
+  counting as a step, and is not by itself a bound on the value.
+- The trace stays in the anchor's function. Where the value enters through a
+  parameter or leaves a call, `crossings` name the call to ask `guards` about
+  next. `--from F` keeps only callers on a path from `F`, which must name one
+  function, and examines nothing between them.
+- Where the trace cannot follow the value (a load, a pointer round trip,
+  inline assembly, an intrinsic it does not read through),
+  `uncertainty.value_trace_lost` says where, and the list is partial.
+- Over MCP, `guards` needs a program loaded with `load_catalog`.
 
 ## Recording a verdict
 
@@ -51,13 +70,34 @@ rllvm-query --catalog build/catalog.json reach main put --annotations
 ```
 
 The clamp is evidence; whether a length above `CAP` can reach `put` is a
-verdict, which you write as an `annotate` record in the overlay beside the
-catalog. rllvm-query checks that its anchor names one value but never judges
-it, and never writes one itself. A `verify` or `retract` record names it by
-the same `anchor` under `annotation`, and `overlay list` shows it with its
-verdict and verification.
+verdict you write as an `annotate` record in the
+[call-graph overlay](../callgraph-overlay/) beside the catalog.
+
+- Its `verdict` is `feasible`, `infeasible` or `conditional`, with a
+  `confidence` and `provenance`. It is never proof, and rllvm-query never
+  writes one itself.
+- Its `anchor` names a value as `guards` does: an `argument` (`site`,
+  `operand`), a `return` (`site`) or a `local` (`function`, `name`). A `site`
+  is a `file:line` or a call site id. An optional `from` names the one
+  function the verdict holds for.
+- Recording reads the anchor's module through `opt`; an anchor that does not
+  resolve, or is ambiguous, rejects the batch.
+- `verify` and `retract` name it by its `anchor` and `from` under
+  `annotation`. `overlay list` shows it with its verdict and verification;
+  with `--json`, and in MCP's `list_overlay`, it sits under `annotations`
+  beside `edges`.
 
 `reach main put --annotations` returns the same path as without the flag, and
 the annotation rides along under `uncertainty.annotated_flows`, labeled
 `agent`: a hypothesis about the call to `put`, never proof that the path
 cannot run.
+
+- `--annotations` works on `reach` and `slice` (MCP: `include_annotations`,
+  default off), independent of `--include-overlay`.
+- It surfaces each infeasible or conditional annotation, not refuted, whose
+  anchor lies on the returned path. `annotated_flows` is omitted from the JSON
+  when none attach.
+- An annotation with a `from` attaches only when the walk's `from` names that
+  same single function; a `from` matching several functions shows none.
+- The flag is an error when no overlay is attached (a missing file, or over
+  MCP none loaded) or the overlay holds no annotations.

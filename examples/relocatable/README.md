@@ -23,12 +23,11 @@ RLLVM_BITCODE_ROOT="$PWD/build" rllvm-cc -c lib.c -o build/lib.o
 rllvm-get-bc --bitcode-root moved moved/app -o moved/app.bc
 ```
 
-The root is resolved against each bitcode file's real path, so a path through
-a symlink works. A root that cannot contain the bitcode is reported rather
-than silently ignored; run with `RLLVM_LOG_LEVEL=1` to see it.
-
 The root must contain the bitcode files, including a central
-`bitcode_store_path` if you use one.
+`bitcode_store_path` if you use one. It is resolved against each file's real
+path, so a path through a symlink works. A root that cannot contain the
+bitcode is reported rather than silently ignored; run with
+`RLLVM_LOG_LEVEL=1` to see it.
 
 ## Inspect the result
 

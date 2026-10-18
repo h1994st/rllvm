@@ -1,7 +1,13 @@
 # Objective-C + rllvm Example
 
 Objective-C (`.m`) and Objective-C++ (`.mm`) go through `rllvm-cc` and
-`rllvm-cxx`, the same wrappers as C and C++.
+`rllvm-cxx`, the same wrappers as C and C++. Without the toolchain file, set
+`OBJC=rllvm-cc OBJCXX=rllvm-cxx` beside `CC` and `CXX`, or call the wrapper
+directly:
+
+```bash
+rllvm-cc hello.m -o hello -framework Foundation
+```
 
 This project enables `OBJC` on its own, which is the case the toolchain file
 has to name explicitly: with no C language enabled, CMake has no C compiler to
