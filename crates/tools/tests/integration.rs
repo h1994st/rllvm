@@ -2434,8 +2434,7 @@ fn get_bc_reports_an_object_without_bitcode() {
     );
 }
 
-/// Verbosity levels are accepted and do not corrupt stdout. `-v` is one clap
-/// counter, so the noisiest level stands for the others.
+/// Verbosity levels are accepted and do not corrupt stdout.
 #[test]
 fn get_bc_verbosity_levels_are_accepted() {
     let tmp = TempDir::new().unwrap();
@@ -2448,21 +2447,23 @@ fn get_bc_verbosity_levels_are_accepted() {
         .expect("compile failed");
     assert!(status.success());
 
-    let out = tmp.path().join("out.bc");
-    let output = rllvm("rllvm-get-bc")
-        .arg("-vvvv")
-        .arg(&object_path)
-        .arg("-o")
-        .arg(&out)
-        .output()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(output.status.success(), "-vvvv failed");
-    assert!(out.exists());
-    assert!(
-        output.stdout.is_empty(),
-        "verbose logging reached stdout: {}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    for flag in ["-v", "-vv", "-vvv", "-vvvv"] {
+        let out = tmp.path().join(format!("out{}.bc", flag.len()));
+        let output = rllvm("rllvm-get-bc")
+            .arg(flag)
+            .arg(&object_path)
+            .arg("-o")
+            .arg(&out)
+            .output()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(output.status.success(), "{flag} failed");
+        assert!(out.exists());
+        assert!(
+            output.stdout.is_empty(),
+            "{flag} logging reached stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
 }
 
 /// `-b` selects the archive strategy when `--merge-strategy` is absent.
