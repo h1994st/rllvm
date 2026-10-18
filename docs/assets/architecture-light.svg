@@ -1,0 +1,157 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 360" width="960" height="360" role="img" aria-labelledby="t d">
+<title id="t">rllvm architecture</title>
+<desc id="d">Capture: rllvm-cc, rllvm-cxx and rllvm-rustc run the real compiler and also write a bitcode module per source, recording its path in each object's .rllvm_bc section. Link: the ordinary linker concatenates those sections, so the binary lists every module. Extract: rllvm-get-bc and rllvm-info read the list back into a module catalog or a whole-program .bc; rllvm-compdb builds modules from compile_commands.json instead. Analyze: rllvm-query answers source-level questions across C, C++ and Rust, reports what it could not see, and serves the same queries over MCP.</desc>
+<style>
+svg{--bg:#ffffff;--ink:#232A35;--muted:#59636e;--trace:#232A35;--tile:#232A35;--halo:none;--halo-w:0;--tile-txt:#ffffff;--ghost:#8c959f;--disc:#232A35;--disc-txt:#ffffff;--amber:#E0960F;--amber-txt:#8a5a00;--violet:#8B5CF6;--blue:#2F7BFF;--mint:#3DE8AA;--dash:#8c959f;--faint:#ffffff}
+text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;fill:var(--ink)}
+.m{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.5px}
+.st{font-size:17px;font-weight:700}
+.num{font-size:12px;font-weight:700;fill:var(--disc-txt)}
+.c1{font-size:13px;font-weight:600}
+.c2{font-size:12px;fill:var(--muted)}
+.tt{fill:var(--tile-txt);font-weight:600}
+.ink{fill:var(--ink)}
+.tile{fill:var(--tile);stroke:var(--halo);stroke-width:var(--halo-w)}
+.ghost{fill:none;stroke:var(--ghost);stroke-width:1.2}
+.bgfill{fill:var(--bg)}
+.trace{fill:none;stroke:var(--trace);stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.side{fill:none;stroke:var(--dash);stroke-width:1.6;stroke-dasharray:5 4;stroke-linecap:round}
+.edge{stroke:var(--trace);stroke-width:2;fill:none}
+@keyframes run{0%{transform:translateX(0);opacity:0}4%{opacity:1}94%{opacity:1}100%{transform:translateX(704px);opacity:0}}
+@media (prefers-reduced-motion:no-preference){
+.pk{animation:run 8s linear infinite}
+
+.p0{animation-delay:0.00s}
+.p1{animation-delay:-1.00s}
+.p2{animation-delay:-2.00s}
+.p3{animation-delay:-3.00s}
+.p4{animation-delay:-4.00s}
+.p5{animation-delay:-5.00s}
+.p6{animation-delay:-6.00s}
+.p7{animation-delay:-7.00s}
+}
+</style>
+<rect width="960" height="360" fill="var(--bg)"/>
+<circle cx="51" cy="35" r="11" fill="var(--disc)"/>
+<text class="num" x="51" y="39.2" text-anchor="middle">1</text>
+<text class="st" x="70" y="41">Capture</text>
+<circle cx="283" cy="35" r="11" fill="var(--disc)"/>
+<text class="num" x="283" y="39.2" text-anchor="middle">2</text>
+<text class="st" x="302" y="41">Link</text>
+<circle cx="515" cy="35" r="11" fill="var(--disc)"/>
+<text class="num" x="515" y="39.2" text-anchor="middle">3</text>
+<text class="st" x="534" y="41">Extract</text>
+<circle cx="747" cy="35" r="11" fill="var(--disc)"/>
+<text class="num" x="747" y="39.2" text-anchor="middle">4</text>
+<text class="st" x="766" y="41">Analyze</text>
+<rect class="tile" x="40" y="62" width="81" height="24" rx="6"/>
+<rect x="45" y="81.5" width="71" height="2.5" rx="1.25" fill="var(--blue)"/>
+<text class="m tt" x="80.5" y="78" text-anchor="middle">rllvm-cc</text>
+<rect class="tile" x="127" y="62" width="88" height="24" rx="6"/>
+<rect x="132" y="81.5" width="78" height="2.5" rx="1.25" fill="var(--blue)"/>
+<text class="m tt" x="171.0" y="78" text-anchor="middle">rllvm-cxx</text>
+<rect class="tile" x="40" y="92" width="104" height="24" rx="6"/>
+<rect x="45" y="111.5" width="94" height="2.5" rx="1.25" fill="var(--mint)"/>
+<text class="m tt" x="92.0" y="108" text-anchor="middle">rllvm-rustc</text>
+<rect class="ghost" x="272" y="62" width="35" height="24" rx="6"/>
+<text class="m ink" x="289.5" y="78" text-anchor="middle">ld</text>
+<rect class="ghost" x="313" y="62" width="50" height="24" rx="6"/>
+<text class="m ink" x="338.0" y="78" text-anchor="middle">ld64</text>
+<rect class="ghost" x="369" y="62" width="43" height="24" rx="6"/>
+<text class="m ink" x="390.5" y="78" text-anchor="middle">lld</text>
+<rect class="ghost" x="272" y="92" width="73" height="24" rx="6"/>
+<text class="m ink" x="308.5" y="108" text-anchor="middle">wasm-ld</text>
+<rect class="tile" x="504" y="62" width="111" height="24" rx="6"/>
+<text class="m tt" x="559.5" y="78" text-anchor="middle">rllvm-get-bc</text>
+<rect class="tile" x="504" y="92" width="149" height="24" rx="6"/>
+<text class="m tt" x="578.5" y="108" text-anchor="middle">rllvm-info --json</text>
+<rect class="tile" x="736" y="62" width="104" height="24" rx="6"/>
+<text class="m tt" x="788.0" y="78" text-anchor="middle">rllvm-query</text>
+<rect class="ghost" x="736" y="92" width="67" height="24" rx="12.0"/>
+<text class="m ink" style="font-size:12px" x="769.5" y="108" text-anchor="middle">callers</text>
+<rect class="ghost" x="809" y="92" width="52" height="24" rx="12.0"/>
+<text class="m ink" style="font-size:12px" x="835.0" y="108" text-anchor="middle">reach</text>
+<rect class="ghost" x="867" y="92" width="52" height="24" rx="12.0"/>
+<text class="m ink" style="font-size:12px" x="893.0" y="108" text-anchor="middle">slice</text>
+<path class="side" d="M352 326 H460 Q468 326 468 318 V186"/>
+<path class="side" d="M690 186 V300"/>
+<path class="side" d="M912 208 V306"/>
+<path class="trace" d="M44 178 H752"/>
+<rect class="pk p0" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--blue)" transform="translate(84 0)"/>
+<rect class="pk p1" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--mint)" transform="translate(206 0)"/>
+<rect class="pk p2" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--blue)" transform="translate(266 0)"/>
+<rect class="pk p3" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--blue)" transform="translate(324 0)"/>
+<rect class="pk p4" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--mint)" transform="translate(381 0)"/>
+<rect class="pk p5" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--blue)" transform="translate(456 0)"/>
+<rect class="pk p6" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--blue)" transform="translate(556 0)"/>
+<rect class="pk p7" x="39" y="173" width="10" height="10" rx="2.5" fill="var(--mint)" transform="translate(678 0)"/>
+<circle cx="44" cy="178" r="7" class="tile"/><circle cx="44" cy="178" r="3.5" fill="var(--blue)"/>
+<rect class="tile" x="66" y="148" width="46" height="60" rx="6"/>
+<text class="m tt" x="75" y="167">.o</text>
+<rect x="73" y="192" width="32" height="6" rx="2" fill="var(--blue)"/>
+<path d="M105 195 C 124 195, 128 190, 144 190" fill="none" stroke="var(--blue)" stroke-width="1.6" stroke-dasharray="3 2.5"/>
+<rect class="tile" x="156" y="142" width="46" height="58" rx="6" style="fill:var(--mint)"/>
+<rect class="tile" x="146" y="152" width="46" height="58" rx="6" style="fill:var(--blue)"/>
+<text class="m tt" x="154" y="171">.bc</text>
+<text class="c1" x="40" y="242">.o and .bc per source</text>
+<text class="c2" x="40" y="260">path kept in a .rllvm_bc section</text>
+<rect class="tile" x="336" y="138" width="64" height="80" rx="8"/>
+<rect x="346" y="150" width="40" height="3" rx="1.5" fill="var(--faint)" opacity="0.28"/>
+<rect x="346" y="158" width="28" height="3" rx="1.5" fill="var(--faint)" opacity="0.28"/>
+<rect x="346" y="166" width="34" height="3" rx="1.5" fill="var(--faint)" opacity="0.28"/>
+<rect x="346" y="180" width="44" height="5" rx="1.5" fill="var(--blue)"/>
+<rect x="346" y="188" width="44" height="5" rx="1.5" fill="var(--mint)"/>
+<rect x="346" y="196" width="44" height="5" rx="1.5" fill="var(--blue)"/>
+<rect x="346" y="204" width="44" height="5" rx="1.5" fill="var(--blue)"/>
+<text class="c1" x="272" y="242">binary lists every module</text>
+<text class="c2" x="272" y="260">native, cross, wasm, eBPF, LTO</text>
+<circle cx="690" cy="178" r="4.5" fill="var(--trace)"/>
+<circle cx="468" cy="178" r="4.5" fill="var(--trace)"/>
+<rect class="tile" x="560" y="140" width="88" height="76" rx="8"/>
+<rect x="571" y="153" width="13" height="13" rx="3" fill="var(--blue)"/>
+<rect x="589" y="153" width="13" height="13" rx="3" fill="var(--blue)"/>
+<rect x="607" y="153" width="13" height="13" rx="3" fill="var(--mint)"/>
+<rect x="625" y="153" width="13" height="13" rx="3" fill="var(--blue)"/>
+<rect x="571" y="171" width="13" height="13" rx="3" fill="var(--blue)"/>
+<rect x="590" y="172" width="11" height="11" rx="2.5" fill="none" stroke="var(--amber)" stroke-width="1.8" stroke-dasharray="2.6 2"/>
+<rect x="607" y="171" width="13" height="13" rx="3" fill="var(--blue)"/>
+<rect x="625" y="171" width="13" height="13" rx="3" fill="var(--mint)"/>
+<rect x="571" y="189" width="13" height="13" rx="3" fill="var(--mint)"/>
+<rect x="589" y="189" width="13" height="13" rx="3" fill="var(--blue)"/>
+<rect x="607" y="189" width="13" height="13" rx="3" fill="var(--blue)"/>
+<rect x="625" y="189" width="13" height="13" rx="3" fill="var(--blue)"/>
+<text class="c1" x="504" y="242">module catalog</text>
+<text class="c2" x="504" y="260">each module and its source</text>
+<rect class="tile" x="668" y="304" width="44" height="44" rx="7" style="fill:var(--blue)"/>
+<path d="M712 318 V341 Q712 348 705 348 H682 Z" fill="var(--mint)"/>
+<text class="c1" x="656" y="322" text-anchor="end">whole-program .bc</text>
+<text class="c2" x="656" y="340" text-anchor="end">for any LLVM tool</text>
+<line class="edge" x1="752" y1="178" x2="798" y2="152"/>
+<line class="edge" x1="752" y1="178" x2="798" y2="202"/>
+<line class="edge" x1="798" y1="152" x2="850" y2="164"/>
+<line class="edge" x1="798" y1="202" x2="852" y2="204"/>
+<line class="edge" x1="850" y1="164" x2="912" y2="200"/>
+<line x1="850" y1="164" x2="902" y2="144" stroke="var(--amber)" stroke-width="2" stroke-dasharray="4 3"/>
+<line x1="852" y1="204" x2="912" y2="200" stroke="var(--violet)" stroke-width="2.2" stroke-dasharray="4 3"/>
+<circle cx="752" cy="178" r="8" class="tile"/><circle cx="752" cy="178" r="4.0" fill="var(--blue)"/>
+<circle cx="798" cy="152" r="8" class="tile"/><circle cx="798" cy="152" r="4.0" fill="var(--blue)"/>
+<circle cx="798" cy="202" r="8" class="tile"/><circle cx="798" cy="202" r="4.0" fill="var(--mint)"/>
+<circle cx="850" cy="164" r="8" class="tile"/><circle cx="850" cy="164" r="4.0" fill="var(--blue)"/>
+<circle cx="852" cy="204" r="8" class="tile"/><circle cx="852" cy="204" r="4.0" fill="var(--mint)"/>
+<circle cx="912" cy="200" r="8" class="tile"/><circle cx="912" cy="200" r="4.0" fill="var(--blue)"/>
+<circle cx="902" cy="144" r="8" class="bgfill" stroke="var(--amber)" stroke-width="2" stroke-dasharray="3.2 2.4"/>
+<text class="c1" x="736" y="242">one graph: C, C++, Rust</text>
+<line x1="736" y1="256" x2="752" y2="256" stroke="var(--amber)" stroke-width="2" stroke-dasharray="4 3"/>
+<text class="c2" x="758" y="260">not seen</text>
+<line x1="820" y1="256" x2="836" y2="256" stroke="var(--violet)" stroke-width="2.2" stroke-dasharray="4 3"/>
+<text class="c2" x="842" y="260">agent edge</text>
+<rect class="ghost" x="40" y="314" width="180" height="24" rx="6"/>
+<text class="m ink" x="130.0" y="330" text-anchor="middle">compile_commands.json</text>
+<path d="M222 326 H236" stroke="var(--dash)" stroke-width="1.6" fill="none"/>
+<rect class="tile" x="238" y="314" width="111" height="24" rx="6"/>
+<text class="m tt" x="293.5" y="330" text-anchor="middle">rllvm-compdb</text>
+<text class="c2" x="363" y="319">no rebuild</text>
+<rect class="tile" x="794" y="306" width="134" height="24" rx="6"/>
+<text class="m tt" x="861.0" y="322" text-anchor="middle">rllvm-query mcp</text>
+<text class="c2" x="928" y="350" text-anchor="end">Claude Code plugin, any MCP client</text>
+</svg>

@@ -104,7 +104,9 @@ tests/data/cargo_fixture/target/
 # published page cannot drift from the repository's front page.
 site/index.md
 
-# Track the maintained catalog reference within the otherwise excluded docs.
+# Track the catalog reference and the README's illustrations within the otherwise
+# excluded docs.
 !/docs/
 /docs/*
 !/docs/CATALOG.md
+!/docs/assets/
