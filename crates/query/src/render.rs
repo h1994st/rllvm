@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use owo_colors::OwoColorize;
 
 use crate::{
-    EdgeKey, GuardSite, PathStep, QueryResult, QueryResults,
+    EdgeKey, GuardSite, PathStep, QueryResult, QueryResults, Resolution,
     bind::BindingStatus,
     facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, GuardKind, Slot, SourceLocation},
     overlay::verdict_label,
@@ -236,6 +236,39 @@ fn symbol_list(symbols: &BTreeMap<String, String>, ids: &[FunctionId], ctx: Ctx)
         .map(|id| name(symbols, &id.symbol, ctx))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The function a direct call step enters: the function the next step starts
+/// from, or, for the last step, what the query's destination resolved to
+/// (comma-joined when the name matched loosely).
+fn step_callee(
+    symbols: &BTreeMap<String, String>,
+    next: Option<&PathStep>,
+    resolution: &[Resolution],
+    ctx: Ctx,
+) -> String {
+    let symbol = match next {
+        Some(PathStep::Call(site) | PathStep::BoundedIndirect { site, .. }) => {
+            Some(&site.function.symbol)
+        }
+        Some(PathStep::Agent { site, .. }) => Some(&site.function.symbol),
+        Some(PathStep::Binding(binding)) => Some(&binding.symbol),
+        Some(PathStep::Alias { alias, .. }) => Some(&alias.symbol),
+        None => None,
+    };
+    match symbol {
+        Some(symbol) => name(symbols, symbol, ctx),
+        None => resolution
+            .get(1)
+            .map(|to| {
+                to.symbols
+                    .iter()
+                    .map(|symbol| name(symbols, symbol, ctx))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default(),
+    }
 }
 
 /// ` via ops@8 (on_event)`: the record field a site loads from or a use
@@ -1023,12 +1056,14 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
             // no steps to print. Both print nothing here, and the footer
             // tells them apart: rule 1 for the absence, `ZERO_STEP_REACH`
             // for the trivial find.
-            for step in path.iter().flatten() {
+            let steps = path.as_deref().unwrap_or_default();
+            for (index, step) in steps.iter().enumerate() {
                 match step {
                     PathStep::Call(site) => out.push_str(&format!(
-                        "{}              {}\n",
+                        "{}              {} -> {}\n",
                         paint("call", ctx.color, Paint::Resolved),
-                        name(symbols, &site.function.symbol, ctx)
+                        name(symbols, &site.function.symbol, ctx),
+                        step_callee(symbols, steps.get(index + 1), &result.resolution, ctx)
                     )),
                     PathStep::BoundedIndirect {
                         site,
@@ -1451,6 +1486,25 @@ mod tests {
         )
         .unwrap();
         assert!(render(&result, TextMode::Adaptive, Color::Never).contains("call"));
+    }
+
+    #[test]
+    fn a_found_path_names_where_each_call_leads() {
+        let session = session_from(&[("a", "b"), ("b", "c")]);
+        let result = run(
+            &session,
+            &Query::Reach {
+                from: "a".into(),
+                to: "c".into(),
+                include_overlay: false,
+                min_confidence: None,
+                include_annotations: false,
+            },
+        )
+        .unwrap();
+        let text = render(&result, TextMode::Adaptive, Color::Never);
+        assert!(text.contains("a -> b"), "got: {text}");
+        assert!(text.contains("b -> c"), "the target is missing: {text}");
     }
 
     #[test]
