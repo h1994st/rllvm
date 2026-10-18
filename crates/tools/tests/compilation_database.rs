@@ -768,23 +768,37 @@ fn a_compiler_newer_than_llvm_dis_fails_before_compiling() {
     assert!(!scratch.path().join("analysis").exists());
 }
 
-/// A compiler at or below `llvm-dis`'s major is read as usual.
+/// Generates a database whose compiler reports LLVM `major`, asserting the
+/// run succeeds and compares the versions.
+#[cfg(unix)]
+fn assert_compiler_major_is_accepted(major: u32) {
+    let scratch = tempfile::tempdir().unwrap();
+    database_with_driver(&scratch, &format!("clang version {major}.0.0"));
+    let output = rllvm(&scratch)
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("cannot compare"),
+        "{output:?}"
+    );
+}
+
+/// A compiler at `llvm-dis`'s major is read as usual: the boundary is
+/// accepted.
 #[test]
 #[cfg(unix)]
-fn a_compiler_no_newer_than_llvm_dis_is_accepted() {
-    for major in [llvm_dis_major(), 1] {
-        let scratch = tempfile::tempdir().unwrap();
-        database_with_driver(&scratch, &format!("clang version {major}.0.0"));
-        let output = rllvm(&scratch)
-            .args(["generate", ".", "--output-dir", "analysis"])
-            .output()
-            .unwrap();
-        assert_success(&output);
-        assert!(
-            !String::from_utf8_lossy(&output.stderr).contains("cannot compare"),
-            "{output:?}"
-        );
-    }
+fn a_compiler_as_new_as_llvm_dis_is_accepted() {
+    assert_compiler_major_is_accepted(llvm_dis_major());
+}
+
+/// A compiler below `llvm-dis`'s major is read as usual: only a newer
+/// producer is refused, not every different one.
+#[test]
+#[cfg(unix)]
+fn a_compiler_older_than_llvm_dis_is_accepted() {
+    assert_compiler_major_is_accepted(1);
 }
 
 /// Apple clang's version does not name the LLVM it is built from, so the
