@@ -24,14 +24,14 @@ printed=$("$OUT/app")
 [ "$printed" = "doubled=42 tripled=126" ] ||
     fail "app printed '$printed', so a hop across the boundary did not run"
 
-rllvm-get-bc "$OUT/app" -o "$OUT/app.bc"
+rllvm-get-bc "$OUT/app" -o "$OUT/whole.bc"
 rllvm-info "$OUT/app" --json >"$OUT/catalog.json"
 
 # One module holding all three languages.
-symbols=$("$BINDIR/llvm-nm" --defined-only "$OUT/app.bc")
-defines "$symbols" ' T _?rust_add$' "app.bc does not define rust_add (Rust)"
-defines "$symbols" ' T _?c_double$' "app.bc does not define c_double (C)"
-defines "$symbols" ' T _?cxx_triple$' "app.bc does not define cxx_triple (C++)"
+symbols=$("$BINDIR/llvm-nm" --defined-only "$OUT/whole.bc")
+defines "$symbols" ' T _?rust_add$' "whole.bc does not define rust_add (Rust)"
+defines "$symbols" ' T _?c_double$' "whole.bc does not define c_double (C)"
+defines "$symbols" ' T _?cxx_triple$' "whole.bc does not define cxx_triple (C++)"
 
 # Ask by the readable name rather than the mangled symbol: `main::main`
 # resolves through the demangled index, and its callees are the two crossings

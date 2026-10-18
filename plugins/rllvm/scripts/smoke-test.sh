@@ -35,7 +35,7 @@ step "rllvm-info reads the module" rllvm-info hello.bc
 if command -v rustc >/dev/null; then
     printf 'fn main() {}\n' >main.rs
     step "rllvm-rustc compiles and links Rust" rllvm-rustc main.rs -o main
-    step "rllvm-get-bc extracts the Rust program" rllvm-get-bc main -o main.bc
+    step "rllvm-get-bc extracts the Rust program" rllvm-get-bc main -o whole.bc
 else
     echo "skip: rustc is not installed"
 fi

@@ -27,7 +27,7 @@ rllvm-cxx -g -c cxx_side.cc -o build/cxx_side.o
 llvm-ar rcs build/libffidemo.a build/c_side.o build/cxx_side.o
 rllvm-rustc -g main.rs -o build/app -L build -l static=ffidemo
 
-rllvm-get-bc build/app -o build/app.bc
+rllvm-get-bc build/app -o build/whole.bc
 rllvm-info build/app --json >build/catalog.json
 ```
 

@@ -171,13 +171,17 @@ pub fn run() -> Result<(), Error> {
             .collect()
     };
     tracing::debug!("Bitcode filepaths: {:?}", bitcode_filepaths);
-    if args.save_manifest {
-        // Write bitcode filepaths into the manifest file
+    let manifest_filepath = args.save_manifest.then(|| {
         let input_parent_dir = input_filepath.parent().unwrap();
         let output_filename = output_filepath.file_name().unwrap();
-        let manifest_filepath =
-            input_parent_dir.join(format!("{}.manifest", output_filename.to_string_lossy()));
-
+        input_parent_dir.join(format!("{}.manifest", output_filename.to_string_lossy()))
+    });
+    refuse_overwriting_inputs(
+        std::iter::once(&output_filepath).chain(manifest_filepath.iter()),
+        std::iter::once(&input_filepath).chain(&bitcode_filepaths),
+    )?;
+    if let Some(manifest_filepath) = manifest_filepath {
+        // Write bitcode filepaths into the manifest file
         let manifest_contents = bitcode_filepaths
             .iter()
             .map(|bitcode_filepath| bitcode_filepath.to_string_lossy())
@@ -289,21 +293,10 @@ fn extract_catalog(args: &ExtractionArgs, archive_input: bool) -> Result<(), Err
     } else {
         None
     };
-    for destination in std::iter::once(&output).chain(manifest.iter()) {
-        if let Ok(existing) = destination.canonicalize()
-            && (existing == input
-                || selected
-                    .modules
-                    .iter()
-                    .filter_map(|m| m.path.as_ref())
-                    .any(|path| path.canonicalize().ok().as_ref() == Some(&existing)))
-        {
-            return Err(Error::InvalidArguments(
-                "output or manifest would overwrite an input artifact; choose another -o path"
-                    .into(),
-            ));
-        }
-    }
+    refuse_overwriting_inputs(
+        std::iter::once(&output).chain(manifest.iter()),
+        std::iter::once(&input).chain(selected.modules.iter().filter_map(|m| m.path.as_ref())),
+    )?;
     let scratch = tempfile::tempdir()?;
     let directory = scratch.path().join("modules");
     let copied = copy_modules(&selected, &directory)?;
@@ -328,6 +321,30 @@ fn extract_catalog(args: &ExtractionArgs, archive_input: bool) -> Result<(), Err
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(manifest, contents)?;
+    }
+    Ok(())
+}
+
+/// Refuse to write where this extraction reads. `rllvm-rustc -o prog` records
+/// `prog.bc`, the default output for `prog`, so writing there would replace a
+/// module the binary still records. Checked before anything is written.
+fn refuse_overwriting_inputs<'a>(
+    destinations: impl IntoIterator<Item = &'a PathBuf>,
+    reads: impl IntoIterator<Item = &'a PathBuf>,
+) -> Result<(), Error> {
+    let reads: Vec<PathBuf> = reads
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .collect();
+    for destination in destinations {
+        if let Ok(existing) = destination.canonicalize()
+            && reads.contains(&existing)
+        {
+            return Err(Error::InvalidArguments(format!(
+                "output {} is an input of this extraction; choose another -o path",
+                existing.display()
+            )));
+        }
     }
     Ok(())
 }
