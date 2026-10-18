@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
+use rllvm_testkit::{llvm_bin, llvm_bindir};
 use tempfile::TempDir;
 
 /// Returns the path to a compiled binary from the cargo target directory.
@@ -22,13 +23,8 @@ fn cargo_bin(name: &str) -> PathBuf {
 fn shared_config_path() -> &'static Path {
     static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
     CONFIG_PATH.get_or_init(|| {
-        let llvm_config = find_llvm_config().expect("llvm-config not found; is LLVM installed?");
-        let output = Command::new(&llvm_config)
-            .arg("--bindir")
-            .output()
-            .expect("Failed to run llvm-config --bindir");
-        assert!(output.status.success(), "llvm-config --bindir failed");
-        let bindir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        let bindir = llvm_bindir();
+        let llvm_config = llvm_bin("llvm-config");
 
         let tool = |name: &str| bindir.join(name).display().to_string();
         let contents = format!(
@@ -86,76 +82,6 @@ fn fixture(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Finds llvm-dis on the system for bitcode validation.
-fn find_llvm_dis() -> Option<PathBuf> {
-    // Try to get the LLVM bin directory from llvm-config
-    let llvm_config = find_llvm_config()?;
-    let output = Command::new(&llvm_config).arg("--bindir").output().ok()?;
-    if output.status.success() {
-        let bindir = String::from_utf8(output.stdout).ok()?.trim().to_string();
-        let llvm_dis = PathBuf::from(&bindir).join("llvm-dis");
-        if llvm_dis.exists() {
-            return Some(llvm_dis);
-        }
-    }
-    None
-}
-
-/// Finds llvm-nm in the same LLVM installation the wrappers use.
-fn find_llvm_nm() -> Option<PathBuf> {
-    let llvm_config = find_llvm_config()?;
-    let output = Command::new(&llvm_config).arg("--bindir").output().ok()?;
-    if output.status.success() {
-        let bindir = String::from_utf8(output.stdout).ok()?.trim().to_string();
-        let llvm_nm = PathBuf::from(&bindir).join("llvm-nm");
-        if llvm_nm.exists() {
-            return Some(llvm_nm);
-        }
-    }
-    None
-}
-
-/// Finds llvm-config on the system (mirrors the crate's discovery logic).
-fn find_llvm_config() -> Option<PathBuf> {
-    if let Ok(val) = std::env::var("LLVM_CONFIG") {
-        let p = PathBuf::from(val);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    if let Ok(p) = which("llvm-config") {
-        return Some(p);
-    }
-    #[cfg(target_vendor = "apple")]
-    {
-        // Search Homebrew cellar
-        if let Ok(output) = Command::new("brew").arg("--cellar").output()
-            && output.status.success()
-        {
-            let cellar = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            for pattern in &[
-                format!("{cellar}/llvm@*/*/bin/llvm-config"),
-                format!("{cellar}/llvm/*/bin/llvm-config"),
-            ] {
-                if let Ok(paths) = glob::glob(pattern)
-                    && let Some(Ok(p)) = paths.last()
-                {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        for v in (6..=33).rev() {
-            if let Ok(p) = which(&format!("llvm-config-{v}")) {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
 fn which(name: &str) -> Result<PathBuf, ()> {
     let output = Command::new("which").arg(name).output().map_err(|_| ())?;
     if output.status.success() {
@@ -177,7 +103,7 @@ fn assert_valid_bitcode(bitcode_path: &Path) {
         "Bitcode file does not exist: {bitcode_path:?}"
     );
 
-    let llvm_dis = find_llvm_dis().expect("llvm-dis not found; is LLVM installed?");
+    let llvm_dis = llvm_bin("llvm-dis");
     let output = Command::new(&llvm_dis)
         .arg(bitcode_path)
         .arg("-o")
@@ -211,7 +137,7 @@ fn response_file_large_os_string_command_preserves_source_path() {
         "source with space-é.c".as_bytes().to_vec(),
     ));
     fs::write(&source, "int value(void) { return 42; }\n").unwrap();
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let wrapper = ClangWrapperBuilder::new()
         .wrapped_compiler(&clang)
         .build()
@@ -249,7 +175,7 @@ fn assert_response_transport_preserves_empty_include_argument(before_response: b
     } else {
         ["@args.rsp", "-I", ""]
     };
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let oracle = Command::new(clang)
         .current_dir(tmp.path())
         .args(args)
@@ -302,7 +228,7 @@ fn response_file_large_payload_reaches_synthesized_compilations() {
         defines.push_str(&format!("-DUNUSED_{i}={}\n", "a".repeat(128 * 1024)));
     }
     defines.push_str("-DVALUE=42\n");
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     for (flags, output_name, mode) in [
         ("-c", "result.o", "marker"),
         ("-c -flto", "result.o", "marker"),
@@ -476,7 +402,7 @@ fn response_file_failures_finish_with_diagnostics() {
 #[test]
 fn response_file_lto_preserves_user_requested_linker_temporaries() {
     let tmp = TempDir::new().unwrap();
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let mut saved_by_clang = Vec::new();
     for oracle in [true, false] {
         let dir = tmp.path().join(if oracle { "oracle" } else { "wrapper" });
@@ -554,7 +480,7 @@ fn response_file_keeps_literal_macho_install_name() {
         "-dynamiclib source.c -install_name @rpath/libvalue.dylib -o libvalue.dylib",
     )
     .unwrap();
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let output = Command::new(clang)
         .current_dir(tmp.path())
         .arg("@args.rsp")
@@ -618,7 +544,7 @@ fn response_file_nested_quoted_arguments_match_clang() {
         r#"-DVALUE=42 -DTEXT=\"hello\ world\""#,
     )
     .unwrap();
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let oracle = Command::new(&clang)
         .current_dir(tmp.path())
         .arg("@sub/outer.rsp")
@@ -777,10 +703,8 @@ fn assert_compilation_variants_keep_bitcode(variant: CompilationVariant) {
             format!("{config}bitcode_generation_flags = ['-UVALUE', '{definition}']\n")
         } else {
             if compiler_variant {
-                let bindir = find_llvm_dis().unwrap().parent().unwrap().to_path_buf();
-                command
-                    .arg("--rllvm-compiler")
-                    .arg(bindir.join(if index == 0 { "clang" } else { "clang++" }));
+                let compiler = if index == 0 { "clang" } else { "clang++" };
+                command.arg("--rllvm-compiler").arg(llvm_bin(compiler));
             } else {
                 command.arg(&definition);
             }
@@ -837,7 +761,7 @@ fn assert_compilation_variants_keep_bitcode(variant: CompilationVariant) {
             "variant extraction failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        let output = Command::new(find_llvm_dis().expect("llvm-dis not found"))
+        let output = Command::new(llvm_bin("llvm-dis"))
             .arg(&bitcode)
             .args(["-o", "-"])
             .output()
@@ -1172,7 +1096,7 @@ fn assert_pthread_compilation(compile_only: bool) {
             .unwrap()
             .success()
     );
-    let output = Command::new(find_llvm_dis().unwrap())
+    let output = Command::new(llvm_bin("llvm-dis"))
         .arg(&bitcode)
         .args(["-o", "-"])
         .output()
@@ -1524,7 +1448,7 @@ fn objective_c_sources_are_captured_when_only_their_language_is_enabled() {
             String::from_utf8_lossy(&output.stderr)
         );
 
-        let output = Command::new(find_llvm_nm().expect("llvm-nm not found"))
+        let output = Command::new(llvm_bin("llvm-nm"))
             .arg(&bitcode)
             .output()
             .expect("Failed to run llvm-nm");
@@ -1680,9 +1604,7 @@ fn dropin_dash_v_passes_through_to_compiler() {
 fn rllvm_compiler_override_still_works() {
     let tmp = TempDir::new().unwrap();
     let object_path = tmp.path().join("foo.o");
-    let clang = find_llvm_config()
-        .map(|c| c.parent().unwrap().join("clang"))
-        .expect("llvm-config not found");
+    let clang = llvm_bin("clang");
 
     let output = rllvm("rllvm-cc")
         .arg(format!("--rllvm-compiler={}", clang.display()))
@@ -2192,7 +2114,7 @@ fn info_disassembles_with_the_configured_llvm_bindir() {
         &format!(
             "#!/bin/sh\necho ran >> '{}'\nexec '{}' \"$@\"\n",
             log.display(),
-            find_llvm_dis().expect("llvm-dis not found").display()
+            llvm_bin("llvm-dis").display()
         ),
     );
     let cfg = tmp.path().join("config.toml");
@@ -2207,7 +2129,7 @@ fn info_disassembles_with_the_configured_llvm_bindir() {
     .unwrap();
 
     let bitcode = tmp.path().join("foo.bc");
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let status = Command::new(clang)
         .args(["-c", "-emit-llvm", "-o"])
         .arg(&bitcode)
@@ -2242,9 +2164,7 @@ fn info_counts_implicit_entry_and_pred_labeled_blocks() {
     )
     .unwrap();
 
-    let clang = find_llvm_config()
-        .map(|config| config.parent().unwrap().join("clang"))
-        .expect("clang not found");
+    let clang = llvm_bin("clang");
     let output = Command::new(clang)
         .args(["-O0", "-emit-llvm", "-c", "-o"])
         .arg(&bitcode_path)
@@ -2517,9 +2437,7 @@ fn get_bc_reports_an_object_without_bitcode() {
     let obj = tmp.path().join("plain.o");
 
     // Compile with the real clang, so no section is embedded.
-    let clang = find_llvm_config()
-        .map(|c| c.parent().unwrap().join("clang"))
-        .expect("clang not found");
+    let clang = llvm_bin("clang");
     let status = Command::new(clang)
         .args(["-c", "-o"])
         .arg(&obj)
@@ -2628,8 +2546,7 @@ fn init_reports_a_bad_llvm_prefix() {
 /// `--llvm-prefix` accepts both a prefix and its bin directory.
 #[test]
 fn init_accepts_prefix_and_bindir() {
-    let llvm_config = find_llvm_config().expect("llvm-config not found");
-    let bindir = llvm_config.parent().unwrap().to_path_buf();
+    let bindir = llvm_bindir().to_path_buf();
     let prefix = bindir.parent().unwrap().to_path_buf();
 
     for candidate in [prefix, bindir.clone()] {
@@ -3073,11 +2990,7 @@ fn get_bc_reports_an_unreadable_input() {
 
 /// True when the local clang can target WebAssembly.
 fn wasm_target_available() -> bool {
-    let Some(llvm_config) = find_llvm_config() else {
-        return false;
-    };
-    let clang = llvm_config.parent().unwrap().join("clang");
-    Command::new(clang)
+    Command::new(llvm_bin("clang"))
         .args(["--print-targets"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("wasm32"))
@@ -3198,7 +3111,7 @@ fn rustc_marker_survives_gnu_linker_gc() {
         return;
     }
     let tmp = TempDir::new().unwrap();
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let unused = tmp.path().join("unused.o");
     fs::write(
         tmp.path().join("unused.c"),
@@ -3274,7 +3187,7 @@ fn rustc_marker_survives_gnu_linker_gc() {
         "extraction failed: {}",
         String::from_utf8_lossy(&extracted.stderr)
     );
-    let ir = Command::new(find_llvm_dis().unwrap())
+    let ir = Command::new(llvm_bin("llvm-dis"))
         .arg(bitcode)
         .args(["-o", "-"])
         .output()
@@ -3486,7 +3399,7 @@ int main(int argc, char **argv) {
     )
     .unwrap();
     let loader = root.join("load");
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     let mut compile_loader = Command::new(clang);
     compile_loader.arg(&loader_src).arg("-o").arg(&loader);
     #[cfg(target_os = "linux")]
@@ -3642,9 +3555,8 @@ fn compile_rlib_with_llvm_ar_apart(
 ) -> (std::process::Output, PathBuf) {
     let apart = root.join("llvm-ar-apart");
     fs::create_dir(&apart).unwrap();
-    let llvm_nm = find_llvm_nm().expect("llvm-nm not found");
     let llvm_ar = apart.join("llvm-ar");
-    std::os::unix::fs::symlink(llvm_nm.with_file_name("llvm-ar"), &llvm_ar).unwrap();
+    std::os::unix::fs::symlink(llvm_bin("llvm-ar"), &llvm_ar).unwrap();
 
     let cfg = root.join("config.toml");
     let mut contents: String = fs::read_to_string(shared_config_path())
@@ -3687,7 +3599,7 @@ fn compile_rlib_with_llvm_ar_apart(
 fn rustc_archive_is_patched_when_llvm_ar_lives_apart_from_llvm_nm() {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().canonicalize().unwrap();
-    let llvm_config = find_llvm_config().expect("llvm-config not found");
+    let llvm_config = llvm_bin("llvm-config");
     let (output, rlib) = compile_rlib_with_llvm_ar_apart(&root, &llvm_config, None);
     assert_rlib_records_bitcode(&root, &output, &rlib);
 }
@@ -3706,13 +3618,10 @@ fn rustc_archive_is_patched_with_the_configured_llvm_bindir() {
         &format!(
             "#!/bin/sh\n[ \"$1\" = --bindir ] && touch '{}' && exit 1\nexec '{}' \"$@\"\n",
             asked.display(),
-            find_llvm_config().expect("llvm-config not found").display()
+            llvm_bin("llvm-config").display()
         ),
     );
-    let bindir = find_llvm_nm().expect("llvm-nm not found");
-    let bindir = bindir.parent().unwrap();
-
-    let (output, rlib) = compile_rlib_with_llvm_ar_apart(&root, &stand_in, Some(bindir));
+    let (output, rlib) = compile_rlib_with_llvm_ar_apart(&root, &stand_in, Some(llvm_bindir()));
     assert_rlib_records_bitcode(&root, &output, &rlib);
     assert!(!asked.exists(), "llvm-config was asked for its bindir");
 }
@@ -3784,7 +3693,7 @@ fn rustc_split_codegen_units_still_record_the_whole_crate() {
         "extraction from the rlib failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let symbols = Command::new(find_llvm_nm().expect("llvm-nm not found"))
+    let symbols = Command::new(llvm_bin("llvm-nm"))
         .arg("--defined-only")
         .arg(&bitcode)
         .output()
@@ -3822,7 +3731,7 @@ fn rustc_archive_patching_names_a_missing_llvm_nm() {
         &format!(
             "#!/bin/sh\n[ \"$1\" = --bindir ] && echo '{}' && exit 0\nexec '{}' \"$@\"\n",
             empty_bindir.display(),
-            find_llvm_config().expect("llvm-config not found").display()
+            llvm_bin("llvm-config").display()
         ),
     );
 
@@ -4218,7 +4127,7 @@ fn lto_build_and_extract(tmp: &Path, lto_flag: &str, extra_link: &[&str]) -> Str
     assert!(status.success(), "rllvm-get-bc failed on the LTO binary");
     assert_bitcode_magic(&bitcode);
 
-    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let nm = llvm_bin("llvm-nm");
     let output = Command::new(nm)
         .arg(&bitcode)
         .output()
@@ -4269,8 +4178,7 @@ fn lto_static_archive_extracts_without_linking() {
             assert!(status.success(), "rllvm-cc {lto_flag} failed on {source:?}");
             objects.push(object);
         }
-        let nm = find_llvm_nm().expect("llvm-nm not found");
-        let status = Command::new(nm.with_file_name("llvm-ar"))
+        let status = Command::new(llvm_bin("llvm-ar"))
             .arg("rcs")
             .arg(tmp.path().join("libfoo.a"))
             .args(&objects)
@@ -4291,7 +4199,7 @@ fn lto_static_archive_extracts_without_linking() {
         );
         let bitcode = tmp.path().join("libfoo.a.bc");
         assert_bitcode_magic(&bitcode);
-        let output = Command::new(nm)
+        let output = Command::new(llvm_bin("llvm-nm"))
             .arg(&bitcode)
             .output()
             .expect("llvm-nm failed");
@@ -4431,7 +4339,7 @@ fn lto_cxx_build_with_std_flag_succeeds() {
     assert!(status.success(), "rllvm-get-bc failed on the LTO binary");
     assert_bitcode_magic(&bitcode);
 
-    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let nm = llvm_bin("llvm-nm");
     let output = Command::new(nm)
         .arg(&bitcode)
         .output()
@@ -4567,7 +4475,7 @@ fn fat_lto_objects_stay_extractable_through_the_object_path() {
     );
     assert_bitcode_magic(&bitcode);
 
-    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let nm = llvm_bin("llvm-nm");
     let output = Command::new(nm)
         .arg("--defined-only")
         .arg(&bitcode)
@@ -4640,7 +4548,7 @@ fn fat_lto_link_records_every_unit(linker: &str) {
     );
     assert_bitcode_magic(&bitcode);
 
-    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let nm = llvm_bin("llvm-nm");
     let output = Command::new(nm)
         .arg("--defined-only")
         .arg(&bitcode)
@@ -4974,7 +4882,7 @@ fn save_temps_mode_records_the_linker_merged_module() {
 
     // The collected module must actually be whole-program, not just some
     // bitcode file that happened to be lying around.
-    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let nm = llvm_bin("llvm-nm");
     let output = Command::new(nm)
         .arg(&merged)
         .output()
@@ -5099,7 +5007,7 @@ fn save_temps_source_link_and_extract(
             .canonicalize()
             .unwrap()
     );
-    let output = Command::new(find_llvm_nm().expect("llvm-nm not found"))
+    let output = Command::new(llvm_bin("llvm-nm"))
         .arg("--defined-only")
         .arg(&extracted)
         .output()
@@ -5316,7 +5224,7 @@ fn save_temps_merges_every_lto_partition() {
     // `a_fn` in one partition and `b_fn`/`main` in the other, and a merge that
     // kept only the first would still list the dropped symbol as an undefined
     // reference -- so a bare `contains` passes with the merge arm removed.
-    let nm = find_llvm_nm().expect("llvm-nm not found");
+    let nm = llvm_bin("llvm-nm");
     let output = Command::new(nm)
         .arg("--defined-only")
         .arg(&merged)
@@ -5599,21 +5507,10 @@ fn lto_marker_records_a_path_relative_to_bitcode_root() {
 /// the suite for a reason that has nothing to do with rllvm.
 #[cfg(target_vendor = "apple")]
 fn architecture_is_linkable(arch: &str) -> bool {
-    let Some(llvm_config) = find_llvm_config() else {
-        return false;
-    };
-    let Ok(output) = Command::new(&llvm_config).arg("--bindir").output() else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let bindir = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim().to_string());
-
     let tmp = TempDir::new().unwrap();
     let src = tmp.path().join("probe.c");
     fs::write(&src, "int main(void) { return 0; }\n").unwrap();
-    Command::new(bindir.join("clang"))
+    Command::new(llvm_bin("clang"))
         .args(["-arch", arch, "-o"])
         .arg(tmp.path().join("probe"))
         .arg(&src)
@@ -5665,7 +5562,7 @@ fn source_link_preserves_the_requested_architecture() {
             .unwrap()
             .success()
     );
-    let output = Command::new(find_llvm_dis().unwrap())
+    let output = Command::new(llvm_bin("llvm-dis"))
         .arg(&bitcode)
         .args(["-o", "-"])
         .output()
@@ -5969,7 +5866,7 @@ fn assert_cached_value(dir: &Path, includes: &[&Path], cpath: Option<&Path>, val
     );
 
     let executable = dir.join("value");
-    let clang = find_llvm_dis().unwrap().with_file_name("clang");
+    let clang = llvm_bin("clang");
     assert!(
         Command::new(clang)
             .arg(&object)
@@ -5994,7 +5891,7 @@ fn assert_cached_value(dir: &Path, includes: &[&Path], cpath: Option<&Path>, val
             .unwrap()
             .success()
     );
-    let disassembled = Command::new(find_llvm_dis().unwrap())
+    let disassembled = Command::new(llvm_bin("llvm-dis"))
         .arg(bitcode)
         .args(["-o", "-"])
         .output()
@@ -6453,20 +6350,13 @@ fn a_positional_archive_is_linked_after_the_objects() {
             .success()
     );
     assert!(
-        Command::new(
-            find_llvm_config()
-                .map(|c| {
-                    let out = Command::new(&c).arg("--bindir").output().unwrap();
-                    PathBuf::from(String::from_utf8(out.stdout).unwrap().trim()).join("llvm-ar")
-                })
-                .expect("llvm-ar")
-        )
-        .arg("rcs")
-        .arg(&archive)
-        .arg(&object)
-        .status()
-        .expect("archive the member")
-        .success()
+        Command::new(llvm_bin("llvm-ar"))
+            .arg("rcs")
+            .arg(&archive)
+            .arg(&object)
+            .status()
+            .expect("archive the member")
+            .success()
     );
 
     let output = rllvm("rllvm-cc")

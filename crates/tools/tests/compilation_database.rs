@@ -1,3 +1,4 @@
+use rllvm_testkit::llvm_bin;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -5,13 +6,6 @@ use std::{
     process::{Command, Output},
 };
 use tempfile::TempDir;
-
-fn llvm_bin(name: &str) -> PathBuf {
-    let config = rllvm_core::utils::find_llvm_config().unwrap();
-    let output = Command::new(config).arg("--bindir").output().unwrap();
-    assert!(output.status.success());
-    Path::new(String::from_utf8(output.stdout).unwrap().trim()).join(name)
-}
 
 /// An isolated config for the configured toolchain, with `llvm_bindir` in
 /// place of its own when given. Its bitcode flags break any compilation that
@@ -576,7 +570,7 @@ fn ordinary_wrapper_ignores_a_compilation_database() {
     )
     .unwrap();
     let config = scratch.path().join("wrapper.toml");
-    fs::write(&config, format!("llvm_config_filepath = '{}'\nclang_filepath = '{}'\nclangxx_filepath = '{}'\nllvm_objcopy_filepath = '{}'\nllvm_ar_filepath = '{}'\nllvm_link_filepath = '{}'\n", rllvm_core::utils::find_llvm_config().unwrap().display(), llvm_bin("clang").display(), llvm_bin("clang++").display(), llvm_bin("llvm-objcopy").display(), llvm_bin("llvm-ar").display(), llvm_bin("llvm-link").display())).unwrap();
+    fs::write(&config, format!("llvm_config_filepath = '{}'\nclang_filepath = '{}'\nclangxx_filepath = '{}'\nllvm_objcopy_filepath = '{}'\nllvm_ar_filepath = '{}'\nllvm_link_filepath = '{}'\n", llvm_bin("llvm-config").display(), llvm_bin("clang").display(), llvm_bin("clang++").display(), llvm_bin("llvm-objcopy").display(), llvm_bin("llvm-ar").display(), llvm_bin("llvm-link").display())).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-cc"))
         .env("RLLVM_CONFIG", &config)
         .current_dir(scratch.path())

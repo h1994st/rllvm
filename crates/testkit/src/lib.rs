@@ -6,7 +6,7 @@
 //! against the same program, or they are not testing the same thing.
 
 pub mod toolchain;
-pub use toolchain::{llvm_bin, scratch_rllvm_config};
+pub use toolchain::{llvm_bin, llvm_bindir, scratch_rllvm_config};
 
 use std::{
     path::{Path, PathBuf},

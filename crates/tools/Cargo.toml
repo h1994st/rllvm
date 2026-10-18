@@ -67,7 +67,3 @@ libc = "0.2"
 # Reading the manifests back in tests/packaging.rs.
 toml.workspace = true
 rllvm-testkit = { path = "../testkit" }
-
-# Locating a Homebrew LLVM in the integration harness.
-[target.'cfg(target_vendor = "apple")'.dev-dependencies]
-glob.workspace = true

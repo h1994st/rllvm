@@ -231,12 +231,46 @@ fn changed_paths(
     changed
 }
 
+/// Variables a developer's shell may set that change what an example prints
+/// or captures. Removed rather than overridden: `rllvm-query` reads
+/// `FORCE_COLOR` (and `CLICOLOR_FORCE`) before it checks for a terminal or
+/// `NO_COLOR`, so a forced colour put escapes into the output the scripts grep.
+const SCRUBBED_ENV: &[&str] = &[
+    "RLLVM_BITCODE_ROOT",
+    "RLLVM_LTO_MODE",
+    "RLLVM_LOG_LEVEL",
+    "FORCE_COLOR",
+    "CLICOLOR_FORCE",
+];
+
+/// The command that runs one example's `check.sh` in the environment the
+/// harness controls.
+fn check_command(
+    example: &Path,
+    scratch: &Path,
+    path: &str,
+    config: &Path,
+    bindir: &Path,
+) -> Command {
+    let mut command = Command::new(example.join("check.sh"));
+    command
+        .arg(scratch)
+        .current_dir(example)
+        .env("PATH", path)
+        .env("RLLVM_CONFIG", config)
+        .env("RLLVM_CACHE", "0")
+        .env("LLVM_BINDIR", bindir);
+    for name in SCRUBBED_ENV {
+        command.env_remove(name);
+    }
+    command
+}
+
 #[test]
 fn every_example_verifies_itself() {
     let home = tempfile::tempdir().unwrap();
     let config = rllvm_testkit::scratch_rllvm_config(home.path());
-    let llvm_config = rllvm_testkit::llvm_bin("llvm-config");
-    let bindir = llvm_config.parent().expect("llvm-config sits in a bindir");
+    let bindir = rllvm_testkit::llvm_bindir();
     let path = format!(
         "{}:{}",
         binary_directory().display(),
@@ -266,17 +300,7 @@ fn every_example_verifies_itself() {
         let name = example.file_name().unwrap().to_string_lossy().into_owned();
         let scratch = tempfile::tempdir().unwrap();
 
-        let mut command = Command::new(example.join("check.sh"));
-        command
-            .arg(scratch.path())
-            .current_dir(&example)
-            .env("PATH", &path)
-            .env("RLLVM_CONFIG", &config)
-            .env("RLLVM_CACHE", "0")
-            .env_remove("RLLVM_BITCODE_ROOT")
-            .env_remove("RLLVM_LTO_MODE")
-            .env_remove("RLLVM_LOG_LEVEL")
-            .env("LLVM_BINDIR", bindir);
+        let mut command = check_command(&example, scratch.path(), &path, &config, bindir);
 
         // A non-executable or unspawnable check.sh is a failure of that one
         // example, not a reason to abort the rest.
@@ -404,4 +428,32 @@ fn the_summary_names_every_example_and_its_fate() {
          failed    wasm\n\
          1 verified, 1 skipped, 1 failed\n"
     );
+}
+
+#[test]
+fn an_example_inherits_no_forced_colour_or_rllvm_setting() {
+    let command = check_command(
+        Path::new("/example"),
+        Path::new("/scratch"),
+        "/bin",
+        Path::new("/config.toml"),
+        Path::new("/llvm/bin"),
+    );
+    let removed: Vec<String> = command
+        .get_envs()
+        .filter(|(_, value)| value.is_none())
+        .map(|(key, _)| key.to_string_lossy().into_owned())
+        .collect();
+    for name in [
+        "FORCE_COLOR",
+        "CLICOLOR_FORCE",
+        "RLLVM_BITCODE_ROOT",
+        "RLLVM_LTO_MODE",
+        "RLLVM_LOG_LEVEL",
+    ] {
+        assert!(
+            removed.iter().any(|key| key == name),
+            "{name} reaches check.sh: {removed:?}"
+        );
+    }
 }
