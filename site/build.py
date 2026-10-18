@@ -4,7 +4,7 @@
 The README is the single source of truth. Nothing generated here is committed,
 so the published page cannot drift from the repository's front page.
 
-Four things change on the way:
+Five things change on the way:
 
 * The `# rllvm` heading, the banner and the badge images are repository chrome.
   The page has a designed header instead, which carries the banner itself.
@@ -12,6 +12,8 @@ Four things change on the way:
   can set them in the hero rather than repeating them in the body.
 * Relative links work on github.com and 404 on the site, which has no
   `examples/` or `LICENSE` to serve.
+* Relative images, the README's illustrations, are served raw from the
+  repository, since a `blob` page is HTML rather than the image.
 * The version comes from release-please's manifest, which records what was
   actually released, so the header cannot claim a version that was never cut.
 """
@@ -41,6 +43,11 @@ LINK = re.compile(r"(?<=\]\()([^)\s]+)(?=[)\s])")
 
 ABSOLUTE = ("http://", "https://", "#", "mailto:", "//")
 
+# `![alt](target)`, and the `src`/`srcset` of a `<picture>`, capturing the
+# target. Images are rewritten before links, so `LINK` then sees them absolute.
+IMAGE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)")
+SOURCE = re.compile(r'(\b(?:src|srcset)=")([^"]+)')
+
 # The banner (`![`) and the badges (`[![`) above the first `##`.
 IMAGE_LINES = ("![", "[![")
 
@@ -52,6 +59,15 @@ def rewrite(target: str) -> str:
     # A trailing slash means a directory, which GitHub serves under `tree`.
     kind = "tree" if target.endswith("/") else "blob"
     return f"https://github.com/{REPO}/{kind}/{BRANCH}/{target.lstrip('./')}"
+
+
+def raw(match: re.Match[str]) -> str:
+    """Serve a repository-relative image from GitHub's raw host."""
+    prefix, target = match.groups()
+    if target.startswith(ABSOLUTE):
+        return match.group(0)
+    path = target.lstrip("./")
+    return f"{prefix}https://raw.githubusercontent.com/{REPO}/{BRANCH}/{path}"
 
 
 def crate_version() -> str:
@@ -115,8 +131,10 @@ def main() -> int:
         )
         return 1
 
+    body = SOURCE.sub(raw, IMAGE.sub(raw, body))
     body = LINK.sub(lambda match: rewrite(match.group(0)), body)
-    leftover = [t for t in LINK.findall(body) if not t.startswith(ABSOLUTE)]
+    targets = LINK.findall(body) + [t for _, t in SOURCE.findall(body)]
+    leftover = [t for t in targets if not t.startswith(ABSOLUTE)]
     if leftover:
         print(f"unrewritten relative links: {leftover}", file=sys.stderr)
         return 1
