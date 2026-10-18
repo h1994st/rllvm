@@ -3350,6 +3350,8 @@ fn get_bc_refuses_to_overwrite_a_recorded_module() {
 #[cfg(unix)]
 #[test]
 fn rustc_mixed_crate_types_preserve_loadable_shared_library() {
+    use object::{Object, ObjectSymbol};
+
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let src = root.join("mixed.rs");
@@ -3393,95 +3395,55 @@ int main(int argc, char **argv) {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let rustc = which("rustc").unwrap();
-    for wrapped in [false, true] {
-        let out_dir = root.join(if wrapped { "wrapped" } else { "native" });
-        fs::create_dir(&out_dir).unwrap();
-        let mut compile = if wrapped {
-            let mut command = rllvm("rllvm-rustc");
-            command.arg("--rllvm-verbose=3").arg(&rustc);
-            command
-        } else {
-            Command::new(&rustc)
-        };
-        let output = compile
-            .args(["--crate-name=mixed", "--crate-type=lib,staticlib,cdylib"])
-            .arg("--out-dir")
-            .arg(&out_dir)
-            .arg(&src)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "mixed crate compilation failed (wrapped={wrapped}): {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let shared = out_dir.join(format!("libmixed{}", std::env::consts::DLL_SUFFIX));
-        let loaded = Command::new(&loader).arg(&shared).output().unwrap();
-        assert!(
-            loaded.status.success(),
-            "shared library could not execute (wrapped={wrapped}, {}): {}\ncompiler output: {}",
-            loaded.status,
-            String::from_utf8_lossy(&loaded.stderr),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&loaded.stdout).trim(), "42");
-
-        if wrapped {
-            for artifact in [
-                shared,
-                out_dir.join("libmixed.rlib"),
-                out_dir.join("libmixed.a"),
-            ] {
-                let bitcode = root.join("extracted.bc");
-                let output = rllvm("rllvm-get-bc")
-                    .arg(&artifact)
-                    .arg("-o")
-                    .arg(&bitcode)
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "extraction from {artifact:?} failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                assert_valid_bitcode(&bitcode);
-                fs::remove_file(bitcode).unwrap();
-            }
-        }
-    }
-}
-
-/// rustc puts an allocator shim (`__rust_alloc` and friends) in a staticlib,
-/// named after the crate but generated outside its bitcode. The member must
-/// record nothing, so the catalog reports it instead of hiding its functions
-/// behind a module that does not define them.
-#[test]
-fn a_staticlib_allocator_shim_records_no_bitcode() {
-    use object::{Object, ObjectSymbol};
-
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let src = root.join("shim.rs");
-    fs::write(
-        &src,
-        "#[unsafe(no_mangle)]\npub extern \"C\" fn boxed(x: i32) -> i32 { *Box::new(x) }\n",
-    )
-    .unwrap();
+    let out_dir = root.join("out");
+    fs::create_dir(&out_dir).unwrap();
     let output = rllvm("rllvm-rustc")
+        .arg("--rllvm-verbose=3")
         .arg(which("rustc").unwrap())
-        .args(["--crate-name=shim", "--crate-type=staticlib", "--out-dir"])
-        .arg(&root)
+        .args(["--crate-name=mixed", "--crate-type=lib,staticlib,cdylib"])
+        .arg("--out-dir")
+        .arg(&out_dir)
         .arg(&src)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "staticlib compilation failed: {}",
+        "mixed crate compilation failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let shared = out_dir.join(format!("libmixed{}", std::env::consts::DLL_SUFFIX));
+    let loaded = Command::new(&loader).arg(&shared).output().unwrap();
+    assert!(
+        loaded.status.success(),
+        "shared library could not execute ({}): {}\ncompiler output: {}",
+        loaded.status,
+        String::from_utf8_lossy(&loaded.stderr),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&loaded.stdout).trim(), "42");
 
-    let archive = root.join("libshim.a");
+    let archive = out_dir.join("libmixed.a");
+    for artifact in [&shared, &out_dir.join("libmixed.rlib"), &archive] {
+        let bitcode = root.join("extracted.bc");
+        let output = rllvm("rllvm-get-bc")
+            .arg(artifact)
+            .arg("-o")
+            .arg(&bitcode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "extraction from {artifact:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_valid_bitcode(&bitcode);
+        fs::remove_file(bitcode).unwrap();
+    }
+
+    // rustc puts an allocator shim (`__rust_alloc` and friends) in a staticlib,
+    // named after the crate but generated outside its bitcode. The member must
+    // record nothing, so the catalog reports it instead of hiding its functions
+    // behind a module that does not define them.
     let data = fs::read(&archive).unwrap();
     let parsed = object::read::archive::ArchiveFile::parse(&*data).unwrap();
     let defines_alloc = |member: &[u8]| {
@@ -3496,7 +3458,7 @@ fn a_staticlib_allocator_shim_records_no_bitcode() {
         .filter_map(Result::ok)
         .filter(|member| member.data(&*data).is_ok_and(defines_alloc))
         .map(|member| String::from_utf8_lossy(member.name()).into_owned())
-        .filter(|name| name.starts_with("shim."))
+        .filter(|name| name.starts_with("mixed."))
         .collect();
     assert_eq!(
         shim.len(),
