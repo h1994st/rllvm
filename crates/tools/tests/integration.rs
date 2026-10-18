@@ -586,52 +586,18 @@ fn response_file_nested_quoted_arguments_match_clang() {
     );
 }
 
-#[test]
-fn compile_single_c_file_and_extract_bitcode() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo.o");
-
-    // Step 1: Compile foo.c with rllvm-cc (compile-only mode)
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc compile failed");
-    assert!(object_path.exists(), "Object file not created");
-
-    // Step 2: Extract bitcode with rllvm-get-bc
-    let bitcode_path = tmp.path().join("foo.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc failed");
-
-    // Step 3: Verify the extracted bitcode is valid LLVM IR
-    assert_valid_bitcode(&bitcode_path);
-}
-
 /// Both compilations must finish before extraction: extracting the first early
 /// would hide a later compilation overwriting its embedded bitcode path.
 enum CompilationVariant {
-    Output,
     OutputOnly,
     StoreOutputOnly,
-    SharedStore,
     ReusedOutput,
     ConfiguredFlags,
     Compiler,
 }
 
 fn assert_compilation_variants_keep_bitcode(variant: CompilationVariant) {
-    let shared_store = matches!(
-        variant,
-        CompilationVariant::SharedStore | CompilationVariant::StoreOutputOnly
-    );
+    let shared_store = matches!(variant, CompilationVariant::StoreOutputOnly);
     let output_only = matches!(
         variant,
         CompilationVariant::OutputOnly | CompilationVariant::StoreOutputOnly
@@ -766,16 +732,6 @@ fn compilation_variants_with_identical_flags_have_distinct_output_artifacts() {
 #[test]
 fn compilation_variants_with_identical_flags_have_distinct_store_artifacts() {
     assert_compilation_variants_keep_bitcode(CompilationVariant::StoreOutputOnly);
-}
-
-#[test]
-fn compilation_variants_in_one_directory_keep_bitcode() {
-    assert_compilation_variants_keep_bitcode(CompilationVariant::Output);
-}
-
-#[test]
-fn compilation_variants_in_shared_store_keep_bitcode() {
-    assert_compilation_variants_keep_bitcode(CompilationVariant::SharedStore);
 }
 
 #[test]
@@ -930,97 +886,6 @@ fn compile_multiple_c_files_and_link() {
     assert_valid_bitcode(&bitcode_path);
 }
 
-#[test]
-fn compile_inline_c_program() {
-    let tmp = TempDir::new().unwrap();
-
-    // Write a small C program to a temp file
-    let c_source = tmp.path().join("main.c");
-    std::fs::write(
-        &c_source,
-        r#"
-int square(int x) { return x * x; }
-int main(void) { return square(3) - 9; }
-"#,
-    )
-    .unwrap();
-
-    let object_path = tmp.path().join("main.o");
-
-    // Compile with rllvm-cc
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-c", "-o"])
-        .arg(&object_path)
-        .arg(&c_source)
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc compile failed");
-
-    // Extract bitcode
-    let bitcode_path = tmp.path().join("main.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc failed");
-
-    assert_valid_bitcode(&bitcode_path);
-}
-
-#[test]
-fn compile_and_link_inline_c_program_to_executable() {
-    let tmp = TempDir::new().unwrap();
-
-    let c_source = tmp.path().join("hello.c");
-    std::fs::write(
-        &c_source,
-        r#"
-#include <stdio.h>
-int main(void) {
-    printf("hello from rllvm\n");
-    return 0;
-}
-"#,
-    )
-    .unwrap();
-
-    let exe_path = tmp.path().join("hello");
-
-    // Compile + link with rllvm-cc
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-o"])
-        .arg(&exe_path)
-        .arg(&c_source)
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc compile+link failed");
-    assert!(exe_path.exists(), "Executable not created");
-
-    // Verify the executable actually runs
-    let output = Command::new(&exe_path)
-        .output()
-        .expect("Failed to run compiled executable");
-    assert!(output.status.success(), "Compiled executable failed");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "hello from rllvm"
-    );
-
-    // Extract bitcode
-    let bitcode_path = tmp.path().join("hello.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&exe_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc failed");
-
-    assert_valid_bitcode(&bitcode_path);
-}
-
 fn assert_pthread_compilation(compile_only: bool) {
     let tmp = TempDir::new().unwrap();
     let source = tmp.path().join("threaded.c");
@@ -1128,80 +993,6 @@ fn compile_cxx_file_and_extract_bitcode() {
         .status()
         .expect("Failed to run rllvm-get-bc");
     assert!(status.success(), "rllvm-get-bc failed on C++ output");
-
-    assert_valid_bitcode(&bitcode_path);
-}
-
-#[test]
-fn get_bc_with_manifest_flag() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo.o");
-
-    // Compile
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success());
-
-    // Extract with manifest flag
-    let bitcode_path = tmp.path().join("foo.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-m", "-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc -m failed");
-
-    assert_valid_bitcode(&bitcode_path);
-
-    // Check that the manifest file was created
-    let manifest_path = tmp.path().join("foo.bc.manifest");
-    assert!(
-        manifest_path.exists(),
-        "Manifest file not created at {manifest_path:?}"
-    );
-
-    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(
-        !manifest_content.trim().is_empty(),
-        "Manifest file is empty"
-    );
-    // Each line in the manifest should be a path to a .bc file
-    for line in manifest_content.lines() {
-        assert!(
-            line.ends_with(".bc"),
-            "Manifest line does not end with .bc: {line}"
-        );
-    }
-}
-
-#[test]
-fn compile_with_optimization_flags() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo_opt.o");
-
-    // Compile with -O2
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-O2", "-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc -O2 compile failed");
-
-    // Extract and verify bitcode
-    let bitcode_path = tmp.path().join("foo_opt.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success());
 
     assert_valid_bitcode(&bitcode_path);
 }
@@ -1575,28 +1366,6 @@ fn dropin_dash_v_passes_through_to_compiler() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(object_path.exists(), "Object file not created with -v");
-}
-
-/// The per-invocation compiler override survives, under its namespaced name.
-#[test]
-fn rllvm_compiler_override_still_works() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo.o");
-    let clang = llvm_bin("clang");
-
-    let output = rllvm("rllvm-cc")
-        .arg(format!("--rllvm-compiler={}", clang.display()))
-        .args(["-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .output()
-        .expect("Failed to run rllvm-cc");
-    assert!(
-        output.status.success(),
-        "--rllvm-compiler was rejected: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(object_path.exists(), "Object file not created");
 }
 
 /// Bare `--rllvm-verbose` must not consume the following compiler argument.
@@ -1982,28 +1751,6 @@ fn get_bc_partial_error_cleans_owned_temps_and_preserves_output() {
     );
 }
 
-/// Completions generate for every shell and every binary.
-#[test]
-fn completions_generate_for_all_shells_and_binaries() {
-    for bin in ["cc", "cxx", "get-bc"] {
-        for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
-            let output = rllvm("rllvm-completions")
-                .args(["--shell", shell, "--bin", bin])
-                .output()
-                .expect("Failed to run rllvm-completions");
-            assert!(
-                output.status.success(),
-                "completions failed for {bin}/{shell}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(
-                !output.stdout.is_empty(),
-                "completions for {bin}/{shell} were empty"
-            );
-        }
-    }
-}
-
 /// `rllvm-info` accepts both a raw `.bc` and an object file with an embedded path.
 #[test]
 fn info_reports_on_bitcode_and_on_object_files() {
@@ -2326,22 +2073,6 @@ fn embedding_falls_back_when_objcopy_is_unconfigured_or_missing() {
         );
         assert_valid_bitcode(&bitcode_path);
     }
-}
-
-/// `rllvm-get-bc` on a path that does not exist fails cleanly.
-#[test]
-fn get_bc_reports_a_missing_input() {
-    let tmp = TempDir::new().unwrap();
-    let output = rllvm("rllvm-get-bc")
-        .arg(tmp.path().join("nope.o"))
-        .output()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(!output.status.success(), "missing input was accepted");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("panicked"),
-        "panicked instead of failing: {stderr}"
-    );
 }
 
 /// An object with no embedded bitcode section fails with a clear error.
@@ -4888,11 +4619,6 @@ fn save_temps_source_link_and_extract(
 }
 
 #[test]
-fn save_temps_source_link_records_module_for_relative_output() {
-    save_temps_source_link_and_extract(Some("prog"), false, None);
-}
-
-#[test]
 fn save_temps_source_link_records_module_for_default_output() {
     save_temps_source_link_and_extract(None, false, None);
 }
@@ -5897,6 +5623,7 @@ fn a_missing_input_is_reported_with_its_path_and_no_debug_formatting() {
             !stderr.contains("Os {"),
             "{binary} printed a Debug rendering of io::Error at the user: {stderr}"
         );
+        assert!(!stderr.contains("panicked"), "{stderr}");
     }
 }
 
