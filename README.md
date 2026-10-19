@@ -169,9 +169,10 @@ Every answer also says what it could not see: modules that failed to parse,
 indirect call sites, ambiguous bindings, and source that changed since it was
 compiled. Add `--json` for the machine-readable envelope or `--full` for those
 blocks as text. Name a symbol by its mangled name, its demangled reading, or a
-bare identifier that searches. Pipe several queries in, one per line, to load
-the catalog once. Extracted facts are cached; `RLLVM_QUERY_CACHE=0` turns that
-off, and `rllvm-query cache clear` empties it.
+bare identifier that searches. A `file:line` names its file as the debug info
+recorded it, or by any path to the same file, symlinks included. Pipe several
+queries in, one per line, to load the catalog once. Extracted facts are cached;
+`RLLVM_QUERY_CACHE=0` turns that off, and `rllvm-query cache clear` empties it.
 
 See the [queries](examples/queries/), [name resolution](examples/name-resolution/)
 and [staleness](examples/staleness/) examples.
