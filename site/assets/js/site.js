@@ -11,6 +11,15 @@
   var ORDER = ["auto", "light", "dark"];
   var LABEL = { auto: "Auto", light: "Light", dark: "Dark" };
 
+  // The README's illustrations pick their dark variant with
+  // `<source media="(prefers-color-scheme: dark)">`, which follows the system,
+  // not this toggle. An explicit choice rewrites that media query.
+  var SCHEME = "(prefers-color-scheme: dark)";
+  var DARK_MEDIA = { auto: SCHEME, light: "not all", dark: "all" };
+  var darkSources = document.querySelectorAll(
+    'picture source[media="' + SCHEME + '"]'
+  );
+
   var toggle = document.querySelector("[data-theme-toggle]");
   var label = document.querySelector("[data-theme-label]");
 
@@ -18,6 +27,9 @@
     root.dataset.theme = theme;
     if (label) label.textContent = LABEL[theme];
     if (toggle) toggle.setAttribute("aria-label", "Theme: " + LABEL[theme]);
+    darkSources.forEach(function (source) {
+      source.media = DARK_MEDIA[theme];
+    });
   }
 
   if (toggle) {
