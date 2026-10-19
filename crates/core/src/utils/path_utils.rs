@@ -115,6 +115,16 @@ where
     hash
 }
 
+/// Whether two paths name the same file. Paths that exist are compared as the
+/// OS resolves them, symlinks and `..` included: collapsing those lexically can
+/// name a different file. A path that does not exist matches only as spelled.
+pub fn same_file(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

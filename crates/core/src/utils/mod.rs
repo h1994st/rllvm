@@ -51,3 +51,7 @@ pub use stdout::print_stdout;
 mod path_utils;
 pub use path_utils::calculate_filepath_hash;
 pub(crate) use path_utils::derive_object_and_bitcode_filepath;
+/// Whether two paths name the same file. Shared by catalog source selection
+/// and `rllvm-query`'s `file:line` lookups, not a supported interface.
+#[doc(hidden)]
+pub use path_utils::same_file;

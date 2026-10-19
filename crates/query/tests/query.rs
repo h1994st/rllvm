@@ -711,6 +711,82 @@ fn a_location_without_a_line_is_an_error_not_an_empty_answer() {
     );
 }
 
+/// A build in a directory reached through a symlink, as the wrapper compiles
+/// it: clang records the working directory as the shell spelled it, but is
+/// handed the source with the symlink resolved. The file it records is then
+/// no spelling of the source relative to that directory. Returns the catalog
+/// and the symlinked directory.
+fn build_through_a_symlink(scratch: &tempfile::TempDir) -> (PathBuf, PathBuf) {
+    let real = scratch.path().join("real");
+    let link = scratch.path().join("link");
+    std::fs::create_dir(&real).unwrap();
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let source = real.join("t.c");
+    std::fs::write(
+        &source,
+        "int sink(int x) { return x; }\nint main(int argc, char **argv) { return sink(argc); }\n",
+    )
+    .unwrap();
+    let module = real.join("t.bc");
+    let status = Command::new(llvm_bin("clang"))
+        .current_dir(&link)
+        .env("PWD", &link)
+        .args(["-g", "-O0", "-emit-llvm", "-c", "-o"])
+        .arg(&module)
+        .arg(source.canonicalize().unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success(), "clang failed");
+    let mut catalog =
+        rllvm_core::catalog::inventory(&module, scratch.path(), Some(&llvm_bin("llvm-dis")))
+            .unwrap();
+    catalog.modules[0].id = MODULE_ID.to_string();
+    let path = scratch.path().join("catalog.json");
+    write_catalog_json(&path, &catalog);
+    (path, link)
+}
+
+#[test]
+fn a_site_named_from_a_symlinked_build_directory_is_found() {
+    let scratch = tempfile::tempdir().unwrap();
+    let (catalog, link) = build_through_a_symlink(&scratch);
+    let query = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .current_dir(&link)
+            .env("PWD", &link)
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "rllvm-query {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    let at = query(&["at", "t.c", "2"]);
+    let results = at["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1, "one function holds t.c:2: {at}");
+    assert_eq!(results[0]["function"]["symbol"], "main", "{at}");
+    assert_eq!(
+        results[0]["call_sites"].as_array().map(Vec::len),
+        Some(1),
+        "the call to sink is on t.c:2: {at}"
+    );
+
+    let guards = query(&["guards", "--at", "t.c:2", "--operand", "0"]);
+    assert_eq!(
+        guards["results"]["guards"],
+        serde_json::json!([]),
+        "nothing constrains argc, but its site resolves: {guards}"
+    );
+}
+
 #[test]
 fn the_heuristics_flag_may_follow_its_subcommand() {
     // The README writes `indirect-targets parser.c:8 --heuristics`; without

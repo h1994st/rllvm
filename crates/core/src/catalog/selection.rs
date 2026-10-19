@@ -6,7 +6,7 @@ use super::{
     ModuleCatalog, ModuleRecord, ModuleSelection, ModuleStatus, hash_bytes, hash_file,
     write_catalog,
 };
-use crate::error::Error;
+use crate::{error::Error, utils::same_file};
 
 fn source_matches(module: &ModuleRecord, source: &Path, cwd: &Path) -> bool {
     let requested = if source.is_absolute() {
@@ -24,12 +24,7 @@ fn source_matches(module: &ModuleRecord, source: &Path, cwd: &Path) -> bool {
                 _ => return known.path == source && source.is_relative(),
             }
         };
-        // Resolve existing paths with OS semantics: collapsing symlink/.. lexically
-        // can select a different source. Unresolved legacy paths match literally.
-        match (path.canonicalize(), requested.canonicalize()) {
-            (Ok(left), Ok(right)) => left == right,
-            _ => path == requested,
-        }
+        same_file(&path, &requested)
     })
 }
 
