@@ -2201,6 +2201,24 @@ mod tests {
     }
 
     #[test]
+    fn full_text_prints_the_cache_line() {
+        let mut result = clean_callers_answer();
+        result.analysis.cache = Some(CacheReport {
+            hits: 0,
+            misses: 2,
+            written: 2,
+            disk_bytes: MIB / 2,
+            warn_bytes: MIB,
+            over_threshold: false,
+        });
+        let text = render(&result, TextMode::Full, Color::Never);
+        assert!(
+            text.contains("  cache: 0 hit, 2 miss, 2 written, "),
+            "got: {text}"
+        );
+    }
+
+    #[test]
     fn a_cache_under_its_threshold_prints_no_note() {
         let mut result = clean_callers_answer();
         result.analysis.cache = Some(CacheReport {

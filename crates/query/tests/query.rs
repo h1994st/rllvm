@@ -129,25 +129,6 @@ fn the_cli_prints_text_by_default() {
     assert!(text.contains("main"), "got: {text}");
 }
 
-/// `--full` only makes sense for the text renderer; combined with `--json`
-/// neither flag would silently win, so clap rejects the combination outright.
-#[test]
-fn json_and_full_cannot_be_combined() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_two_module_catalog();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
-        .arg("--catalog")
-        .arg(catalog)
-        .args(["--json", "--full", "callers", "add"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "clap should reject the combination"
-    );
-}
-
 const ADD_AND_MAIN: &[(&str, &str)] = &[
     ("add.c", "int add(int a,int b){return a+b;}\n"),
     (
@@ -848,23 +829,6 @@ fn a_site_named_from_a_symlinked_build_directory_is_found() {
         guards["results"]["guards"],
         serde_json::json!([]),
         "nothing constrains argc, but its site resolves: {guards}"
-    );
-}
-
-#[test]
-fn the_heuristics_flag_may_follow_its_subcommand() {
-    // The README writes `indirect-targets parser.c:8 --heuristics`; without
-    // `global = true` clap rejects that placement outright.
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_two_module_catalog();
-    let value = query_json(
-        &scratch,
-        catalog,
-        &["indirect-targets", "main.c:2", "--heuristics"],
-    );
-    assert_eq!(
-        value["query"]["heuristics"], true,
-        "the trailing flag must reach the query: {value}"
     );
 }
 
@@ -2910,7 +2874,6 @@ mod mcp {
     use super::*;
 
     const MODERN: &str = "2026-07-28";
-    const LEGACY: &str = "2025-06-18";
 
     /// The `_meta` block every modern request must carry.
     fn modern_meta() -> serde_json::Value {
@@ -3136,43 +3099,6 @@ mod mcp {
         );
     }
 
-    #[test]
-    fn a_modern_request_is_served_without_a_handshake() {
-        let response = mcp_exchange(&modern_request(
-            "list-tools",
-            "tools/list",
-            serde_json::json!({}),
-        ));
-        assert_eq!(response["result"]["resultType"], "complete");
-        assert_eq!(
-            response["result"]["cacheScope"], "private",
-            "modern cacheScope must be a spec-valid MCP enum value (public|private)"
-        );
-        assert!(response["result"]["tools"].as_array().unwrap().len() >= 9);
-    }
-
-    #[test]
-    fn server_discover_returns_supported_versions() {
-        let response = mcp_exchange(&modern_request(
-            "discover",
-            "server/discover",
-            serde_json::json!({}),
-        ));
-        let result = &response["result"];
-        assert_eq!(result["resultType"], "complete");
-        let versions = result["supportedVersions"].as_array().unwrap();
-        assert!(versions.iter().any(|v| v == MODERN));
-        assert!(
-            versions.iter().any(|v| v == LEGACY),
-            "a dual-era server supports both"
-        );
-        assert!(result["capabilities"]["tools"].is_object());
-        assert!(
-            result["ttlMs"].is_number(),
-            "DiscoverResult extends CacheableResult"
-        );
-    }
-
     /// One tool over the wire. That every one of the eleven is listed under a
     /// name `query_from_call` resolves is `mcp.rs`'s own
     /// `every_query_variant_is_listed_and_resolves_through_a_call`, which
@@ -3365,79 +3291,6 @@ mod mcp {
             2,
             "both catalogs stay loaded across calls"
         );
-    }
-
-    #[test]
-    fn a_request_without_client_capabilities_is_rejected() {
-        // `clientCapabilities` is required; accepting its absence would make the
-        // server pass tests a conforming client would fail against.
-        let response = mcp_exchange(
-            &serde_json::json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
-                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": MODERN } }
-            })
-            .to_string(),
-        );
-        assert_eq!(response["error"]["code"], -32602);
-    }
-
-    #[test]
-    fn an_unsupported_version_returns_minus_32022_with_the_supported_list() {
-        let response = mcp_exchange(
-            &serde_json::json!({
-                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
-                "params": { "_meta": {
-                    "io.modelcontextprotocol/protocolVersion": "1900-01-01",
-                    "io.modelcontextprotocol/clientCapabilities": {}
-                }}
-            })
-            .to_string(),
-        );
-        assert_eq!(response["error"]["code"], -32022);
-        let supported = response["error"]["data"]["supported"].as_array().unwrap();
-        assert!(supported.iter().any(|v| v == MODERN));
-    }
-
-    #[test]
-    fn a_legacy_initialize_selects_legacy_semantics() {
-        let response = mcp_exchange(&format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize",
-             "params":{{"protocolVersion":"{LEGACY}","capabilities":{{}},
-             "clientInfo":{{"name":"t","version":"1"}}}}}}"#
-        ));
-        assert_eq!(response["result"]["protocolVersion"], LEGACY);
-        assert!(response["result"]["capabilities"]["tools"].is_object());
-        assert!(
-            response["result"]["resultType"].is_null(),
-            "legacy results must not carry modern fields"
-        );
-    }
-
-    #[test]
-    fn a_legacy_initialize_with_an_older_version_gets_a_counter_offer() {
-        // The 2025-06-18 lifecycle spec: "If the server supports the
-        // requested protocol version, it MUST respond with the same
-        // version. Otherwise, the server MUST respond with another protocol
-        // version it supports." That is a successful `InitializeResult`
-        // naming `LEGACY`, not a protocol error -- a legacy client has no
-        // fall-forward mechanism, so an error would be exactly the dead end
-        // the counter-offer exists to avoid.
-        let response = mcp_exchange(
-            r#"{"jsonrpc":"2.0","id":1,"method":"initialize",
-             "params":{"protocolVersion":"2024-11-05","capabilities":{},
-             "clientInfo":{"name":"t","version":"1"}}}"#,
-        );
-        assert!(
-            response["error"].is_null(),
-            "an unsupported requested version must counter-offer, not error: {response:?}"
-        );
-        assert_eq!(response["result"]["protocolVersion"], LEGACY);
-    }
-
-    #[test]
-    fn malformed_json_returns_minus_32700() {
-        let response = mcp_exchange("{not json");
-        assert_eq!(response["error"]["code"], -32700);
     }
 
     #[test]
@@ -3998,14 +3851,6 @@ fn an_mcp_load_reports_the_cache() {
     assert_eq!(summary["analysis"]["cache"]["misses"], 2);
 }
 
-#[test]
-fn full_text_prints_the_cache_line() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_two_module_catalog();
-    let text = query_text(&scratch, catalog, &["--full", "callers", "add"]);
-    assert!(text.contains("cache: 0 hit, 2 miss, 2 written, "), "{text}");
-}
-
 fn query_cache_command(scratch: &tempfile::TempDir, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
@@ -4204,17 +4049,25 @@ fn ir_catalog(scratch: &tempfile::TempDir, ir_modules: &[(&str, &str)]) -> PathB
 
 #[test]
 fn an_alias_is_a_definition_that_forwards_to_its_target() {
+    use rllvm_query::Query;
     let scratch = tempfile::tempdir().unwrap();
     let catalog = aliased_catalog(&scratch);
+    let session = rllvm_query::open(&catalog).unwrap();
+    let answer =
+        |query: Query| serde_json::to_value(rllvm_query::run(&session, &query).unwrap()).unwrap();
 
-    let defs = query_json(&scratch, &catalog, &["defs", "exported"]);
+    let defs = answer(Query::Defs {
+        name: "exported".into(),
+    });
     assert_eq!(
         defs["results"].as_array().map(Vec::len),
         Some(1),
         "the alias is defined in the captured code: {defs}"
     );
 
-    let callees = query_json(&scratch, &catalog, &["callees", "local_caller"]);
+    let callees = answer(Query::Callees {
+        name: "local_caller".into(),
+    });
     assert_eq!(
         callees["results"][0]["target"]["kind"], "direct",
         "a call through an alias names its callee: {callees}"
@@ -4224,7 +4077,13 @@ fn an_alias_is_a_definition_that_forwards_to_its_target() {
         "exported"
     );
 
-    let reach = query_json(&scratch, &catalog, &["reach", "main", "leaf"]);
+    let reach = answer(Query::Reach {
+        from: "main".into(),
+        to: "leaf".into(),
+        include_overlay: false,
+        min_confidence: None,
+        include_annotations: false,
+    });
     let steps = reach["results"]
         .as_array()
         .unwrap_or_else(|| panic!("a path runs through the alias: {reach}"));
@@ -4233,7 +4092,9 @@ fn an_alias_is_a_definition_that_forwards_to_its_target() {
         "the path names the alias step: {reach}"
     );
 
-    let callers = query_json(&scratch, &catalog, &["callers", "impl"]);
+    let callers = answer(Query::Callers {
+        name: "impl".into(),
+    });
     let callers: Vec<&str> = callers["results"]
         .as_array()
         .unwrap()

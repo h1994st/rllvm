@@ -1176,4 +1176,27 @@ mod tests {
             );
         }
     }
+
+    /// `--json` picks the envelope, `--full` the full text, and neither the
+    /// adaptive text: the only check that `--full` reaches the renderer.
+    #[test]
+    fn the_output_flags_select_the_renderer() {
+        // `None` for the JSON envelope; an exhaustive match, not `matches!`,
+        // so a renderer added later must be placed here too.
+        let selected = [
+            &["rllvm-query", "--full", "callers", "add"][..],
+            &["rllvm-query", "--json", "callers", "add"],
+            &["rllvm-query", "callers", "add"],
+        ]
+        .map(
+            |argv| match Format::of(&QueryArgs::try_parse_from(argv).unwrap()) {
+                Format::Json => None,
+                Format::Text(mode) => Some(mode),
+            },
+        );
+        assert_eq!(
+            selected,
+            [Some(TextMode::Full), None, Some(TextMode::Adaptive)]
+        );
+    }
 }

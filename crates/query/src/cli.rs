@@ -275,3 +275,34 @@ pub enum CacheAction {
         stale: bool,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use clap::{Parser, error::ErrorKind};
+
+    use super::QueryArgs;
+
+    /// `--full` only makes sense for the text renderer; with `--json` neither
+    /// would silently win, so clap rejects the combination outright.
+    #[test]
+    fn json_and_full_cannot_be_combined() {
+        let error =
+            QueryArgs::try_parse_from(["rllvm-query", "--json", "--full", "callers", "add"])
+                .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
+    }
+
+    /// The README writes `indirect-targets parser.c:8 --heuristics`; without
+    /// `global = true` clap rejects that placement outright.
+    #[test]
+    fn the_heuristics_flag_may_follow_its_subcommand() {
+        let args = QueryArgs::try_parse_from([
+            "rllvm-query",
+            "indirect-targets",
+            "main.c:2",
+            "--heuristics",
+        ])
+        .unwrap();
+        assert!(args.modifiers.heuristics);
+    }
+}

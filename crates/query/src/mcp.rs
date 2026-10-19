@@ -2090,6 +2090,126 @@ mod tests {
         assert_eq!(response["id"], 1);
     }
 
+    /// A modern request line, carrying the `_meta` block every one must.
+    fn modern_request(method: &str) -> String {
+        json!({
+            "jsonrpc": "2.0", "id": method, "method": method,
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN,
+                "io.modelcontextprotocol/clientInfo": { "name": "rllvm-test", "version": "1.0.0" },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }}
+        })
+        .to_string()
+    }
+
+    /// The one response `line` gets.
+    fn respond(line: &str) -> Value {
+        handle_line(&mut one_catalog(), line).expect("a request with an id must be answered")
+    }
+
+    #[test]
+    fn a_modern_request_is_served_without_a_handshake() {
+        let response = respond(&modern_request("tools/list"));
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(
+            response["result"]["cacheScope"], "private",
+            "modern cacheScope must be a spec-valid MCP enum value (public|private)"
+        );
+        assert!(response["result"]["tools"].as_array().unwrap().len() >= 9);
+    }
+
+    #[test]
+    fn server_discover_returns_supported_versions() {
+        let response = respond(&modern_request("server/discover"));
+        let result = &response["result"];
+        assert_eq!(result["resultType"], "complete");
+        let versions = result["supportedVersions"].as_array().unwrap();
+        assert!(versions.iter().any(|v| v == MODERN));
+        assert!(
+            versions.iter().any(|v| v == LEGACY),
+            "a dual-era server supports both"
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+        assert!(
+            result["ttlMs"].is_number(),
+            "DiscoverResult extends CacheableResult"
+        );
+    }
+
+    #[test]
+    fn a_request_without_client_capabilities_is_rejected() {
+        // `clientCapabilities` is required; accepting its absence would make the
+        // server pass tests a conforming client would fail against.
+        let response = respond(
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": MODERN } }
+            })
+            .to_string(),
+        );
+        assert_eq!(response["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn an_unsupported_version_returns_minus_32022_with_the_supported_list() {
+        let response = respond(
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "1900-01-01",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }}
+            })
+            .to_string(),
+        );
+        assert_eq!(response["error"]["code"], -32022);
+        let supported = response["error"]["data"]["supported"].as_array().unwrap();
+        assert!(supported.iter().any(|v| v == MODERN));
+    }
+
+    #[test]
+    fn a_legacy_initialize_selects_legacy_semantics() {
+        let response = respond(&format!(
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize",
+             "params":{{"protocolVersion":"{LEGACY}","capabilities":{{}},
+             "clientInfo":{{"name":"t","version":"1"}}}}}}"#
+        ));
+        assert_eq!(response["result"]["protocolVersion"], LEGACY);
+        assert!(response["result"]["capabilities"]["tools"].is_object());
+        assert!(
+            response["result"]["resultType"].is_null(),
+            "legacy results must not carry modern fields"
+        );
+    }
+
+    #[test]
+    fn a_legacy_initialize_with_an_older_version_gets_a_counter_offer() {
+        // The 2025-06-18 lifecycle spec: "If the server supports the
+        // requested protocol version, it MUST respond with the same
+        // version. Otherwise, the server MUST respond with another protocol
+        // version it supports." That is a successful `InitializeResult`
+        // naming `LEGACY`, not a protocol error -- a legacy client has no
+        // fall-forward mechanism, so an error would be exactly the dead end
+        // the counter-offer exists to avoid.
+        let response = respond(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize",
+             "params":{"protocolVersion":"2024-11-05","capabilities":{},
+             "clientInfo":{"name":"t","version":"1"}}}"#,
+        );
+        assert!(
+            response["error"].is_null(),
+            "an unsupported requested version must counter-offer, not error: {response:?}"
+        );
+        assert_eq!(response["result"]["protocolVersion"], LEGACY);
+    }
+
+    #[test]
+    fn malformed_json_returns_minus_32700() {
+        let response = respond("{not json");
+        assert_eq!(response["error"]["code"], -32700);
+    }
+
     /// The overlay fixture loaded as `catalog.json` in `scratch`, so its
     /// default overlay sits in the scratch directory and nowhere else.
     fn overlay_registry(scratch: &tempfile::TempDir) -> (Registry, PathBuf) {
