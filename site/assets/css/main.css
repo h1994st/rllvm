@@ -500,6 +500,12 @@ a:hover {
   font-size: 1em;
 }
 
+/* README illustrations are wider than the measure; scale them to fit. */
+.prose img {
+  max-width: 100%;
+  height: auto;
+}
+
 .prose table {
   display: block;
   max-width: 100%;

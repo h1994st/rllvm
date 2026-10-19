@@ -16,8 +16,7 @@ Set CursorBlink false
 Set WindowBar Colorful
 Set WindowBarSize 36
 Set BorderRadius 12
-Set Margin 2
-Set MarginFill "#ECEFF4"
+Set Margin 0
 Set Framerate 15
 Set Theme { "name": "rllvm", "background": "#232A35", "foreground": "#E4E8EF", "cursor": "#3DE8AA", "selection": "#3B4452", "black": "#1B212A", "red": "#FF6B6B", "green": "#3DE8AA", "yellow": "#F5A524", "blue": "#2F7BFF", "magenta": "#B48CFF", "cyan": "#5FD4F4", "white": "#E4E8EF", "brightBlack": "#7D8798", "brightRed": "#FF8A8A", "brightGreen": "#6CF0C0", "brightYellow": "#FFC14D", "brightBlue": "#5B98FF", "brightMagenta": "#C8A8FF", "brightCyan": "#8BE1F7", "brightWhite": "#FFFFFF" }
 
