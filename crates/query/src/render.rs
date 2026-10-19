@@ -2299,6 +2299,8 @@ mod tests {
         for heading in ["scope", "analysis", "uncertainty", "provenance"] {
             assert!(text.contains(heading), "missing {heading}: {text}");
         }
+        // Zero counts too, which the adaptive footer omits.
+        assert!(text.contains("ambiguous_bindings: 0"), "got: {text}");
     }
 
     #[test]
@@ -2348,13 +2350,6 @@ mod tests {
     }
 
     #[test]
-    fn full_mode_prints_zero_counts_the_footer_omits() {
-        let session = session_from(&[("a", "b")]);
-        let result = run(&session, &Query::Callers { name: "b".into() }).unwrap();
-        assert!(render(&result, TextMode::Full, Color::Never).contains("ambiguous_bindings: 0"));
-    }
-
-    #[test]
     fn full_mode_prints_the_frontier_of_ambiguous_bindings() {
         let session = session_with_ambiguous_bindings();
         let result = run(&session, &Query::Externals).unwrap();
@@ -2366,17 +2361,12 @@ mod tests {
         assert!(text.contains("frontier: target"), "got: {text}");
         assert!(text.contains("ambiguous"), "got: {text}");
         assert!(text.contains("2 candidate(s))"), "got: {text}");
-    }
 
-    #[test]
-    fn a_binding_status_reads_the_same_word_in_text_as_in_json() {
-        // Pins the `{:?}`-vs-serde divergence shut: the expected word comes
-        // from `serde_json`'s own serialization of the value, not a
-        // hardcoded lowercase literal, so a `BindingStatus` variant rename
-        // fails this test instead of silently changing only one of the two
-        // outputs.
-        let session = session_with_ambiguous_bindings();
-        let result = run(&session, &Query::Externals).unwrap();
+        // A binding status reads the same word in text as in JSON. Pins the
+        // `{:?}`-vs-serde divergence shut: the expected word comes from
+        // `serde_json`'s own serialization of the value, not a hardcoded
+        // lowercase literal, so a `BindingStatus` variant rename fails this
+        // test instead of silently changing only one of the two outputs.
         let binding = result
             .uncertainty
             .frontier
@@ -2387,7 +2377,6 @@ mod tests {
             Ok(serde_json::Value::String(spelling)) => spelling,
             other => panic!("BindingStatus did not serialize to a JSON string: {other:?}"),
         };
-        let text = render(&result, TextMode::Full, Color::Never);
         let frontier_line = text
             .lines()
             .find(|line| line.trim_start().starts_with("frontier: target"))

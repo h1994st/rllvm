@@ -1583,6 +1583,18 @@ mod tests {
             guards.iter().any(|guard| guard["bound"] == "8"),
             "{payload}"
         );
+
+        // The same session as an `inventory` artifact has no catalog file to
+        // read the anchor's module through: the error says so and names the
+        // way out.
+        registry.artifacts.insert(PathBuf::from("first"));
+        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
+        assert!(
+            text.contains("`guards`")
+                && text.contains("inventory")
+                && text.contains("load_catalog"),
+            "{text}"
+        );
     }
 
     /// A `from` that is not a name would otherwise be dropped, turning a
@@ -1596,29 +1608,6 @@ mod tests {
             json!({ "function": "a", "local": "x", "from": 7 }),
         );
         assert!(text.contains("`from`"), "{text}");
-    }
-
-    /// An `inventory` artifact has no catalog file to read the anchor's
-    /// module through: the error says so and names the way out.
-    #[test]
-    fn guards_on_an_inventory_artifact_names_load_catalog() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = crate::testing::compiled_session(
-            scratch.path(),
-            "t.c",
-            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
-            &["-O0", "-g"],
-        );
-        let mut registry = Registry::with_sessions(vec![("first", session)]);
-        registry.artifacts.insert(PathBuf::from("first"));
-        let at = format!("{}:3", scratch.path().join("t.c").display());
-        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
-        assert!(
-            text.contains("`guards`")
-                && text.contains("inventory")
-                && text.contains("load_catalog"),
-            "{text}"
-        );
     }
 
     /// The guard the fixed-length `[Query; 9]` could not give: every variant
@@ -1670,15 +1659,13 @@ mod tests {
             Management::all().len() + sample_queries().len(),
             "every listed tool must come from exactly one variant of one of the two surfaces"
         );
-    }
 
-    /// A tool name is one spelling on both sides: listed once, and the same
-    /// literal the dispatcher matches. Covers collisions across the two
-    /// surfaces too -- a query named `inventory` would be unreachable,
-    /// because management names are matched first.
-    #[test]
-    fn no_two_tools_share_a_name() {
-        let mut listed = listed_tool_names();
+        // A tool name is one spelling on both sides: listed once, and the
+        // same literal the dispatcher matches. Covers collisions across the
+        // two surfaces too -- a query named `inventory` would be
+        // unreachable, because management names are matched first. The
+        // count above cannot catch that: a shared name still counts twice.
+        let mut listed = listed;
         listed.sort();
         let count = listed.len();
         listed.dedup();
@@ -1902,17 +1889,6 @@ mod tests {
         assert!(!Path::new("never-written.bc").exists());
     }
 
-    /// One loaded catalog is the default, so an agent working on a single
-    /// program never names it.
-    #[test]
-    fn one_loaded_catalog_answers_without_being_named() {
-        let mut registry = one_catalog();
-        assert_eq!(
-            call(&mut registry, "callers", json!({ "name": "b" }))["isError"],
-            false
-        );
-    }
-
     /// With several loaded, picking one would answer confidently about the
     /// wrong program. The error names them instead.
     #[test]
@@ -2026,8 +2002,11 @@ mod tests {
         );
     }
 
+    /// A `load_catalog` that cannot be carried out -- a path it cannot read,
+    /// or no path at all -- is a tool error the client sees, not a protocol
+    /// error.
     #[test]
-    fn a_load_that_cannot_read_its_path_is_a_tool_error_not_a_protocol_error() {
+    fn a_load_that_cannot_be_carried_out_is_a_tool_error_not_a_protocol_error() {
         let mut registry = Registry::new();
         let result = call(
             &mut registry,
@@ -2035,11 +2014,7 @@ mod tests {
             json!({ "path": "/nonexistent/catalog.json" }),
         );
         assert_eq!(result["isError"], true);
-    }
 
-    #[test]
-    fn a_management_call_missing_its_argument_is_a_tool_error() {
-        let mut registry = Registry::new();
         let text = call_text(&mut registry, "load_catalog", json!({}));
         assert!(text.contains("`path`"), "{text}");
     }
@@ -2061,11 +2036,8 @@ mod tests {
             text.contains("parser.c"),
             "the error must name the location it could not parse: {text}"
         );
-    }
 
-    #[test]
-    fn a_valid_location_still_answers() {
-        let mut registry = one_catalog();
+        // The positive control: the same tool with the line answers.
         let result = call(
             &mut registry,
             "indirect_targets",

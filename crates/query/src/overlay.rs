@@ -2089,6 +2089,19 @@ mod tests {
         assert!(error.starts_with("record 2: "), "{error}");
         assert_eq!(overlay.edges().count(), 0);
         assert_eq!(overlay.pending(), 0);
+
+        // The same batch read from a file names the bad record by its line.
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        let error = message(
+            overlay
+                .record_lines(
+                    &session,
+                    vec![(2, add_field(8, "h3")), (3, add_field(16, "h3"))],
+                )
+                .unwrap_err(),
+        );
+        assert!(error.starts_with("line 3: "), "{error}");
+        assert_eq!(overlay.edges().count(), 0);
     }
 
     #[test]
@@ -2219,22 +2232,6 @@ mod tests {
         assert!(error.contains("available_externally"), "{error}");
         let error = record_error(&session, vec![add_field(8, "only_ae")]);
         assert!(error.contains("only_ae"), "{error}");
-    }
-
-    #[test]
-    fn a_rejected_record_is_named_by_its_source_line() {
-        let session = session();
-        let mut overlay = Overlay::empty(&session, None).unwrap();
-        let error = message(
-            overlay
-                .record_lines(
-                    &session,
-                    vec![(2, add_field(8, "h3")), (3, add_field(16, "h3"))],
-                )
-                .unwrap_err(),
-        );
-        assert!(error.starts_with("line 3: "), "{error}");
-        assert_eq!(overlay.edges().count(), 0);
     }
 
     #[test]
@@ -2568,65 +2565,50 @@ int main(void) { f(3); return 0; }
     }
 
     #[test]
-    fn an_annotate_on_a_line_with_several_calls_names_the_candidates() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = annotated_session(&scratch);
-        let mut overlay = Overlay::empty(&session, None).unwrap();
-        let error = message(
-            overlay
-                .record_lines(
-                    &session,
-                    vec![(
-                        3,
-                        annotate(
-                            argument(at_line(&scratch, 5), 0),
-                            None,
-                            Feasibility::Feasible,
-                        ),
-                    )],
-                )
-                .unwrap_err(),
-        );
-        assert!(error.starts_with("line 3: "), "{error}");
-        assert!(error.contains("holds 2 call sites"), "{error}");
-        assert!(
-            error.contains("get in f") && error.contains("sink in f"),
-            "{error}"
-        );
-        assert!(overlay.annotations().is_empty());
-    }
-
-    #[test]
     fn an_ungrounded_annotate_is_rejected_naming_its_line_and_why() {
         let scratch = tempfile::tempdir().unwrap();
         let session = annotated_session(&scratch);
         let site = || at_line(&scratch, 4);
-        let cases = [
-            (argument(site(), 1), None, "out of range"),
+        let cases: [(AnchorSpec, Option<&str>, &[&str]); 9] = [
+            (argument(site(), 1), None, &["out of range"]),
             (
                 AnchorSpec::Return { site: site() },
                 None,
-                "returns no value",
+                &["returns no value"],
             ),
-            (argument(at_line(&scratch, 11), 0), None, "no call site at"),
-            (local("nope"), None, "no debug binding of local `nope`"),
-            (local("x"), None, "more than one value"),
+            (
+                argument(at_line(&scratch, 11), 0),
+                None,
+                &["no call site at"],
+            ),
+            (local("nope"), None, &["no debug binding of local `nope`"]),
+            (local("x"), None, &["more than one value"]),
             (
                 AnchorSpec::Local {
                     function: "absent".into(),
                     name: "len".into(),
                 },
                 None,
-                "no function named \"absent\"",
+                &["no function named \"absent\""],
             ),
-            (argument(site(), 0), Some("g"), "not on a path from \"g\""),
+            (
+                argument(site(), 0),
+                Some("g"),
+                &["not on a path from \"g\""],
+            ),
             (
                 argument(site(), 0),
                 Some("absent"),
-                "no function named \"absent\"",
+                &["no function named \"absent\""],
+            ),
+            // A line with several calls names the candidates.
+            (
+                argument(at_line(&scratch, 5), 0),
+                None,
+                &["holds 2 call sites", "get in f", "sink in f"],
             ),
         ];
-        for (anchor, from, reason) in cases {
+        for (anchor, from, reasons) in cases {
             let mut overlay = Overlay::empty(&session, None).unwrap();
             let error = message(
                 overlay
@@ -2637,7 +2619,9 @@ int main(void) { f(3); return 0; }
                     .unwrap_err(),
             );
             assert!(error.starts_with("line 7: "), "{anchor:?}: {error}");
-            assert!(error.contains(reason), "{anchor:?}: {error}");
+            for reason in reasons {
+                assert!(error.contains(reason), "{anchor:?}: {error}");
+            }
             assert!(overlay.annotations().is_empty());
         }
 

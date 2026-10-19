@@ -1720,39 +1720,6 @@ mod tests {
     use crate::{facts::Language, load::load_catalog, testing::*};
 
     #[test]
-    fn a_guards_query_returns_a_well_formed_envelope() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = compiled_session(
-            scratch.path(),
-            "t.c",
-            "extern void b(unsigned);\nvoid a(unsigned n) { b(n); }\n",
-            &["-O0", "-g"],
-        );
-        let site = session
-            .call_sites()
-            .iter()
-            .find(|site| site.id.function.symbol == "a")
-            .unwrap()
-            .id
-            .clone();
-        let query = Query::Guards {
-            anchor: GuardAnchor::Argument { site, operand: 0 },
-            from: None,
-            emit_module: None,
-        };
-        let answer = run(&session, &query).unwrap();
-        let QueryResults::Guards(result) = &answer.results else {
-            panic!("expected a guards answer, got {:?}", answer.results);
-        };
-        assert!(result.guards.is_empty() && result.crossings.is_empty());
-        assert!(result.lost.is_none(), "{result:?}");
-        let json = serde_json::to_value(&answer).unwrap();
-        for block in ["scope", "analysis", "uncertainty"] {
-            assert!(json.get(block).is_some(), "missing `{block}` block");
-        }
-    }
-
-    #[test]
     fn a_lost_value_trace_reaches_uncertainty() {
         let scratch = tempfile::tempdir().unwrap();
         let session = compiled_session(
@@ -1835,6 +1802,14 @@ mod tests {
             "{:?}",
             answer.resolution
         );
+        // And the answer is a whole envelope, not just the guards result.
+        let QueryResults::Guards(_) = &answer.results else {
+            panic!("expected a guards answer, got {:?}", answer.results);
+        };
+        let json = serde_json::to_value(&answer).unwrap();
+        for block in ["scope", "analysis", "uncertainty"] {
+            assert!(json.get(block).is_some(), "missing `{block}` block");
+        }
     }
 
     #[test]

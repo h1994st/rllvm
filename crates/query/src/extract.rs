@@ -3202,6 +3202,7 @@ exit:
     #[test]
     fn read_module_ir_surfaces_a_clamp_and_its_comparison() {
         let ir = read_module_ir(&bitcode("clamp.c", CLAMP_SOURCE, &["-O1", "-g"])).unwrap();
+        assert!(ir.diagnostics.is_empty(), "{:?}", ir.diagnostics);
         assert_eq!(ir.functions.len(), 1, "the intrinsic is only declared");
         let f = defined(&ir, "f");
         assert_eq!(f.params, [0]);
@@ -3372,9 +3373,6 @@ exit:
                 .iter()
                 .all(|v| v.location.is_none())
         );
-
-        let clean = read_module_ir(&bitcode("clamp.c", CLAMP_SOURCE, &["-O1", "-g"])).unwrap();
-        assert!(clean.diagnostics.is_empty(), "{:?}", clean.diagnostics);
     }
 
     #[test]

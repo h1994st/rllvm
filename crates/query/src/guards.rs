@@ -1648,8 +1648,11 @@ void f(unsigned a, unsigned b) {
         }
     }
 
+    /// An argument resolves to the value the call passes, and one that is
+    /// no value -- a constant, or an operand past the last -- is refused
+    /// naming it.
     #[test]
-    fn an_argument_resolves_to_the_value_passed() {
+    fn an_argument_resolves_to_its_value_or_is_refused_naming_it() {
         let scratch = tempfile::tempdir().unwrap();
         let (session, ir) = promoted(&scratch, ARGUMENT_SOURCE, &["-O0", "-g"], "f");
         let sites = sites_calling(&session, "f", "sink");
@@ -1662,13 +1665,6 @@ void f(unsigned a, unsigned b) {
         assert_eq!(node(&ir, &n, "f").1.opcode, OpcodeIr::Phi);
         let again = resolve_anchor(&ir, &session, &argument(&sites[1], 0)).unwrap();
         assert_eq!(again, n, "both calls pass the one clamped value");
-    }
-
-    #[test]
-    fn an_argument_that_is_no_value_is_refused_naming_it() {
-        let scratch = tempfile::tempdir().unwrap();
-        let (session, ir) = promoted(&scratch, ARGUMENT_SOURCE, &["-O0", "-g"], "f");
-        let sites = sites_calling(&session, "f", "sink");
 
         let error = resolve_anchor(&ir, &session, &argument(&sites[1], 1))
             .unwrap_err()
@@ -2075,9 +2071,16 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 "{optimization}: {r:?}"
             );
             assert!(r.lost.is_none(), "{optimization}: {r:?}");
+            // A guard on the anchor itself is at depth zero.
+            assert!(
+                r.guards.iter().all(|guard| guard.depth == 0),
+                "{optimization}: {r:?}"
+            );
         }
     }
 
+    /// The comparison dominates the call that passes `len`, and is on the
+    /// path of the local `len` itself.
     #[test]
     fn a_dominating_comparison_is_surfaced() {
         let scratch = tempfile::tempdir().unwrap();
@@ -2090,6 +2093,19 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 Some("ugt"),
                 Some("16"),
                 GuardRelation::Dominates
+            )]
+        );
+        assert!(r.lost.is_none(), "{r:?}");
+        assert!(r.guards.iter().all(|guard| guard.depth == 0), "{r:?}");
+
+        let r = guards(&session, &local("f", "len"), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Compare,
+                Some("ugt"),
+                Some("16"),
+                GuardRelation::OnPath
             )]
         );
         assert!(r.lost.is_none(), "{r:?}");
@@ -2158,6 +2174,7 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         let session = session(&scratch, UNGUARDED_SOURCE, &["-O0", "-g"]);
         let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
         assert!(r.guards.is_empty(), "{r:?}");
+        assert!(r.crossings.is_empty(), "{r:?}");
         assert!(r.lost.is_none(), "{r:?}");
     }
 
@@ -2356,23 +2373,6 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
     }
 
     #[test]
-    fn a_local_surfaces_the_guards_on_it() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = session(&scratch, DOMINATING_SOURCE, &["-O0", "-g"]);
-        let r = guards(&session, &local("f", "len"), None).unwrap();
-        assert_eq!(
-            sites(&r),
-            [(
-                GuardKind::Compare,
-                Some("ugt"),
-                Some("16"),
-                GuardRelation::OnPath
-            )]
-        );
-        assert!(r.lost.is_none(), "{r:?}");
-    }
-
-    #[test]
     fn a_value_an_intrinsic_reads_from_memory_loses_the_trace() {
         let scratch = tempfile::tempdir().unwrap();
         let session = compiled_session(
@@ -2407,24 +2407,6 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         let lost = r.lost.as_deref().unwrap_or_default();
         assert!(lost.contains("llvm.aarch64.ldxr"), "{r:?}");
         assert!(r.crossings.is_empty(), "no crossing into h: {r:?}");
-    }
-
-    #[test]
-    fn a_guard_on_the_anchor_is_at_depth_zero() {
-        for (source, flags) in [
-            (CLAMP_SOURCE, &["-O0", "-g"][..]),
-            (CLAMP_SOURCE, &["-O1", "-g"]),
-            (DOMINATING_SOURCE, &["-O0", "-g"]),
-        ] {
-            let scratch = tempfile::tempdir().unwrap();
-            let session = session(&scratch, source, flags);
-            let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
-            assert!(!r.guards.is_empty(), "{flags:?}: {r:?}");
-            assert!(
-                r.guards.iter().all(|guard| guard.depth == 0),
-                "{flags:?}: {r:?}"
-            );
-        }
     }
 
     /// A guard on a value the anchor is computed from is not a guard on the
