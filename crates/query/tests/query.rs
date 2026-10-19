@@ -3,6 +3,7 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::LazyLock,
 };
 
 use rllvm_core::catalog::read_catalog;
@@ -95,11 +96,11 @@ fn the_binary_does_not_link_an_llvm_shared_library() {
 #[test]
 fn the_cli_prints_callers_as_json() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch); // main calls add
+    let catalog = shared_two_module_catalog(); // main calls add
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["--json", "callers", "add"])
         .output()
         .unwrap();
@@ -114,11 +115,11 @@ fn the_cli_prints_callers_as_json() {
 #[test]
 fn the_cli_prints_text_by_default() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["callers", "add"])
         .output()
         .unwrap();
@@ -133,11 +134,11 @@ fn the_cli_prints_text_by_default() {
 #[test]
 fn json_and_full_cannot_be_combined() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["--json", "--full", "callers", "add"])
         .output()
         .unwrap();
@@ -520,6 +521,69 @@ fn two_module_catalog(scratch: &tempfile::TempDir) -> PathBuf {
     archive_catalog_of(scratch, "two", ADD_AND_MAIN)
 }
 
+/// One fresh directory per test process for catalogs no test modifies.
+///
+/// Fresh rather than a fixed path: `llvm-ar rs` inserts into an existing
+/// archive, so a catalog left by an earlier run would keep stale members.
+/// A static is never dropped, so each run leaves one directory under
+/// `target/tmp`; `cargo clean` removes it. Tests that write beside their
+/// catalog -- an overlay, an emitted module, a renamed copy -- must not use
+/// these; they build their own in their scratch directory.
+static SHARED_FIXTURES: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
+    std::fs::create_dir_all(root).unwrap();
+    tempfile::Builder::new()
+        .prefix("query-fixtures-")
+        .tempdir_in(root)
+        .unwrap()
+});
+
+/// Builds one shared catalog in a subdirectory of its own under
+/// [`SHARED_FIXTURES`], kept beside the catalog it holds. Not the shared
+/// directory itself: `ADD_AND_MAIN` and `SLICE_SOURCES` both write `add.c`
+/// and `main.c`, so side by side the second would overwrite the first's
+/// sources, and its catalog's digests would read them as modified.
+fn shared_catalog(
+    stem: &str,
+    build: fn(&tempfile::TempDir) -> PathBuf,
+) -> (tempfile::TempDir, PathBuf) {
+    let directory = tempfile::Builder::new()
+        .prefix(stem)
+        .tempdir_in(SHARED_FIXTURES.path())
+        .unwrap();
+    let catalog = build(&directory);
+    (directory, catalog)
+}
+
+static SHARED_TWO_MODULE: LazyLock<(tempfile::TempDir, PathBuf)> =
+    LazyLock::new(|| shared_catalog("two-", two_module_catalog));
+static SHARED_SLICE: LazyLock<(tempfile::TempDir, PathBuf)> = LazyLock::new(|| {
+    shared_catalog("slice-", |directory| {
+        archive_catalog_of(directory, "slice", SLICE_SOURCES)
+    })
+});
+static SHARED_INLINED: LazyLock<(tempfile::TempDir, PathBuf)> = LazyLock::new(|| {
+    shared_catalog("inlined-", |directory| {
+        archive_catalog_of(directory, "inlined", INLINED_AND_OUTER)
+    })
+});
+
+/// [`two_module_catalog`], built once per process. Read-only users only.
+fn shared_two_module_catalog() -> &'static Path {
+    &SHARED_TWO_MODULE.1
+}
+
+/// The `SLICE_SOURCES` catalog, built once per process. Read-only users only.
+fn shared_slice_catalog() -> &'static Path {
+    &SHARED_SLICE.1
+}
+
+/// The `INLINED_AND_OUTER` catalog, built once per process. Read-only users
+/// only.
+fn shared_inlined_catalog() -> &'static Path {
+    &SHARED_INLINED.1
+}
+
 #[test]
 fn a_module_that_vanishes_after_loading_is_reported_not_fatal() {
     // A concurrent build deletes or rewrites one `.bc` between
@@ -690,11 +754,11 @@ fn a_location_without_a_line_is_an_error_not_an_empty_answer() {
     // `results: []`, which is byte-identical to a valid line that has no
     // indirect calls.
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["indirect-targets", "main.c"])
         .output()
         .unwrap();
@@ -792,10 +856,10 @@ fn the_heuristics_flag_may_follow_its_subcommand() {
     // The README writes `indirect-targets parser.c:8 --heuristics`; without
     // `global = true` clap rejects that placement outright.
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let value = query_json(
         &scratch,
-        &catalog,
+        catalog,
         &["indirect-targets", "main.c:2", "--heuristics"],
     );
     assert_eq!(
@@ -809,14 +873,14 @@ fn a_reader_that_closes_stdout_early_is_not_an_error() {
     // `rllvm-query ... | head` closes the pipe before the answer is written.
     // The reader dropped here before the spawn makes that deterministic.
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     for format in [None, Some("--json")] {
         let (reader, writer) = std::io::pipe().unwrap();
         drop(reader);
         let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
             .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
             .arg("--catalog")
-            .arg(&catalog)
+            .arg(catalog)
             .args(format)
             .args(["callers", "add"])
             .stdout(writer)
@@ -869,8 +933,8 @@ fn query_text(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> Str
 #[test]
 fn queries_piped_on_stdin_answer_as_their_separate_invocations_would() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
-    let output = query_stdin(&scratch, &catalog, &[], "callers add\n\ncallees main\n");
+    let catalog = shared_two_module_catalog();
+    let output = query_stdin(&scratch, catalog, &[], "callers add\n\ncallees main\n");
     assert!(
         output.status.success(),
         "{}",
@@ -878,8 +942,8 @@ fn queries_piped_on_stdin_answer_as_their_separate_invocations_would() {
     );
     let expected = format!(
         "== callers add\n{}== callees main\n{}",
-        query_text(&scratch, &catalog, &["callers", "add"]),
-        query_text(&scratch, &catalog, &["callees", "main"]),
+        query_text(&scratch, catalog, &["callers", "add"]),
+        query_text(&scratch, catalog, &["callees", "main"]),
     );
     assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
 }
@@ -887,15 +951,15 @@ fn queries_piped_on_stdin_answer_as_their_separate_invocations_would() {
 #[test]
 fn queries_piped_on_stdin_print_one_json_envelope_per_line() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     // Every invocation below shares this scratch config's cache directory.
     // Warming it first means each one reports the same steady-state
     // `analysis.cache` (a hit for every module) rather than whichever
     // happens to run first paying the miss and the rest hitting behind it.
-    query_json(&scratch, &catalog, &["externals"]);
+    query_json(&scratch, catalog, &["externals"]);
     let output = query_stdin(
         &scratch,
-        &catalog,
+        catalog,
         &["--json"],
         "callers add\ncallees main\n",
     );
@@ -908,8 +972,8 @@ fn queries_piped_on_stdin_print_one_json_envelope_per_line() {
     assert_eq!(
         answers,
         [
-            query_json(&scratch, &catalog, &["callers", "add"]),
-            query_json(&scratch, &catalog, &["callees", "main"]),
+            query_json(&scratch, catalog, &["callers", "add"]),
+            query_json(&scratch, catalog, &["callees", "main"]),
         ]
     );
 }
@@ -935,8 +999,8 @@ fn a_bad_stdin_line_fails_before_the_catalog_is_read() {
 #[test]
 fn empty_stdin_answers_nothing() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
-    let output = query_stdin(&scratch, &catalog, &[], "");
+    let catalog = shared_two_module_catalog();
+    let output = query_stdin(&scratch, catalog, &[], "");
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
 }
@@ -967,11 +1031,11 @@ fn defined_symbols(module: &Path) -> BTreeSet<String> {
 #[test]
 fn an_emitted_slice_module_defines_the_slice_and_nothing_else() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let catalog = shared_slice_catalog();
     let out = scratch.path().join("slice.bc");
     let answer = query_json(
         &scratch,
-        &catalog,
+        catalog,
         &[
             "slice",
             "main",
@@ -1006,12 +1070,12 @@ fn an_emitted_slice_module_defines_the_slice_and_nothing_else() {
 #[test]
 fn an_empty_slice_emits_nothing_and_says_so() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let catalog = shared_slice_catalog();
     let out = scratch.path().join("slice.bc");
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["slice", "add", "main", "--emit-module"])
         .arg(&out)
         .output()
@@ -1230,7 +1294,7 @@ fn statics_that_stay_out_of_every_piece_do_not_block_the_module() {
 #[test]
 fn a_slice_is_emitted_with_the_configured_llvm_bindir() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let catalog = shared_slice_catalog();
     let apart = scratch.path().join("llvm-link-apart");
     std::fs::create_dir(&apart).unwrap();
     std::os::unix::fs::symlink(llvm_bin("llvm-link"), apart.join("llvm-link")).unwrap();
@@ -1255,7 +1319,7 @@ fn a_slice_is_emitted_with_the_configured_llvm_bindir() {
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", &config)
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["--json", "slice", "main", "add", "--emit-module"])
         .arg(&out)
         .output()
@@ -1276,7 +1340,7 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
     use std::os::unix::fs::symlink;
 
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let catalog = shared_slice_catalog();
     let tools = scratch.path().join("tools");
     std::fs::create_dir(&tools).unwrap();
     for tool in ["llvm-extract", "llvm-nm"] {
@@ -1289,7 +1353,7 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
     );
 
     let out = scratch.path().join("slice.bc");
-    match emit_main_to_add(&catalog, &llvm_link, &tools, &out) {
+    match emit_main_to_add(catalog, &llvm_link, &tools, &out) {
         Err(rllvm_core::error::Error::ExecutionFailure(message)) => {
             assert!(message.contains("refusing to link today"), "{message}")
         }
@@ -1325,13 +1389,13 @@ fn emit_main_to_add(
 #[test]
 fn a_missing_tool_in_the_llvm_bindir_is_named() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let catalog = shared_slice_catalog();
     for (present, missing) in [("llvm-extract", "llvm-nm"), ("llvm-nm", "llvm-extract")] {
         let tools = scratch.path().join(format!("without-{missing}"));
         std::fs::create_dir(&tools).unwrap();
         std::os::unix::fs::symlink(llvm_bin(present), tools.join(present)).unwrap();
         let out = scratch.path().join("slice.bc");
-        match emit_main_to_add(&catalog, &llvm_bin("llvm-link"), &tools, &out) {
+        match emit_main_to_add(catalog, &llvm_bin("llvm-link"), &tools, &out) {
             Err(rllvm_core::error::Error::MissingFile(message)) => {
                 assert!(message.contains(missing), "{message}")
             }
@@ -1344,7 +1408,7 @@ fn a_missing_tool_in_the_llvm_bindir_is_named() {
 #[test]
 fn the_text_answer_says_what_the_slice_module_holds() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "slice", SLICE_SOURCES);
+    let catalog = shared_slice_catalog();
     let out = scratch.path().join("slice.bc");
     // Plain whatever the caller's terminal asks for: a forced colour puts
     // escapes between the words looked for here.
@@ -1353,7 +1417,7 @@ fn the_text_answer_says_what_the_slice_module_holds() {
         .env_remove("FORCE_COLOR")
         .env_remove("CLICOLOR_FORCE")
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["slice", "main", "add", "--emit-module"])
         .arg(&out)
         .output()
@@ -2744,9 +2808,9 @@ fn a_bare_identifier_finds_every_instantiation_and_says_it_was_fuzzy() {
 #[test]
 fn a_c_answer_carries_no_symbol_table() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
 
-    let answer = query_json(&scratch, &catalog, &["callers", "add"]);
+    let answer = query_json(&scratch, catalog, &["callers", "add"]);
     assert_eq!(answer["resolution"][0]["matched"], "mangled");
     assert!(
         answer.get("symbols").is_none(),
@@ -3026,13 +3090,13 @@ mod mcp {
         // the roster once at `load_catalog`, so a query answer omits it, while
         // a standalone CLI invocation keeps it. Everything else is identical.
         let scratch = tempfile::tempdir().unwrap();
-        let catalog = super::two_module_catalog(&scratch); // main calls add
+        let catalog = super::shared_two_module_catalog(); // main calls add
 
         let cli: serde_json::Value = serde_json::from_slice(
             &Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
                 .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
                 .arg("--catalog")
-                .arg(&catalog)
+                .arg(catalog)
                 .args(["--json", "callers", "add"])
                 .output()
                 .unwrap()
@@ -3040,7 +3104,7 @@ mod mcp {
         )
         .unwrap();
 
-        let mcp = mcp_tool_call(&catalog, "callers", serde_json::json!({ "name": "add" }));
+        let mcp = mcp_tool_call(catalog, "callers", serde_json::json!({ "name": "add" }));
 
         assert_eq!(cli["results"], mcp["results"]);
         // The CLI keeps the per-module roster; the MCP answer drops it.
@@ -3056,10 +3120,10 @@ mod mcp {
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();
-        let catalog = super::archive_catalog_of(&scratch, "slice", super::SLICE_SOURCES);
+        let catalog = super::shared_slice_catalog();
         let out = scratch.path().join("mcp-slice.bc");
         let answer = mcp_tool_call(
-            &catalog,
+            catalog,
             "slice",
             serde_json::json!({ "from": "main", "to": "add", "emit_module": out.to_str().unwrap() }),
         );
@@ -3133,7 +3197,7 @@ mod mcp {
         // Started bare, the server has nothing to answer from; after
         // `load_catalog` it answers about that program, in the same process.
         let scratch = tempfile::tempdir().unwrap();
-        let catalog = super::two_module_catalog(&scratch); // main calls add
+        let catalog = super::shared_two_module_catalog(); // main calls add
 
         let responses = mcp_session(
             &scratch,
@@ -3240,7 +3304,7 @@ mod mcp {
     #[test]
     fn two_catalogs_stay_loaded_and_are_told_apart() {
         let scratch = tempfile::tempdir().unwrap();
-        let first = super::two_module_catalog(&scratch); // defines add and main
+        let first = super::shared_two_module_catalog(); // defines add and main
         let second = super::archive_catalog(&scratch); // defines one and two
 
         let responses = mcp_session(
@@ -3614,12 +3678,12 @@ fn cache_probe_answers(session: &rllvm_query::Session) -> Vec<serde_json::Value>
 #[test]
 fn a_warm_cache_answers_exactly_as_extraction_does() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let catalog = shared_inlined_catalog();
     let cache = scratch_cache(&scratch, u64::MAX);
 
-    let uncached = rllvm_query::open(&catalog).unwrap();
-    let cold = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
-    let warm = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let uncached = rllvm_query::open(catalog).unwrap();
+    let cold = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
+    let warm = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
 
     assert_eq!(uncached.cache_report(), None);
     let cold_report = cold.cache_report().unwrap();
@@ -3764,10 +3828,10 @@ fn a_catalog_without_content_hashes_bypasses_the_cache() {
 #[test]
 fn a_corrupt_entry_is_a_miss_that_still_answers_and_is_replaced() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let catalog = shared_inlined_catalog();
     let cache = scratch_cache(&scratch, u64::MAX);
     let expected =
-        cache_probe_answers(&rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap());
+        cache_probe_answers(&rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap());
 
     let generation = cache
         .directory()
@@ -3775,10 +3839,10 @@ fn a_corrupt_entry_is_a_miss_that_still_answers_and_is_replaced() {
     for entry in std::fs::read_dir(&generation).unwrap() {
         std::fs::write(entry.unwrap().path(), b"junk").unwrap();
     }
-    let recovered = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let recovered = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
     assert_eq!(recovered.cache_report().unwrap().misses, 2);
     assert_eq!(cache_probe_answers(&recovered), expected);
-    let again = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let again = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
     assert_eq!(
         again.cache_report().unwrap().hits,
         2,
@@ -3789,17 +3853,17 @@ fn a_corrupt_entry_is_a_miss_that_still_answers_and_is_replaced() {
 #[test]
 fn an_unwritable_cache_still_answers() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let catalog = shared_inlined_catalog();
     let not_a_directory = scratch.path().join("file");
     std::fs::write(&not_a_directory, b"x").unwrap();
     let cache = rllvm_query::FactsCache::new(&not_a_directory, u64::MAX);
 
-    let session = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let session = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
     let report = session.cache_report().unwrap();
     assert_eq!((report.misses, report.written), (2, 0));
     assert_eq!(
         cache_probe_answers(&session),
-        cache_probe_answers(&rllvm_query::open(&catalog).unwrap())
+        cache_probe_answers(&rllvm_query::open(catalog).unwrap())
     );
 }
 
@@ -3810,7 +3874,7 @@ fn an_unwritable_cache_still_answers() {
 #[test]
 fn an_uncreatable_configured_cache_dir_is_a_silent_miss() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let base_config = scratch_rllvm_config(scratch.path());
     let blocked = scratch.path().join("blocked");
     std::fs::write(&blocked, b"x").unwrap();
@@ -3831,7 +3895,7 @@ fn an_uncreatable_configured_cache_dir_is_a_silent_miss() {
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", &config)
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["--json", "callers", "add"])
         .output()
         .unwrap();
@@ -3853,10 +3917,10 @@ fn an_uncreatable_configured_cache_dir_is_a_silent_miss() {
 #[test]
 fn disk_use_counts_existing_and_new_entries_against_the_threshold() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let catalog = shared_inlined_catalog();
     let cache = scratch_cache(&scratch, 1);
 
-    let cold = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let cold = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
     let report = cold.cache_report().unwrap();
     assert_eq!(
         report.disk_bytes,
@@ -3866,26 +3930,26 @@ fn disk_use_counts_existing_and_new_entries_against_the_threshold() {
     assert_eq!(report.warn_bytes, 1);
     assert!(report.over_threshold);
 
-    let warm = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let warm = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
     assert_eq!(warm.cache_report().unwrap().disk_bytes, cache.disk_bytes());
 }
 
 #[test]
 fn the_analysis_block_carries_the_cache_report_only_when_cached() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = archive_catalog_of(&scratch, "inlined", INLINED_AND_OUTER);
+    let catalog = shared_inlined_catalog();
     let query = rllvm_query::Query::Defs {
         name: "outer".into(),
     };
 
     let plain = serde_json::to_value(
-        rllvm_query::run(&rllvm_query::open(&catalog).unwrap(), &query).unwrap(),
+        rllvm_query::run(&rllvm_query::open(catalog).unwrap(), &query).unwrap(),
     )
     .unwrap();
     assert!(plain["analysis"].get("cache").is_none());
 
     let cache = scratch_cache(&scratch, u64::MAX);
-    let session = rllvm_query::open_with_cache(&catalog, Some(&cache)).unwrap();
+    let session = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
     let cached = serde_json::to_value(rllvm_query::run(&session, &query).unwrap()).unwrap();
     assert_eq!(cached["analysis"]["cache"]["misses"], 2);
     assert_eq!(cached["schema_version"], 2);
@@ -3894,10 +3958,10 @@ fn the_analysis_block_carries_the_cache_report_only_when_cached() {
 #[test]
 fn the_cli_fills_the_configured_cache_and_hits_it_next_time() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
-    let cold = query_json(&scratch, &catalog, &["callers", "add"]);
+    let catalog = shared_two_module_catalog();
+    let cold = query_json(&scratch, catalog, &["callers", "add"]);
     assert_eq!(cold["analysis"]["cache"]["written"], 2);
-    let warm = query_json(&scratch, &catalog, &["callers", "add"]);
+    let warm = query_json(&scratch, catalog, &["callers", "add"]);
     assert_eq!(warm["analysis"]["cache"]["hits"], 2);
     assert_eq!(warm["results"], cold["results"]);
     assert!(
@@ -3909,12 +3973,12 @@ fn the_cli_fills_the_configured_cache_and_hits_it_next_time() {
 #[test]
 fn rllvm_query_cache_0_turns_the_cache_off() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .env("RLLVM_QUERY_CACHE", "0")
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["--json", "callers", "add"])
         .output()
         .unwrap();
@@ -3927,18 +3991,18 @@ fn rllvm_query_cache_0_turns_the_cache_off() {
 #[test]
 fn an_mcp_load_reports_the_cache() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let mut registry =
         rllvm_query::mcp::Registry::with_cache(Some(scratch_cache(&scratch, u64::MAX)));
-    let summary = registry.load(&catalog).unwrap();
+    let summary = registry.load(catalog).unwrap();
     assert_eq!(summary["analysis"]["cache"]["misses"], 2);
 }
 
 #[test]
 fn full_text_prints_the_cache_line() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
-    let text = query_text(&scratch, &catalog, &["--full", "callers", "add"]);
+    let catalog = shared_two_module_catalog();
+    let text = query_text(&scratch, catalog, &["--full", "callers", "add"]);
     assert!(text.contains("cache: 0 hit, 2 miss, 2 written, "), "{text}");
 }
 
@@ -3953,8 +4017,8 @@ fn query_cache_command(scratch: &tempfile::TempDir, args: &[&str]) -> std::proce
 #[test]
 fn the_cache_command_reports_and_clears_without_a_catalog() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
-    query_json(&scratch, &catalog, &["callers", "add"]);
+    let catalog = shared_two_module_catalog();
+    query_json(&scratch, catalog, &["callers", "add"]);
 
     let report = query_cache_command(&scratch, &["--json", "cache"]);
     assert!(
@@ -3987,8 +4051,8 @@ fn the_cache_command_reports_and_clears_without_a_catalog() {
 #[test]
 fn clearing_the_cache_counts_orphaned_temp_files_in_its_summary() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
-    query_json(&scratch, &catalog, &["callers", "add"]);
+    let catalog = shared_two_module_catalog();
+    query_json(&scratch, catalog, &["callers", "add"]);
 
     let generation = scratch
         .path()
@@ -4050,7 +4114,7 @@ fn the_cache_command_does_not_create_the_cache_directory() {
 #[test]
 fn an_answer_over_the_threshold_says_how_to_prune() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let config = scratch_rllvm_config(scratch.path());
     let mut contents = std::fs::read_to_string(&config).unwrap();
     contents.push_str("query_cache_warn_mb = 0\n");
@@ -4058,7 +4122,7 @@ fn an_answer_over_the_threshold_says_how_to_prune() {
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", &config)
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .args(["callers", "add"])
         .output()
         .unwrap();
@@ -4434,14 +4498,14 @@ fn an_overlay_slot_edge_covers_every_site_reading_the_slot() {
 #[test]
 fn a_walk_over_a_named_overlay_needs_the_file() {
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = two_module_catalog(&scratch);
+    let catalog = shared_two_module_catalog();
     let missing = scratch.path().join("mistyped.overlay.jsonl");
     let walk = ["reach", "main", "add", "--include-overlay"];
 
     let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
         .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
         .arg("--catalog")
-        .arg(&catalog)
+        .arg(catalog)
         .arg("--overlay")
         .arg(&missing)
         .args(walk)
@@ -4452,14 +4516,21 @@ fn a_walk_over_a_named_overlay_needs_the_file() {
     assert!(stderr.contains(&missing.display().to_string()), "{stderr}");
 
     let named = ["--overlay", missing.to_str().unwrap()];
-    let output = query_stdin(&scratch, &catalog, &named, &format!("{}\n", walk.join(" ")));
+    let output = query_stdin(&scratch, catalog, &named, &format!("{}\n", walk.join(" ")));
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(&missing.display().to_string()), "{stderr}");
     assert!(!missing.exists(), "a walk never creates the file");
 
-    let answer = query_text(&scratch, &catalog, &walk);
+    let answer = query_text(&scratch, catalog, &walk);
     assert!(answer.contains("main"), "{answer}");
+
+    // The catalog is shared by every read-only test in this process: one
+    // that recorded or saved an overlay against it would have written here.
+    assert!(
+        !rllvm_query::default_overlay_path(catalog).exists(),
+        "a test wrote the default overlay beside the shared catalog"
+    );
 }
 
 #[test]
