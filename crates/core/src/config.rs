@@ -841,18 +841,23 @@ mod tests {
         assert_eq!(config.log_level(), Level::DEBUG);
     }
 
+    /// Each configured `log_level` and the `Level` it maps to.
+    const LOG_LEVELS: [(u8, Level); 6] = [
+        (0, Level::ERROR),
+        (1, Level::WARN),
+        (2, Level::INFO),
+        (3, Level::DEBUG),
+        (4, Level::TRACE),
+        (9, Level::TRACE),
+    ];
+
+    // Reading `log_level` from the file is pinned by
+    // `optional_flag_accessors_round_trip`; this covers only the mapping.
     #[test]
     fn log_level_mapping_covers_every_value() {
-        for (value, expected) in [
-            (0u8, Level::ERROR),
-            (1, Level::WARN),
-            (2, Level::INFO),
-            (3, Level::DEBUG),
-            (4, Level::TRACE),
-            (9, Level::TRACE),
-        ] {
-            let (_dir, config_filepath, _) = write_config(&format!("log_level = {value}\n"));
-            let config = RLLVMConfig::load_path(&config_filepath).expect("load failed");
+        let mut config = RLLVMConfig::try_default().expect("Failed to infer the LLVM tool paths");
+        for (value, expected) in LOG_LEVELS {
+            config.log_level = Some(value);
             assert_eq!(config.log_level(), expected, "log_level = {value}");
         }
     }

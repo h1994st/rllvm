@@ -448,12 +448,38 @@ fn explicit_overrides_and_current_source_edits_have_separate_identity() {
     );
 }
 
+/// An existing output directory is refused before any recorded compiler runs
+/// and without writing into it, and an unmatched selection writes nothing.
 #[test]
 fn existing_output_and_unmatched_selection_are_rejected_without_writing() {
     let scratch = tempfile::tempdir().unwrap();
+    fs::write(
+        scratch.path().join("source.c"),
+        "int value(void) { return 2; }\n",
+    )
+    .unwrap();
+    // On unix the recorded compiler is a stand-in that logs every run, so the
+    // refusal is shown to come before any compiler runs.
+    #[cfg(unix)]
+    let log = scratch.path().join("driver.log");
+    #[cfg(unix)]
+    let compiler = {
+        let driver = scratch.path().join("clang");
+        rllvm_testkit::write_executable(
+            &driver,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
+                log.display(),
+                llvm_bin("clang").display()
+            ),
+        );
+        driver
+    };
+    #[cfg(not(unix))]
+    let compiler = llvm_bin("clang");
     write_database(
         &scratch,
-        json!([{"directory":".","file":"source.c","arguments":[llvm_bin("clang"),"-c","source.c"]}]),
+        json!([{"directory":".","file":"source.c","arguments":[&compiler,"-c","source.c"]}]),
     );
     fs::create_dir(scratch.path().join("existing")).unwrap();
     fs::write(scratch.path().join("existing/keep"), "untouched").unwrap();
@@ -461,8 +487,18 @@ fn existing_output_and_unmatched_selection_are_rejected_without_writing() {
         .args(["generate", ".", "--output-dir", "existing"])
         .output()
         .unwrap();
-    assert!(!existing.status.success());
-    assert!(String::from_utf8_lossy(&existing.stderr).contains("must be new"));
+    assert!(
+        !existing.status.success(),
+        "an existing directory was accepted"
+    );
+    let stderr = String::from_utf8_lossy(&existing.stderr);
+    assert!(stderr.contains("output directory must be new"), "{stderr}");
+    #[cfg(unix)]
+    assert!(
+        !log.exists(),
+        "the recorded compiler ran: {:?}",
+        fs::read_to_string(&log)
+    );
     assert_eq!(
         fs::read_to_string(scratch.path().join("existing/keep")).unwrap(),
         "untouched"
@@ -768,23 +804,37 @@ fn a_compiler_newer_than_llvm_dis_fails_before_compiling() {
     assert!(!scratch.path().join("analysis").exists());
 }
 
-/// A compiler at or below `llvm-dis`'s major is read as usual.
+/// Generates a database whose compiler reports LLVM `major`, asserting the
+/// run succeeds and compares the versions.
+#[cfg(unix)]
+fn assert_compiler_major_is_accepted(major: u32) {
+    let scratch = tempfile::tempdir().unwrap();
+    database_with_driver(&scratch, &format!("clang version {major}.0.0"));
+    let output = rllvm(&scratch)
+        .args(["generate", ".", "--output-dir", "analysis"])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("cannot compare"),
+        "{output:?}"
+    );
+}
+
+/// A compiler at `llvm-dis`'s major is read as usual: the boundary is
+/// accepted.
 #[test]
 #[cfg(unix)]
-fn a_compiler_no_newer_than_llvm_dis_is_accepted() {
-    for major in [llvm_dis_major(), 1] {
-        let scratch = tempfile::tempdir().unwrap();
-        database_with_driver(&scratch, &format!("clang version {major}.0.0"));
-        let output = rllvm(&scratch)
-            .args(["generate", ".", "--output-dir", "analysis"])
-            .output()
-            .unwrap();
-        assert_success(&output);
-        assert!(
-            !String::from_utf8_lossy(&output.stderr).contains("cannot compare"),
-            "{output:?}"
-        );
-    }
+fn a_compiler_as_new_as_llvm_dis_is_accepted() {
+    assert_compiler_major_is_accepted(llvm_dis_major());
+}
+
+/// A compiler below `llvm-dis`'s major is read as usual: only a newer
+/// producer is refused, not every different one.
+#[test]
+#[cfg(unix)]
+fn a_compiler_older_than_llvm_dis_is_accepted() {
+    assert_compiler_major_is_accepted(1);
 }
 
 /// Apple clang's version does not name the LLVM it is built from, so the
@@ -805,49 +855,6 @@ fn an_unknown_compiler_major_is_warned_about() {
     // Shown as a diagnostic, not as a log line that `log_level` hides.
     assert!(stderr.contains("warning:"), "{stderr}");
     assert!(!stderr.contains("WARN"), "{stderr}");
-}
-
-/// An existing output directory is refused before any recorded compiler
-/// runs.
-#[test]
-#[cfg(unix)]
-fn an_existing_output_directory_is_refused_before_compilers_run() {
-    let scratch = tempfile::tempdir().unwrap();
-    let driver = scratch.path().join("clang");
-    let log = scratch.path().join("driver.log");
-    rllvm_testkit::write_executable(
-        &driver,
-        &format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nexec '{}' \"$@\"\n",
-            log.display(),
-            llvm_bin("clang").display()
-        ),
-    );
-    fs::write(
-        scratch.path().join("source.c"),
-        "int value(void) { return 2; }\n",
-    )
-    .unwrap();
-    write_database(
-        &scratch,
-        json!([{"directory":".", "file":"source.c", "arguments":[&driver, "-c", "source.c"]}]),
-    );
-    fs::create_dir(scratch.path().join("analysis")).unwrap();
-    let output = rllvm(&scratch)
-        .args(["generate", ".", "--output-dir", "analysis"])
-        .output()
-        .unwrap();
-    assert!(
-        !output.status.success(),
-        "an existing directory was accepted"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("output directory must be new"), "{stderr}");
-    assert!(
-        !log.exists(),
-        "the recorded compiler ran: {:?}",
-        fs::read_to_string(&log)
-    );
 }
 
 #[test]

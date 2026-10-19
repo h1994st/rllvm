@@ -1,8 +1,9 @@
-#include <iostream>
-
-using namespace std;
+#include <cstdio>
 
 int main() {
-    cout << "Hello World!" << endl;
-    return 0;
+    int *value = new int(42);
+    std::puts("Hello World!");
+    int result = *value - 42;
+    delete value;
+    return result;
 }

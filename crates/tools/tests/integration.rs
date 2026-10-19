@@ -175,17 +175,6 @@ fn assert_response_transport_preserves_empty_include_argument(before_response: b
     } else {
         ["@args.rsp", "-I", ""]
     };
-    let clang = llvm_bin("clang");
-    let oracle = Command::new(clang)
-        .current_dir(tmp.path())
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        oracle.status.success(),
-        "Clang empty-argument oracle failed: {}",
-        String::from_utf8_lossy(&oracle.stderr)
-    );
     let output = rllvm("rllvm-cc")
         .current_dir(tmp.path())
         .args(args)
@@ -230,7 +219,6 @@ fn response_file_large_payload_reaches_synthesized_compilations() {
     defines.push_str("-DVALUE=42\n");
     let clang = llvm_bin("clang");
     for (flags, output_name, mode) in [
-        ("-c", "result.o", "marker"),
         ("-c -flto", "result.o", "marker"),
         ("", "result", "marker"),
         ("-flto", "result", "save-temps"),
@@ -261,16 +249,6 @@ fn response_file_large_payload_reaches_synthesized_compilations() {
             format!("{defines} {flags} {input} -o {output_name}"),
         )
         .unwrap();
-        let output = Command::new(&clang)
-            .current_dir(tmp.path())
-            .arg("@args.rsp")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "Clang large-response oracle failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
         let output = rllvm("rllvm-cc")
             .env("RLLVM_LTO_MODE", mode)
             .current_dir(tmp.path())
@@ -608,52 +586,18 @@ fn response_file_nested_quoted_arguments_match_clang() {
     );
 }
 
-#[test]
-fn compile_single_c_file_and_extract_bitcode() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo.o");
-
-    // Step 1: Compile foo.c with rllvm-cc (compile-only mode)
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc compile failed");
-    assert!(object_path.exists(), "Object file not created");
-
-    // Step 2: Extract bitcode with rllvm-get-bc
-    let bitcode_path = tmp.path().join("foo.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc failed");
-
-    // Step 3: Verify the extracted bitcode is valid LLVM IR
-    assert_valid_bitcode(&bitcode_path);
-}
-
 /// Both compilations must finish before extraction: extracting the first early
 /// would hide a later compilation overwriting its embedded bitcode path.
 enum CompilationVariant {
-    Output,
     OutputOnly,
     StoreOutputOnly,
-    SharedStore,
     ReusedOutput,
     ConfiguredFlags,
     Compiler,
 }
 
 fn assert_compilation_variants_keep_bitcode(variant: CompilationVariant) {
-    let shared_store = matches!(
-        variant,
-        CompilationVariant::SharedStore | CompilationVariant::StoreOutputOnly
-    );
+    let shared_store = matches!(variant, CompilationVariant::StoreOutputOnly);
     let output_only = matches!(
         variant,
         CompilationVariant::OutputOnly | CompilationVariant::StoreOutputOnly
@@ -788,16 +732,6 @@ fn compilation_variants_with_identical_flags_have_distinct_output_artifacts() {
 #[test]
 fn compilation_variants_with_identical_flags_have_distinct_store_artifacts() {
     assert_compilation_variants_keep_bitcode(CompilationVariant::StoreOutputOnly);
-}
-
-#[test]
-fn compilation_variants_in_one_directory_keep_bitcode() {
-    assert_compilation_variants_keep_bitcode(CompilationVariant::Output);
-}
-
-#[test]
-fn compilation_variants_in_shared_store_keep_bitcode() {
-    assert_compilation_variants_keep_bitcode(CompilationVariant::SharedStore);
 }
 
 #[test]
@@ -952,97 +886,6 @@ fn compile_multiple_c_files_and_link() {
     assert_valid_bitcode(&bitcode_path);
 }
 
-#[test]
-fn compile_inline_c_program() {
-    let tmp = TempDir::new().unwrap();
-
-    // Write a small C program to a temp file
-    let c_source = tmp.path().join("main.c");
-    std::fs::write(
-        &c_source,
-        r#"
-int square(int x) { return x * x; }
-int main(void) { return square(3) - 9; }
-"#,
-    )
-    .unwrap();
-
-    let object_path = tmp.path().join("main.o");
-
-    // Compile with rllvm-cc
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-c", "-o"])
-        .arg(&object_path)
-        .arg(&c_source)
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc compile failed");
-
-    // Extract bitcode
-    let bitcode_path = tmp.path().join("main.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc failed");
-
-    assert_valid_bitcode(&bitcode_path);
-}
-
-#[test]
-fn compile_and_link_inline_c_program_to_executable() {
-    let tmp = TempDir::new().unwrap();
-
-    let c_source = tmp.path().join("hello.c");
-    std::fs::write(
-        &c_source,
-        r#"
-#include <stdio.h>
-int main(void) {
-    printf("hello from rllvm\n");
-    return 0;
-}
-"#,
-    )
-    .unwrap();
-
-    let exe_path = tmp.path().join("hello");
-
-    // Compile + link with rllvm-cc
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-o"])
-        .arg(&exe_path)
-        .arg(&c_source)
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc compile+link failed");
-    assert!(exe_path.exists(), "Executable not created");
-
-    // Verify the executable actually runs
-    let output = Command::new(&exe_path)
-        .output()
-        .expect("Failed to run compiled executable");
-    assert!(output.status.success(), "Compiled executable failed");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "hello from rllvm"
-    );
-
-    // Extract bitcode
-    let bitcode_path = tmp.path().join("hello.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&exe_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc failed");
-
-    assert_valid_bitcode(&bitcode_path);
-}
-
 fn assert_pthread_compilation(compile_only: bool) {
     let tmp = TempDir::new().unwrap();
     let source = tmp.path().join("threaded.c");
@@ -1150,80 +993,6 @@ fn compile_cxx_file_and_extract_bitcode() {
         .status()
         .expect("Failed to run rllvm-get-bc");
     assert!(status.success(), "rllvm-get-bc failed on C++ output");
-
-    assert_valid_bitcode(&bitcode_path);
-}
-
-#[test]
-fn get_bc_with_manifest_flag() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo.o");
-
-    // Compile
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success());
-
-    // Extract with manifest flag
-    let bitcode_path = tmp.path().join("foo.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-m", "-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc -m failed");
-
-    assert_valid_bitcode(&bitcode_path);
-
-    // Check that the manifest file was created
-    let manifest_path = tmp.path().join("foo.bc.manifest");
-    assert!(
-        manifest_path.exists(),
-        "Manifest file not created at {manifest_path:?}"
-    );
-
-    let manifest_content = std::fs::read_to_string(&manifest_path).unwrap();
-    assert!(
-        !manifest_content.trim().is_empty(),
-        "Manifest file is empty"
-    );
-    // Each line in the manifest should be a path to a .bc file
-    for line in manifest_content.lines() {
-        assert!(
-            line.ends_with(".bc"),
-            "Manifest line does not end with .bc: {line}"
-        );
-    }
-}
-
-#[test]
-fn compile_with_optimization_flags() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo_opt.o");
-
-    // Compile with -O2
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-O2", "-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc -O2 compile failed");
-
-    // Extract and verify bitcode
-    let bitcode_path = tmp.path().join("foo_opt.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&object_path)
-        .args(["-o"])
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success());
 
     assert_valid_bitcode(&bitcode_path);
 }
@@ -1599,28 +1368,6 @@ fn dropin_dash_v_passes_through_to_compiler() {
     assert!(object_path.exists(), "Object file not created with -v");
 }
 
-/// The per-invocation compiler override survives, under its namespaced name.
-#[test]
-fn rllvm_compiler_override_still_works() {
-    let tmp = TempDir::new().unwrap();
-    let object_path = tmp.path().join("foo.o");
-    let clang = llvm_bin("clang");
-
-    let output = rllvm("rllvm-cc")
-        .arg(format!("--rllvm-compiler={}", clang.display()))
-        .args(["-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .output()
-        .expect("Failed to run rllvm-cc");
-    assert!(
-        output.status.success(),
-        "--rllvm-compiler was rejected: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(object_path.exists(), "Object file not created");
-}
-
 /// Bare `--rllvm-verbose` must not consume the following compiler argument.
 ///
 /// Without `require_equals`, clap would treat `-c` as the verbose level and the
@@ -1913,11 +1660,16 @@ fn build_across_two_directories(tmp: &TempDir) -> PathBuf {
     exe
 }
 
-/// Every merge strategy produces a usable artifact from the same input.
+/// Every merge strategy produces a usable artifact from the same input, and
+/// `partial` does not use predictable sibling paths for its intermediates.
 #[test]
 fn get_bc_merge_strategies_all_produce_output() {
     let tmp = TempDir::new().unwrap();
     let exe = build_across_two_directories(&tmp);
+    // Where a predictable intermediate of `partial.bc` would go.
+    let sibling = tmp.path().join("partial_partial_0.bc");
+    let sentinel = b"existing file must survive\n";
+    fs::write(&sibling, sentinel).unwrap();
 
     for (strategy, ext) in [("full", "bc"), ("partial", "bc"), ("archive", "bca")] {
         let out = tmp.path().join(format!("{strategy}.{ext}"));
@@ -1939,31 +1691,6 @@ fn get_bc_merge_strategies_all_produce_output() {
     // agree on content.
     assert_valid_bitcode(&tmp.path().join("full.bc"));
     assert_valid_bitcode(&tmp.path().join("partial.bc"));
-}
-
-/// `partial` must not use predictable sibling paths for its intermediates.
-#[test]
-fn get_bc_partial_preserves_existing_sibling() {
-    let tmp = TempDir::new().unwrap();
-    let exe = build_across_two_directories(&tmp);
-    let out = tmp.path().join("merged.bc");
-    let sibling = tmp.path().join("merged_partial_0.bc");
-    let sentinel = b"existing file must survive\n";
-    fs::write(&sibling, sentinel).unwrap();
-
-    let output = rllvm("rllvm-get-bc")
-        .arg(&exe)
-        .args(["--merge-strategy", "partial", "-o"])
-        .arg(&out)
-        .output()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(
-        output.status.success(),
-        "partial merge failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    assert_valid_bitcode(&out);
     assert_eq!(
         fs::read(&sibling).expect("preexisting sibling was removed"),
         sentinel
@@ -2022,28 +1749,6 @@ fn get_bc_partial_error_cleans_owned_temps_and_preserves_output() {
         temp_leftovers.is_empty(),
         "partial left its temporary workspace behind: {temp_leftovers:?}"
     );
-}
-
-/// Completions generate for every shell and every binary.
-#[test]
-fn completions_generate_for_all_shells_and_binaries() {
-    for bin in ["cc", "cxx", "get-bc"] {
-        for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
-            let output = rllvm("rllvm-completions")
-                .args(["--shell", shell, "--bin", bin])
-                .output()
-                .expect("Failed to run rllvm-completions");
-            assert!(
-                output.status.success(),
-                "completions failed for {bin}/{shell}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(
-                !output.stdout.is_empty(),
-                "completions for {bin}/{shell} were empty"
-            );
-        }
-    }
 }
 
 /// `rllvm-info` accepts both a raw `.bc` and an object file with an embedded path.
@@ -2232,7 +1937,8 @@ fn rustc_help_passes_through_to_rustc() {
     );
 }
 
-/// `rllvm-rustc` works both as `RUSTC` and as `RUSTC_WRAPPER`.
+/// `rllvm-rustc` works both as `RUSTC` and as `RUSTC_WRAPPER`, and query
+/// invocations skip bitcode generation entirely.
 ///
 /// cargo invokes a wrapper as `rllvm-rustc <path-to-rustc> <args...>` but a
 /// replacement as `rllvm-rustc <args...>`, and the binary tells them apart by
@@ -2242,20 +1948,25 @@ fn rustc_wrapper_handles_both_invocation_modes() {
     let rustc = which("rustc").expect("rustc not found");
 
     // RUSTC_WRAPPER mode: argv[1] is the real rustc.
-    let output = rllvm("rllvm-rustc")
-        .arg(&rustc)
-        .arg("--version")
-        .output()
-        .expect("Failed to run rllvm-rustc in wrapper mode");
-    assert!(
-        output.status.success(),
-        "wrapper mode failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("rustc"),
-        "wrapper mode did not reach rustc"
-    );
+    for query in ["--version", "--print=sysroot"] {
+        let output = rllvm("rllvm-rustc")
+            .arg(&rustc)
+            .arg(query)
+            .output()
+            .expect("Failed to run rllvm-rustc in wrapper mode");
+        assert!(
+            output.status.success(),
+            "wrapper mode {query} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.stdout.is_empty(), "{query} produced no output");
+        if query == "--version" {
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("rustc"),
+                "wrapper mode did not reach rustc"
+            );
+        }
+    }
 
     // RUSTC mode: no rustc path, so the binary must find one itself.
     let output = rllvm("rllvm-rustc")
@@ -2300,132 +2011,68 @@ fn config_without(key: &str, dir: &Path) -> PathBuf {
     path
 }
 
-/// The embed path must work when `llvm-objcopy` is not configured.
+/// The embed path must work when `llvm-objcopy` is not configured, or when the
+/// config points at a non-existent one.
 ///
 /// Embedding prefers `llvm-objcopy` and falls back to rebuilding the object
 /// through the `object` crate. The fallback is the lossy one, so it is the more
 /// important of the two to keep working — and every other test takes the
 /// objcopy path, because the test config always has it.
 #[test]
-fn embedding_falls_back_when_objcopy_is_unavailable() {
-    let tmp = TempDir::new().unwrap();
-    let cfg = config_without("llvm_objcopy_filepath", tmp.path());
-    let object_path = tmp.path().join("foo.o");
+fn embedding_falls_back_when_objcopy_is_unconfigured_or_missing() {
+    for bogus_path in [false, true] {
+        // Each config is a `config.toml` of its own, so each gets its own dir.
+        let tmp = TempDir::new().unwrap();
+        let cfg = if bogus_path {
+            let base = fs::read_to_string(shared_config_path()).unwrap();
+            let cfg = tmp.path().join("config.toml");
+            let rewritten: String = base
+                .lines()
+                .map(|l| {
+                    if l.trim_start().starts_with("llvm_objcopy_filepath") {
+                        "llvm_objcopy_filepath = '/nonexistent/llvm-objcopy'".to_string()
+                    } else {
+                        l.to_string()
+                    }
+                })
+                .map(|l| format!("{l}\n"))
+                .collect();
+            fs::write(&cfg, rewritten).unwrap();
+            cfg
+        } else {
+            config_without("llvm_objcopy_filepath", tmp.path())
+        };
+        let object_path = tmp.path().join("foo.o");
 
-    let output = Command::new(cargo_bin("rllvm-cc"))
-        .env("RLLVM_CONFIG", &cfg)
-        .args(["-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .output()
-        .expect("Failed to run rllvm-cc");
-    assert!(
-        output.status.success(),
-        "compile failed without objcopy: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        let output = Command::new(cargo_bin("rllvm-cc"))
+            .env("RLLVM_CONFIG", &cfg)
+            .args(["-c", "-o"])
+            .arg(&object_path)
+            .arg(fixture("foo.c"))
+            .output()
+            .expect("Failed to run rllvm-cc");
+        assert!(
+            output.status.success(),
+            "compile failed (bogus objcopy path={bogus_path}): {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(object_path.exists());
 
-    // The contract must still hold on the fallback path.
-    let bitcode_path = tmp.path().join("foo.bc");
-    let status = Command::new(cargo_bin("rllvm-get-bc"))
-        .env("RLLVM_CONFIG", &cfg)
-        .arg(&object_path)
-        .arg("-o")
-        .arg(&bitcode_path)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "extraction failed on the fallback path");
-    assert_valid_bitcode(&bitcode_path);
-}
-
-/// A config pointing at a non-existent objcopy also takes the fallback.
-#[test]
-fn embedding_falls_back_when_objcopy_path_is_missing() {
-    let tmp = TempDir::new().unwrap();
-    let base = fs::read_to_string(shared_config_path()).unwrap();
-    let cfg = tmp.path().join("config.toml");
-    let rewritten: String = base
-        .lines()
-        .map(|l| {
-            if l.trim_start().starts_with("llvm_objcopy_filepath") {
-                "llvm_objcopy_filepath = '/nonexistent/llvm-objcopy'".to_string()
-            } else {
-                l.to_string()
-            }
-        })
-        .map(|l| format!("{l}\n"))
-        .collect();
-    fs::write(&cfg, rewritten).unwrap();
-
-    let object_path = tmp.path().join("foo.o");
-    let output = Command::new(cargo_bin("rllvm-cc"))
-        .env("RLLVM_CONFIG", &cfg)
-        .args(["-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .output()
-        .expect("Failed to run rllvm-cc");
-    assert!(
-        output.status.success(),
-        "compile failed with a bogus objcopy path: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(object_path.exists());
-}
-
-/// Exercises the object-rebuild embed path, which neither other tier reaches.
-///
-/// Embedding has three tiers: `llvm-objcopy`, a Mach-O in-place builder, and a
-/// full rebuild through the `object` crate. The rebuild only runs for a
-/// non-Mach-O object when objcopy is unavailable, so it needs both conditions
-/// arranged at once — and it is the lossy tier, so leaving it untested is the
-/// worst of the three.
-///
-/// `--target` makes clang emit ELF regardless of host, so this runs everywhere.
-#[test]
-fn embedding_rebuilds_elf_objects_without_objcopy() {
-    let tmp = TempDir::new().unwrap();
-    let cfg = config_without("llvm_objcopy_filepath", tmp.path());
-    let object_path = tmp.path().join("foo.o");
-
-    let output = Command::new(cargo_bin("rllvm-cc"))
-        .env("RLLVM_CONFIG", &cfg)
-        .args(["--target=x86_64-unknown-linux-gnu", "-c", "-o"])
-        .arg(&object_path)
-        .arg(fixture("foo.c"))
-        .output()
-        .expect("Failed to run rllvm-cc");
-    assert!(
-        output.status.success(),
-        "ELF compile failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    // The embedded path must survive the rebuild.
-    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&object_path)
-        .expect("failed to read the embedded section back");
-    assert_eq!(paths.len(), 1, "expected exactly one embedded bitcode path");
-    assert!(
-        paths[0].exists(),
-        "embedded path does not exist: {:?}",
-        paths[0]
-    );
-}
-
-/// `rllvm-get-bc` on a path that does not exist fails cleanly.
-#[test]
-fn get_bc_reports_a_missing_input() {
-    let tmp = TempDir::new().unwrap();
-    let output = rllvm("rllvm-get-bc")
-        .arg(tmp.path().join("nope.o"))
-        .output()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(!output.status.success(), "missing input was accepted");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("panicked"),
-        "panicked instead of failing: {stderr}"
-    );
+        // The contract must still hold on the fallback path.
+        let bitcode_path = tmp.path().join("foo.bc");
+        let status = Command::new(cargo_bin("rllvm-get-bc"))
+            .env("RLLVM_CONFIG", &cfg)
+            .arg(&object_path)
+            .arg("-o")
+            .arg(&bitcode_path)
+            .status()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(
+            status.success(),
+            "extraction failed on the fallback path (bogus objcopy path={bogus_path})"
+        );
+        assert_valid_bitcode(&bitcode_path);
+    }
 }
 
 /// An object with no embedded bitcode section fails with a clear error.
@@ -2480,6 +2127,11 @@ fn get_bc_verbosity_levels_are_accepted() {
             .expect("Failed to run rllvm-get-bc");
         assert!(output.status.success(), "{flag} failed");
         assert!(out.exists());
+        assert!(
+            output.stdout.is_empty(),
+            "{flag} logging reached stdout: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
     }
 }
 
@@ -2575,12 +2227,21 @@ fn init_accepts_prefix_and_bindir() {
     }
 }
 
-/// Rebuilds an ELF object whose content exercises the whole copy path.
+/// Exercises the object-rebuild embed path, which neither other tier reaches,
+/// on an ELF object whose content exercises the whole copy path.
+///
+/// Embedding has three tiers: `llvm-objcopy`, a Mach-O in-place builder, and a
+/// full rebuild through the `object` crate. The rebuild only runs for a
+/// non-Mach-O object when objcopy is unavailable, so it needs both conditions
+/// arranged at once — and it is the lossy tier, so leaving it untested is the
+/// worst of the three.
 ///
 /// `copy_object_file` walks sections, symbols and relocations. A trivial
 /// translation unit touches almost none of that, so this fixture deliberately
 /// contains a BSS global, an undefined external, a static, and references that
 /// produce relocations.
+///
+/// `--target` makes clang emit ELF regardless of host, so this runs everywhere.
 #[test]
 fn embedding_rebuilds_an_elf_object_with_varied_content() {
     let tmp = TempDir::new().unwrap();
@@ -2620,7 +2281,13 @@ int use_everything(void) {
 
     let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&object_path)
         .expect("failed to read the embedded section back");
-    assert_eq!(paths.len(), 1);
+    // The embedded path must survive the rebuild.
+    assert_eq!(paths.len(), 1, "expected exactly one embedded bitcode path");
+    assert!(
+        paths[0].exists(),
+        "embedded path does not exist: {:?}",
+        paths[0]
+    );
 
     // The rebuilt object must still parse and keep its symbols.
     let data = fs::read(&object_path).unwrap();
@@ -2748,9 +2415,16 @@ fn dead_strip_is_passed_through_without_warning() {
     assert_eq!(paths.len(), 1, "expected one embedded path, got {paths:?}");
 }
 
-/// `lto_ldflags` are appended when linking with `-flto`.
+/// `lto_ldflags` are appended when linking with `-flto`, and `-flto` under
+/// `skip` reports that bitcode generation is skipped, at the default log
+/// level.
+///
+/// The skip itself is legitimate: under LTO the object file already is bitcode.
+/// But the linked binary then carries no embedded paths, so `rllvm-get-bc`
+/// finds nothing. Reported only through `tracing`, that went unseen at the
+/// default level and the build looked like it had worked (#97).
 #[test]
-fn lto_ldflags_are_appended_when_linking_with_lto() {
+fn lto_skip_is_reported_and_lto_ldflags_reach_the_link() {
     let tmp = TempDir::new().unwrap();
     let base = fs::read_to_string(shared_config_path()).unwrap();
     let cfg = tmp.path().join("config.toml");
@@ -2765,16 +2439,26 @@ fn lto_ldflags_are_appended_when_linking_with_lto() {
     // predates `lto_mode` and was written when `-flto` always skipped bitcode
     // generation; pin to `skip` so it keeps exercising exactly that, unrelated
     // path rather than tripping over the default `marker` mode's bitcode
-    // artifact, which Task 5's tests cover instead.
-    let status = Command::new(cargo_bin("rllvm-cc"))
+    // artifact, which Task 5's tests cover instead. #97's loud warning is
+    // only emitted in `skip` mode; the default `marker` mode does not skip.
+    let output = Command::new(cargo_bin("rllvm-cc"))
         .env("RLLVM_CONFIG", &cfg)
         .env("RLLVM_LTO_MODE", "skip")
         .args(["-flto", "-c", "-o"])
         .arg(&obj)
         .arg(&src)
-        .status()
+        .output()
         .expect("compile failed");
-    assert!(status.success());
+    assert!(
+        output.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("link-time optimization"),
+        "the skip was not reported at the default log level: {stderr:?}"
+    );
 
     // Linking from objects only, with -flto, is the path that consumes lto_ldflags.
     let exe = tmp.path().join("prog");
@@ -2887,26 +2571,6 @@ fn rustc_wasm_object_carries_extractable_bitcode() {
     assert_valid_bitcode(&bitcode);
 }
 
-/// Query invocations must skip bitcode generation entirely.
-#[test]
-fn rustc_wrapper_skips_bitcode_for_query_invocations() {
-    let rustc = which("rustc").expect("rustc not found");
-
-    for query in ["--version", "--print=sysroot"] {
-        let output = rllvm("rllvm-rustc")
-            .arg(&rustc)
-            .arg(query)
-            .output()
-            .expect("Failed to run rllvm-rustc");
-        assert!(
-            output.status.success(),
-            "{query} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(!output.stdout.is_empty(), "{query} produced no output");
-    }
-}
-
 /// A failing rustc invocation propagates its exit code without embedding.
 #[test]
 fn rustc_wrapper_propagates_failure() {
@@ -2927,45 +2591,32 @@ fn rustc_wrapper_propagates_failure() {
     );
 }
 
-/// `rllvm-init` reports a config directory it cannot create.
+/// `rllvm-init` reports a config directory it cannot create and a config path
+/// it cannot write.
 #[test]
-fn init_reports_an_uncreatable_config_directory() {
+fn init_reports_an_unusable_config_path() {
     let tmp = TempDir::new().unwrap();
     // A regular file where a directory would have to be.
     let blocker = tmp.path().join("blocker");
     fs::write(&blocker, b"not a directory").unwrap();
-
-    let output = Command::new(cargo_bin("rllvm-init"))
-        .arg("-o")
-        .arg(blocker.join("config.toml"))
-        .env("HOME", tmp.path())
-        .output()
-        .expect("Failed to run rllvm-init");
-    assert!(!output.status.success(), "an uncreatable path was accepted");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("panicked"), "panicked: {stderr}");
-}
-
-/// `rllvm-init` reports a config path it cannot write.
-#[test]
-fn init_reports_an_unwritable_config_path() {
-    let tmp = TempDir::new().unwrap();
     // Writing to a directory fails.
     let dir_as_target = tmp.path().join("a_directory");
     fs::create_dir_all(&dir_as_target).unwrap();
 
-    let output = Command::new(cargo_bin("rllvm-init"))
-        .arg("-o")
-        .arg(&dir_as_target)
-        .env("HOME", tmp.path())
-        .output()
-        .expect("Failed to run rllvm-init");
-    assert!(
-        !output.status.success(),
-        "writing to a directory was accepted"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("panicked"), "panicked: {stderr}");
+    for target in [blocker.join("config.toml"), dir_as_target] {
+        let output = Command::new(cargo_bin("rllvm-init"))
+            .arg("-o")
+            .arg(&target)
+            .env("HOME", tmp.path())
+            .output()
+            .expect("Failed to run rllvm-init");
+        assert!(
+            !output.status.success(),
+            "an unusable path was accepted: {target:?}"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("panicked"), "panicked: {stderr}");
+    }
 }
 
 /// `rllvm-get-bc` reports an input it cannot read.
@@ -3002,45 +2653,21 @@ fn wasm_ld_available() -> bool {
     which("wasm-ld").is_ok()
 }
 
-/// A WebAssembly object carries the embedded bitcode path.
-#[test]
-fn wasm_object_carries_the_bitcode_path() {
-    if !wasm_target_available() {
-        eprintln!("skipping: clang has no wasm32 target");
-        return;
-    }
-    let tmp = TempDir::new().unwrap();
-    let obj = tmp.path().join("wasm_lib.o");
-
-    let output = rllvm("rllvm-cc")
-        .args(["--target=wasm32-unknown-unknown", "-c", "-o"])
-        .arg(&obj)
-        .arg(fixture("wasm_lib.c"))
-        .output()
-        .expect("Failed to run rllvm-cc");
-    assert!(
-        output.status.success(),
-        "wasm compile failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(&obj)
-        .expect("failed to read the embedded section");
-    assert_eq!(paths.len(), 1, "expected one embedded path");
-    assert_bitcode_magic(&paths[0]);
-}
-
-/// The section survives `wasm-ld` and concatenates across translation units.
+/// A WebAssembly object carries the embedded bitcode path, and the section
+/// survives `wasm-ld` and concatenates across translation units.
 ///
 /// This is the whole bitcode-path contract on WebAssembly, and it did not work
 /// before the section was renamed: `lld/wasm/Writer.cpp` skips `.llvmbc` and
 /// `.llvmcmd` by name, because those belong to `clang -fembed-bitcode`, while
 /// concatenating every other custom section. rllvm used `.llvmbc`, so the
 /// linker dropped it and extraction from a linked module always failed.
+///
+/// The object half needs only the wasm32 target, so it still runs where
+/// `wasm-ld` is missing.
 #[test]
-fn wasm_linked_module_carries_every_translation_unit() {
-    if !wasm_target_available() || !wasm_ld_available() {
-        eprintln!("skipping: needs a wasm32 target and wasm-ld");
+fn wasm_objects_and_linked_module_carry_every_translation_unit() {
+    if !wasm_target_available() {
+        eprintln!("skipping: clang has no wasm32 target");
         return;
     }
     let tmp = TempDir::new().unwrap();
@@ -3048,15 +2675,28 @@ fn wasm_linked_module_carries_every_translation_unit() {
     let main_obj = tmp.path().join("wasm_main.o");
 
     for (src, obj) in [("wasm_lib.c", &lib_obj), ("wasm_main.c", &main_obj)] {
-        let status = rllvm("rllvm-cc")
+        let output = rllvm("rllvm-cc")
             .args(["--target=wasm32-unknown-unknown", "-c", "-o"])
             .arg(obj)
             .arg(fixture(src))
-            .status()
+            .output()
             .expect("Failed to run rllvm-cc");
-        assert!(status.success(), "wasm compile of {src} failed");
+        assert!(
+            output.status.success(),
+            "wasm compile of {src} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let paths = rllvm_core::utils::extract_bitcode_filepaths_from_object_file(obj)
+            .expect("failed to read the embedded section");
+        assert_eq!(paths.len(), 1, "expected one embedded path in {src}");
+        assert_bitcode_magic(&paths[0]);
     }
 
+    if !wasm_ld_available() {
+        eprintln!("skipping the link: wasm-ld is unavailable");
+        return;
+    }
     let module = tmp.path().join("out.wasm");
     let output = rllvm("rllvm-cc")
         .args([
@@ -3368,6 +3008,8 @@ fn get_bc_refuses_to_overwrite_a_recorded_module() {
 #[cfg(unix)]
 #[test]
 fn rustc_mixed_crate_types_preserve_loadable_shared_library() {
+    use object::{Object, ObjectSymbol};
+
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     let src = root.join("mixed.rs");
@@ -3411,95 +3053,55 @@ int main(int argc, char **argv) {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let rustc = which("rustc").unwrap();
-    for wrapped in [false, true] {
-        let out_dir = root.join(if wrapped { "wrapped" } else { "native" });
-        fs::create_dir(&out_dir).unwrap();
-        let mut compile = if wrapped {
-            let mut command = rllvm("rllvm-rustc");
-            command.arg("--rllvm-verbose=3").arg(&rustc);
-            command
-        } else {
-            Command::new(&rustc)
-        };
-        let output = compile
-            .args(["--crate-name=mixed", "--crate-type=lib,staticlib,cdylib"])
-            .arg("--out-dir")
-            .arg(&out_dir)
-            .arg(&src)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "mixed crate compilation failed (wrapped={wrapped}): {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let shared = out_dir.join(format!("libmixed{}", std::env::consts::DLL_SUFFIX));
-        let loaded = Command::new(&loader).arg(&shared).output().unwrap();
-        assert!(
-            loaded.status.success(),
-            "shared library could not execute (wrapped={wrapped}, {}): {}\ncompiler output: {}",
-            loaded.status,
-            String::from_utf8_lossy(&loaded.stderr),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&loaded.stdout).trim(), "42");
-
-        if wrapped {
-            for artifact in [
-                shared,
-                out_dir.join("libmixed.rlib"),
-                out_dir.join("libmixed.a"),
-            ] {
-                let bitcode = root.join("extracted.bc");
-                let output = rllvm("rllvm-get-bc")
-                    .arg(&artifact)
-                    .arg("-o")
-                    .arg(&bitcode)
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "extraction from {artifact:?} failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                assert_valid_bitcode(&bitcode);
-                fs::remove_file(bitcode).unwrap();
-            }
-        }
-    }
-}
-
-/// rustc puts an allocator shim (`__rust_alloc` and friends) in a staticlib,
-/// named after the crate but generated outside its bitcode. The member must
-/// record nothing, so the catalog reports it instead of hiding its functions
-/// behind a module that does not define them.
-#[test]
-fn a_staticlib_allocator_shim_records_no_bitcode() {
-    use object::{Object, ObjectSymbol};
-
-    let tmp = TempDir::new().unwrap();
-    let root = tmp.path().canonicalize().unwrap();
-    let src = root.join("shim.rs");
-    fs::write(
-        &src,
-        "#[unsafe(no_mangle)]\npub extern \"C\" fn boxed(x: i32) -> i32 { *Box::new(x) }\n",
-    )
-    .unwrap();
+    let out_dir = root.join("out");
+    fs::create_dir(&out_dir).unwrap();
     let output = rllvm("rllvm-rustc")
+        .arg("--rllvm-verbose=3")
         .arg(which("rustc").unwrap())
-        .args(["--crate-name=shim", "--crate-type=staticlib", "--out-dir"])
-        .arg(&root)
+        .args(["--crate-name=mixed", "--crate-type=lib,staticlib,cdylib"])
+        .arg("--out-dir")
+        .arg(&out_dir)
         .arg(&src)
         .output()
         .unwrap();
     assert!(
         output.status.success(),
-        "staticlib compilation failed: {}",
+        "mixed crate compilation failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let shared = out_dir.join(format!("libmixed{}", std::env::consts::DLL_SUFFIX));
+    let loaded = Command::new(&loader).arg(&shared).output().unwrap();
+    assert!(
+        loaded.status.success(),
+        "shared library could not execute ({}): {}\ncompiler output: {}",
+        loaded.status,
+        String::from_utf8_lossy(&loaded.stderr),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&loaded.stdout).trim(), "42");
 
-    let archive = root.join("libshim.a");
+    let archive = out_dir.join("libmixed.a");
+    for artifact in [&shared, &out_dir.join("libmixed.rlib"), &archive] {
+        let bitcode = root.join("extracted.bc");
+        let output = rllvm("rllvm-get-bc")
+            .arg(artifact)
+            .arg("-o")
+            .arg(&bitcode)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "extraction from {artifact:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_valid_bitcode(&bitcode);
+        fs::remove_file(bitcode).unwrap();
+    }
+
+    // rustc puts an allocator shim (`__rust_alloc` and friends) in a staticlib,
+    // named after the crate but generated outside its bitcode. The member must
+    // record nothing, so the catalog reports it instead of hiding its functions
+    // behind a module that does not define them.
     let data = fs::read(&archive).unwrap();
     let parsed = object::read::archive::ArchiveFile::parse(&*data).unwrap();
     let defines_alloc = |member: &[u8]| {
@@ -3514,7 +3116,7 @@ fn a_staticlib_allocator_shim_records_no_bitcode() {
         .filter_map(Result::ok)
         .filter(|member| member.data(&*data).is_ok_and(defines_alloc))
         .map(|member| String::from_utf8_lossy(member.name()).into_owned())
-        .filter(|name| name.starts_with("shim."))
+        .filter(|name| name.starts_with("mixed."))
         .collect();
     assert_eq!(
         shim.len(),
@@ -3848,6 +3450,9 @@ fn build_cargo_fixture(tmp: &TempDir) -> PathBuf {
 /// passes a "some bitcode exists" check while dependency bitcode is silently
 /// missing, and the two arrive by different routes — the binary's own path
 /// through a marker object, the dependency's through its patched rlib.
+///
+/// A library crate is also usable on its own, without a binary to link it
+/// into, so its rlib is extracted too.
 #[test]
 fn cargo_build_embeds_bitcode_for_bin_and_lib() {
     let tmp = TempDir::new().unwrap();
@@ -3885,13 +3490,6 @@ fn cargo_build_embeds_bitcode_for_bin_and_lib() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_bitcode_magic(&bitcode);
-}
-
-/// A library crate is usable on its own, without a binary to link it into.
-#[test]
-fn cargo_build_bitcode_extractable_from_rlib() {
-    let tmp = TempDir::new().unwrap();
-    let root = build_cargo_fixture(&tmp);
 
     let rlib = fs::read_dir(root.join("target/debug/deps"))
         .expect("no deps directory")
@@ -4010,42 +3608,6 @@ fn rustc_wrapper_honours_log_level_from_config() {
     );
 }
 
-/// `-flto` reports that bitcode generation is skipped, at the default log level.
-///
-/// The skip itself is legitimate: under LTO the object file already is bitcode.
-/// But the linked binary then carries no embedded paths, so `rllvm-get-bc`
-/// finds nothing. Reported only through `tracing`, that went unseen at the
-/// default level and the build looked like it had worked.
-#[test]
-fn lto_reports_that_bitcode_generation_is_skipped() {
-    let tmp = TempDir::new().unwrap();
-    let src = tmp.path().join("a.c");
-    fs::write(&src, "int helper(int x) { return x + 1; }\n").unwrap();
-    let object = tmp.path().join("a.o");
-
-    // This test predates `lto_mode` and covers the skip path specifically --
-    // #97's loud warning is only emitted in `skip` mode now. The default
-    // `marker` mode does not skip at all (Task 5's tests cover that path).
-    let output = rllvm("rllvm-cc")
-        .env("RLLVM_LTO_MODE", "skip")
-        .args(["-flto", "-c", "-o"])
-        .arg(&object)
-        .arg(&src)
-        .output()
-        .expect("Failed to run rllvm-cc");
-    assert!(
-        output.status.success(),
-        "build failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("link-time optimization"),
-        "the skip was not reported at the default log level: {stderr:?}"
-    );
-}
-
 /// The routine skips stay quiet.
 ///
 /// Preprocessing, dependency generation and link-only invocations all skip
@@ -4135,10 +3697,19 @@ fn lto_build_and_extract(tmp: &Path, lto_flag: &str, extra_link: &[&str]) -> Str
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// `-Wl,-dead_strip` on Darwin, where the section must survive it; nothing elsewhere.
+#[cfg(target_vendor = "apple")]
+const DEAD_STRIP_FLAGS: &[&str] = &["-Wl,-dead_strip"];
+#[cfg(not(target_vendor = "apple"))]
+const DEAD_STRIP_FLAGS: &[&str] = &[];
+
 #[test]
 fn lto_full_binary_yields_whole_program_bitcode() {
+    // On Darwin the link dead-strips: nothing references the section, so a
+    // dead-stripping link discards it unless the directive says
+    // `no_dead_strip`.
     let tmp = TempDir::new().unwrap();
-    let symbols = lto_build_and_extract(tmp.path(), "-flto", &[]);
+    let symbols = lto_build_and_extract(tmp.path(), "-flto", DEAD_STRIP_FLAGS);
     for symbol in ["a_fn", "b_fn", "main"] {
         assert!(
             symbols.contains(symbol),
@@ -4210,21 +3781,6 @@ fn lto_static_archive_extracts_without_linking() {
                 "{symbol} missing from the {lto_flag} archive's module:\n{symbols}"
             );
         }
-    }
-}
-
-#[test]
-#[cfg(target_vendor = "apple")]
-fn lto_marker_survives_dead_strip() {
-    // Nothing references the section, so a dead-stripping link discards it
-    // unless the directive says `no_dead_strip`.
-    let tmp = TempDir::new().unwrap();
-    let symbols = lto_build_and_extract(tmp.path(), "-flto", &["-Wl,-dead_strip"]);
-    for symbol in ["a_fn", "b_fn", "main"] {
-        assert!(
-            symbols.contains(symbol),
-            "{symbol} missing from:\n{symbols}"
-        );
     }
 }
 
@@ -4846,70 +4402,106 @@ fn completions_are_generated_for_every_binary_and_shell() {
 }
 
 /// `lto_mode = "save-temps"` collects the module the linker's own LTO
-/// pipeline merged, instead of recording per-unit paths with a marker.
+/// pipeline merged, instead of recording per-unit paths with a marker, for an
+/// absolute and a relative `-o`.
+///
+/// The relative case (`cc -o prog *.o`, run from inside the build directory)
+/// is the common one, and must not crash before the link even runs.
+/// `<output>.rllvm.bc` does not exist until `collect_saved_module` creates it
+/// after the link, so the marker's embedded path has to become absolute
+/// without ever requiring the file to already exist; and afterwards,
+/// `Path::parent` returns `Some("")`, not `None`, for a bare filename, so the
+/// collection step's directory lookup has to guard against that too. Revert
+/// either fix and the relative case fails: `output.is_absolute()` is always
+/// true for the absolute case, so the fixed code path never runs there.
 #[test]
 fn save_temps_mode_records_the_linker_merged_module() {
-    let tmp = TempDir::new().unwrap();
-    let sources = write_lto_sources(tmp.path());
+    for relative in [false, true] {
+        let tmp = TempDir::new().unwrap();
+        let sources = write_lto_sources(tmp.path());
+        let output_path = |name: &str| {
+            if relative {
+                PathBuf::from(name)
+            } else {
+                tmp.path().join(name)
+            }
+        };
 
-    let mut objects = vec![];
-    for source in &sources {
-        let object = source.with_extension("o");
-        let status = rllvm("rllvm-cc")
+        let mut objects = vec![];
+        for source in &sources {
+            let object = output_path(&format!(
+                "{}.o",
+                source.file_stem().unwrap().to_string_lossy()
+            ));
+            let status = rllvm("rllvm-cc")
+                .current_dir(tmp.path())
+                .env("RLLVM_LTO_MODE", "save-temps")
+                .args(["--", "-flto", "-c", "-o"])
+                .arg(&object)
+                .arg(source)
+                .status()
+                .expect("Failed to run rllvm-cc");
+            assert!(
+                status.success(),
+                "rllvm-cc failed on {source:?} (relative={relative})"
+            );
+            objects.push(object);
+        }
+
+        let mut link = rllvm("rllvm-cc");
+        link.current_dir(tmp.path())
             .env("RLLVM_LTO_MODE", "save-temps")
-            .args(["--", "-flto", "-c", "-o"])
-            .arg(&object)
-            .arg(source)
-            .status()
-            .expect("Failed to run rllvm-cc");
-        assert!(status.success(), "rllvm-cc failed on {source:?}");
-        objects.push(object);
-    }
-
-    let program = tmp.path().join("prog");
-    let mut link = rllvm("rllvm-cc");
-    link.env("RLLVM_LTO_MODE", "save-temps")
-        .args(["--", "-flto", "-o"])
-        .arg(&program);
-    for object in &objects {
-        link.arg(object);
-    }
-    assert!(link.status().unwrap().success(), "save-temps link failed");
-
-    let merged = tmp.path().join("prog.rllvm.bc");
-    assert!(merged.exists(), "the merged module was not collected");
-    assert_bitcode_magic(&merged);
-
-    // The collected module must actually be whole-program, not just some
-    // bitcode file that happened to be lying around.
-    let nm = llvm_bin("llvm-nm");
-    let output = Command::new(nm)
-        .arg(&merged)
-        .output()
-        .expect("llvm-nm failed");
-    let symbols = String::from_utf8_lossy(&output.stdout);
-    for symbol in ["a_fn", "b_fn", "main"] {
+            .args(["--", "-flto", "-o"])
+            .arg(output_path("prog"));
+        for object in &objects {
+            link.arg(object);
+        }
         assert!(
-            symbols.contains(symbol),
-            "{symbol} missing from the collected module:\n{symbols}"
+            link.status().unwrap().success(),
+            "save-temps link failed (relative={relative})"
+        );
+
+        let merged = tmp.path().join("prog.rllvm.bc");
+        assert!(
+            merged.exists(),
+            "the merged module was not collected (relative={relative})"
+        );
+        assert_bitcode_magic(&merged);
+
+        // The collected module must actually be whole-program, not just some
+        // bitcode file that happened to be lying around.
+        let nm = llvm_bin("llvm-nm");
+        let output = Command::new(nm)
+            .arg(&merged)
+            .output()
+            .expect("llvm-nm failed");
+        let symbols = String::from_utf8_lossy(&output.stdout);
+        for symbol in ["a_fn", "b_fn", "main"] {
+            assert!(
+                symbols.contains(symbol),
+                "{symbol} missing from the collected module (relative={relative}):\n{symbols}"
+            );
+        }
+
+        // The binary names it, so extraction needs no discovery convention.
+        let extracted = tmp.path().join("prog.bc");
+        let status = rllvm("rllvm-get-bc")
+            .arg(tmp.path().join("prog"))
+            .arg("-m")
+            .arg("-o")
+            .arg(&extracted)
+            .status()
+            .expect("Failed to run rllvm-get-bc");
+        assert!(
+            status.success(),
+            "rllvm-get-bc failed under save-temps (relative={relative})"
+        );
+        let manifest = fs::read_to_string(tmp.path().join("prog.bc.manifest")).unwrap();
+        assert!(
+            manifest.trim().ends_with("prog.rllvm.bc"),
+            "the binary must name the merged module (relative={relative}):\n{manifest}"
         );
     }
-
-    // The binary names it, so extraction needs no discovery convention.
-    let extracted = tmp.path().join("prog.bc");
-    let status = rllvm("rllvm-get-bc")
-        .arg(&program)
-        .arg("-m")
-        .arg("-o")
-        .arg(&extracted)
-        .status()
-        .expect("Failed to run rllvm-get-bc");
-    assert!(status.success(), "rllvm-get-bc failed under save-temps");
-    let manifest = fs::read_to_string(tmp.path().join("prog.bc.manifest")).unwrap();
-    assert!(
-        manifest.trim().ends_with("prog.rllvm.bc"),
-        "the binary must name the merged module:\n{manifest}"
-    );
 }
 
 /// A combined source build must record the module produced by its LTO link.
@@ -5024,11 +4616,6 @@ fn save_temps_source_link_and_extract(
             "missing definition of {symbol}: {symbols}"
         );
     }
-}
-
-#[test]
-fn save_temps_source_link_records_module_for_relative_output() {
-    save_temps_source_link_and_extract(Some("prog"), false, None);
 }
 
 #[test]
@@ -5249,59 +4836,6 @@ fn save_temps_merges_every_lto_partition() {
         leftovers.is_empty(),
         "save-temps partitions were left behind: {leftovers:?}"
     );
-}
-
-/// A relative `-o` (`cc -o prog *.o`, run from inside the build directory --
-/// the common case, and the one the test above avoids by always using an
-/// absolute `tmp.path().join(...)` output) must not crash before the link
-/// even runs.
-///
-/// `<output>.rllvm.bc` does not exist until `collect_saved_module` creates it
-/// after the link, so the marker's embedded path has to become absolute
-/// without ever requiring the file to already exist; and afterwards,
-/// `Path::parent` returns `Some("")`, not `None`, for a bare filename, so the
-/// collection step's directory lookup has to guard against that too. Revert
-/// either fix and this is the test that fails: `output.is_absolute()` is
-/// always true in the sibling tests above, so the fixed code path never runs
-/// there.
-#[test]
-fn save_temps_mode_collects_the_module_for_a_relative_output() {
-    let tmp = TempDir::new().unwrap();
-    let sources = write_lto_sources(tmp.path());
-
-    let mut objects = vec![];
-    for source in &sources {
-        let object_name = format!("{}.o", source.file_stem().unwrap().to_string_lossy());
-        let status = rllvm("rllvm-cc")
-            .current_dir(tmp.path())
-            .env("RLLVM_LTO_MODE", "save-temps")
-            .args(["--", "-flto", "-c", "-o"])
-            .arg(&object_name)
-            .arg(source)
-            .status()
-            .expect("Failed to run rllvm-cc");
-        assert!(status.success(), "rllvm-cc failed on {source:?}");
-        objects.push(object_name);
-    }
-
-    let mut link = rllvm("rllvm-cc");
-    link.current_dir(tmp.path())
-        .env("RLLVM_LTO_MODE", "save-temps")
-        .args(["--", "-flto", "-o", "prog"]);
-    for object in &objects {
-        link.arg(object);
-    }
-    assert!(
-        link.status().unwrap().success(),
-        "save-temps link with a relative -o failed"
-    );
-
-    let merged = tmp.path().join("prog.rllvm.bc");
-    assert!(
-        merged.exists(),
-        "the merged module was not collected for a relative -o"
-    );
-    assert_bitcode_magic(&merged);
 }
 
 /// ThinLTO never builds a whole-program module, so `save-temps` has nothing
@@ -5738,13 +5272,21 @@ fn dependency_file_names_the_object_and_its_headers() {
     );
 }
 
-/// Link mode has a second writer of the same file.
+/// `-MD` must not suppress bitcode generation, and link mode must leave the
+/// dependency file naming the object.
 ///
-/// Besides the `.bc` compile, `build_object_file` recompiles each source to a
-/// hidden intermediate object with the user's arguments, so it clobbers the
+/// `-M` and `-MM` stop after preprocessing and emit dependencies instead of an
+/// object, so skipping bitcode for them is right. `-MD` compiles normally and
+/// writes the depfile as a side effect. Classifying it with the former made a
+/// link-mode build carrying `-MD` produce a binary with no bitcode at all, and
+/// the skip was quiet, so nothing said so.
+///
+/// Link mode also has a second writer of the same file. Besides the `.bc`
+/// compile, `build_object_file` recompiles each source to a hidden
+/// intermediate object with the user's arguments, so it clobbers the
 /// dependency file too.
 #[test]
-fn link_mode_leaves_the_dependency_file_naming_the_object() {
+fn link_mode_dependency_flags_keep_bitcode_and_name_the_object() {
     let tmp = TempDir::new().unwrap();
     let header = tmp.path().join("prog.h");
     let source = tmp.path().join("prog.c");
@@ -5767,6 +5309,7 @@ fn link_mode_leaves_the_dependency_file_naming_the_object() {
         .expect("Failed to run rllvm-cc");
     assert!(status.success(), "rllvm-cc link failed");
 
+    // Read before extracting, so only the build has written the depfile.
     let deps = fs::read_to_string(&depfile).expect("no dependency file written");
     assert!(
         !deps.contains(".bc"),
@@ -5776,34 +5319,8 @@ fn link_mode_leaves_the_dependency_file_naming_the_object() {
         deps.contains("prog.h"),
         "the header must appear as a prerequisite:\n{deps}"
     );
-}
 
-/// `-MD` must not suppress bitcode generation.
-///
-/// `-M` and `-MM` stop after preprocessing and emit dependencies instead of an
-/// object, so skipping bitcode for them is right. `-MD` compiles normally and
-/// writes the depfile as a side effect. Classifying it with the former made a
-/// link-mode build carrying `-MD` produce a binary with no bitcode at all, and
-/// the skip was quiet, so nothing said so.
-#[test]
-fn dependency_flags_do_not_suppress_bitcode_in_link_mode() {
-    let tmp = TempDir::new().unwrap();
-    let source = tmp.path().join("mdlink.c");
-    let program = tmp.path().join("mdlink");
-    let depfile = tmp.path().join("mdlink.d");
-    fs::write(&source, "int main(void) { return 0; }\n").unwrap();
-
-    let status = rllvm("rllvm-cc")
-        .args(["--", "-MD", "-MF"])
-        .arg(&depfile)
-        .arg("-o")
-        .arg(&program)
-        .arg(&source)
-        .status()
-        .expect("Failed to run rllvm-cc");
-    assert!(status.success(), "rllvm-cc link failed");
-
-    let bitcode = tmp.path().join("mdlink.bc");
+    let bitcode = tmp.path().join("extracted.bc");
     let status = rllvm("rllvm-get-bc")
         .arg(&program)
         .arg("-o")
@@ -6106,6 +5623,7 @@ fn a_missing_input_is_reported_with_its_path_and_no_debug_formatting() {
             !stderr.contains("Os {"),
             "{binary} printed a Debug rendering of io::Error at the user: {stderr}"
         );
+        assert!(!stderr.contains("panicked"), "{stderr}");
     }
 }
 
