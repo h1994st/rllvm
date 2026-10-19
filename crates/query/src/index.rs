@@ -22,6 +22,7 @@ use serde::Serialize;
 use rllvm_core::{
     catalog::{CatalogOrigin, CatalogScope},
     config::LlvmBindir,
+    utils::same_file,
 };
 
 use crate::{
@@ -497,14 +498,73 @@ impl Session {
             .collect()
     }
 
-    /// Functions whose recorded source mapping includes `file:line`. Not
-    /// public API: internal plumbing for the `at` query, called by
+    /// Functions whose recorded source mapping includes `file:line`, with
+    /// `file` matched as [`Self::spellings_of`] describes, in function order.
+    /// Not public API: internal plumbing for the `at` query, called by
     /// `crate::run`.
-    pub(crate) fn functions_at(&self, file: &Path, line: u32) -> &[FunctionId] {
-        self.by_file_line
-            .get(&(file.to_path_buf(), line))
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+    pub(crate) fn functions_at(&self, file: &Path, line: u32) -> Vec<FunctionId> {
+        let mapped = |spelling: &Path| self.by_file_line.get(&(spelling.to_path_buf(), line));
+        let mut found: BTreeSet<usize> = mapped(file)
+            .into_iter()
+            .flatten()
+            .map(|id| self.function_index[id])
+            .collect();
+        for (module_id, spelling) in self.spellings_of(file) {
+            found.extend(
+                mapped(spelling)
+                    .into_iter()
+                    .flatten()
+                    .filter(|id| id.module_id == module_id)
+                    .map(|id| self.function_index[id]),
+            );
+        }
+        found
+            .into_iter()
+            .map(|idx| self.facts.functions[idx].id.clone())
+            .collect()
+    }
+
+    /// Every other spelling, per module, under which the debug info recorded
+    /// the file `file` names. The spelling as written always matches; this
+    /// adds the file named another way -- relative to the working directory,
+    /// absolute, or through a symlink the compiler resolved in the file but
+    /// not in its recorded directory. Only a location that resolves to an
+    /// absolute path is compared, so a relative file with no recorded
+    /// directory is never guessed at.
+    fn spellings_of(&self, file: &Path) -> HashSet<(&str, &Path)> {
+        let mut spellings = HashSet::new();
+        let Ok(named) = std::path::absolute(file) else {
+            return spellings;
+        };
+        let functions = self
+            .facts
+            .functions
+            .iter()
+            .map(|function| (&function.id, function.location.as_ref()));
+        let sites = self
+            .facts
+            .call_sites
+            .iter()
+            .map(|site| (&site.id.function, site.location.as_ref()));
+        let uses = self.facts.uses.iter().filter_map(|use_fact| {
+            Some((use_fact.in_function.as_ref()?, use_fact.location.as_ref()))
+        });
+        // One comparison per file, not per location: each touches the disk.
+        let mut same: HashMap<PathBuf, bool> = HashMap::new();
+        for (id, location) in functions.chain(sites).chain(uses) {
+            let Some(location) = location else {
+                continue;
+            };
+            let resolved = location.resolved_path();
+            if resolved.is_absolute()
+                && *same
+                    .entry(resolved)
+                    .or_insert_with_key(|resolved| same_file(resolved, &named))
+            {
+                spellings.insert((id.module_id.as_str(), location.file.as_path()));
+            }
+        }
+        spellings
     }
 
     /// The heuristic address-taken inventory, verbatim. Never consulted by
@@ -581,17 +641,24 @@ impl Session {
             .collect()
     }
 
-    /// Call sites recorded at exactly `file:line`, in any function. Not
-    /// public API: internal plumbing for `at` and `indirect-targets`, which
-    /// both key off a source location rather than a symbol name.
+    /// Call sites recorded at `file:line`, in any function, with `file`
+    /// matched as [`Self::spellings_of`] describes. Not public API: internal
+    /// plumbing for `at`, `indirect-targets` and every `--at` site, which key
+    /// off a source location rather than a symbol name.
     pub(crate) fn call_sites_at(&self, file: &Path, line: u32) -> Vec<&CallSiteFact> {
+        let spellings = self.spellings_of(file);
         self.facts
             .call_sites
             .iter()
             .filter(|site| {
-                site.location
-                    .as_ref()
-                    .is_some_and(|location| location.file == *file && location.line == line)
+                site.location.as_ref().is_some_and(|location| {
+                    location.line == line
+                        && (location.file == *file
+                            || spellings.contains(&(
+                                site.id.function.module_id.as_str(),
+                                location.file.as_path(),
+                            )))
+                })
             })
             .collect()
     }

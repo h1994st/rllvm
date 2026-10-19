@@ -237,11 +237,9 @@ fn resolve_status(
     module_id: &str,
     source_status: &HashMap<(String, PathBuf), SourceState>,
 ) {
-    let full = match &location.directory {
-        Some(directory) => directory.join(&location.file),
-        None => location.file.clone(),
-    };
-    let state = source_status.get(&(module_id.to_string(), full)).copied();
+    let state = source_status
+        .get(&(module_id.to_string(), location.resolved_path()))
+        .copied();
     location.source_status = state.map_or(SourceStatus::Unknown, |state| state.status);
     location.status_basis = state.and_then(|state| state.basis);
     for frame in &mut location.inlined_at {

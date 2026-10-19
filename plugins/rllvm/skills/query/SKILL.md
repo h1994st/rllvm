@@ -56,6 +56,10 @@ it as a whole identifier; a C symbol has no reading, so a bare C name
 resolves only to its own exact symbol. When a bare name matches nothing,
 find the exact symbol with `at`, `callers` or `callees`, then query that.
 
+The file in a `file:line` matches as the debug info recorded it, or as any
+path that names the same file from the working directory: relative,
+absolute, or through a symlink.
+
 ## Recording resolved indirect calls
 
 To close gaps in a call graph, use the `complete-callgraph` skill; it runs

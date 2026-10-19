@@ -73,6 +73,17 @@ pub struct SourceLocation {
     pub inlined_at: Vec<SourceLocation>,
 }
 
+impl SourceLocation {
+    /// The file this location points at: the file, under its recorded
+    /// directory when it has one.
+    pub(crate) fn resolved_path(&self) -> PathBuf {
+        match &self.directory {
+            Some(directory) => directory.join(&self.file),
+            None => self.file.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Linkage {
