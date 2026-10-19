@@ -3092,6 +3092,7 @@ mod mcp {
                 serde_json::json!({ "name": name, "arguments": arguments }),
             ),
         );
+        assert_eq!(response["result"]["resultType"], "complete");
         assert_eq!(
             response["result"]["isError"], false,
             "tool `{name}` call failed: {response:?}"
@@ -3822,6 +3823,8 @@ fn an_uncreatable_configured_cache_dir_is_a_silent_miss() {
     );
     let answer: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(answer["analysis"]["cache"]["written"], 0);
+    assert_eq!(answer["analysis"]["cache"]["misses"], 2);
+    assert_eq!(answer["results"][0]["function"]["symbol"], "main");
 }
 
 #[test]

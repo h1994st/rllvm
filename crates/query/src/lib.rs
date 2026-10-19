@@ -1915,6 +1915,8 @@ mod tests {
             ModuleAnalysis::Failed,
             "a module that changed after verification must not be silently analyzed"
         );
+        let diagnostic = session.modules()[0].diagnostic.as_deref().unwrap_or("");
+        assert!(diagnostic.contains("changed"), "{diagnostic}");
         let report = session.cache_report().unwrap();
         assert_eq!(
             report.written, 0,
