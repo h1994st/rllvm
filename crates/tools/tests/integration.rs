@@ -2415,6 +2415,9 @@ fn dead_strip_is_passed_through_without_warning() {
     assert_eq!(paths.len(), 1, "expected one embedded path, got {paths:?}");
 }
 
+/// What `-Wl,-v` makes each linker print: ld64, GNU ld, gold, and lld.
+const LINKER_VERBOSE_BANNERS: &[&str] = &["@(#)PROGRAM:ld", "GNU ld", "GNU gold", "LLD"];
+
 /// `lto_ldflags` are appended when linking with `-flto`, and `-flto` under
 /// `skip` reports that bitcode generation is skipped, at the default log
 /// level.
@@ -2476,6 +2479,19 @@ fn lto_skip_is_reported_and_lto_ldflags_reach_the_link() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(exe.exists());
+    // `-Wl,-v` makes the linker print its banner; GNU ld and lld write it to
+    // stdout and ld64 to stderr, so look at both.
+    let linker_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        LINKER_VERBOSE_BANNERS
+            .iter()
+            .any(|banner| linker_output.contains(banner)),
+        "the LTO link did not run with lto_ldflags: {linker_output:?}"
+    );
 }
 
 /// `rllvm-rustc` compiles Rust to an object and embeds a bitcode path.
