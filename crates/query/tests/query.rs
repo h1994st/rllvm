@@ -3,7 +3,7 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::LazyLock,
+    sync::{LazyLock, Mutex},
 };
 
 use rllvm_core::catalog::read_catalog;
@@ -962,11 +962,17 @@ fn a_bad_stdin_line_fails_before_the_catalog_is_read() {
 
 #[test]
 fn empty_stdin_answers_nothing() {
+    // The catalog does not exist: with no query to answer, none is read.
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_two_module_catalog();
-    let output = query_stdin(&scratch, catalog, &[], "");
+    let catalog = scratch.path().join("absent.json");
+    let output = query_stdin(&scratch, &catalog, &[], "");
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
+    assert!(
+        output.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// `main` calls `add` across two archive members; `sub` and `unused` sit in
@@ -2135,6 +2141,29 @@ void call_inner(struct outer *o) { o->in.b(0, 1); }
 void call_plain(cb_t f) { f(0, 1); }
 "#;
 
+/// `FIELD_SOURCE` extracted once per flag set; tests receive clones.
+static FIELD_FACTS: LazyLock<Mutex<HashMap<Vec<String>, rllvm_query::ModuleFacts>>> =
+    LazyLock::new(Default::default);
+
+/// [`FIELD_SOURCE`] extracted with `flags`, from [`FIELD_FACTS`] once one
+/// test has paid for it. The lock is not held across clang, which would
+/// serialize every first compile; two threads that miss together both
+/// compile, and the first to insert wins.
+fn field_facts(flags: &[&str]) -> rllvm_query::ModuleFacts {
+    let key: Vec<String> = flags.iter().map(|flag| flag.to_string()).collect();
+    if let Some(facts) = FIELD_FACTS.lock().unwrap().get(&key) {
+        return facts.clone();
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, flags);
+    FIELD_FACTS
+        .lock()
+        .unwrap()
+        .entry(key)
+        .or_insert(facts)
+        .clone()
+}
+
 fn field(record: &str, offset: u64) -> rllvm_query::FieldRef {
     rllvm_query::FieldRef {
         record: record.into(),
@@ -2207,8 +2236,7 @@ fn one_use_field(
 fn a_field_dispatch_names_the_same_field_at_every_optimization_level() {
     use rllvm_query::FieldBasis;
     for (level, basis) in [("-O0", FieldBasis::StructGep), ("-O2", FieldBasis::Tbaa)] {
-        let scratch = tempfile::tempdir().unwrap();
-        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level, "-g"]);
+        let facts = field_facts(&[level, "-g"]);
         let evidence = site_field(&facts, "dispatch").unwrap_or_else(|| panic!("{level}"));
         assert_eq!(evidence.field, field("ops", 8), "{level}");
         assert_eq!(evidence.basis, basis, "{level}");
@@ -2219,8 +2247,7 @@ fn a_field_dispatch_names_the_same_field_at_every_optimization_level() {
 #[test]
 fn a_store_and_an_initializer_name_the_field_the_call_reads() {
     use rllvm_query::{FieldBasis, UseKind};
-    let scratch = tempfile::tempdir().unwrap();
-    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0", "-g"]);
+    let facts = field_facts(&["-O0", "-g"]);
 
     let stored = one_use_field(&facts, "h3", "init", UseKind::StoredToMemory);
     assert_eq!(stored.field, field("ops", 8));
@@ -2250,8 +2277,7 @@ fn a_store_and_an_initializer_name_the_field_the_call_reads() {
 fn a_nested_field_names_its_innermost_record() {
     use rllvm_query::UseKind;
     for level in ["-O0", "-O2"] {
-        let scratch = tempfile::tempdir().unwrap();
-        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level]);
+        let facts = field_facts(&[level]);
         let site = site_field(&facts, "call_inner").unwrap_or_else(|| panic!("{level}"));
         assert_eq!(site.field, field("inner", 8), "{level}");
         let stored = one_use_field(&facts, "h1", "set_inner", UseKind::StoredToMemory);
@@ -2264,20 +2290,18 @@ fn a_nested_field_names_its_innermost_record() {
 /// no field, rather than one borrowed from debug info.
 #[test]
 fn an_anonymous_record_is_named_by_its_typedef_only_where_the_ir_says_so() {
-    let scratch = tempfile::tempdir().unwrap();
-    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0", "-g"]);
+    let facts = field_facts(&["-O0", "-g"]);
     let evidence = site_field(&facts, "call_anon").expect("-O0 names the typed GEP");
     assert_eq!(evidence.field, field("anon_ops", 8));
 
-    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O2", "-g"]);
+    let facts = field_facts(&["-O2", "-g"]);
     assert_eq!(site_field(&facts, "call_anon"), None);
 }
 
 #[test]
 fn a_plain_function_pointer_names_no_field() {
     for level in ["-O0", "-O2"] {
-        let scratch = tempfile::tempdir().unwrap();
-        let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &[level, "-g"]);
+        let facts = field_facts(&[level, "-g"]);
         assert_eq!(site_field(&facts, "call_plain"), None, "{level}");
     }
 }
@@ -2285,8 +2309,7 @@ fn a_plain_function_pointer_names_no_field() {
 #[test]
 fn an_initializer_without_debug_info_names_no_literal_field() {
     use rllvm_query::UseKind;
-    let scratch = tempfile::tempdir().unwrap();
-    let facts = extract_source_with_flags(&scratch, FIELD_SOURCE, &["-O0"]);
+    let facts = field_facts(&["-O0"]);
     for used in ["h1", "h2"] {
         assert_eq!(
             use_fields(&facts, used, "table", UseKind::GlobalInitializer),
@@ -3861,9 +3884,16 @@ fn query_cache_command(scratch: &tempfile::TempDir, args: &[&str]) -> std::proce
 
 #[test]
 fn the_cache_command_reports_and_clears_without_a_catalog() {
+    // Two entries written straight into the configured cache: the command
+    // reads no catalog, so none is built. That a query fills this same
+    // directory is `the_cli_fills_the_configured_cache_and_hits_it_next_time`.
     let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_two_module_catalog();
-    query_json(&scratch, catalog, &["callers", "add"]);
+    let cache = scratch_cache(&scratch, u64::MAX);
+    for key in ["a", "b"] {
+        cache
+            .write(&key.repeat(64), &rllvm_query::ModuleFacts::default())
+            .unwrap();
+    }
 
     let report = query_cache_command(&scratch, &["--json", "cache"]);
     assert!(

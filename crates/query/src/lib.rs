@@ -1839,8 +1839,7 @@ mod tests {
 
     #[test]
     fn value_trace_fields_are_absent_from_other_answers() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = compiled_session(scratch.path(), "t.c", "void a(void) {}\n", &["-O0"]);
+        let session = session_from(&[("a", "b")]);
         let answer = run(&session, &Query::Externals).unwrap();
         assert!(answer.uncertainty.value_trace_lost.is_none());
         assert!(answer.uncertainty.value_trace_diagnostics.is_empty());
