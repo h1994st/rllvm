@@ -3608,6 +3608,46 @@ fn rustc_wrapper_honours_log_level_from_config() {
     );
 }
 
+/// `$RLLVM_LOG_LEVEL` wins over the configured `log_level`, in both directions.
+///
+/// The wrapper logs each compiler run's `exit_status=` at debug level, so it
+/// appears exactly when the effective level is 3 or higher.
+#[test]
+fn rllvm_log_level_overrides_the_configured_level() {
+    let tmp = TempDir::new().unwrap();
+    let base = fs::read_to_string(shared_config_path()).unwrap();
+    let src = tmp.path().join("unit.c");
+    fs::write(&src, "int helper(void){return 7;}\n").unwrap();
+
+    let debug_logged = |configured: u8, from_env: &str| {
+        let cfg = tmp.path().join(format!("config{configured}.toml"));
+        fs::write(&cfg, format!("{base}log_level = {configured}\n")).unwrap();
+        let output = Command::new(cargo_bin("rllvm-cc"))
+            .env("RLLVM_CONFIG", &cfg)
+            .env("RLLVM_LOG_LEVEL", from_env)
+            .args(["-c", "-o"])
+            .arg(tmp.path().join(format!("unit{configured}.o")))
+            .arg(&src)
+            .output()
+            .expect("Failed to run rllvm-cc");
+        assert!(
+            output.status.success(),
+            "build failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stderr).contains("exit_status=")
+    };
+
+    assert!(
+        debug_logged(0, "3"),
+        "RLLVM_LOG_LEVEL=3 did not raise a configured log_level = 0"
+    );
+    assert!(
+        !debug_logged(3, "0"),
+        "RLLVM_LOG_LEVEL=0 did not lower a configured log_level = 3"
+    );
+}
+
 /// The routine skips stay quiet.
 ///
 /// Preprocessing, dependency generation and link-only invocations all skip
