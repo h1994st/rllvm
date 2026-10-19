@@ -1,6 +1,8 @@
 # CMake + rllvm Example
 
-This example demonstrates using rllvm with a CMake project via the toolchain file.
+The toolchain file `cmake/rllvm-toolchain.cmake` sets all four compilers: C,
+C++, Objective-C and Objective-C++. Setting `CC=rllvm-cc CXX=rllvm-cxx` before
+`cmake` works too.
 
 ## Build
 

@@ -1,6 +1,7 @@
 # MCP server + rllvm Example
 
 `rllvm-query mcp` serves the same queries as JSON-RPC 2.0 tools over stdio.
+Answers are always the JSON envelope.
 
 ## Requirements
 
@@ -13,14 +14,16 @@ default `cargo build` does not build.
 ./check.sh
 ```
 
-It captures `lib.c`, then `mcp_session.py` runs two full sessions over stdio —
-one per protocol era the server supports. Each session discovers the server,
-lists its tools, loads the captured module with `inventory`, and asks `defs`
-where `helper` is defined. The check confirms the answer (`lib.c:1`), that the
-query answer carries the aggregate analysis counts but not the per-module
-roster (which rides `load_catalog` and `list_catalogs`), that the modern
-session's cache envelope is well formed (`cacheScope` is `public` or
-`private`), and that stdout carried protocol frames and nothing else.
+It captures `lib.c`, then `mcp_session.py` runs one session per protocol era
+the server supports: discover the server, list its tools, load the module with
+`inventory`, and ask `defs` where `helper` is defined. It checks:
+
+- the answer is `lib.c:1`;
+- it carries the aggregate analysis counts but not the per-module roster,
+  which rides `load_catalog` and `list_catalogs`;
+- the modern session's cache envelope is well formed (`cacheScope` is
+  `public` or `private`);
+- stdout carried protocol frames and nothing else.
 
 ## What a session looks like
 
@@ -53,6 +56,26 @@ the versions the server supports.
   }
 }
 ```
+
+In Claude Code, the [plugin](../claude-plugin/) configures this for you.
+
+## The overlay over MCP
+
+Four tools keep the [call-graph overlay](../callgraph-overlay/):
+
+- `record_edges` takes the records `overlay record` reads, all or none,
+  attaching the overlay beside the catalog first if none is.
+- `save_overlay` is the only tool that writes, appending to the file.
+- `load_overlay` attaches the default file or `path` (required after
+  `inventory`), and refuses to drop unsaved records unless `discard_pending`
+  is set.
+- `list_overlay` shows the edges and annotations, saved or not.
+
+Recorded edges are walked at once: `reach`, `closure` and `slice` take
+`include_overlay` and `min_confidence`, and `reach` and `slice` take
+`include_annotations`. `slice`'s `emit_module`, `guards`, and an `annotate`
+record need a catalog from `load_catalog`. `unload_catalog` reports any
+unsaved records it dropped.
 
 ## Stdout is the protocol
 

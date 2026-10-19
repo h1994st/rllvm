@@ -77,7 +77,7 @@ docker run --rm -v "$(pwd)":/workspace rllvm -c "rllvm-info hello.bc"
 | `rllvm-completions` | Generate shell completions |
 
 `rllvm-query` is not in the image. It links LLVM statically and ships as its
-own crate and formula; see the [README](README.md#queries).
+own crate and formula; see the [README](README.md#analyzing-bitcode).
 
 LLD is installed, so `-fuse-ld=lld`, `wasm-ld` and cross-compilation all work.
 

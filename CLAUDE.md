@@ -80,7 +80,8 @@ reaches becomes public API of `rllvm-core`.
   environment variable, config key or behaviour updates the matching skill in
   the same PR. `examples/claude-plugin/check.sh` catches renamed names, not
   changed meaning.
-- `docs/` is gitignored except `docs/CATALOG.md`.
+- `docs/` is gitignored except `docs/CATALOG.md` and the README's illustrations
+  in `docs/assets/`.
 - Use repository-relative paths. Keep committed benchmark evidence to compact
   summaries; raw logs stay out of Git.
 

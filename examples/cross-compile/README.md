@@ -1,7 +1,8 @@
 # Cross-compilation + rllvm Example
 
 Builds for machines this host is not, and extracts whole-program bitcode for
-each.
+each. Pass `--target=<triple>` as you would to Clang; it reaches the link as
+well as the compile, so a one-shot build works.
 
 Targets `aarch64-unknown-linux-gnu`, plus `riscv64-unknown-linux-gnu` when
 `llvm_objcopy_filepath` is set — the embedding fallback does not model RISC-V
@@ -11,7 +12,7 @@ aarch64 Linux host it is neither, so the script skips there.
 
 ## Requirements
 
-LLD, which links ELF on any host:
+LLD: linking ELF off a non-ELF host needs it.
 
 ```bash
 brew install lld            # macOS
@@ -36,7 +37,11 @@ rllvm-get-bc build/app -o build/app.bc
 ```
 
 `-nostdlib` keeps it to the two translation units, so no cross sysroot is
-needed. The binaries are never run.
+needed; linking libc needs one as usual. The binaries are never run.
+
+The recorded section follows the object's format, not the host's, so a Linux
+ELF built on macOS extracts like any other. Universal (multiple `-arch`)
+builds are unsupported: build and extract one architecture at a time.
 
 ## Why it is worth checking
 

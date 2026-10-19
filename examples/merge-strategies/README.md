@@ -6,11 +6,12 @@
 | --- | --- |
 | `rllvm-get-bc app` | one `.bc` for the whole program |
 | `--merge-strategy partial` | groups by directory, then links the groups |
-| `--merge-strategy archive libfoo.a` | a `.bca` holding one bitcode member per object |
+| `--merge-strategy archive libfoo.a`, or `-b` | a `.bca` holding one bitcode member per object |
 | `-m` | also writes `app.bc.manifest`, one module path per line |
 
 `partial` produces the same module as the default; it exists for link sets too
-large for a single `llvm-link` invocation.
+large for a single `llvm-link` invocation. An archive output is rewritten from
+the current modules, so removed members do not persist.
 
 ## Build and verify
 
