@@ -4213,7 +4213,10 @@ fn the_overlay_cli_records_lists_and_compacts() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("holds none"), "{stderr}");
+    assert!(
+        stderr.contains("include_annotations") && stderr.contains("holds none"),
+        "{stderr}"
+    );
 
     let retract = serde_json::json!({
         "op": "retract",
