@@ -25,9 +25,9 @@ from benchmarks.validation import (
 )
 
 
-@pytest.fixture
-def _validation_context(request, tmp_path: Path) -> None:
-    root = tmp_path / "validation space"
+@pytest.fixture(scope="class")
+def _validation_context(request, tmp_path_factory) -> None:
+    root = tmp_path_factory.mktemp("validation") / "validation space"
     root.mkdir()
     tools = tools_at(root)
     env = environment(root, tools)
@@ -88,7 +88,7 @@ def _validation_context(request, tmp_path: Path) -> None:
         env,
         "extract",
     )
-    instance = request.instance
+    instance = request.cls
     instance.root = root
     instance.tools = tools
     instance.env = env

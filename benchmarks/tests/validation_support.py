@@ -6,9 +6,12 @@ import shutil
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 from benchmarks.fixtures import PreparedFixture
 from benchmarks.process import Command, checked
+from benchmarks.recipes import Edit, Recipe
+from benchmarks.records import read_records as _read_records
 from benchmarks.toolchains import Toolchain, child_environment, sha256
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -106,6 +109,10 @@ def run(argv, root, env, label):
     )
 
 
+def read_records(path: Path) -> list[dict[str, Any]]:
+    return cast(list[dict[str, Any]], _read_records(path))
+
+
 def commit_fixture(prepared: PreparedFixture) -> PreparedFixture:
     """Prepare intentional test inputs with honest current Git identities."""
 
@@ -135,4 +142,85 @@ def commit_fixture(prepared: PreparedFixture) -> PreparedFixture:
         tree=git("rev-parse", "HEAD^{tree}"),
         recipe=replace(prepared.recipe, commit=commit),
         lock_sha256=sha256(lock) if lock.is_file() else None,
+    )
+
+
+def tiny_cmake_fixture(root: Path, *, spaces: bool = False) -> PreparedFixture:
+    """A committed tiny C/C++ CMake fixture whose children record probes."""
+    root.mkdir()
+    discovered = tools_at(root)
+    tools = Toolchain.discover(
+        ("llvm-ranlib", "rllvm-info"),
+        root / ("extra tools" if spaces else "extra-tools"),
+        paths={
+            "llvm-ranlib": Path(discovered.path("llvm-ar")).with_name(
+                "llvm-ranlib"
+            ),
+            "rllvm-info": Path(discovered.path("rllvm-cc")).with_name(
+                "rllvm-info"
+            ),
+        },
+    )
+    tools = replace(discovered, tools=discovered.tools | tools.tools)
+    source = root / ("source with spaces" if spaces else "source")
+    (source / "lib/includes/tiny").mkdir(parents=True)
+    (source / "tests").mkdir()
+    (source / "lib/includes/tiny/tiny.h").write_text(
+        "struct tiny_info { const char *version_str; };\n"
+        "const struct tiny_info *tiny_version(int);\n"
+    )
+    (source / "lib/version.c").write_text(
+        '#include "tiny/tiny.h"\n'
+        'static const struct tiny_info info = {"version"};\n'
+        "const struct tiny_info *tiny_version(int unused){return &info;}\n"
+    )
+    (source / "tests/main.cpp").write_text(
+        '#include <cstdio>\nextern "C" {\n#include "tiny/tiny.h"\n}\n'
+        'int main(){puts(tiny_version(0)->version_str);puts("/tiny [ OK ]\\n'
+        '1 of 1 (100%) tests successful, 0 (0%) test skipped.");return 0;}\n'
+    )
+    (source / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n"
+        "project(tiny LANGUAGES C CXX)\n"
+        "include_directories(lib/includes)\n"
+        "add_library(tiny SHARED lib/version.c)\n"
+        "add_library(tiny_static STATIC lib/version.c)\n"
+        "set_target_properties(tiny tiny_static PROPERTIES "
+        "OUTPUT_NAME tiny ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib "
+        "LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)\n"
+        "add_executable(main tests/main.cpp)\n"
+        "target_link_libraries(main PRIVATE tiny)\n"
+        "set_target_properties(main PROPERTIES "
+        "RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)\n"
+        "execute_process(COMMAND ${CMAKE_COMMAND} -E environment "
+        "OUTPUT_FILE ${CMAKE_BINARY_DIR}/child-environment)\n"
+        "file(WRITE ${CMAKE_BINARY_DIR}/child-cwd ${CMAKE_BINARY_DIR})\n"
+    )
+    recipe = Recipe(
+        "tiny-c-cmake",
+        "tiny",
+        "cmake",
+        "local-fixture",
+        "fixture",
+        (),
+        False,
+        (),
+        (),
+        ("tiny", "tiny_static", "main"),
+        "static",
+        Edit("lib/version.c", '"version"', '"version-rllvm-benchmark"'),
+    )
+    return commit_fixture(
+        PreparedFixture(
+            "tiny",
+            source,
+            recipe,
+            "fixture",
+            "fixture",
+            {},
+            None,
+            tools,
+            (),
+            root / ("prepared fixture.json" if spaces else "fixture.json"),
+        )
     )
