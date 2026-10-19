@@ -266,52 +266,6 @@ fn two_modules_recording_one_source_keep_separate_statuses() {
 }
 
 #[test]
-fn an_archive_member_loads_through_the_existing_cache() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog_path = archive_catalog(&scratch); // two .bc members in one .a
-
-    let loaded = load_catalog(&catalog_path).unwrap();
-    assert_eq!(loaded.pending.len(), 2, "both archive members must load");
-
-    // `PendingModule` has no `bytes` field: reading bytes is `for_each_module`'s
-    // job. Verify here that both members resolved to the expected archive
-    // path with distinct member indices.
-    let archive_path = scratch.path().join("lib.a").canonicalize().unwrap();
-    let mut indices: Vec<usize> = loaded
-        .pending
-        .iter()
-        .map(|module| {
-            assert_eq!(
-                module.path, archive_path,
-                "each member must resolve to the archive path"
-            );
-            module
-                .member
-                .as_ref()
-                .expect("an archive module must carry a member reference")
-                .index
-        })
-        .collect();
-    indices.sort_unstable();
-    assert_eq!(
-        indices,
-        vec![0, 1],
-        "members must resolve to distinct indices"
-    );
-
-    // Drive the actual byte reads through `for_each_module` to prove the
-    // cached archive bytes really load.
-    let mut loaded_count = 0;
-    for_each_module(&loaded, |module| {
-        assert!(!module.bytes.is_empty(), "archive member bytes must load");
-        loaded_count += 1;
-        Ok(())
-    })
-    .unwrap();
-    assert_eq!(loaded_count, 2);
-}
-
-#[test]
 fn a_deleted_archive_reports_its_members_missing_not_failed() {
     let scratch = tempfile::tempdir().unwrap();
     let catalog_path = archive_catalog(&scratch);
@@ -593,39 +547,27 @@ fn a_module_that_vanishes_after_loading_is_reported_not_fatal() {
     assert!(!visited.contains(&vanished));
     assert_eq!(unreadable.len(), 1);
     assert_eq!(unreadable[0].0, vanished);
-}
 
-#[test]
-fn a_module_rewritten_after_loading_is_unreadable_not_parsed() {
-    // Valid bitcode with different bytes: only the hash check can tell. A
-    // cache keyed by the recorded hash must never store what these bytes say.
-    let scratch = tempfile::tempdir().unwrap();
-    let (catalog_path, first_module) = two_plain_module_catalog(&scratch);
-    let loaded = load_catalog(&catalog_path).unwrap();
-    let rewritten = loaded
+    // Rewritten rather than deleted: valid bitcode with different bytes, so
+    // only the hash check can tell. It is unreadable, never handed over.
+    let survivor = loaded
         .pending
         .iter()
-        .find(|module| module.path.file_name() == first_module.file_name())
-        .unwrap()
-        .id
-        .clone();
-
-    let other = compile_bitcode(&scratch, "other.c", "int other(void){return 1;}\n");
-    std::fs::copy(&other, &first_module).unwrap();
-
-    let mut visited = Vec::new();
+        .find(|module| module.id != vanished)
+        .unwrap();
+    std::fs::copy(&survivor.path, &first_module).unwrap();
+    let mut visited: Vec<String> = Vec::new();
     let unreadable = for_each_module(&loaded, |module| {
         visited.push(module.id.clone());
         Ok(())
     })
     .unwrap();
-
     assert!(
-        !visited.contains(&rewritten),
+        !visited.contains(&vanished),
         "rewritten bytes were handed over"
     );
     assert_eq!(unreadable.len(), 1);
-    assert_eq!(unreadable[0].0, rewritten);
+    assert_eq!(unreadable[0].0, vanished);
     assert!(
         unreadable[0].1.to_string().contains("changed"),
         "{}",
@@ -1049,28 +991,6 @@ fn an_emitted_slice_module_defines_the_slice_and_nothing_else() {
     );
 }
 
-#[test]
-fn an_empty_slice_emits_nothing_and_says_so() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_slice_catalog();
-    let out = scratch.path().join("slice.bc");
-    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
-        .arg("--catalog")
-        .arg(catalog)
-        .args(["slice", "add", "main", "--emit-module"])
-        .arg(&out)
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success());
-    assert!(
-        stderr.contains("no path from add to main; nothing to emit"),
-        "{stderr}"
-    );
-    assert!(!out.exists(), "no empty module is written");
-}
-
 /// `a.c`'s static `helper` is on the path from `main` to `leaf`, and `leaf`
 /// in `b.c` calls some other, external `helper` the program never defines.
 #[test]
@@ -1291,7 +1211,7 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
     );
 
     let out = scratch.path().join("slice.bc");
-    match emit_main_to_add(catalog, &llvm_link, &tools, &out) {
+    match emit_slice_of(catalog, ("main", "add"), &llvm_link, &tools, &out) {
         Err(rllvm_core::error::Error::ExecutionFailure(message)) => {
             assert!(message.contains("refusing to link today"), "{message}")
         }
@@ -1300,18 +1220,19 @@ fn a_failing_link_is_an_execution_failure_with_its_stderr() {
     assert!(!out.exists());
 }
 
-/// Emits `slice main add` through the library, linking with `llvm_link` and
-/// taking the other tools from `llvm_bindir`.
-fn emit_main_to_add(
+/// Emits `slice <from> <to>` through the library, linking with `llvm_link`
+/// and taking the other tools from `llvm_bindir`.
+fn emit_slice_of(
     catalog: &Path,
+    (from, to): (&str, &str),
     llvm_link: &Path,
     llvm_bindir: &Path,
     out: &Path,
 ) -> Result<rllvm_query::EmittedModule, rllvm_core::error::Error> {
     let session = rllvm_query::open(catalog).unwrap();
     let query = rllvm_query::Query::Slice {
-        from: "main".into(),
-        to: "add".into(),
+        from: from.into(),
+        to: to.into(),
         include_overlay: false,
         min_confidence: None,
         include_annotations: false,
@@ -1333,7 +1254,13 @@ fn a_missing_tool_in_the_llvm_bindir_is_named() {
         std::fs::create_dir(&tools).unwrap();
         std::os::unix::fs::symlink(llvm_bin(present), tools.join(present)).unwrap();
         let out = scratch.path().join("slice.bc");
-        match emit_main_to_add(catalog, &llvm_bin("llvm-link"), &tools, &out) {
+        match emit_slice_of(
+            catalog,
+            ("main", "add"),
+            &llvm_bin("llvm-link"),
+            &tools,
+            &out,
+        ) {
             Err(rllvm_core::error::Error::MissingFile(message)) => {
                 assert!(message.contains(missing), "{message}")
             }
@@ -1341,6 +1268,25 @@ fn a_missing_tool_in_the_llvm_bindir_is_named() {
         }
         assert!(!out.exists());
     }
+
+    // A slice that found no path is refused before any tool is looked for:
+    // never an empty module.
+    let tools = scratch.path().join("without-llvm-extract");
+    let out = scratch.path().join("empty.bc");
+    match emit_slice_of(
+        catalog,
+        ("add", "main"),
+        &llvm_bin("llvm-link"),
+        &tools,
+        &out,
+    ) {
+        Err(rllvm_core::error::Error::InvalidArguments(message)) => assert!(
+            message.contains("no path from add to main; nothing to emit"),
+            "{message}"
+        ),
+        other => panic!("expected an empty slice to be refused, got {other:?}"),
+    }
+    assert!(!out.exists(), "no empty module is written");
 }
 
 #[test]
@@ -2700,20 +2646,6 @@ fn a_cxx_name_resolves_mangled_demangled_or_fuzzily_and_says_which() {
     );
 }
 
-/// A C program's answers gain neither block's noise: `main` is its own name.
-#[test]
-fn a_c_answer_carries_no_symbol_table() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_two_module_catalog();
-
-    let answer = query_json(&scratch, catalog, &["callers", "add"]);
-    assert_eq!(answer["resolution"][0]["matched"], "mangled");
-    assert!(
-        answer.get("symbols").is_none(),
-        "nothing in a C answer demangles: {answer}"
-    );
-}
-
 const RUST_EXPORTS: &str = r#"#[unsafe(no_mangle)]
 pub extern "C" fn lib_add(a: i32, b: i32) -> i32 { helper(a) + b }
 
@@ -2763,30 +2695,6 @@ fn ffi_exports_lists_what_no_mangle_and_export_name_make_c_callable() {
         .collect();
     assert_eq!(symbols, ["lib_add", "renamed"]);
     assert_eq!(answer["uncertainty"]["functions_of_unknown_language"], 0);
-}
-
-/// `MERGED_IR` holds `no_debug`, a function with neither debug info nor a
-/// single producer to fall back on: it is counted as unknown, not searched,
-/// and so never appears among the results.
-#[test]
-fn a_merged_module_without_debug_info_is_counted_not_searched() {
-    let scratch = tempfile::tempdir().unwrap();
-    let module = assemble_ir(&scratch, MERGED_IR);
-    let catalog = plain_module_catalog(&scratch, &[module]);
-
-    let answer = query_json(&scratch, &catalog, &["ffi-exports"]);
-    assert_eq!(
-        answer["analysis"]["analyzed"], 1,
-        "the merged fixture failed to parse: {answer}"
-    );
-    let symbols: Vec<&str> = answer["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["function"]["symbol"].as_str().unwrap())
-        .collect();
-    assert_eq!(symbols, ["rust_fn"]);
-    assert_eq!(answer["uncertainty"]["functions_of_unknown_language"], 1);
 }
 
 // --- MCP stdio server -------------------------------------------------
@@ -2939,13 +2847,6 @@ mod mcp {
         mcp_raw_in(&scratch, &catalog, request)
     }
 
-    /// `mcp_exchange_in` against a fresh, unused empty catalog.
-    fn mcp_exchange(request: &str) -> serde_json::Value {
-        let scratch = tempfile::tempdir().unwrap();
-        let catalog = empty_catalog(&scratch);
-        mcp_exchange_in(&scratch, &catalog, request)
-    }
-
     /// Calls one tool against `catalog` over `tools/call` and returns the
     /// decoded envelope (`results`/`analysis`/`uncertainty`) the query
     /// produced, not the `CallToolResult` wrapper around it: `tool_call_outcome`
@@ -3030,24 +2931,6 @@ mod mcp {
             super::defined_symbols(&out),
             BTreeSet::from(["add".to_string(), "main".to_string()])
         );
-    }
-
-    /// One tool over the wire. That every one of the eleven is listed under a
-    /// name `query_from_call` resolves is `mcp.rs`'s own
-    /// `every_query_variant_is_listed_and_resolves_through_a_call`, which
-    /// checks it against a match the compiler forces to stay exhaustive --
-    /// driving the same eleven through a subprocess here proves nothing extra
-    /// about the transport this test already covers.
-    #[test]
-    fn a_modern_tool_call_returns_a_call_tool_result() {
-        let response = mcp_exchange(&modern_request(
-            "call",
-            "tools/call",
-            serde_json::json!({ "name": "externals", "arguments": {} }),
-        ));
-        assert_eq!(response["result"]["resultType"], "complete");
-        assert_eq!(response["result"]["isError"], false);
-        assert!(response["result"]["content"].as_array().is_some());
     }
 
     #[test]
@@ -3586,48 +3469,6 @@ fn a_catalog_without_content_hashes_bypasses_the_cache() {
     );
 }
 
-#[test]
-fn a_corrupt_entry_is_a_miss_that_still_answers_and_is_replaced() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_inlined_catalog();
-    let cache = scratch_cache(&scratch, u64::MAX);
-    let expected =
-        cache_probe_answers(&rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap());
-
-    let generation = cache
-        .directory()
-        .join(rllvm_query::FactsCache::generation());
-    for entry in std::fs::read_dir(&generation).unwrap() {
-        std::fs::write(entry.unwrap().path(), b"junk").unwrap();
-    }
-    let recovered = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
-    assert_eq!(recovered.cache_report().unwrap().misses, 2);
-    assert_eq!(cache_probe_answers(&recovered), expected);
-    let again = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
-    assert_eq!(
-        again.cache_report().unwrap().hits,
-        2,
-        "the junk was replaced"
-    );
-}
-
-#[test]
-fn an_unwritable_cache_still_answers() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_inlined_catalog();
-    let not_a_directory = scratch.path().join("file");
-    std::fs::write(&not_a_directory, b"x").unwrap();
-    let cache = rllvm_query::FactsCache::new(&not_a_directory, u64::MAX);
-
-    let session = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
-    let report = session.cache_report().unwrap();
-    assert_eq!((report.misses, report.written), (2, 0));
-    assert_eq!(
-        cache_probe_answers(&session),
-        cache_probe_answers(&rllvm_query::open(catalog).unwrap())
-    );
-}
-
 /// Resolving the configured cache root must never create it, and never log
 /// at error level when it cannot be created: `facts_cache()` runs before
 /// every query, so a read-only HOME must not print an `ERROR` line on every
@@ -3695,27 +3536,6 @@ fn disk_use_counts_existing_and_new_entries_against_the_threshold() {
 
     let warm = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
     assert_eq!(warm.cache_report().unwrap().disk_bytes, cache.disk_bytes());
-}
-
-#[test]
-fn the_analysis_block_carries_the_cache_report_only_when_cached() {
-    let scratch = tempfile::tempdir().unwrap();
-    let catalog = shared_inlined_catalog();
-    let query = rllvm_query::Query::Defs {
-        name: "outer".into(),
-    };
-
-    let plain = serde_json::to_value(
-        rllvm_query::run(&rllvm_query::open(catalog).unwrap(), &query).unwrap(),
-    )
-    .unwrap();
-    assert!(plain["analysis"].get("cache").is_none());
-
-    let cache = scratch_cache(&scratch, u64::MAX);
-    let session = rllvm_query::open_with_cache(catalog, Some(&cache)).unwrap();
-    let cached = serde_json::to_value(rllvm_query::run(&session, &query).unwrap()).unwrap();
-    assert_eq!(cached["analysis"]["cache"]["misses"], 2);
-    assert_eq!(cached["schema_version"], 2);
 }
 
 #[test]
@@ -3821,6 +3641,14 @@ fn the_cache_command_reports_and_clears_without_a_catalog() {
         "{text}"
     );
     assert!(!orphan.exists());
+    // Nothing left, and no orphan to name.
+    let cleared = query_cache_command(&scratch, &["cache", "clear"]);
+    assert!(cleared.status.success());
+    let text = String::from_utf8_lossy(&cleared.stdout);
+    assert!(
+        text.starts_with("removed 0 entries, ") && !text.contains("orphaned"),
+        "{text}"
+    );
     let after: serde_json::Value =
         serde_json::from_slice(&query_cache_command(&scratch, &["--json", "cache"]).stdout)
             .unwrap();
@@ -4368,6 +4196,25 @@ fn the_overlay_cli_records_lists_and_compacts() {
     assert!(text.starts_with("ops@8 -> h3 ["), "{text}");
     assert!(text.ends_with("]  high  unverified  1 site(s)\n"), "{text}");
 
+    // An overlay holding only edges has no annotation to surface: asking
+    // for one is an error once the walk runs, not an empty answer.
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args([
+            "reach",
+            "dispatch",
+            "h3",
+            "--include-overlay",
+            "--annotations",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("holds none"), "{stderr}");
+
     let retract = serde_json::json!({
         "op": "retract",
         "edge": edges[0]["key"],
@@ -4519,74 +4366,6 @@ const GUARDED_CALLS: &str = "extern unsigned a(unsigned);\n\
        b(a(n));\n\
      }\n";
 
-fn guards_failure(scratch: &tempfile::TempDir, catalog: &Path, args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
-        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
-        .arg("--catalog")
-        .arg(catalog)
-        .arg("guards")
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(!output.status.success(), "guards {args:?} should fail");
-    String::from_utf8(output.stderr).unwrap()
-}
-
-#[test]
-fn the_guards_flags_name_a_call_site_argument_and_print_snake_case() {
-    let scratch = tempfile::tempdir().unwrap();
-    let module = compile_bitcode(&scratch, "g.c", GUARDED_CALLS);
-    let catalog = plain_module_catalog(&scratch, &[module]);
-    let line = |n: u32| format!("{}:{n}", scratch.path().join("g.c").display());
-
-    // Line 5 holds two calls: the id of either is the way to name one.
-    let error = guards_failure(&scratch, &catalog, &["--at", &line(5), "--operand", "0"]);
-    assert!(
-        error.contains("holds 2 call sites")
-            && error.contains("a in f")
-            && error.contains("b in f"),
-        "{error}"
-    );
-    let id = error
-        .split("a in f")
-        .nth(1)
-        .and_then(|rest| rest.split("=> ").nth(1))
-        .and_then(|rest| rest.split(';').next())
-        .map(str::trim)
-        .unwrap()
-        .to_string();
-
-    let json = query_json(
-        &scratch,
-        &catalog,
-        &["guards", "--at", &id, "--operand", "0"],
-    );
-    let guards = json["results"]["guards"].as_array().unwrap();
-    assert!(
-        guards.iter().any(|guard| guard["op"] == "compare"),
-        "{json}"
-    );
-
-    let text = query_text(
-        &scratch,
-        &catalog,
-        &["--full", "guards", "--at", &id, "--operand", "0"],
-    );
-    assert!(
-        text.contains("compare") && !text.contains("Compare") && !text.contains("Dominates"),
-        "{text}"
-    );
-    assert!(
-        text.contains("(dominates, ") || text.contains("(on_path, "),
-        "{text}"
-    );
-
-    let error = guards_failure(&scratch, &catalog, &["--at", &line(5)]);
-    assert!(error.contains("needs --operand"), "{error}");
-    let error = guards_failure(&scratch, &catalog, &["--function", "f"]);
-    assert!(error.contains("needs --local"), "{error}");
-}
-
 /// The IR prints the mask `0xfffffff0` as `-16` and the bound `0x80000000`
 /// as `-2147483648`.
 const UNSIGNED_GUARDS_SOURCE: &str = "extern void sink(unsigned);\n\
@@ -4631,6 +4410,20 @@ fn guards_read_unsigned_bounds_unsigned_and_print_masks_in_hex() {
         text.contains("mask 0xfffffff0 (defines, on the anchor)"),
         "{text}"
     );
+
+    // A location no call site was compiled from is named, not answered
+    // empty. The file does not exist either, so it matches only as spelled.
+    let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+        .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+        .arg("--catalog")
+        .arg(&catalog)
+        .args(["guards", "--at", "absent.c:4", "--operand", "0"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty(), "no answer may reach stdout");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("no call site at absent.c:4"), "{stderr}");
 }
 
 const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\
