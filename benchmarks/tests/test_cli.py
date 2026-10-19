@@ -10,10 +10,13 @@ from typer.testing import CliRunner
 
 from benchmarks.cli import app
 from benchmarks.fixtures import PreparedFixture
-from benchmarks.recipes import Edit, Recipe, get_recipe
+from benchmarks.recipes import get_recipe
 from benchmarks.records import read_json, write_json
 from benchmarks.runner import RunOptions, RunResult
-from benchmarks.tests.validation_support import commit_fixture, tools_at
+from benchmarks.tests.validation_support import (
+    read_records,
+    tiny_cmake_fixture,
+)
 from benchmarks.toolchains import Toolchain
 from benchmarks.workspace import Workspace
 
@@ -140,91 +143,14 @@ def test_run_rejects_invalid_counts_before_creating_output(
     assert not output.exists()
 
 
-def _tiny(tmp_path: Path) -> PreparedFixture:
-    root = tmp_path / "tiny fixture"
-    root.mkdir()
-    discovered = tools_at(root)
-    extra = Toolchain.discover(
-        ("llvm-ranlib", "rllvm-info"),
-        root / "extra tools",
-        paths={
-            "llvm-ranlib": Path(discovered.path("llvm-ar")).with_name(
-                "llvm-ranlib"
-            ),
-            "rllvm-info": Path(discovered.path("rllvm-cc")).with_name(
-                "rllvm-info"
-            ),
-        },
-    )
-    tools = replace(discovered, tools=discovered.tools | extra.tools)
-    source = root / "source with spaces"
-    (source / "lib/includes/tiny").mkdir(parents=True)
-    (source / "tests").mkdir()
-    (source / "lib/includes/tiny/tiny.h").write_text(
-        "struct tiny_info { const char *version_str; };\n"
-        "const struct tiny_info *tiny_version(int);\n"
-    )
-    (source / "lib/version.c").write_text(
-        '#include "tiny/tiny.h"\n'
-        'static const struct tiny_info info = {"version"};\n'
-        "const struct tiny_info *tiny_version(int unused){return &info;}\n"
-    )
-    (source / "tests/main.cpp").write_text(
-        '#include <cstdio>\nextern "C" {\n#include "tiny/tiny.h"\n}\n'
-        'int main(){puts(tiny_version(0)->version_str);puts("/tiny [ OK ]\\n'
-        '1 of 1 (100%) tests successful, 0 (0%) test skipped.");return 0;}\n'
-    )
-    (source / "CMakeLists.txt").write_text(
-        "cmake_minimum_required(VERSION 3.20)\n"
-        "project(tiny LANGUAGES C CXX)\n"
-        "include_directories(lib/includes)\n"
-        "add_library(tiny SHARED lib/version.c)\n"
-        "add_library(tiny_static STATIC lib/version.c)\n"
-        "set_target_properties(tiny tiny_static PROPERTIES "
-        "OUTPUT_NAME tiny ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib "
-        "LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)\n"
-        "add_executable(main tests/main.cpp)\n"
-        "target_link_libraries(main PRIVATE tiny)\n"
-        "set_target_properties(main PROPERTIES "
-        "RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/tests)\n"
-    )
-    recipe = Recipe(
-        "tiny-c-cmake",
-        "tiny",
-        "cmake",
-        "local-fixture",
-        "fixture",
-        (),
-        False,
-        (),
-        (),
-        ("tiny", "tiny_static", "main"),
-        "static",
-        Edit("lib/version.c", '"version"', '"version-rllvm-benchmark"'),
-    )
-    return commit_fixture(
-        PreparedFixture(
-            "tiny",
-            source,
-            recipe,
-            "fixture",
-            "fixture",
-            {},
-            None,
-            tools,
-            (),
-            root / "prepared fixture.json",
-        )
-    )
-
-
 @pytest.mark.full
-def test_cli_smoke_and_offline_report_use_saved_records(
+def test_cli_smoke_run_preserves_base_references_and_reports_offline(
     tmp_path: Path,
 ) -> None:
-    prepared = _tiny(tmp_path)
+    prepared = tiny_cmake_fixture(tmp_path / "tiny fixture", spaces=True)
     write_json(prepared.manifest_path, prepared.manifest())
     output = tmp_path / "run output with spaces"
+    # The default of two extraction repeats gives repeat 1 its own log pairs.
     result = runner.invoke(
         app,
         [
@@ -234,17 +160,103 @@ def test_cli_smoke_and_offline_report_use_saved_records(
             "--smoke",
             "--jobs",
             "2",
-            "--extraction-repeats",
-            "1",
             "--output",
             str(output),
         ],
     )
     assert result.exit_code == 0, result.stderr
     group = read_json(output / "run-group.json")
-    assert group["kind"] == "workflow-run-group"
     runs = cast(list[dict[str, Any]], group["runs"])
     run_manifest = Path(runs[0]["manifest"])
+    root = run_manifest.parent
+
+    # Scheduler checks read the run directory before any report rewrites it.
+    manifest = read_json(run_manifest)
+    assert manifest["status"] == "valid", manifest
+    assert cast(dict[str, Any], manifest["result"])["failed_samples"] == 0
+    samples = read_records(root / "samples.jsonl")
+    assert len(samples) == 12
+    assert all(s["valid"] for s in samples)
+    commands = read_records(root / "commands.jsonl")
+    log_pairs = [
+        (c["measurement"]["stdout"], c["measurement"]["stderr"])
+        for c in commands
+        if c.get("measurement") is not None
+    ]
+    assert len(log_pairs) == len(set(log_pairs))
+    edits = read_records(root / "operations.jsonl")
+    for arm in (
+        "native",
+        "wrapped-uncached",
+        "wrapped-empty-cache",
+        "wrapped-primed-cache",
+    ):
+        build = root / "arms" / arm / "build"
+        assert Path((build / "child-cwd").read_text()) == build
+        child_env = dict(
+            line.split("=", 1)
+            for line in (build / "child-environment").read_text().splitlines()
+            if "=" in line
+        )
+        recorded_env = next(
+            c["command"]["env"]
+            for c in commands
+            if c["arm"] == arm and c["phase"] == "configure"
+        )
+        assert all(child_env[k] == v for k, v in recorded_env.items())
+    api = [
+        c
+        for c in commands
+        if c["phase"] == "api-probe"
+        and c["command"]["argv"][0].endswith("/version")
+    ]
+    assert all(
+        Path(c["measurement"]["stdout"]).read_text()
+        == (
+            "version-rllvm-benchmark\n"
+            if c["state"] == "edited"
+            else "version\n"
+        )
+        for c in api
+    )
+    assert (
+        prepared.recipe.edit.after
+        not in (prepared.source / prepared.recipe.edit.path).read_text()
+    )
+    prime = [c for c in commands if c["phase"] == "prime-build"]
+    clean = [
+        c
+        for c in commands
+        if c["phase"] == "clean-build" and c["arm"] == "wrapped-primed-cache"
+    ]
+    assert prime[0]["command"] == clean[0]["command"]
+    assert all(
+        c["sequence"]
+        < next(e["sequence"] for e in edits if e["operation"] == "apply-edit")
+        for c in prime
+    )
+    retained = [
+        e for e in edits if e["operation"] == "reset" and e.get("retain_cache")
+    ]
+    assert retained and any(e["cache_bytes_before"] > 0 for e in retained)
+    assert all(
+        "RLLVM_BENCHMARK_EVENTS" not in c["command"]["env"]
+        for c in commands
+        if c["category"] == "timed"
+    )
+    assert all(
+        s["gates"]["edited_ir"]["valid"]
+        for s in samples
+        if s["state"] == "edited" and s["arm"] != "native"
+    )
+    diagnostics = read_records(root / "diagnostics.jsonl")
+    assert diagnostics and all(d["valid"] for d in diagnostics)
+    assert diagnostics[1]["summary"]["event_ids"]
+    assert set(diagnostics[0]["summary"]["event_ids"]).isdisjoint(
+        diagnostics[1]["summary"]["event_ids"]
+    )
+
+    assert group["kind"] == "workflow-run-group"
     assert read_json(run_manifest)["status"] == "valid"
 
     report_root = tmp_path / "offline report"
