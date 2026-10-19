@@ -2127,7 +2127,7 @@ mod tests {
         let versions = result["supportedVersions"].as_array().unwrap();
         assert!(versions.iter().any(|v| v == MODERN));
         assert!(
-            versions.iter().any(|v| v == LEGACY),
+            versions.iter().any(|v| v == "2025-06-18"),
             "a dual-era server supports both"
         );
         assert!(result["capabilities"]["tools"].is_object());
@@ -2170,12 +2170,14 @@ mod tests {
 
     #[test]
     fn a_legacy_initialize_selects_legacy_semantics() {
-        let response = respond(&format!(
-            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize",
-             "params":{{"protocolVersion":"{LEGACY}","capabilities":{{}},
-             "clientInfo":{{"name":"t","version":"1"}}}}}}"#
-        ));
-        assert_eq!(response["result"]["protocolVersion"], LEGACY);
+        // The date itself, not `LEGACY`: a legacy client sends this string,
+        // so a change to the constant must fail here.
+        let response = respond(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize",
+             "params":{"protocolVersion":"2025-06-18","capabilities":{},
+             "clientInfo":{"name":"t","version":"1"}}}"#,
+        );
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
         assert!(response["result"]["capabilities"]["tools"].is_object());
         assert!(
             response["result"]["resultType"].is_null(),
@@ -2201,7 +2203,7 @@ mod tests {
             response["error"].is_null(),
             "an unsupported requested version must counter-offer, not error: {response:?}"
         );
-        assert_eq!(response["result"]["protocolVersion"], LEGACY);
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
     }
 
     #[test]

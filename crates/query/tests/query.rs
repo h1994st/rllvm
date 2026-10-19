@@ -502,22 +502,56 @@ fn two_module_catalog(scratch: &tempfile::TempDir) -> PathBuf {
     archive_catalog_of(scratch, "two", ADD_AND_MAIN)
 }
 
+/// The name every [`SHARED_FIXTURES`] directory starts with.
+const SHARED_FIXTURES_PREFIX: &str = "query-fixtures-";
+
+/// How old an earlier run's [`SHARED_FIXTURES`] directory must be before a
+/// later run removes it: far longer than any run, so never one in use.
+const STALE_SHARED_FIXTURES: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
 /// One fresh directory per test process for catalogs no test modifies.
 ///
 /// Fresh rather than a fixed path: `llvm-ar rs` inserts into an existing
 /// archive, so a catalog left by an earlier run would keep stale members.
-/// A static is never dropped, so each run leaves one directory under
-/// `target/tmp`; `cargo clean` removes it. Tests that write beside their
-/// catalog -- an overlay, an emitted module, a renamed copy -- must not use
-/// these; they build their own in their scratch directory.
+/// A static is never dropped, so each run leaves its directory under
+/// `target/tmp`; the next run removes those older than
+/// [`STALE_SHARED_FIXTURES`], and `cargo clean` removes the rest. Tests that
+/// write beside their catalog -- an overlay, an emitted module, a renamed
+/// copy -- must not use these; they build their own in their scratch
+/// directory.
 static SHARED_FIXTURES: LazyLock<tempfile::TempDir> = LazyLock::new(|| {
     let root = Path::new(env!("CARGO_TARGET_TMPDIR"));
     std::fs::create_dir_all(root).unwrap();
+    remove_stale_shared_fixtures(root);
     tempfile::Builder::new()
-        .prefix("query-fixtures-")
+        .prefix(SHARED_FIXTURES_PREFIX)
         .tempdir_in(root)
         .unwrap()
 });
+
+/// Removes earlier runs' [`SHARED_FIXTURES`] directories older than
+/// [`STALE_SHARED_FIXTURES`], so local runs do not pile up. Runs before this
+/// process creates its own; a failure only leaves a directory behind.
+fn remove_stale_shared_fixtures(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(SHARED_FIXTURES_PREFIX)
+            && entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age > STALE_SHARED_FIXTURES);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
 
 /// Builds one shared catalog in a subdirectory of its own under
 /// [`SHARED_FIXTURES`], kept beside the catalog it holds. Not the shared
@@ -4416,12 +4450,19 @@ fn a_walk_over_a_named_overlay_needs_the_file() {
     let answer = query_text(&scratch, catalog, &walk);
     assert!(answer.contains("main"), "{answer}");
 
-    // The catalog is shared by every read-only test in this process: one
-    // that recorded or saved an overlay against it would have written here.
-    assert!(
-        !rllvm_query::default_overlay_path(catalog).exists(),
-        "a test wrote the default overlay beside the shared catalog"
-    );
+    // These catalogs are shared by every read-only test in this process: one
+    // that recorded or saved an overlay against them would have written here.
+    for shared in [
+        shared_two_module_catalog(),
+        shared_slice_catalog(),
+        shared_inlined_catalog(),
+    ] {
+        assert!(
+            !rllvm_query::default_overlay_path(shared).exists(),
+            "a test wrote the default overlay beside {}",
+            shared.display()
+        );
+    }
 }
 
 #[test]
