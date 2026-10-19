@@ -76,13 +76,13 @@ rllvm-query --catalog release-cat/catalog.json reach \
 ```
 
 ```text
-call              <quiche::tls::Handshake>::do_handshake
+call              <quiche::tls::Handshake>::do_handshake -> SSL_do_handshake
 binding           SSL_do_handshake  (unique, 1 candidate(s))
-call              SSL_do_handshake
+call              SSL_do_handshake -> bssl::ssl_run_handshake(bssl::SSL_HANDSHAKE*, bool*)
 binding           bssl::ssl_run_handshake(bssl::SSL_HANDSHAKE*, bool*)  (unique, 1 candidate(s))
-call              bssl::ssl_run_handshake(bssl::SSL_HANDSHAKE*, bool*)
+call              bssl::ssl_run_handshake(bssl::SSL_HANDSHAKE*, bool*) -> bssl::ssl_handle_open_record(ssl_st*, bool*, bssl::ssl_open_record_t, unsigned long, unsigned char)
 binding           bssl::ssl_handle_open_record(ssl_st*, bool*, bssl::ssl_open_record_t, unsigned long, unsigned char)  (unique, 1 candidate(s))
-call              bssl::ssl_handle_open_record(ssl_st*, bool*, bssl::ssl_open_record_t, unsigned long, unsigned char)
+call              bssl::ssl_handle_open_record(ssl_st*, bool*, bssl::ssl_open_record_t, unsigned long, unsigned char) -> bssl::ssl_send_alert(ssl_st*, int, int)
 binding           bssl::ssl_send_alert(ssl_st*, int, int)  (unique, 1 candidate(s))
 
 note: 'ssl_send_alert' matched loosely, gathering 1 symbol(s)

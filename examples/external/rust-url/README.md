@@ -69,12 +69,12 @@ rllvm-query --catalog cat/catalog.json reach rust_fuzzer_test_input idna::domain
 ```
 
 ```text
-call              rust_fuzzer_test_input
-call              parse::_::__libfuzzer_sys_run
+call              rust_fuzzer_test_input -> parse::_::__libfuzzer_sys_run
+call              parse::_::__libfuzzer_sys_run -> <url::ParseOptions>::parse
 binding           <url::ParseOptions>::parse  (unique, 1 candidate(s))
-call              <url::ParseOptions>::parse
-call              <url::parser::Parser>::parse_file
-call              <url::host::Host<alloc::borrow::Cow<str>>>::parse_cow
+call              <url::ParseOptions>::parse -> <url::parser::Parser>::parse_file
+call              <url::parser::Parser>::parse_file -> <url::host::Host<alloc::borrow::Cow<str>>>::parse_cow
+call              <url::host::Host<alloc::borrow::Cow<str>>>::parse_cow -> idna::domain_to_ascii_from_cow
 binding           idna::domain_to_ascii_from_cow  (unique, 1 candidate(s))
 
 note: 51 indirect call site(s), 1 with an LLVM target bound

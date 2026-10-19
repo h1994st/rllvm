@@ -43,8 +43,8 @@ rllvm-query --catalog cat/catalog.json reach server_client_dispatch cmd_parse_fr
 ```
 
 ```text
-call              server_client_dispatch
-call              server_client_dispatch_command
+call              server_client_dispatch -> server_client_dispatch_command
+call              server_client_dispatch_command -> cmd_parse_from_arguments
 binding           cmd_parse_from_arguments  (unique, 1 candidate(s))
 
 note: 103 indirect call site(s), 2 with an LLVM target bound
