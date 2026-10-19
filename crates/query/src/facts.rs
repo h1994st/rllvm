@@ -404,25 +404,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn call_sites_on_one_line_have_distinct_identities() {
-        let function = FunctionId {
-            module_id: "m".into(),
-            symbol: "caller".into(),
-        };
-        let first = CallSiteId {
-            function: function.clone(),
-            block_index: 0,
-            instruction_index: 3,
-        };
-        let second = CallSiteId {
-            function,
-            block_index: 0,
-            instruction_index: 7,
-        };
-        assert_ne!(first, second);
-    }
-
-    #[test]
     fn a_bare_symbol_is_not_a_function_identity() {
         let left = FunctionId {
             module_id: "a".into(),

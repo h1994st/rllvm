@@ -1583,6 +1583,18 @@ mod tests {
             guards.iter().any(|guard| guard["bound"] == "8"),
             "{payload}"
         );
+
+        // The same session as an `inventory` artifact has no catalog file to
+        // read the anchor's module through: the error says so and names the
+        // way out.
+        registry.artifacts.insert(PathBuf::from("first"));
+        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
+        assert!(
+            text.contains("`guards`")
+                && text.contains("inventory")
+                && text.contains("load_catalog"),
+            "{text}"
+        );
     }
 
     /// A `from` that is not a name would otherwise be dropped, turning a
@@ -1596,29 +1608,6 @@ mod tests {
             json!({ "function": "a", "local": "x", "from": 7 }),
         );
         assert!(text.contains("`from`"), "{text}");
-    }
-
-    /// An `inventory` artifact has no catalog file to read the anchor's
-    /// module through: the error says so and names the way out.
-    #[test]
-    fn guards_on_an_inventory_artifact_names_load_catalog() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = crate::testing::compiled_session(
-            scratch.path(),
-            "t.c",
-            "extern void sink(unsigned);\nvoid f(unsigned n) {\n  sink(n);\n}\n",
-            &["-O0", "-g"],
-        );
-        let mut registry = Registry::with_sessions(vec![("first", session)]);
-        registry.artifacts.insert(PathBuf::from("first"));
-        let at = format!("{}:3", scratch.path().join("t.c").display());
-        let text = tool_error(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
-        assert!(
-            text.contains("`guards`")
-                && text.contains("inventory")
-                && text.contains("load_catalog"),
-            "{text}"
-        );
     }
 
     /// The guard the fixed-length `[Query; 9]` could not give: every variant
@@ -1670,15 +1659,13 @@ mod tests {
             Management::all().len() + sample_queries().len(),
             "every listed tool must come from exactly one variant of one of the two surfaces"
         );
-    }
 
-    /// A tool name is one spelling on both sides: listed once, and the same
-    /// literal the dispatcher matches. Covers collisions across the two
-    /// surfaces too -- a query named `inventory` would be unreachable,
-    /// because management names are matched first.
-    #[test]
-    fn no_two_tools_share_a_name() {
-        let mut listed = listed_tool_names();
+        // A tool name is one spelling on both sides: listed once, and the
+        // same literal the dispatcher matches. Covers collisions across the
+        // two surfaces too -- a query named `inventory` would be
+        // unreachable, because management names are matched first. The
+        // count above cannot catch that: a shared name still counts twice.
+        let mut listed = listed;
         listed.sort();
         let count = listed.len();
         listed.dedup();
@@ -1902,17 +1889,6 @@ mod tests {
         assert!(!Path::new("never-written.bc").exists());
     }
 
-    /// One loaded catalog is the default, so an agent working on a single
-    /// program never names it.
-    #[test]
-    fn one_loaded_catalog_answers_without_being_named() {
-        let mut registry = one_catalog();
-        assert_eq!(
-            call(&mut registry, "callers", json!({ "name": "b" }))["isError"],
-            false
-        );
-    }
-
     /// With several loaded, picking one would answer confidently about the
     /// wrong program. The error names them instead.
     #[test]
@@ -2026,8 +2002,11 @@ mod tests {
         );
     }
 
+    /// A `load_catalog` that cannot be carried out -- a path it cannot read,
+    /// or no path at all -- is a tool error the client sees, not a protocol
+    /// error.
     #[test]
-    fn a_load_that_cannot_read_its_path_is_a_tool_error_not_a_protocol_error() {
+    fn a_load_that_cannot_be_carried_out_is_a_tool_error_not_a_protocol_error() {
         let mut registry = Registry::new();
         let result = call(
             &mut registry,
@@ -2035,11 +2014,7 @@ mod tests {
             json!({ "path": "/nonexistent/catalog.json" }),
         );
         assert_eq!(result["isError"], true);
-    }
 
-    #[test]
-    fn a_management_call_missing_its_argument_is_a_tool_error() {
-        let mut registry = Registry::new();
         let text = call_text(&mut registry, "load_catalog", json!({}));
         assert!(text.contains("`path`"), "{text}");
     }
@@ -2061,11 +2036,8 @@ mod tests {
             text.contains("parser.c"),
             "the error must name the location it could not parse: {text}"
         );
-    }
 
-    #[test]
-    fn a_valid_location_still_answers() {
-        let mut registry = one_catalog();
+        // The positive control: the same tool with the line answers.
         let result = call(
             &mut registry,
             "indirect_targets",
@@ -2088,6 +2060,128 @@ mod tests {
             .expect("a request with an id must be answered");
         assert_eq!(response["error"]["code"], -32600);
         assert_eq!(response["id"], 1);
+    }
+
+    /// A modern request line, carrying the `_meta` block every one must.
+    fn modern_request(method: &str) -> String {
+        json!({
+            "jsonrpc": "2.0", "id": method, "method": method,
+            "params": { "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MODERN,
+                "io.modelcontextprotocol/clientInfo": { "name": "rllvm-test", "version": "1.0.0" },
+                "io.modelcontextprotocol/clientCapabilities": {}
+            }}
+        })
+        .to_string()
+    }
+
+    /// The one response `line` gets.
+    fn respond(line: &str) -> Value {
+        handle_line(&mut one_catalog(), line).expect("a request with an id must be answered")
+    }
+
+    #[test]
+    fn a_modern_request_is_served_without_a_handshake() {
+        let response = respond(&modern_request("tools/list"));
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(
+            response["result"]["cacheScope"], "private",
+            "modern cacheScope must be a spec-valid MCP enum value (public|private)"
+        );
+        assert!(response["result"]["tools"].as_array().unwrap().len() >= 9);
+    }
+
+    #[test]
+    fn server_discover_returns_supported_versions() {
+        let response = respond(&modern_request("server/discover"));
+        let result = &response["result"];
+        assert_eq!(result["resultType"], "complete");
+        let versions = result["supportedVersions"].as_array().unwrap();
+        assert!(versions.iter().any(|v| v == MODERN));
+        assert!(
+            versions.iter().any(|v| v == "2025-06-18"),
+            "a dual-era server supports both"
+        );
+        assert!(result["capabilities"]["tools"].is_object());
+        assert!(
+            result["ttlMs"].is_number(),
+            "DiscoverResult extends CacheableResult"
+        );
+    }
+
+    #[test]
+    fn a_request_without_client_capabilities_is_rejected() {
+        // `clientCapabilities` is required; accepting its absence would make the
+        // server pass tests a conforming client would fail against.
+        let response = respond(
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": MODERN } }
+            })
+            .to_string(),
+        );
+        assert_eq!(response["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn an_unsupported_version_returns_minus_32022_with_the_supported_list() {
+        let response = respond(
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": { "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "1900-01-01",
+                    "io.modelcontextprotocol/clientCapabilities": {}
+                }}
+            })
+            .to_string(),
+        );
+        assert_eq!(response["error"]["code"], -32022);
+        let supported = response["error"]["data"]["supported"].as_array().unwrap();
+        assert!(supported.iter().any(|v| v == MODERN));
+    }
+
+    #[test]
+    fn a_legacy_initialize_selects_legacy_semantics() {
+        // The date itself, not `LEGACY`: a legacy client sends this string,
+        // so a change to the constant must fail here.
+        let response = respond(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize",
+             "params":{"protocolVersion":"2025-06-18","capabilities":{},
+             "clientInfo":{"name":"t","version":"1"}}}"#,
+        );
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+        assert!(response["result"]["capabilities"]["tools"].is_object());
+        assert!(
+            response["result"]["resultType"].is_null(),
+            "legacy results must not carry modern fields"
+        );
+    }
+
+    #[test]
+    fn a_legacy_initialize_with_an_older_version_gets_a_counter_offer() {
+        // The 2025-06-18 lifecycle spec: "If the server supports the
+        // requested protocol version, it MUST respond with the same
+        // version. Otherwise, the server MUST respond with another protocol
+        // version it supports." That is a successful `InitializeResult`
+        // naming `LEGACY`, not a protocol error -- a legacy client has no
+        // fall-forward mechanism, so an error would be exactly the dead end
+        // the counter-offer exists to avoid.
+        let response = respond(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize",
+             "params":{"protocolVersion":"2024-11-05","capabilities":{},
+             "clientInfo":{"name":"t","version":"1"}}}"#,
+        );
+        assert!(
+            response["error"].is_null(),
+            "an unsupported requested version must counter-offer, not error: {response:?}"
+        );
+        assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+    }
+
+    #[test]
+    fn malformed_json_returns_minus_32700() {
+        let response = respond("{not json");
+        assert_eq!(response["error"]["code"], -32700);
     }
 
     /// The overlay fixture loaded as `catalog.json` in `scratch`, so its

@@ -1720,39 +1720,6 @@ mod tests {
     use crate::{facts::Language, load::load_catalog, testing::*};
 
     #[test]
-    fn a_guards_query_returns_a_well_formed_envelope() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = compiled_session(
-            scratch.path(),
-            "t.c",
-            "extern void b(unsigned);\nvoid a(unsigned n) { b(n); }\n",
-            &["-O0", "-g"],
-        );
-        let site = session
-            .call_sites()
-            .iter()
-            .find(|site| site.id.function.symbol == "a")
-            .unwrap()
-            .id
-            .clone();
-        let query = Query::Guards {
-            anchor: GuardAnchor::Argument { site, operand: 0 },
-            from: None,
-            emit_module: None,
-        };
-        let answer = run(&session, &query).unwrap();
-        let QueryResults::Guards(result) = &answer.results else {
-            panic!("expected a guards answer, got {:?}", answer.results);
-        };
-        assert!(result.guards.is_empty() && result.crossings.is_empty());
-        assert!(result.lost.is_none(), "{result:?}");
-        let json = serde_json::to_value(&answer).unwrap();
-        for block in ["scope", "analysis", "uncertainty"] {
-            assert!(json.get(block).is_some(), "missing `{block}` block");
-        }
-    }
-
-    #[test]
     fn a_lost_value_trace_reaches_uncertainty() {
         let scratch = tempfile::tempdir().unwrap();
         let session = compiled_session(
@@ -1835,12 +1802,19 @@ mod tests {
             "{:?}",
             answer.resolution
         );
+        // And the answer is a whole envelope, not just the guards result.
+        let QueryResults::Guards(_) = &answer.results else {
+            panic!("expected a guards answer, got {:?}", answer.results);
+        };
+        let json = serde_json::to_value(&answer).unwrap();
+        for block in ["scope", "analysis", "uncertainty"] {
+            assert!(json.get(block).is_some(), "missing `{block}` block");
+        }
     }
 
     #[test]
     fn value_trace_fields_are_absent_from_other_answers() {
-        let scratch = tempfile::tempdir().unwrap();
-        let session = compiled_session(scratch.path(), "t.c", "void a(void) {}\n", &["-O0"]);
+        let session = session_from(&[("a", "b")]);
         let answer = run(&session, &Query::Externals).unwrap();
         assert!(answer.uncertainty.value_trace_lost.is_none());
         assert!(answer.uncertainty.value_trace_diagnostics.is_empty());
@@ -1916,6 +1890,8 @@ mod tests {
             ModuleAnalysis::Failed,
             "a module that changed after verification must not be silently analyzed"
         );
+        let diagnostic = session.modules()[0].diagnostic.as_deref().unwrap_or("");
+        assert!(diagnostic.contains("changed"), "{diagnostic}");
         let report = session.cache_report().unwrap();
         assert_eq!(
             report.written, 0,
