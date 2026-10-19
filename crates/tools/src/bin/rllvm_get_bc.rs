@@ -5,9 +5,8 @@ use std::{
 
 use clap::Parser;
 use object::Object;
-use rllvm::cli::ExtractionArgs;
+use rllvm::cli::{ExtractionArgs, verbose_log_level};
 use rllvm_core::{config::try_rllvm_config, error::Error, merge::MergeStrategy, utils::*};
-use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 pub fn run() -> Result<(), Error> {
@@ -23,17 +22,10 @@ pub fn run() -> Result<(), Error> {
         return extract_catalog(&args, false);
     }
 
-    // Set log level
-    // The verbose flag will override the configured log level
-    let log_level = if args.verbose == 0 {
-        try_rllvm_config()?.log_level()
-    } else {
-        match args.verbose {
-            1 => Level::WARN,
-            2 => Level::INFO,
-            3 => Level::DEBUG,
-            _ => Level::TRACE,
-        }
+    // Set log level. `-v` overrides the configured level.
+    let log_level = match verbose_log_level(args.verbose) {
+        Some(level) => level,
+        None => try_rllvm_config()?.log_level(),
     };
     // Diagnostics belong on stderr: these wrappers stand in for a compiler, and
     // anything on stdout is captured as build output (`-E` preprocessing,

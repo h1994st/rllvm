@@ -14,10 +14,10 @@ use clap::{Parser, ValueEnum};
 
 use rllvm_core::merge::MergeStrategy;
 
-/// The log level `--rllvm-verbose` asks for.
+/// The log level `--rllvm-verbose`, or `rllvm-get-bc -v`, asks for.
 ///
 /// `None` means the flag was not given, so the configured `log_level` stands.
-/// Shared so the wrappers cannot map the same number to different levels.
+/// Shared so the binaries cannot map the same number to different levels.
 pub fn verbose_log_level(verbose: u8) -> Option<tracing::Level> {
     match verbose {
         0 => None,
