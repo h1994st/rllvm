@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.3.0](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.2.0...rllvm-plugin-v0.3.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* refuse get-bc output over a module it reads ([#332](https://github.com/h1994st/rllvm/issues/332))
+* surface annotated flows on reach and slice paths ([#329](https://github.com/h1994st/rllvm/issues/329))
+* record annotate verdicts in a version-2 overlay ([#328](https://github.com/h1994st/rllvm/issues/328))
+* add the guards query for value guards and clamps ([#327](https://github.com/h1994st/rllvm/issues/327))
+
+### Features
+
+* add the guards query for value guards and clamps ([#327](https://github.com/h1994st/rllvm/issues/327)) ([f2a41de](https://github.com/h1994st/rllvm/commit/f2a41deb40611453928eb72c15df1f4bc035f2b7))
+* distinguish field and signature-only candidate groups ([#316](https://github.com/h1994st/rllvm/issues/316)) ([ddb6c84](https://github.com/h1994st/rllvm/commit/ddb6c84606850d10d06cb1693715454c788fde13))
+* group and record indirect calls by slot ([#322](https://github.com/h1994st/rllvm/issues/322)) ([c57dd05](https://github.com/h1994st/rllvm/commit/c57dd05253a182ed275d5c122241f28a3648a813))
+* record annotate verdicts in a version-2 overlay ([#328](https://github.com/h1994st/rllvm/issues/328)) ([0aef9e3](https://github.com/h1994st/rllvm/commit/0aef9e3d42d1cde602ccde2d52952d900d7c057c))
+* surface annotated flows on reach and slice paths ([#329](https://github.com/h1994st/rllvm/issues/329)) ([93c0586](https://github.com/h1994st/rllvm/commit/93c0586050f44025e2347de13fa72c9c15cbc2e2))
+
+
+### Bug Fixes
+
+* match file:line sites by file, not spelling ([#337](https://github.com/h1994st/rllvm/issues/337)) ([dc2b825](https://github.com/h1994st/rllvm/commit/dc2b82547c8ddf6bdaa420563bd97f684eb64c2a))
+* refuse get-bc output over a module it reads ([b11ad9e](https://github.com/h1994st/rllvm/commit/b11ad9e3cdf72319b9ca07953b6bf0fb8b27db9d))
+* refuse get-bc output over a module it reads ([#332](https://github.com/h1994st/rllvm/issues/332)) ([b11ad9e](https://github.com/h1994st/rllvm/commit/b11ad9e3cdf72319b9ca07953b6bf0fb8b27db9d))
+
 ## [0.2.0](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.1.1...rllvm-plugin-v0.2.0) (2026-10-08)
 
 

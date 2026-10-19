@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.7.0...rllvm-core-v0.7.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* match file:line sites by file, not spelling ([#337](https://github.com/h1994st/rllvm/issues/337)) ([dc2b825](https://github.com/h1994st/rllvm/commit/dc2b82547c8ddf6bdaa420563bd97f684eb64c2a))
+
 ## [0.7.0](https://github.com/h1994st/rllvm/compare/rllvm-core-v0.6.3...rllvm-core-v0.7.0) (2026-10-08)
 
 

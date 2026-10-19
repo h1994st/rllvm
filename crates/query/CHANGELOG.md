@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.9.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.8.0...rllvm-query-v0.9.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* surface annotated flows on reach and slice paths ([#329](https://github.com/h1994st/rllvm/issues/329))
+* record annotate verdicts in a version-2 overlay ([#328](https://github.com/h1994st/rllvm/issues/328))
+* add the guards query for value guards and clamps ([#327](https://github.com/h1994st/rllvm/issues/327))
+* an MCP query answer no longer carries `analysis.modules`; the aggregate counts stay, and `load_catalog` and `list_catalogs` still report the roster.
+
+### Features
+
+* add the guards query for value guards and clamps ([#327](https://github.com/h1994st/rllvm/issues/327)) ([f2a41de](https://github.com/h1994st/rllvm/commit/f2a41deb40611453928eb72c15df1f4bc035f2b7))
+* group and record indirect calls by slot ([#322](https://github.com/h1994st/rllvm/issues/322)) ([c57dd05](https://github.com/h1994st/rllvm/commit/c57dd05253a182ed275d5c122241f28a3648a813))
+* omit the per-module roster from MCP query answers ([#317](https://github.com/h1994st/rllvm/issues/317)) ([fc35b0f](https://github.com/h1994st/rllvm/commit/fc35b0fe033e2f16370ca65adb9b5654c7c04f7b))
+* record annotate verdicts in a version-2 overlay ([#328](https://github.com/h1994st/rllvm/issues/328)) ([0aef9e3](https://github.com/h1994st/rllvm/commit/0aef9e3d42d1cde602ccde2d52952d900d7c057c))
+* surface annotated flows on reach and slice paths ([#329](https://github.com/h1994st/rllvm/issues/329)) ([93c0586](https://github.com/h1994st/rllvm/commit/93c0586050f44025e2347de13fa72c9c15cbc2e2))
+
+
+### Bug Fixes
+
+* match file:line sites by file, not spelling ([#337](https://github.com/h1994st/rllvm/issues/337)) ([dc2b825](https://github.com/h1994st/rllvm/commit/dc2b82547c8ddf6bdaa420563bd97f684eb64c2a))
+* name where each reach call step leads ([#335](https://github.com/h1994st/rllvm/issues/335)) ([ba0f812](https://github.com/h1994st/rllvm/commit/ba0f812a5967c4c5b39c726d2ef2c3b2bf5770f1))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * rllvm-core bumped from 0.7.0 to 0.7.1
+
 ## [0.8.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.7.2...rllvm-query-v0.8.0) (2026-10-08)
 
 

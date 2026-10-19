@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.8.0](https://github.com/h1994st/rllvm/compare/rllvm-v0.7.1...rllvm-v0.8.0) (2026-10-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* refuse get-bc output over a module it reads ([#332](https://github.com/h1994st/rllvm/issues/332))
+
+### Bug Fixes
+
+* keep rllvm-compdb from choosing an unrecorded SDK ([#326](https://github.com/h1994st/rllvm/issues/326)) ([7af14dc](https://github.com/h1994st/rllvm/commit/7af14dc3c264b477d233b5132612c96bee257281))
+* refuse get-bc output over a module it reads ([b11ad9e](https://github.com/h1994st/rllvm/commit/b11ad9e3cdf72319b9ca07953b6bf0fb8b27db9d))
+* refuse get-bc output over a module it reads ([#332](https://github.com/h1994st/rllvm/issues/332)) ([b11ad9e](https://github.com/h1994st/rllvm/commit/b11ad9e3cdf72319b9ca07953b6bf0fb8b27db9d))
+
+
+### Dependencies
+
+* The following workspace dependencies were updated
+  * dependencies
+    * rllvm-core bumped from 0.7.0 to 0.7.1
+
 ## [0.7.1](https://github.com/h1994st/rllvm/compare/rllvm-v0.7.0...rllvm-v0.7.1) (2026-10-10)
 
 
