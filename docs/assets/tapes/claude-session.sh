@@ -26,13 +26,13 @@ done_at=$(ffmpeg -i "$RAW" -vf "freezedetect=n=0.0001:d=1.5,metadata=print:file=
     END            { print start }')
 end=$(awk -v t="$done_at" -v h="$HOLD" 'BEGIN { print t + h }')
 
-# Claude Code's welcome header (terminal rows 1-3, y 58-142 at the tapes'
+# Claude Code's welcome header (terminal rows 1-3, y 56-140 at the tapes'
 # size) names the account's plan; cut those rows out of every frame. Later
 # rows scroll through the same band, so nothing else is hidden for long.
 ffmpeg -loglevel error -y -t "$end" -i "$RAW" -filter_complex "
     [0:v]split[a][b];
-    [a]crop=iw:58:0:0[top];
-    [b]crop=iw:ih-143:0:143[rest];
+    [a]crop=iw:56:0:0[top];
+    [b]crop=iw:ih-141:0:141[rest];
     [top][rest]vstack,fps=12,split[v][p];
     [p]palettegen=stats_mode=diff:max_colors=96[pal];
     [v][pal]paletteuse=dither=none:diff_mode=rectangle" "$GIF"
