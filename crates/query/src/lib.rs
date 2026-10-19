@@ -1831,6 +1831,28 @@ mod tests {
         assert_eq!(loaded.reports[0].status, ModuleAnalysis::Verified);
     }
 
+    /// A module deleted between `load_catalog` and `session_from_loaded` --
+    /// a concurrent `make clean` -- is reported as failed with the read
+    /// error, and the session is still built so every other module answers.
+    #[test]
+    fn a_module_deleted_after_verification_is_failed_not_fatal() {
+        let scratch = tempfile::tempdir().unwrap();
+        let loaded = load_catalog(&write_catalog_with_one_module(&scratch)).unwrap();
+        let module_path = scratch.path().join("m.bc");
+        std::fs::remove_file(&module_path).unwrap();
+        let not_found = std::fs::read(&module_path).unwrap_err().to_string();
+
+        let session = session_from_loaded(loaded, None).unwrap();
+
+        let module = &session.modules()[0];
+        assert_eq!(module.status, ModuleAnalysis::Failed);
+        let diagnostic = module.diagnostic.as_deref().unwrap_or("");
+        assert!(diagnostic.contains(&not_found), "{diagnostic}");
+        let answer = run(&session, &Query::Externals).unwrap();
+        assert_eq!(answer.analysis.failed, 1);
+        assert_eq!(answer.analysis.analyzed, 0);
+    }
+
     /// `load_catalog` verifies a module's bytes against its recorded hash,
     /// but a concurrent rewrite between that check and `session_from_loaded`
     /// reading the bytes for real is exactly what `load::read_module`'s own
