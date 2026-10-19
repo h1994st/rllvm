@@ -195,6 +195,17 @@ pub struct RLLVMConfig {
     resolved_llvm_bindir: OnceLock<Result<LlvmBindir, String>>,
 }
 
+/// The level a `log_level` number names, from 0 (errors only) up.
+fn level_from_number(level: u8) -> Level {
+    match level {
+        0 => Level::ERROR,
+        1 => Level::WARN,
+        2 => Level::INFO,
+        3 => Level::DEBUG,
+        _ => Level::TRACE,
+    }
+}
+
 impl RLLVMConfig {
     /// Returns the path to `llvm-config`.
     pub fn llvm_config_filepath(&self) -> &PathBuf {
@@ -294,13 +305,7 @@ impl RLLVMConfig {
             .ok()
             .and_then(|value| value.parse::<u8>().ok())
             .unwrap_or_else(|| self.log_level.unwrap_or_default());
-        match level {
-            0 => Level::ERROR,
-            1 => Level::WARN,
-            2 => Level::INFO,
-            3 => Level::DEBUG,
-            _ => Level::TRACE,
-        }
+        level_from_number(level)
     }
 
     /// Returns whether caching is enabled in the config.
@@ -838,7 +843,9 @@ mod tests {
         );
         assert!(config.is_configure_only());
         assert!(config.cache_enabled());
-        assert_eq!(config.log_level(), Level::DEBUG);
+        // The field, not `log_level()`: the accessor lets `$RLLVM_LOG_LEVEL`
+        // win, and the developer's shell must not decide this test.
+        assert_eq!(config.log_level, Some(3));
     }
 
     /// Each configured `log_level` and the `Level` it maps to.
@@ -852,13 +859,12 @@ mod tests {
     ];
 
     // Reading `log_level` from the file is pinned by
-    // `optional_flag_accessors_round_trip`; this covers only the mapping.
+    // `optional_flag_accessors_round_trip`; this covers only the mapping, on
+    // its own so a `$RLLVM_LOG_LEVEL` in the developer's shell cannot win.
     #[test]
     fn log_level_mapping_covers_every_value() {
-        let mut config = RLLVMConfig::try_default().expect("Failed to infer the LLVM tool paths");
         for (value, expected) in LOG_LEVELS {
-            config.log_level = Some(value);
-            assert_eq!(config.log_level(), expected, "log_level = {value}");
+            assert_eq!(level_from_number(value), expected, "log_level = {value}");
         }
     }
 
