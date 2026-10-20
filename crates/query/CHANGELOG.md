@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.9.0...rllvm-query-v0.9.1) (2026-10-20)
+
+
+### Bug Fixes
+
+* explain an unmatched or inlined call-site line ([#348](https://github.com/h1994st/rllvm/issues/348)) ([cd172ad](https://github.com/h1994st/rllvm/commit/cd172ad35e8f318895471e6fae211eaa1f70291f))
+
 ## [0.9.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.8.0...rllvm-query-v0.9.0) (2026-10-19)
 
 
