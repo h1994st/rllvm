@@ -181,7 +181,11 @@ fn resolve_site(session: &Session, at: &str) -> Result<CallSiteId, String> {
     let (file, line) = crate::parse_location(at).map_err(|error| error.to_string())?;
     let sites = session.call_sites_at(&file, line);
     match sites.as_slice() {
-        [] => Err(format!("no call site at {at}")),
+        [] => Err(format!(
+            "no call site at {at}: the line may differ from the one the debug info \
+             recorded, or the call may have been inlined away; check the recorded line, \
+             or name the value with `--function F --local NAME`"
+        )),
         [one] => Ok(one.id.clone()),
         several => Err(format!(
             "{at} holds {} call sites; name one by its call site id as JSON: {}",
@@ -2654,7 +2658,10 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             &parts(Some(&blank), None, true, None, None),
             AnchorSurface::Cli,
         );
-        assert!(missing.unwrap_err().contains("no call site at"));
+        let message = missing.unwrap_err();
+        assert!(message.contains("no call site at"));
+        assert!(message.contains("inlined"));
+        assert!(message.contains("--local"));
     }
 
     #[test]
