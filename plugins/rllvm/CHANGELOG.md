@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.3.0...rllvm-plugin-v0.3.1) (2026-10-20)
+
+
+### Features
+
+* explain which capture levels guards can trace ([#347](https://github.com/h1994st/rllvm/issues/347)) ([6688fd1](https://github.com/h1994st/rllvm/commit/6688fd152a1ee1d0bea2333db6b9c143264a2ee5))
+
 ## [0.3.0](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.2.0...rllvm-plugin-v0.3.0) (2026-10-19)
 
 
