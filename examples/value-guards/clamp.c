@@ -18,3 +18,14 @@ int main(int argc, char **argv) {
     copy(buf, argv[0], (size_t)argc * 100);
     return buf[0];
 }
+
+void peek(char *dst, const char *src, size_t len) {
+    size_t n;
+    if (len < CAP) {
+        n = len;
+        put(dst, src, len);
+    } else {
+        n = CAP;
+    }
+    put(dst, src, n);
+}
