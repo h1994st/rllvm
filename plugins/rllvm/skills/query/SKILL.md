@@ -235,10 +235,11 @@ Report what the answer supports, and say what it does not:
   A comparison is verified only through its branch's edge into the use, and
   its `predicate` is the one that holds on that edge, which may negate the
   source condition: past `if (x > 16) return;` it reads `ule 16`. Report a
-  verified comparison's predicate as holding at the use. A clamp of the
-  anchored value made of a comparison (a branch or select clamp, not an
-  intrinsic umin or saturation) also lists that comparison, which bounds the
-  anchored value itself. For a clamp, mask, modulo or saturation, `verified`
+  verified comparison's predicate as holding at the use; one with no
+  deciding edge keeps its predicate as written. A clamp of the anchored
+  value made of a comparison (a branch or select clamp, not an intrinsic
+  umin or saturation) also lists that comparison, which bounds the anchored
+  value itself. For a clamp, mask, modulo or saturation, `verified`
   does not mean it runs on every path: report its bound as unconditional
   only when it is `verified` and its `relation` is `dominates` or `defines`;
   a verified one that is on_path is conditional. The numeric cap lives in

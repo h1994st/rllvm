@@ -215,10 +215,11 @@ edge shows a comparison held at the use, the bound wraps, or it cannot be
 mapped. A comparison is verified only through its branch's edge into the use,
 and gives the predicate that holds on that edge, which may negate the source
 condition: past `if (x > 16) return;` it is `ule 16`. A verified comparison's
-predicate holds at the use. A clamp computed from the value bounds its own
-result, so when it is made of a comparison (a branch or `select` clamp, not an
-intrinsic `umin`), that comparison is listed too. For a clamp, mask, modulo or
-saturation, `verified` does not say it runs on every path, `relation` does: an
+predicate holds at the use; one with no deciding edge keeps its predicate as
+written. A clamp computed from the value bounds its own result, so when it is
+made of a comparison (a branch or `select` clamp, not an intrinsic `umin`),
+that comparison is listed too. For a clamp, mask, modulo or saturation,
+`verified` does not say it runs on every path, `relation` does: an
 unconditional bound is `verified` and `dominates` or `defines`, while one
 `on_path` is conditional. The numeric cap is `bound`: a `verified` guard
 without one is capped by a runtime value, the guard's operand, which is a sound
