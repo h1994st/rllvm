@@ -91,37 +91,49 @@ impl AnchorSurface {
 impl AnchorParts {
     /// What these parts name, or why they do not name one. Needs no
     /// catalog, so a surface can reject a bad combination before loading one.
+    /// `at` is the call site with `operand` or `ret`, and a use of the
+    /// local with `function` and `local`.
     fn shape(&self, surface: AnchorSurface) -> Result<AnchorShape<'_>, String> {
         let (at, operand, ret) = (self.at.as_deref(), self.operand, self.ret);
         let (function, local) = (self.function.as_deref(), self.local.as_deref());
-        let call = at.is_some() || operand.is_some() || ret;
+        let call = operand.is_some() || ret;
         let named = function.is_some() || local.is_some();
         let (n_at, n_operand, n_ret) = (surface.at(), surface.operand(), surface.ret());
         let (n_function, n_local) = (surface.function(), surface.local());
         match (call, named) {
-            (false, false) => Err(format!(
-                "name a value: {n_at} with {n_operand} or {n_ret}, or {n_function} with {n_local}"
-            )),
+            (false, false) => Err(match at {
+                None => format!(
+                    "name a value: {n_at} with {n_operand} or {n_ret}, or {n_function} with \
+                     {n_local}"
+                ),
+                Some(_) => format!(
+                    "{n_at} needs {n_operand} (an argument) or {n_ret} (the result), or \
+                     {n_function} with {n_local} for a use of a local"
+                ),
+            }),
             (true, true) => Err(format!(
-                "a call site ({n_at}) and a local ({n_function}, {n_local}) name two values: give one"
+                "a call's value ({n_operand}, {n_ret}) and a local ({n_function}, {n_local}) \
+                 name two values: give one"
             )),
             (true, false) => {
                 let at = at.ok_or_else(|| {
                     format!("{n_operand} and {n_ret} need {n_at}, the call site they refer to")
                 })?;
-                match (operand, ret) {
-                    (Some(_), true) => {
+                match operand {
+                    Some(_) if ret => {
                         Err(format!("{n_operand} and {n_ret} name two values: give one"))
                     }
-                    (Some(operand), false) => Ok(AnchorShape::Argument { at, operand }),
-                    (None, true) => Ok(AnchorShape::Return { at }),
-                    (None, false) => Err(format!(
-                        "{n_at} needs {n_operand} (an argument) or {n_ret} (the result)"
-                    )),
+                    Some(operand) => Ok(AnchorShape::Argument { at, operand }),
+                    None => Ok(AnchorShape::Return { at }),
                 }
             }
             (false, true) => match (function, local) {
-                (Some(function), Some(name)) => Ok(AnchorShape::Local { function, name }),
+                (Some(function), Some(name)) => {
+                    if let Some(at) = at {
+                        check_use_site(at, surface)?;
+                    }
+                    Ok(AnchorShape::Local { function, name })
+                }
                 (None, _) => Err(format!(
                     "{n_local} needs {n_function}, the function that holds it"
                 )),
@@ -131,6 +143,29 @@ impl AnchorParts {
             },
         }
     }
+
+    /// The use-site `at` names for a local: the `file:line` that picks one
+    /// of a reused local's values. `None` for a call site, which `at`
+    /// names instead.
+    pub fn use_site(&self) -> Option<&str> {
+        self.local.as_ref().and(self.at.as_deref())
+    }
+}
+
+/// Rejects a local's use-site `at` that is not a `file:line`: a call site
+/// id names one call, not a line that reads the local.
+fn check_use_site(at: &str, surface: AnchorSurface) -> Result<(), String> {
+    if at.trim_start().starts_with('{') {
+        return Err(format!(
+            "{} with {} is the `file:line` of a use of the local, not a call site id: an id \
+             names a call, not a line that reads the local",
+            surface.at(),
+            surface.local()
+        ));
+    }
+    crate::parse_location(at.trim())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Rejects a combination of anchor parts that names no value, without
@@ -480,6 +515,17 @@ pub fn guards(
     anchor: &GuardAnchor,
     from: Option<&str>,
 ) -> Result<GuardsResult, Error> {
+    guards_at_use(session, anchor, None, from)
+}
+
+/// [`guards`], with a local read at one use: `at`, a `file:line`, picks
+/// which of the values a reused local is bound to is traced.
+pub fn guards_at_use(
+    session: &Session,
+    anchor: &GuardAnchor,
+    at: Option<&str>,
+    from: Option<&str>,
+) -> Result<GuardsResult, Error> {
     let function = anchor_function(session, anchor)?;
     let scope = from
         .map(|from| caller_scope(session, from, &function))
@@ -496,16 +542,31 @@ pub fn guards(
             .collect(),
         ..GuardsResult::default()
     };
-    match resolve_anchor(&ir, session, anchor)? {
-        Resolved::Ambiguous(values) => {
+    match resolve_anchor_at_use(&ir, session, anchor, at)? {
+        Resolved::Ambiguous {
+            function: index,
+            values,
+        } => {
+            let body = &ir.functions[index];
+            let uses = match anchor {
+                GuardAnchor::Local { name, .. } => {
+                    use_lines(body, &local_uses(body, &dominators(body), name))
+                }
+                GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => Vec::new(),
+            };
             lost.push(format!(
-                "{}, so none is traced",
-                bound_to_several(anchor, &function, values.len())
+                "{}, so none is traced{}",
+                bound_to_several(anchor, &function, values.len()),
+                match uses.as_slice() {
+                    [] => String::new(),
+                    lines => format!(": name one by a line that uses it, at {}", lines.join(", ")),
+                }
             ));
         }
         Resolved::One {
             function: index,
             value,
+            used_at,
         } => {
             let body = &ir.functions[index];
             let trace = Trace {
@@ -515,7 +576,10 @@ pub fn guards(
                 scope: scope.as_ref(),
                 doms: dominators(body),
             };
-            let at = use_point(body, session, anchor, value)?;
+            let at = match used_at {
+                Some(at) => at,
+                None => use_point(body, session, anchor, value)?,
+            };
             let walk = trace.walk(value);
             result.guards = trace.guard_sites(&walk, value, at);
             result.crossings = walk.crossings;
@@ -540,7 +604,7 @@ pub(crate) fn ground_anchor(session: &Session, anchor: &GuardAnchor) -> Result<(
     let ir = read_module_ir(&promoted.bytes)?;
     match resolve_anchor(&ir, session, anchor)? {
         Resolved::One { .. } => Ok(()),
-        Resolved::Ambiguous(values) => Err(Error::InvalidArguments(format!(
+        Resolved::Ambiguous { values, .. } => Err(Error::InvalidArguments(format!(
             "{}, so there is no one value for a verdict to rest on",
             bound_to_several(anchor, &function, values.len())
         ))),
@@ -1938,12 +2002,21 @@ const PROMOTION_DELETES: &[&str] = &["llvm.lifetime."];
 /// The SSA value a [`GuardAnchor`] names in the promoted module `ir`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Resolved {
-    /// Value `value` of `ir.functions[function]`.
-    One { function: usize, value: ValueId },
-    /// A local bound to more than one value over its lifetime: each SSA
-    /// value it is bound to, in binding order. A binding to a constant, or to
-    /// nothing traceable, counts toward the ambiguity but is not listed.
-    Ambiguous(Vec<ValueId>),
+    /// Value `value` of `ir.functions[function]`. `used_at` is the
+    /// instruction a local read at a use-site is used at, when it was.
+    One {
+        function: usize,
+        value: ValueId,
+        used_at: Option<ValueId>,
+    },
+    /// A local of `ir.functions[function]` bound to more than one value over
+    /// its lifetime: each SSA value it is bound to, in binding order. A
+    /// binding to a constant, or to nothing traceable, counts toward the
+    /// ambiguity but is not listed.
+    Ambiguous {
+        function: usize,
+        values: Vec<ValueId>,
+    },
 }
 
 /// The function `anchor` lies in: its call site's, or the one definition
@@ -2002,7 +2075,24 @@ pub(crate) fn resolve_anchor(
     session: &Session,
     anchor: &GuardAnchor,
 ) -> Result<Resolved, Error> {
+    resolve_anchor_at_use(ir, session, anchor, None)
+}
+
+/// [`resolve_anchor`], with a local read at the use on `at`, a `file:line`.
+pub(crate) fn resolve_anchor_at_use(
+    ir: &ModuleIr,
+    session: &Session,
+    anchor: &GuardAnchor,
+    at: Option<&str>,
+) -> Result<Resolved, Error> {
     let id = anchor_function(session, anchor)?;
+    if at.is_some() && !matches!(anchor, GuardAnchor::Local { .. }) {
+        return Err(Error::InvalidArguments(
+            "a use-site picks one value of a local; a call site's argument or result is \
+             already one value"
+                .to_string(),
+        ));
+    }
     let function = ir
         .functions
         .iter()
@@ -2027,6 +2117,7 @@ pub(crate) fn resolve_anchor(
                 Some(Operand::Value(value)) => Ok(Resolved::One {
                     function,
                     value: *value,
+                    used_at: None,
                 }),
                 Some(Operand::Const(constant)) => Err(refuse(format!(
                     "is the constant {}, not a value to trace",
@@ -2057,9 +2148,18 @@ pub(crate) fn resolve_anchor(
                     site_label(site)
                 )));
             }
-            Ok(Resolved::One { function, value })
+            Ok(Resolved::One {
+                function,
+                value,
+                used_at: None,
+            })
         }
-        GuardAnchor::Local { name, .. } => resolve_local(body, function, name),
+        GuardAnchor::Local { name, .. } => {
+            let at = at
+                .map(|at| UseSite::new(session, &id.module_id, at))
+                .transpose()?;
+            resolve_local(body, &id, function, name, at.as_ref())
+        }
     }
 }
 
@@ -2146,10 +2246,17 @@ fn promoted_peers<'a>(
 }
 
 /// The value the source variable `name` is bound to in `body`, which is
-/// `ir.functions[function]`. Bindings to one value are one value however
+/// `ir.functions[function]` and the catalog's `id`. Bindings to one value are one value however
 /// often they recur; bindings to several are reported, never chosen
-/// between.
-fn resolve_local(body: &FunctionIr, function: usize, name: &str) -> Result<Resolved, Error> {
+/// between, unless `at` names a use: then the one value the local holds at
+/// that use, refused when the line reads none or several.
+fn resolve_local(
+    body: &FunctionIr,
+    id: &FunctionId,
+    function: usize,
+    name: &str,
+    at: Option<&UseSite>,
+) -> Result<Resolved, Error> {
     let mut bound: Vec<&Operand> = Vec::new();
     for binding in body
         .dbg_values
@@ -2160,7 +2267,7 @@ fn resolve_local(body: &FunctionIr, function: usize, name: &str) -> Result<Resol
             bound.push(&binding.value);
         }
     }
-    let label = function_label(&body.id);
+    let label = function_label(id);
     if bound.is_empty() {
         return Err(Error::InvalidArguments(format!(
             "no debug binding of local `{name}` in {label}; resolving a local needs a module \
@@ -2174,9 +2281,8 @@ fn resolve_local(body: &FunctionIr, function: usize, name: &str) -> Result<Resol
             _ => None,
         })
         .collect();
-    match (bound.len(), values.as_slice()) {
-        (1, &[value]) => Ok(Resolved::One { function, value }),
-        (_, []) => {
+    match (bound.len(), values.as_slice(), at) {
+        (_, [], _) => {
             let constants: Vec<&str> = bound
                 .iter()
                 .filter_map(|operand| match operand {
@@ -2198,8 +2304,194 @@ fn resolve_local(body: &FunctionIr, function: usize, name: &str) -> Result<Resol
                 )
             }))
         }
-        _ => Ok(Resolved::Ambiguous(values)),
+        (_, _, Some(at)) => resolve_local_at(body, &label, function, name, at),
+        (1, &[value], None) => Ok(Resolved::One {
+            function,
+            value,
+            used_at: None,
+        }),
+        (_, _, None) => Ok(Resolved::Ambiguous { function, values }),
     }
+}
+
+/// The one value local `name` of `body`, the function `label` names, holds
+/// at the uses on `at`.
+fn resolve_local_at(
+    body: &FunctionIr,
+    label: &str,
+    function: usize,
+    name: &str,
+    at: &UseSite,
+) -> Result<Resolved, Error> {
+    let doms = dominators(body);
+    let uses = local_uses(body, &doms, name);
+    let here: Vec<(ValueId, ValueId)> = uses
+        .iter()
+        .copied()
+        .filter(|&(instr, _)| {
+            body.values[instr as usize]
+                .location
+                .as_ref()
+                .is_some_and(|location| at.holds(location))
+        })
+        .collect();
+    let mut values: Vec<ValueId> = Vec::new();
+    for &(_, value) in &here {
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    match values.as_slice() {
+        [] => Err(Error::InvalidArguments(format!(
+            "no use of `{name}` at {} in {label}: {}",
+            at.spelled,
+            match use_lines(body, &uses).as_slice() {
+                [] => "no instruction with a recorded line reads it".to_string(),
+                lines => format!("it is used at {}", lines.join(", ")),
+            }
+        ))),
+        &[value] => {
+            let instrs: Vec<ValueId> = here.iter().map(|&(instr, _)| instr).collect();
+            Ok(Resolved::One {
+                function,
+                value,
+                used_at: Some(shared_point(body, &doms, &instrs)),
+            })
+        }
+        several => Err(Error::InvalidArguments(format!(
+            "the uses of `{name}` in {label} at {} read more than one of its values ({} SSA \
+             values), so none is picked",
+            at.spelled,
+            several.len()
+        ))),
+    }
+}
+
+/// A `file:line` naming the uses of a local, with each spelling of the file
+/// the anchor's module recorded.
+struct UseSite {
+    /// As written, for errors.
+    spelled: String,
+    files: HashSet<std::path::PathBuf>,
+    line: u32,
+}
+
+impl UseSite {
+    /// `at` in the module `module_id`, matched as `at` matches a call site.
+    fn new(session: &Session, module_id: &str, at: &str) -> Result<UseSite, Error> {
+        let (file, line) = crate::parse_location(at.trim())?;
+        let mut files: HashSet<std::path::PathBuf> = session
+            .spellings_of(&file)
+            .into_iter()
+            .filter(|(module, _)| *module == module_id)
+            .map(|(_, spelling)| spelling.to_path_buf())
+            .collect();
+        files.insert(file);
+        Ok(UseSite {
+            spelled: at.trim().to_string(),
+            files,
+            line,
+        })
+    }
+
+    fn holds(&self, location: &SourceLocation) -> bool {
+        location.line == self.line && self.files.contains(&location.file)
+    }
+}
+
+/// Each instruction of `body` that reads the value local `name` holds
+/// there, with that value. The value held is the one the last binding
+/// before the instruction binds: in its block, or else the last in the
+/// nearest block dominating it that has one. A `phi` merges values rather
+/// than reading one, so it is no use; nor is any read where `name` holds a
+/// constant or nothing traceable.
+fn local_uses(body: &FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, ValueId)> {
+    let mut position = vec![0; body.values.len()];
+    for block in &body.blocks {
+        for (index, &id) in block.instrs.iter().enumerate() {
+            position[id as usize] = index;
+        }
+    }
+    // Each block's bindings of `name` in order, by the position each takes
+    // effect before.
+    let mut bindings: Vec<Vec<(usize, &Operand)>> = vec![Vec::new(); body.blocks.len()];
+    for binding in body
+        .dbg_values
+        .iter()
+        .filter(|binding| binding.name == name)
+    {
+        if let Some(node) = body.values.get(binding.at as usize)
+            && let Some(block) = bindings.get_mut(node.block)
+        {
+            block.push((position[binding.at as usize], &binding.value));
+        }
+    }
+    let held = |id: ValueId| {
+        let mut block = body.values[id as usize].block;
+        let mut binding = bindings[block]
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= position[id as usize]);
+        while binding.is_none() {
+            match doms.idom.get(block) {
+                Some(&Some(up)) if up != block => block = up,
+                _ => return None,
+            }
+            binding = bindings[block].last();
+        }
+        match binding? {
+            (_, Operand::Value(value)) => Some(*value),
+            _ => None,
+        }
+    };
+    body.values
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| !matches!(node.opcode, OpcodeIr::Param | OpcodeIr::Phi))
+        .filter_map(|(id, node)| {
+            let id = id as ValueId;
+            let value = held(id)?;
+            let operands = node.call.as_ref().map_or(&node.operands, |call| &call.args);
+            operands
+                .contains(&Operand::Value(value))
+                .then_some((id, value))
+        })
+        .collect()
+}
+
+/// The `file:line` of each of `uses`, once each, in order.
+fn use_lines(body: &FunctionIr, uses: &[(ValueId, ValueId)]) -> Vec<String> {
+    let lines: BTreeSet<(String, u32)> = uses
+        .iter()
+        .filter_map(|&(instr, _)| body.values[instr as usize].location.as_ref())
+        .filter(|location| location.line != 0)
+        .map(|location| (location.file.display().to_string(), location.line))
+        .collect();
+    lines
+        .into_iter()
+        .map(|(file, line)| format!("{file}:{line}"))
+        .collect()
+}
+
+/// The point every one of `instrs` runs after: the first of them in the
+/// nearest block dominating them all, or that block's last instruction when
+/// it holds none of them. Whatever runs before the point runs before each.
+/// The first of them when no block dominates them all.
+fn shared_point(body: &FunctionIr, doms: &Doms, instrs: &[ValueId]) -> ValueId {
+    let first = instrs[0];
+    let block_of = |id: ValueId| body.values[id as usize].block;
+    let Some(shared) = instrs.iter().try_fold(block_of(first), |shared, &id| {
+        doms.common_dominator(shared, block_of(id))
+    }) else {
+        return first;
+    };
+    let instrs_of_shared = &body.blocks[shared].instrs;
+    instrs_of_shared
+        .iter()
+        .copied()
+        .find(|id| instrs.contains(id))
+        .or_else(|| instrs_of_shared.last().copied())
+        .unwrap_or(first)
 }
 
 /// Whether two recorded locations name the same place. What is known about
@@ -2257,6 +2549,31 @@ impl Doms {
             at = *up;
         }
         false
+    }
+
+    /// The nearest block dominating both `a` and `b`. `None` when either
+    /// is unreachable from the entry.
+    fn common_dominator(&self, a: usize, b: usize) -> Option<usize> {
+        let mut above_a = Vec::new();
+        let mut at = a;
+        loop {
+            above_a.push(at);
+            match self.idom.get(at) {
+                Some(&Some(up)) if up != at => at = up,
+                Some(&Some(_)) => break,
+                _ => return None,
+            }
+        }
+        let mut at = b;
+        loop {
+            if above_a.contains(&at) {
+                return Some(at);
+            }
+            match self.idom.get(at) {
+                Some(&Some(up)) if up != at => at = up,
+                _ => return None,
+            }
+        }
     }
 }
 
@@ -2416,6 +2733,38 @@ void g(unsigned a) {
 }
 ";
 
+    /// `cur` holds `a`, then `b`: each guarded on line 4 or 7 and used on
+    /// line 5 or 8.
+    const REUSED_LOCAL_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned cur = a;
+  if (cur > 64) return;
+  sink(cur);
+  cur = b;
+  if (cur > 16) return;
+  sink(cur);
+}
+";
+
+    /// Line 6 reads `keep`, which holds `cur`'s first value, beside `cur`,
+    /// which by then holds its second.
+    const KEPT_VALUE_SOURCE: &str = "extern void sink(unsigned, unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned cur = a;
+  unsigned keep = cur;
+  cur = b;
+  sink(keep, cur);
+}
+";
+
+    /// Line 4 uses `cur` before and after it is rebound.
+    const ONE_LINE_REBINDING_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned cur = a;
+  sink(cur); cur = b; sink(cur);
+}
+";
+
     /// Both calls expand from one macro use, so they share a source
     /// location; the stack slots before them are promoted away.
     const SHARED_LOCATION_SOURCE: &str = "extern void sink(unsigned);
@@ -2459,7 +2808,10 @@ void f(unsigned a, unsigned b) {
 
     /// The node `resolved` names, which must be a single value of `symbol`.
     fn node<'a>(ir: &'a ModuleIr, resolved: &Resolved, symbol: &str) -> (ValueId, &'a ValueNode) {
-        let Resolved::One { function, value } = *resolved else {
+        let Resolved::One {
+            function, value, ..
+        } = *resolved
+        else {
             panic!("expected one value, got {resolved:?}");
         };
         let function = &ir.functions[function];
@@ -2565,7 +2917,8 @@ void f(unsigned a, unsigned b) {
         assert_eq!(node(&ir, &a, "g").0, g.params[0]);
 
         // `x` holds `a`, then `a + 1`: two live values, reported as such.
-        let Resolved::Ambiguous(values) = resolve_anchor(&ir, &session, &local("g", "x")).unwrap()
+        let Resolved::Ambiguous { values, .. } =
+            resolve_anchor(&ir, &session, &local("g", "x")).unwrap()
         else {
             panic!("`x` is bound to two values");
         };
@@ -2585,6 +2938,122 @@ void f(unsigned a, unsigned b) {
             .unwrap_err()
             .to_string();
         assert!(error.contains("`x`") && error.contains("-g"), "{error}");
+    }
+
+    /// `file:line` in `t.c` under `scratch`.
+    fn line_of(scratch: &tempfile::TempDir, line: u32) -> String {
+        format!("{}:{line}", scratch.path().join("t.c").display())
+    }
+
+    #[test]
+    fn a_reused_local_resolves_to_the_value_used_at_a_line() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, REUSED_LOCAL_SOURCE, &["-O0", "-g"], "g");
+        let g = defined(&ir, "g");
+        let cur = local("g", "cur");
+
+        let first =
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 5))).unwrap();
+        assert_eq!(node(&ir, &first, "g").0, g.params[0]);
+        let second =
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 8))).unwrap();
+        assert_eq!(node(&ir, &second, "g").0, g.params[1]);
+    }
+
+    /// `keep` still holds `a` on line 6, but `cur` holds `b` there: the
+    /// value a line uses counts only while the local is bound to it.
+    #[test]
+    fn a_use_site_picks_the_value_the_local_holds_there() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, KEPT_VALUE_SOURCE, &["-O0", "-g"], "g");
+        let g = defined(&ir, "g");
+        let resolved = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &local("g", "cur"),
+            Some(&line_of(&scratch, 6)),
+        )
+        .unwrap();
+        assert_eq!(node(&ir, &resolved, "g").0, g.params[1]);
+    }
+
+    #[test]
+    fn a_use_site_with_no_use_of_the_local_is_refused_listing_its_use_lines() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, REUSED_LOCAL_SOURCE, &["-O0", "-g"], "g");
+        let at = line_of(&scratch, 99);
+        let error = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("no use of `cur` at {at} in g [m]")),
+            "{error}"
+        );
+        assert!(
+            error.contains("t.c:5") && error.contains("t.c:8"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_use_site_reading_two_values_of_the_local_is_refused_not_picked() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, ONE_LINE_REBINDING_SOURCE, &["-O0", "-g"], "g");
+        let error = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &local("g", "cur"),
+            Some(&line_of(&scratch, 4)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("`cur`") && error.contains("more than one of its values"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_reused_local_without_a_use_site_is_reported_with_its_use_lines() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, REUSED_LOCAL_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &local("g", "cur"), None).unwrap();
+        assert!(r.guards.is_empty(), "{r:?}");
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(lost.contains("bound to more than one value"), "{lost}");
+        assert!(lost.contains("t.c:5") && lost.contains("t.c:8"), "{lost}");
+    }
+
+    /// Each use-site traces its own value: the bound checked before it,
+    /// which runs before that use on every path.
+    #[test]
+    fn a_reused_local_at_a_use_site_reports_that_values_guards() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, REUSED_LOCAL_SOURCE, &["-O0", "-g"]);
+        let cur = local("g", "cur");
+        let first = guards_at_use(&session, &cur, Some(&line_of(&scratch, 5)), None).unwrap();
+        assert_eq!(
+            sites(&first),
+            [(
+                GuardKind::Compare,
+                Some("ugt"),
+                Some("64"),
+                GuardRelation::Dominates
+            )],
+            "{first:?}"
+        );
+        let second = guards_at_use(&session, &cur, Some(&line_of(&scratch, 8)), None).unwrap();
+        assert_eq!(
+            sites(&second),
+            [(
+                GuardKind::Compare,
+                Some("ugt"),
+                Some("16"),
+                GuardRelation::Dominates
+            )],
+            "{second:?}"
+        );
+        assert!(first.lost.is_none() && second.lost.is_none());
     }
 
     /// Mapping by position would land on another instruction: the promoted
@@ -3963,6 +4432,67 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
     }
 
     #[test]
+    fn the_common_dominator_of_two_blocks_is_the_nearest_above_both() {
+        // 0 -> {1, 2} -> 3; 4 is unreachable.
+        let d = dominators(&cfg(&[&[1, 2], &[3], &[3], &[], &[3]]));
+        assert_eq!(d.common_dominator(1, 2), Some(0));
+        assert_eq!(d.common_dominator(1, 3), Some(0));
+        assert_eq!(d.common_dominator(0, 3), Some(0));
+        assert_eq!(d.common_dominator(3, 3), Some(3));
+        assert_eq!(d.common_dominator(4, 3), None);
+    }
+
+    /// A diamond, 0 -> {1, 2} -> 3, holding instructions 0 and 1 in block
+    /// 0, 2 and 3 in block 1, 4 in block 2 and 5 in block 3.
+    fn diamond_of_instructions() -> FunctionIr {
+        let mut body = cfg(&[&[1, 2], &[3], &[3], &[]]);
+        for (id, block) in [0, 0, 1, 1, 2, 3].into_iter().enumerate() {
+            body.blocks[block].instrs.push(id as ValueId);
+            body.values.push(ValueNode {
+                block,
+                opcode: OpcodeIr::Other,
+                operands: Vec::new(),
+                incoming: Vec::new(),
+                call: None,
+                guard: None,
+                location: None,
+                volatile: false,
+                ty: None,
+                element: None,
+            });
+        }
+        body
+    }
+
+    /// Uses on both arms share the branch above them: a guard running only
+    /// before one of them is not before the use-site.
+    #[test]
+    fn the_point_uses_share_runs_before_each_of_them() {
+        let body = diamond_of_instructions();
+        let d = dominators(&body);
+        assert_eq!(
+            shared_point(&body, &d, &[3, 4]),
+            1,
+            "the branch above both arms"
+        );
+        assert_eq!(
+            shared_point(&body, &d, &[4, 5]),
+            1,
+            "an arm is not above the join"
+        );
+        assert_eq!(
+            shared_point(&body, &d, &[3, 2]),
+            2,
+            "the first in one block"
+        );
+        assert_eq!(
+            shared_point(&body, &d, &[5, 0]),
+            0,
+            "the use above the other"
+        );
+    }
+
+    #[test]
     fn dominators_on_a_diamond() {
         let d = dominators(&cfg(&[&[1, 2], &[3], &[3], &[]]));
         for b in 0..4 {
@@ -4131,7 +4661,16 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         assert!(ok(Some("t.c:4"), Some(0), false, None, None).is_ok());
         assert!(ok(Some("t.c:4"), None, true, None, None).is_ok());
         assert!(ok(None, None, false, Some("f"), Some("n")).is_ok());
+        assert!(ok(Some("t.c:4"), None, false, Some("f"), Some("n")).is_ok());
         for (parts, fragment) in [
+            (
+                ok(Some("t.c:4"), None, true, Some("f"), Some("n")),
+                "give one",
+            ),
+            (
+                ok(Some("t.c:4"), None, false, None, Some("n")),
+                "needs --function",
+            ),
             (ok(None, None, false, None, None), "name a value"),
             (ok(None, Some(0), false, None, None), "need --at"),
             (ok(None, None, true, None, None), "need --at"),
@@ -4621,5 +5160,25 @@ define void @unstored(ptr %s) {
             lost.contains("the field may hold something other than what the store wrote"),
             "{r:?}"
         );
+    }
+
+    /// A use is a line, not a call: an id names one call, and a use-site
+    /// that does not parse is refused before any catalog is read.
+    #[test]
+    fn a_use_site_for_a_local_is_a_file_line_never_a_call_site_id() {
+        let check = |at: &str, surface| {
+            check_anchor_parts(&parts(Some(at), None, false, Some("f"), Some("n")), surface)
+        };
+        let id =
+            r#"{"function":{"module_id":"m","symbol":"f"},"block_index":0,"instruction_index":0}"#;
+        let error = check(id, AnchorSurface::Cli).unwrap_err();
+        assert!(
+            error.contains("--at") && error.contains("file:line") && error.contains("call site id"),
+            "{error}"
+        );
+        let error = check(id, AnchorSurface::Tool).unwrap_err();
+        assert!(error.contains("`at`"), "{error}");
+        let error = check("t.c", AnchorSurface::Cli).unwrap_err();
+        assert!(error.contains("expected `file:line`"), "{error}");
     }
 }
