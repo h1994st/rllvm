@@ -389,6 +389,37 @@ const RETURN_POSITION: &str = "return";
 /// What separates the reasons a trace was lost.
 const LOST_SEPARATOR: &str = "; ";
 
+/// What separates the reasons a guard site is not verified.
+const CAVEAT_SEPARATOR: &str = "; ";
+
+/// Why a guard site is not verified, in the order its caveat names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Unverified {
+    /// The anchored value is no constant affine function of the bounded one.
+    NotAffine,
+}
+
+impl Unverified {
+    fn reason(self) -> &'static str {
+        match self {
+            Unverified::NotAffine => "the relation to the anchored value is not affine",
+        }
+    }
+}
+
+/// Marks `site` verified exactly when nothing in `causes` keeps it from
+/// being, and otherwise names every cause, in order, in its caveat.
+fn mark(site: &mut GuardSite, causes: &BTreeSet<Unverified>) {
+    site.verified = causes.is_empty();
+    site.caveat = (!causes.is_empty()).then(|| {
+        causes
+            .iter()
+            .map(|cause| cause.reason())
+            .collect::<Vec<_>>()
+            .join(CAVEAT_SEPARATOR)
+    });
+}
+
 /// The guards on the value `anchor` names, read from its function's own
 /// module once `mem2reg` has promoted it. The trace walks the value's
 /// definitions back within that function and stops at a call boundary,
@@ -1044,6 +1075,11 @@ impl Trace<'_> {
                 None => Relation::NotAffine,
             };
             site.affine = relation.affine(signedness(site.op, site.predicate.as_deref()));
+            let mut causes = BTreeSet::new();
+            if site.affine.is_none() {
+                causes.insert(Unverified::NotAffine);
+            }
+            mark(site, &causes);
         }
         sites.into_values().collect()
     }
@@ -2554,6 +2590,17 @@ define void @truncated(i64 %x) {
   ret void
 }
 
+define void @summed(i32 %x, i32 %y) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = add i32 %x, %y
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
 define void @flag(i32 %x) {
   %c = icmp ult i32 %x, 16
   %n = zext i1 %c to i32
@@ -3046,6 +3093,30 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         ] {
             let r = affine_ir_guards(&session, function, callee);
             assert_eq!(only_guard(&r).affine, expected, "{function}: {r:?}");
+        }
+    }
+
+    /// A guard on a value the anchored one is no constant affine function
+    /// of is a lead, not a bound on it: unverified, saying why. One that is
+    /// stays verified.
+    #[test]
+    fn a_guard_with_no_affine_relation_is_unverified() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "summed", "sink");
+        let site = only_guard(&r);
+        assert_eq!(site.affine, None, "{r:?}");
+        assert!(!site.verified, "{r:?}");
+        assert_eq!(
+            site.caveat.as_deref(),
+            Some("the relation to the anchored value is not affine")
+        );
+
+        for function in ["offset", "agreeing"] {
+            let r = affine_ir_guards(&session, function, "sink");
+            let site = only_guard(&r);
+            assert!(site.verified && site.caveat.is_none(), "{function}: {r:?}");
         }
     }
 
