@@ -2914,6 +2914,41 @@ mod mcp {
         assert_eq!(cli["uncertainty"], mcp["uncertainty"]);
     }
 
+    /// A reused local named by a use-site answers alike on both surfaces:
+    /// `--at` beside `--local` on the CLI, `at` beside `local` over MCP.
+    #[test]
+    fn a_reused_local_at_a_use_site_answers_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "r.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned cur = a;\n  if (cur > 64) return;\n  sink(cur);\n  cur = b;\n  if (cur > 16) return;\n  sink(cur);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:8", scratch.path().join("r.c").display());
+        let cli = query_json(
+            &scratch,
+            &catalog,
+            &["guards", "--function", "g", "--local", "cur", "--at", &at],
+        );
+        let bounds: Vec<&str> = cli["results"]["guards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|guard| guard["bound"].as_str().unwrap())
+            .collect();
+        assert_eq!(bounds, ["16"], "{cli}");
+
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "g", "local": "cur", "at": at }),
+        );
+        assert_eq!(cli["results"], mcp["results"]);
+        assert_eq!(cli["query"], mcp["query"]);
+        assert_eq!(cli["query"]["at"], at.as_str(), "{cli}");
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();
@@ -4427,6 +4462,36 @@ fn guards_read_unsigned_bounds_unsigned_and_print_masks_in_hex() {
     assert!(output.stdout.is_empty(), "no answer may reach stdout");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("no call site at absent.c:4"), "{stderr}");
+}
+
+/// A location that is no `file:line` is named once, under one prefix, on
+/// either path that reads one: a call site's and a local's use.
+#[test]
+fn guards_name_a_malformed_location_under_one_prefix() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "u.c", UNSIGNED_GUARDS_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    for anchor in [
+        &["--at", "j.c", "--operand", "0"][..],
+        &["--function", "f", "--local", "len", "--at", "j.c"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .arg("guards")
+            .args(anchor)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "Invalid arguments: invalid location `j.c`: expected `file:line`, e.g. `parser.c:8`"
+            ) && stderr.matches("Invalid arguments").count() == 1,
+            "{anchor:?}: {stderr}"
+        );
+    }
 }
 
 const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\

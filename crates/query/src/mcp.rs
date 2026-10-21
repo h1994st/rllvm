@@ -768,7 +768,7 @@ management_tool_surface! {
                 "records": {
                     "type": "array",
                     "items": { "type": "object" },
-                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it), `\"via_slot\"` (a group's `slot`, every unresolved site reading it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it. `{\"op\":\"annotate\",\"anchor\":{\"kind\":\"argument\",\"site\":\"clamp.c:14\",\"operand\":2},\"verdict\":\"infeasible\",\"confidence\":\"high\",\"provenance\":[\"clamp.c:13: n = len < CAP ? len : CAP\"]}` is your feasibility verdict (`feasible`, `infeasible` or `conditional`) on a value, never proof: `anchor` is an `argument` (`site`, `operand`, counting from 0), a `return` (`site`) or a `local` (`function`, `name`), `site` a `file:line` or a call site id, and the optional `from` a function the verdict holds for. It is grounded in the catalog on write, so an unresolvable or ambiguous anchor is rejected, and grounding reads the anchor's module, so it needs a catalog loaded by `load_catalog`, not `inventory`. `{\"op\":\"verify\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"reason\":...}` judge or remove an annotation, named by its anchor and `from` (omitted when it has none)."
+                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it), `\"via_slot\"` (a group's `slot`, every unresolved site reading it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it. `{\"op\":\"annotate\",\"anchor\":{\"kind\":\"argument\",\"site\":\"clamp.c:14\",\"operand\":2},\"verdict\":\"infeasible\",\"confidence\":\"high\",\"provenance\":[\"clamp.c:13: n = len < CAP ? len : CAP\"]}` is your feasibility verdict (`feasible`, `infeasible` or `conditional`) on a value, never proof: `anchor` is an `argument` (`site`, `operand`, counting from 0), a `return` (`site`) or a `local` (`function`, `name`; it carries no use-site, so a local reused for several values cannot be annotated), `site` a `file:line` or a call site id, and the optional `from` a function the verdict holds for. It is grounded in the catalog on write, so an unresolvable or ambiguous anchor is rejected, and grounding reads the anchor's module, so it needs a catalog loaded by `load_catalog`, not `inventory`. `{\"op\":\"verify\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"reason\":...}` judge or remove an annotation, named by its anchor and `from` (omitted when it has none)."
                 }
             },
             "required": ["records"]
@@ -905,7 +905,7 @@ query_tool_surface! {
     Query::FfiExports => Query::FfiExports, "ffi_exports";
     Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
     Query::ResolutionCandidates => Query::ResolutionCandidates, "resolution_candidates";
-    Query::Guards { .. } => Query::Guards { anchor: GuardAnchor::Local { function: String::new(), name: String::new() }, from: None, emit_module: None }, "guards";
+    Query::Guards { .. } => Query::Guards { anchor: GuardAnchor::Local { function: String::new(), name: String::new() }, at: None, from: None, emit_module: None }, "guards";
 }
 
 /// The `name` argument four of the thirteen tools take, identically. Spelled
@@ -1104,15 +1104,15 @@ fn query_tool(query: &Query) -> Value {
         }),
         Query::Guards { .. } => json!({
             "name": name,
-            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `affine` gives the anchored value as `scale * guarded + offset` when constant arithmetic links them, and `verified` true means the bound soundly carries to the value, while false is a lead, not a bound, whose `caveat` says why (not affine, a guard on a value computed from it, wraps, or could not be mapped, or a load that may not read back the store it was followed to); `verified` does not mean the guard runs on every path, so an unconditional bound is `verified` with `relation` `dominates` or `defines`; `relation` `on_path` runs on some path to the use but not every one. The numeric cap lives in `bound`: a `verified` guard with no `bound` is capped by a runtime value, the guard's operand, which is a sound relation, not a numeric limit; to reach a number, anchor on that operand and trace it. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped, or a load may not read back the store it was followed to, and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
+            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`; a local reused for several values is refused with the lines that use it, and `at` beside it, a `file:line`, traces the value it holds at that use; a use at a line is a read of the value the local holds there, possibly through another variable that holds the same value). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `affine` gives the anchored value as `scale * guarded + offset` when constant arithmetic links them, and `verified` true means the bound soundly carries to the value, while false is a lead, not a bound, whose `caveat` says why (not affine, a guard on a value computed from it, wraps, or could not be mapped, or a load that may not read back the store it was followed to); `verified` does not mean the guard runs on every path, so an unconditional bound is `verified` with `relation` `dominates` or `defines`; `relation` `on_path` runs on some path to the use but not every one. The numeric cap lives in `bound`: a `verified` guard with no `bound` is capped by a runtime value, the guard's operand, which is a sound relation, not a numeric limit; to reach a number, anchor on that operand and trace it. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped, or a load may not read back the store it was followed to, and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "at": { "type": "string", "description": "The call site: a `file:line` location, e.g. `t.c:4`, or a call site id as JSON (`{\"function\": ..., \"block_index\": ..., \"instruction_index\": ...}`) for a line that holds several calls. An ambiguous `file:line` is an error naming each candidate's id." },
+                    "at": { "type": "string", "description": "The call site: a `file:line` location, e.g. `t.c:4`, or a call site id as JSON (`{\"function\": ..., \"block_index\": ..., \"instruction_index\": ...}`) for a line that holds several calls. An ambiguous `file:line` is an error naming each candidate's id. With `local` instead: the `file:line` of a use, which picks the value a reused local holds there; never a call site id." },
                     "operand": { "type": "integer", "minimum": 0, "description": "With `at`: the call's argument to trace, counting from 0" },
                     "return": { "type": "boolean", "description": "With `at`: trace the call's result instead of an argument" },
                     "function": { "type": "string", "description": "With `local`: the function that holds the variable" },
-                    "local": { "type": "string", "description": "With `function`: the source variable to trace" },
+                    "local": { "type": "string", "description": "With `function`: the source variable to trace. With `at`: read at that use" },
                     "from": { "type": "string", "description": "Bound the crossings into a parameter to the callers on a path from this function, which must name exactly one definition. The trace still stays in the anchor's function: guards between `from` and it are not examined." },
                     "emit_module": { "type": "string", "description": "Write the promoted slice a scoped re-read would use (from `from` to the anchor's function, else the function and its callers) to this .bc file, relative to the server's working directory; the answer gains `emitted`. Needs a catalog loaded by `load_catalog`." }
                 },
@@ -1189,11 +1189,14 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         Query::Guards {
             from, emit_module, ..
         } => {
-            let anchor = guard_parts(&arguments)
-                .and_then(|parts| anchor_from_parts(session, &parts, AnchorSurface::Tool));
+            let anchor = guard_parts(&arguments).and_then(|parts| {
+                let anchor = anchor_from_parts(session, &parts, AnchorSurface::Tool)?;
+                Ok((anchor, parts.use_site().map(str::to_string)))
+            });
             match anchor {
-                Ok(anchor) => Query::Guards {
+                Ok((anchor, at)) => Query::Guards {
                     anchor,
+                    at,
                     from,
                     emit_module,
                 },
@@ -1403,6 +1406,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                     function: String::new(),
                     name: String::new(),
                 },
+                at: None,
                 from: optional_string(arguments, "from")?,
                 emit_module: None,
             })
@@ -1517,6 +1521,14 @@ mod tests {
             (json!({ "function": "f" }), "`function` needs `local`"),
             (json!({ "at": "t.c:4", "operand": -1 }), "operand"),
             (json!({ "at": 4, "operand": 0 }), "`at`"),
+            (
+                json!({ "at": "t.c:4", "operand": 0, "function": "f", "local": "x" }),
+                "give one",
+            ),
+            (
+                json!({ "at": "{\"block_index\": 0}", "function": "f", "local": "x" }),
+                "call site id",
+            ),
         ] {
             let text = tool_error(&mut registry, "guards", arguments);
             assert!(text.contains(fragment), "{fragment}: {text}");
@@ -1550,6 +1562,44 @@ mod tests {
         // The id is accepted as an anchor: the call is answered.
         let answered = answer(&mut registry, "guards", json!({ "at": id, "return": true }));
         assert_eq!(answered["results"]["anchor"]["kind"], "return");
+    }
+
+    /// `at` with `local` names a use of the local, as `--at` does on the
+    /// CLI: each line traces the value the local holds there.
+    #[test]
+    fn a_guards_call_names_a_reused_local_by_its_use_site() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned cur = a;\n  if (cur > 64) return;\n  sink(cur);\n  cur = b;\n  if (cur > 16) return;\n  sink(cur);\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        let line = |n: u32| format!("{}:{n}", scratch.path().join("t.c").display());
+        let bounds = |payload: &Value| -> Vec<Value> {
+            payload["results"]["guards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|guard| guard["bound"].clone())
+                .collect()
+        };
+        for (n, bound) in [(5, "64"), (8, "16")] {
+            let payload = answer(
+                &mut registry,
+                "guards",
+                json!({ "function": "g", "local": "cur", "at": line(n) }),
+            );
+            assert_eq!(bounds(&payload), [json!(bound)], "{payload}");
+            assert_eq!(payload["results"]["anchor"]["kind"], "local", "{payload}");
+        }
+        let text = tool_error(
+            &mut registry,
+            "guards",
+            json!({ "function": "g", "local": "cur", "at": line(99) }),
+        );
+        assert!(text.contains("no use of `cur`"), "{text}");
     }
 
     #[test]

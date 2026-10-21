@@ -206,9 +206,10 @@ pub enum QueryCommand {
     ResolutionCandidates,
     /// The comparisons, clamps, masks and moduli that constrain a value. Evidence, not a verdict: no guard found is not "unbounded".
     ///
-    /// Name the value by a call site (`--at t.c:40` with `--operand N` for an argument or `--return` for the result) or by a named local (`--function f --local n`, needs `-g`).
+    /// Name the value by a call site (`--at t.c:40` with `--operand N` for an argument or `--return` for the result) or by a named local (`--function f --local n`, needs `-g`; a local reused for several values needs `--at t.c:42`, a line that uses it).
     Guards {
-        /// Call site: `file:line`, or a call site id as JSON when a line holds several calls
+        /// Call site: `file:line`, or a call site id as JSON when a line holds several calls.
+        /// With `--local`: the `file:line` of a use, picking the value a reused local holds there
         #[arg(long, value_name = "FILE:LINE")]
         at: Option<String>,
         /// Trace argument N (zero-based) of the call given by `--at`
