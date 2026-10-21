@@ -74,6 +74,10 @@ and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
 - `verified` does not say the guard runs on every path; `relation` does. A
   bound holds unconditionally only when it is `verified` and `dominates` or
   `defines` the value.
+- The numeric cap is `bound`. A `verified` guard without one, such as a clamp
+  to another variable, is capped by a runtime value, the guard's operand: a
+  sound relation, not a numeric limit. To reach a number, anchor on that
+  operand and trace it.
 - A comparison admits the side that holds on its branch's edge into the
   anchor: past `if (left > MAX) return;`, `left` is in `[0, MAX]`. With no
   such edge (the block it enters is also entered from elsewhere, or does not

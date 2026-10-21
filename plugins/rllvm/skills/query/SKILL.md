@@ -233,6 +233,10 @@ Report what the answer supports, and say what it does not:
   anchor). `verified` does not mean the guard runs on every path: report a
   bound as unconditional only when it is `verified` and its `relation` is
   `dominates` or `defines`; a verified one that is on_path is conditional.
+  The numeric cap lives in `bound`. A verified guard with no `bound` is
+  capped by a runtime value, the guard's operand: a sound relation, not a
+  numeric limit, so never report a number for it; to reach one, anchor on
+  that operand and trace it.
   A `relation` of `dominates` runs before the use on every path but does not
   say which way its branch goes; one that is on_path lies on some path to
   the use, not every one. `crossings` name the call where the value enters
