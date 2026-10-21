@@ -1002,7 +1002,9 @@ fn read_bound(bound: &str, bits: u32, signed: bool) -> Option<i128> {
         if printed < lowest {
             return None;
         }
-        printed.checked_add(max.checked_add(1)?)?
+        // `printed + 2^bits`, without forming 2^bits, which an i128 does
+        // not hold at 127 bits.
+        printed.checked_add(max)?.checked_add(1)?
     };
     (min <= value && value <= max).then_some(value)
 }
@@ -4481,6 +4483,15 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             Some(Unverified::Wraps),
             "[0, 239] + 20 reaches 259"
         );
+    }
+
+    /// `ult -1` at 127 bits is `ult 2^127 - 1`, the widest unsigned value
+    /// an i128 holds, read without forming 2^127. At 128 bits the unsigned
+    /// range does not fit in an i128, so the bound stays unread.
+    #[test]
+    fn a_negative_bound_reads_unsigned_at_127_bits() {
+        assert_eq!(read_bound("-1", 127, false), Some(i128::MAX));
+        assert_eq!(read_bound("-1", 128, false), None);
     }
 
     /// A bound the guard's integer cannot hold, or one with no width or no
