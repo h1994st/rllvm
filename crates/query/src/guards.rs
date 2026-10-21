@@ -5352,6 +5352,16 @@ define void @volatile_nearest(ptr %s, i32 %n) {
   ret void
 }
 
+define void @atomic_nearest(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  store atomic i32 %n, ptr %a seq_cst, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
 define void @narrower_nearest(ptr %s, i32 %n) {
   %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
   %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
@@ -5484,6 +5494,7 @@ define void @unstored(ptr %s) {
             // may write the field first is never skipped to reach a store.
             ("overwritten_called", call, call.to_string()),
             ("volatile_nearest", store, store.to_string()),
+            ("atomic_nearest", store, store.to_string()),
             ("narrower_nearest", store, store.to_string()),
             ("retyped_nearest", store, store.to_string()),
             ("called_and_stored", &call_and_store, call_and_store.clone()),
