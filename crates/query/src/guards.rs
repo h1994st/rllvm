@@ -871,7 +871,8 @@ impl Widenings {
     /// Whether `site`'s bound holds across all of them: a `zext` keeps an
     /// unsigned value, a `sext` a signed one. An equality's bound is printed
     /// signed, which a `sext` keeps, and a `zext` only when it is not
-    /// negative.
+    /// negative. An inequality is kept by none: it is no identity across a
+    /// widening.
     fn keep(self, site: &GuardSite) -> bool {
         if self == Widenings::NONE {
             return true;
@@ -879,6 +880,7 @@ impl Widenings {
         match signedness(site.op, site.predicate.as_deref()) {
             Some(Signedness::Unsigned) => !self.sext,
             Some(Signedness::Signed) => !self.zext,
+            Some(Signedness::Equality) if site.predicate.as_deref() == Some("ne") => false,
             Some(Signedness::Equality) => {
                 !self.zext
                     || site
@@ -1356,7 +1358,6 @@ impl Trace<'_> {
                     .or_insert_with(|| self.relation(&followed, value, bounded)),
                 None => Relation::NotAffine,
             };
-            site.affine = relation.affine(site);
             let mut causes = bounds
                 .get(id)
                 .and_then(|bounded| unproven.get(bounded))
@@ -1374,6 +1375,9 @@ impl Trace<'_> {
                     }
                 }
             }
+            // Read with the predicate that holds on the edge, which the
+            // relation must keep.
+            site.affine = relation.affine(site);
             if site.affine.is_none() {
                 causes.insert(Unverified::NotAffine);
             } else if !causes.contains(&Unverified::NoEdge) {
@@ -5079,30 +5083,31 @@ out:
         }
     }
 
-    /// Past the false edge of `x eq 5`, `x ne 5` holds, and across a `zext`
-    /// on the widened value too; `-1` zero-extended is another number, so
-    /// the equality on `-1` is not affine there.
+    /// Past the false edge of `x eq 5`, `x ne 5` holds. The relation is
+    /// read with that predicate: an inequality admits nearly every value,
+    /// so across a `zext` it is no identity, and the site is not affine
+    /// whatever its bound.
     #[test]
-    fn a_widened_equality_on_the_false_edge_is_reported_unequal() {
+    fn a_widened_equality_on_the_false_edge_is_unequal_and_not_affine() {
         let scratch = tempfile::tempdir().unwrap();
         let session =
             compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
-        let r = affine_ir_guards(&session, "unequal_widened", "sink64");
-        let site = only_guard(&r);
-        assert_eq!(site.predicate.as_deref(), Some("ne"), "{r:?}");
-        assert_eq!(site.bound.as_deref(), Some("5"), "{r:?}");
-        assert_eq!(site.affine, Some(Affine::IDENTITY), "{r:?}");
-        assert!(site.verified, "{r:?}");
-
-        let r = affine_ir_guards(&session, "negative_unequal_widened", "sink64");
-        let site = only_guard(&r);
-        assert_eq!(site.predicate.as_deref(), Some("ne"), "{r:?}");
-        assert_eq!(site.affine, None, "{r:?}");
-        assert_eq!(
-            site.caveat.as_deref(),
-            Some("the relation to the anchored value is not affine"),
-            "{r:?}"
-        );
+        for (function, bound) in [("unequal_widened", "5"), ("negative_unequal_widened", "-1")] {
+            let r = affine_ir_guards(&session, function, "sink64");
+            let site = only_guard(&r);
+            assert_eq!(
+                (site.predicate.as_deref(), site.bound.as_deref()),
+                (Some("ne"), Some(bound)),
+                "{function}: {r:?}"
+            );
+            assert_eq!(site.affine, None, "{function}: {r:?}");
+            assert!(!site.verified, "{function}: {r:?}");
+            assert_eq!(
+                site.caveat.as_deref(),
+                Some("the relation to the anchored value is not affine"),
+                "{function}: {r:?}"
+            );
+        }
     }
 
     /// A comparison whose branch has no edge into the use -- its successor
