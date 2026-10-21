@@ -400,6 +400,9 @@ enum Unverified {
     /// Carried through the affine relation, the bound leaves the anchored
     /// value's range.
     Wraps,
+    /// The bound gives no interval to carry: there is no constant, or no
+    /// width.
+    Unmappable,
 }
 
 impl Unverified {
@@ -409,6 +412,7 @@ impl Unverified {
             Unverified::Wraps => {
                 "the bound does not carry to the anchored value without wraparound"
             }
+            Unverified::Unmappable => "the bound could not be mapped to the anchored value",
         }
     }
 }
@@ -842,22 +846,18 @@ fn linear(op: BinaryOp, operands: &[Operand]) -> Option<(ValueId, Affine)> {
     Some((operand, affine))
 }
 
-/// Whether `site`'s bound, carried onto the anchored value through its
-/// affine relation, leaves the anchored value's range: every value the guard
-/// admits, from one end of its interval to the other, must map into it.
+/// Why `site`'s bound does not carry onto the anchored value through its
+/// affine relation, or `None` when it does: every value the guard admits,
+/// from one end of its interval to the other, must map into the anchored
+/// value's range.
 ///
 /// The guard's integer of `bits` is the anchored value's width: an affine
 /// relation other than the identity is arithmetic alone, which keeps one
 /// width, and the identity maps the interval to itself. The guard's
-/// signedness is the anchored value's reading. A site with no bound has no
-/// interval to carry; one whose interval cannot be read is taken to wrap.
-fn wraps(site: &GuardSite, bits: Option<u32>) -> bool {
-    let Some(affine) = site.affine.filter(|affine| *affine != Affine::IDENTITY) else {
-        return false;
-    };
-    if site.bound.is_none() {
-        return false;
-    }
+/// signedness is the anchored value's reading. Without an interval to carry
+/// -- no constant bound, no width -- nothing is known to carry.
+fn uncarried(site: &GuardSite, bits: Option<u32>) -> Option<Unverified> {
+    let affine = site.affine.filter(|affine| *affine != Affine::IDENTITY)?;
     let carries = || {
         let signed = match signedness(site.op, site.predicate.as_deref())? {
             Signedness::Unsigned => false,
@@ -871,7 +871,11 @@ fn wraps(site: &GuardSite, bits: Option<u32>) -> bool {
         // A negative scale swaps the ends.
         Some(range.0 <= a.min(b) && a.max(b) <= range.1)
     };
-    !carries().unwrap_or(false)
+    match carries() {
+        Some(true) => None,
+        Some(false) => Some(Unverified::Wraps),
+        None => Some(Unverified::Unmappable),
+    }
 }
 
 /// The values an integer of `bits` holds, read `signed` or not, when `i128`
@@ -1163,8 +1167,8 @@ impl Trace<'_> {
             let mut causes = BTreeSet::new();
             if site.affine.is_none() {
                 causes.insert(Unverified::NotAffine);
-            } else if wraps(site, self.guard_width(*id)) {
-                causes.insert(Unverified::Wraps);
+            } else {
+                causes.extend(uncarried(site, self.guard_width(*id)));
             }
             mark(site, &causes);
         }
@@ -2537,6 +2541,7 @@ void f(void) { M(); }
 declare void @sink(i32)
 declare void @sink64(i64)
 declare void @sink8(i8)
+declare i32 @llvm.umin.i32(i32, i32)
 
 define void @offset(i32 %x) {
   %c = icmp ult i32 %x, 16
@@ -2756,6 +2761,24 @@ use:
   call void @sink8(i8 %n)
   br label %out
 out:
+  ret void
+}
+
+define void @unbounded(i32 %x, i32 %y) {
+  %c = icmp ugt i32 %x, %y
+  br i1 %c, label %out, label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @clamped_to_value(i32 %x, i32 %y) {
+  %m = call i32 @llvm.umin.i32(i32 %x, i32 %y)
+  %n = add i32 %m, 1
+  call void @sink(i32 %n)
   ret void
 }
 
@@ -3356,6 +3379,33 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             assert_eq!(site.affine, relation, "{function}: {r:?}");
             assert_eq!(site.verified, caveat.is_none(), "{function}: {r:?}");
             assert_eq!(site.caveat.as_deref(), caveat, "{function}: {r:?}");
+        }
+    }
+
+    /// A guard with no constant bound has no interval to carry onto the
+    /// anchored value, so nothing is known to carry.
+    #[test]
+    fn a_bound_with_no_constant_cannot_be_carried() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        for function in ["unbounded", "clamped_to_value"] {
+            let r = affine_ir_guards(&session, function, "sink");
+            let site = only_guard(&r);
+            assert_eq!(
+                site.affine,
+                Some(Affine {
+                    scale: 1,
+                    offset: 1
+                }),
+                "{function}: {r:?}"
+            );
+            assert!(!site.verified, "{function}: {r:?}");
+            assert_eq!(
+                site.caveat.as_deref(),
+                Some("the bound could not be mapped to the anchored value"),
+                "{function}: {r:?}"
+            );
         }
     }
 
