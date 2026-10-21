@@ -68,7 +68,7 @@ rllvm-query --catalog build/field.json guards --at field.c:19 --operand 2
 This names `b->len`, loaded for `put` right after line 18 stores the clamp
 there. Nothing between the store and the load writes memory, so the load is
 the stored value: the answer lists the `clamp umin 64` at `field.c:18`, on the
-anchor and `verified`. A call between them (say `log(b)`) could change the
+anchor and `verified`. A call between them (say `note(b)`) could change the
 field, so the same clamp would come back unverified, its caveat naming the
 call.
 
@@ -103,13 +103,15 @@ call.
   parameter or leaves a call, `crossings` name the call to ask `guards` about
   next. `--from F` keeps only callers on a path from `F`, which must name one
   function, and examines nothing between them.
-- A load is followed to the store it reads back: a non-volatile store of
-  the same type to the same address, the same pointer or a `getelementptr`
-  alike, that runs before it. With exactly one, in the load's block, and only
-  operations that write no memory between them, the load is the stored
-  value. A call, another store or any other operation between, more than one
-  such store, or a store in another block still leads on, but every guard
-  reached that way is unverified, its caveat saying which.
+- A load is followed to the store it reads back: a non-volatile store of the
+  same type to the same address, the same pointer or a `getelementptr` alike,
+  that runs before it. With exactly one, in the load's block, and only
+  operations that write no memory between them, the load is the stored value.
+  A call, another store or any other operation between (an `atomicrmw`, a
+  `cmpxchg`, a volatile load), more than one such store, or a store in another
+  block still leads on, but every guard reached that way is unverified, its
+  caveat saying which, and `uncertainty.value_trace_lost` says the field may
+  hold something else.
 - Where the trace cannot follow the value (a load with no such store, or a
   volatile or atomic one, a pointer round trip, inline assembly, an
   intrinsic it does not read through), `uncertainty.value_trace_lost` says
