@@ -216,14 +216,15 @@ carries to the value; otherwise it is a lead whose `caveat` says why: the
 relation is not affine, the guard bounds a value computed from it, no branch
 edge shows a comparison held at the use, the bound wraps, or it cannot be
 mapped. A comparison is verified only through its branch's edge into the use,
-and gives the predicate that holds on that edge, which may negate the source
-condition: past `if (x > 16) return;` it is `ule 16`. A verified comparison's
-predicate holds at the use; one with no deciding edge keeps its predicate as
-written. A `--return` anchor, or a `--local` without `--at`, sits before the
-comparisons that test the value, so they are leads there: for their bound,
-anchor at the later use, `--at` that use for a local or an argument anchor on
-the call that consumes a returned value. A clamp computed from the value
-bounds its own result, so when it is made of a comparison (a branch or
+one every path to the use crosses (a loop's backedge into the block it enters
+is fine), and gives the predicate that holds on that edge, which may negate the
+source condition: past `if (x > 16) return;` it is `ule 16`. A verified
+comparison's predicate holds at the use; one with no deciding edge keeps its
+predicate as written. A `--return` anchor, or a `--local` without `--at`, sits
+before the comparisons that test the value, so they are leads there: for their
+bound, anchor at the later use, `--at` that use for a local or an argument
+anchor on the call that consumes a returned value. A clamp computed from the
+value bounds its own result, so when it is made of a comparison (a branch or
 `select` clamp, not an intrinsic `umin`), that comparison is listed too. For a
 clamp, mask, modulo or saturation, `verified` does not say it runs on every
 path, `relation` does: an unconditional bound is `verified` and `dominates` or

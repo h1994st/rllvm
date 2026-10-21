@@ -235,18 +235,19 @@ Report what the answer supports, and say what it does not:
   comparison held at the use, the bound wraps when carried to the anchored
   value, or it could not be mapped (no constant the guard's integer holds,
   no width, or an interval that admits no value, such as `ult 0`).
-  A comparison is verified only through its branch's edge into the use, and
-  its `predicate` is the one that holds on that edge, which may negate the
-  source condition: past `if (x > 16) return;` it reads `ule 16`. Report a
-  verified comparison's predicate as holding at the use; one with no
-  deciding edge keeps its predicate as written. A `return` anchor, or a
-  `local` without `at`, sits before the comparisons that test the value, so
-  they are leads there: for their bound, anchor at the later use, `at` that
-  use for a local or an argument anchor on the call that consumes a returned
-  value. A clamp of the anchored value made of a comparison (a branch or
-  select clamp, not an intrinsic umin or saturation) also lists that
-  comparison, which bounds the anchored value itself, verified only through
-  its branch's edge into the use. For a clamp, mask,
+  A comparison is verified only through its branch's edge into the use, one
+  every path to the use crosses (a loop's backedge into the block it enters
+  is fine), and its `predicate` is the one that holds on that edge, which
+  may negate the source condition: past `if (x > 16) return;` it reads
+  `ule 16`. Report a verified comparison's predicate as holding at the use;
+  one with no deciding edge keeps its predicate as written. A `return`
+  anchor, or a `local` without `at`, sits before the comparisons that test
+  the value, so they are leads there: for their bound, anchor at the later
+  use, `at` that use for a local or an argument anchor on the call that
+  consumes a returned value. A clamp of the anchored value made of a
+  comparison (a branch or select clamp, not an intrinsic umin or saturation)
+  also lists that comparison, which bounds the anchored value itself,
+  verified only through its branch's edge into the use. For a clamp, mask,
   modulo or saturation, `verified` does not mean it runs on every path:
   report its bound as unconditional only when it is `verified` and its
   `relation` is `dominates` or `defines`; a verified one that is on_path is

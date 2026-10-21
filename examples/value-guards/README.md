@@ -93,12 +93,12 @@ rllvm-query --catalog build/catalog.json guards --at clamp.c:26 --operand 2
 rllvm-query --catalog build/catalog.json guards --at clamp.c:30 --operand 2
 ```
 
-In `peek`, an `if` clamps `len` to 64 into `n`, and line 26 passes `len`
-itself from inside the branch where `len < 64`. The clamp bounds `n`, which is
+In `peek`, an `if` clamps `len` to 64 into `n`, and line 26 passes `len` itself
+from inside the branch where `len < 64`. The clamp bounds `n`, which is
 computed from `len`, so it comes back unverified; the `compare ult 64` it is
-made of is listed beside it and `verified`, since its true edge is the only way
-into the call. At line 30 `n` is the clamp's result: one verified clamp, its
-comparison not listed again.
+made of is listed beside it and `verified`, since every path to the call
+crosses its true edge. At line 30 `n` is the clamp's result: one verified
+clamp, its comparison not listed again.
 
 ```bash
 rllvm-query --catalog build/catalog.json guards --function copy --local len
@@ -161,13 +161,13 @@ a use-site, so a reused local cannot be annotated.
   operand and trace it.
 - A comparison's `predicate` is the side that holds on its branch's edge into
   the anchor, so it may negate the source condition: past
-  `if (left > MAX) return;` it is `ule MAX`. A verified comparison's
-  predicate holds at the use. With no such edge (the block it enters is also
-  entered from elsewhere, or does not dominate the use, or the comparison
-  only feeds a `select` or `zext`), it keeps the predicate as written and is
-  unverified, its caveat "no branch edge shows the comparison held at the
-  use". With no constant bound, nothing is known to carry, and a guard
-  upstream of arithmetic is unverified.
+  `if (left > MAX) return;` it is `ule MAX`. A verified comparison's predicate
+  holds at the use. With no such edge (a path reaches the use without crossing
+  it, though a loop's backedge into the block it enters is fine, or the
+  comparison only feeds a `select` or `zext`), it keeps the predicate as
+  written and is unverified, its caveat "no branch edge shows the comparison
+  held at the use". With no constant bound, nothing is known to carry, and a
+  guard upstream of arithmetic is unverified.
 - A `--return` anchor, or a `--local` without `--at`, sits before the
   comparisons that test the value, so they are leads there. For their bound,
   anchor at the later use: `--at` that use for a local, or an argument anchor
