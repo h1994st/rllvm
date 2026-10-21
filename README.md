@@ -216,15 +216,18 @@ mapped. A comparison is verified only through its branch's edge into the use,
 and gives the predicate that holds on that edge, which may negate the source
 condition: past `if (x > 16) return;` it is `ule 16`. A verified comparison's
 predicate holds at the use; one with no deciding edge keeps its predicate as
-written. A clamp computed from the value bounds its own result, so when it is
-made of a comparison (a branch or `select` clamp, not an intrinsic `umin`),
-that comparison is listed too. For a clamp, mask, modulo or saturation,
-`verified` does not say it runs on every path, `relation` does: an
-unconditional bound is `verified` and `dominates` or `defines`, while one
-`on_path` is conditional. The numeric cap is `bound`: a `verified` guard
-without one is capped by a runtime value, the guard's operand, which is a sound
-relation but not a numeric limit; to reach a number, anchor on that operand and
-trace it.
+written. A `--return` anchor, or a `--local` without `--at`, sits before the
+comparisons that test the value, so they are leads there: for their bound,
+anchor at the later use, `--at` that use for a local or an argument anchor on
+the call that consumes a returned value. A clamp computed from the value
+bounds its own result, so when it is made of a comparison (a branch or
+`select` clamp, not an intrinsic `umin`), that comparison is listed too. For a
+clamp, mask, modulo or saturation, `verified` does not say it runs on every
+path, `relation` does: an unconditional bound is `verified` and `dominates` or
+`defines`, while one `on_path` is conditional. The numeric cap is `bound`: a
+`verified` guard without one is capped by a runtime value, the guard's operand,
+which is a sound relation but not a numeric limit; to reach a number, anchor on
+that operand and trace it.
 A load is followed to the nearest store before it in its block, which
 overwrites any earlier one, with nothing between that writes memory. A call,
 another store or any other operation between (an `atomicrmw`, a `cmpxchg`, a

@@ -161,6 +161,10 @@ cannot be annotated.
   unverified, its caveat "no branch edge shows the comparison held at the
   use". With no constant bound, nothing is known to carry, and a guard
   upstream of arithmetic is unverified.
+- A `--return` anchor, or a `--local` without `--at`, sits before the
+  comparisons that test the value, so they are leads there. For their bound,
+  anchor at the later use: `--at` that use for a local, or an argument anchor
+  on the call that consumes a returned value.
 - The trace stays in the anchor's function. Where the value enters through a
   parameter or leaves a call, `crossings` name the call to ask `guards` about
   next. `--from F` keeps only callers on a path from `F`, which must name one
