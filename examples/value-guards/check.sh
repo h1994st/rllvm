@@ -11,6 +11,8 @@ rllvm-cc -g -O0 clamp.c -o "$OUT/clamp"
 rllvm-info "$OUT/clamp" --json >"$OUT/catalog.json"
 rllvm-cc -g -O0 offset.c -o "$OUT/offset"
 rllvm-info "$OUT/offset" --json >"$OUT/offset.json"
+rllvm-cc -g -O0 field.c -o "$OUT/field"
+rllvm-info "$OUT/field" --json >"$OUT/field.json"
 
 query() {
     rllvm-query --catalog "$OUT/catalog.json" "$@"
@@ -104,4 +106,22 @@ carried=$(offset --json |
 [ "$carried" = "[('compare', '64', True, 1, 1)]" ] ||
     fail "guards on left + 1 reported $carried, expected one verified compare with affine {1, 1}"
 
-echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, and a verified bound carried to left + 1"
+# 9. `b->len` is stored the clamp and read straight back for put, with nothing
+#    between that writes memory: the load is the stored value, so the clamp
+#    bounds the argument itself, verified.
+field_guards() {
+    rllvm-query --catalog "$OUT/field.json" guards --at field.c:19 --operand 2 "$@"
+}
+text=$(field_guards)
+defines "$text" 'clamp umin 64' "no clamp through the field: $text"
+defines "$text" 'on the anchor' "the clamp through the field was not on the anchor: $text"
+defines "$text" 'field\.c:18' "the clamp did not name the line that stores it: $text"
+if grep -q 'unverified' <<<"$text"; then
+    fail "the clamp through the field was marked unverified: $text"
+fi
+through=$(field_guards --json |
+    field '([(g["op"], g["bound"], g["verified"], g["depth"]) for g in a["results"]["guards"]], a["uncertainty"].get("value_trace_lost"))')
+[ "$through" = "([('clamp', '64', True, 0)], None)" ] ||
+    fail "guards on b->len reported $through, expected one verified clamp and no lost trace"
+
+echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, and a clamp followed through a struct field"

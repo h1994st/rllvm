@@ -58,6 +58,32 @@ pub(crate) struct ValueNode {
     pub(crate) guard: Option<GuardOpRaw>,
     /// From the instruction's `!dbg`.
     pub(crate) location: Option<SourceLocation>,
+    /// Set for a `load` or `store` that is volatile or atomic: memory the
+    /// program does not alone define.
+    pub(crate) volatile: bool,
+    /// For a `load`, the type it reads; for a `store`, the type of the value
+    /// it writes. `None` for anything else, and for a type the tag does not
+    /// tell apart from another.
+    pub(crate) ty: Option<TypeTag>,
+    /// For a `getelementptr`, the type it indexes as the IR prints it, which
+    /// with its operands decides the address it computes.
+    pub(crate) element: Option<String>,
+}
+
+/// A scalar type, as far as two memory accesses must agree on it: two
+/// equal tags are one type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TypeTag {
+    pub(crate) kind: ScalarKind,
+    pub(crate) bits: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ScalarKind {
+    Int,
+    Float,
+    /// A pointer in the default address space.
+    Ptr,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +104,8 @@ pub(crate) enum OpcodeIr {
         op: CastOp,
     },
     Phi,
+    /// A `getelementptr`: address arithmetic, which reads no memory.
+    Gep,
     Load,
     Store,
     Ret,

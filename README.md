@@ -212,6 +212,11 @@ path, `relation` does: an unconditional bound is `verified` and `dominates` or
 `verified` guard without one is capped by a runtime value, the guard's operand,
 which is a sound relation but not a numeric limit; to reach a number, anchor on
 that operand and trace it.
+A load is followed to the one store it reads back in its block, with nothing
+between that writes memory. A call, another store or any other operation
+between (an `atomicrmw`, a `cmpxchg`, a volatile load), several stores, or one
+in another block makes each guard reached through it a lead, and the trace is
+reported lost there.
 It is evidence, never a verdict: an empty list does not mean unbounded. See the
 [value guards example](examples/value-guards/).
 
