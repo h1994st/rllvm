@@ -4464,6 +4464,36 @@ fn guards_read_unsigned_bounds_unsigned_and_print_masks_in_hex() {
     assert!(stderr.contains("no call site at absent.c:4"), "{stderr}");
 }
 
+/// A location that is no `file:line` is named once, under one prefix, on
+/// either path that reads one: a call site's and a local's use.
+#[test]
+fn guards_name_a_malformed_location_under_one_prefix() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "u.c", UNSIGNED_GUARDS_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    for anchor in [
+        &["--at", "j.c", "--operand", "0"][..],
+        &["--function", "f", "--local", "len", "--at", "j.c"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .arg("guards")
+            .args(anchor)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "Invalid arguments: invalid location `j.c`: expected `file:line`, e.g. `parser.c:8`"
+            ) && stderr.matches("Invalid arguments").count() == 1,
+            "{anchor:?}: {stderr}"
+        );
+    }
+}
+
 const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\
      void callee(unsigned n) {\n\
        if (n > 15) return;\n\

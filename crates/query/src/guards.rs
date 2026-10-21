@@ -19,7 +19,7 @@ use crate::ir::{
     BinaryOp, CallIr, CastOp, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand, ValueId,
     ValueNode, int_predicate,
 };
-use crate::overlay::{function_label, site_label};
+use crate::overlay::{bare, function_label, site_label};
 use crate::slice::{EmittedModule, check_opt_llvm, emit_module, promote, promote_anchor_module};
 use crate::{
     CallSiteFact, CallSiteId, CallTarget, FunctionId, GuardKind, Linkage, Session, SourceLocation,
@@ -163,9 +163,7 @@ fn check_use_site(at: &str, surface: AnchorSurface) -> Result<(), String> {
             surface.local()
         ));
     }
-    crate::parse_location(at.trim())
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    crate::parse_location(at.trim()).map(|_| ()).map_err(bare)
 }
 
 /// Rejects a combination of anchor parts that names no value, without
@@ -213,7 +211,7 @@ fn resolve_site(session: &Session, at: &str) -> Result<CallSiteId, String> {
             Err(format!("no such call site in the catalog: {at}"))
         };
     }
-    let (file, line) = crate::parse_location(at).map_err(|error| error.to_string())?;
+    let (file, line) = crate::parse_location(at).map_err(bare)?;
     let sites = session.call_sites_at(&file, line);
     match sites.as_slice() {
         [] => Err(format!(
@@ -5143,7 +5141,25 @@ define void @unstored(ptr %s) {
         );
         let error = check(id, AnchorSurface::Tool).unwrap_err();
         assert!(error.contains("`at`"), "{error}");
-        let error = check("t.c", AnchorSurface::Cli).unwrap_err();
-        assert!(error.contains("expected `file:line`"), "{error}");
+        assert_eq!(
+            check("t.c", AnchorSurface::Cli).unwrap_err(),
+            INVALID_T_C,
+            "one message, not wrapped in another error's prefix"
+        );
+    }
+
+    /// What `parse_location` says of `t.c`, with no error's prefix.
+    const INVALID_T_C: &str = "invalid location `t.c`: expected `file:line`, e.g. `parser.c:8`";
+
+    #[test]
+    fn a_call_site_that_is_no_file_line_is_refused_with_one_message() {
+        let session = crate::testing::session_from(&[("a", "b")]);
+        let error = anchor_from_parts(
+            &session,
+            &parts(Some("t.c"), Some(0), false, None, None),
+            AnchorSurface::Cli,
+        )
+        .unwrap_err();
+        assert_eq!(error, INVALID_T_C);
     }
 }
