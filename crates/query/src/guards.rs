@@ -448,7 +448,8 @@ enum Unverified {
     /// value's range.
     Wraps,
     /// The bound gives no interval to carry: there is no constant, no width,
-    /// or no branch edge that decides which side of a comparison holds.
+    /// no branch edge that decides which side of a comparison holds, or the
+    /// constant is one the guard's integer cannot hold or passes no value.
     Unmappable,
 }
 
@@ -948,9 +949,9 @@ fn linear(op: BinaryOp, operands: &[Operand]) -> Option<(ValueId, Affine)> {
 /// The guard's integer of `bits` is the anchored value's width: an affine
 /// relation other than the identity is arithmetic alone, which keeps one
 /// width, and the identity maps the interval to itself. The guard's
-/// signedness is the anchored value's reading. Without an interval to carry
-/// -- no constant bound, no width, no deciding edge -- nothing is known to
-/// carry.
+/// signedness is the anchored value's reading, and the one its bound is
+/// read in. Without an interval to carry -- no constant bound the guard's
+/// integer holds, no width, no deciding edge -- nothing is known to carry.
 fn uncarried(site: &GuardSite, bits: Option<u32>, edge: Option<bool>) -> Option<Unverified> {
     let affine = site.affine.filter(|affine| *affine != Affine::IDENTITY)?;
     let carries = || {
@@ -959,8 +960,10 @@ fn uncarried(site: &GuardSite, bits: Option<u32>, edge: Option<bool>) -> Option<
             // An equality's bound is printed signed.
             Signedness::Signed | Signedness::Equality => true,
         };
-        let range = range(bits?, signed)?;
-        let (low, high) = interval(site, range, edge)?;
+        let bits = bits?;
+        let range = range(bits, signed)?;
+        let bound = read_bound(site.bound.as_deref()?, bits, signed)?;
+        let (low, high) = interval(site, bound, range, edge)?;
         let map = |end: i128| affine.scale.checked_mul(end)?.checked_add(affine.offset);
         let (a, b) = (map(low)?, map(high)?);
         // A negative scale swaps the ends.
@@ -985,17 +988,37 @@ fn range(bits: u32, signed: bool) -> Option<(i128, i128)> {
     }
 }
 
-/// The values `site`'s guard admits for the value it bounds, read in
-/// `range`, the bounded integer's: an end the guard does not fix is the
-/// type's extreme. A comparison admits what holds on the edge `edge` names
-/// -- its predicate on the true one, the inverse on the false -- and nothing
-/// without one.
+/// `bound`, a constant as the IR prints it or as [`unsigned_bound`] reads
+/// it, as an integer of `bits` read `signed` or not. The IR prints every
+/// integer signed, so unsigned, `-k` is `2^bits - k`. `None` when it is no
+/// number, or one such an integer cannot hold.
+fn read_bound(bound: &str, bits: u32, signed: bool) -> Option<i128> {
+    let printed: i128 = bound.parse().ok()?;
+    let (min, max) = range(bits, signed)?;
+    let value = if signed || printed >= 0 {
+        printed
+    } else {
+        let (lowest, _) = range(bits, true)?;
+        if printed < lowest {
+            return None;
+        }
+        printed.checked_add(max.checked_add(1)?)?
+    };
+    (min <= value && value <= max).then_some(value)
+}
+
+/// The values `site`'s guard with constant `bound` admits for the value it
+/// bounds, read in `range`, the bounded integer's: an end the guard does not
+/// fix is the type's extreme. A comparison admits what holds on the edge
+/// `edge` names -- its predicate on the true one, the inverse on the false
+/// -- and nothing without one. `None` when the guard passes no value, as
+/// `x ult 0` does.
 fn interval(
     site: &GuardSite,
+    bound: i128,
     (min, max): (i128, i128),
     edge: Option<bool>,
 ) -> Option<(i128, i128)> {
-    let bound: i128 = site.bound.as_deref()?.parse().ok()?;
     let predicate = match site.op {
         GuardKind::Compare => {
             let predicate = site.predicate.as_deref()?;
@@ -1007,7 +1030,7 @@ fn interval(
         }
         _ => site.predicate.as_deref().unwrap_or_default(),
     };
-    Some(match (site.op, predicate) {
+    let (low, high) = match (site.op, predicate) {
         (GuardKind::Compare, "ult" | "slt") => (min, bound.checked_sub(1)?),
         (GuardKind::Compare, "ule" | "sle") | (GuardKind::Clamp, "umin" | "smin") => (min, bound),
         (GuardKind::Compare, "ugt" | "sgt") => (bound.checked_add(1)?, max),
@@ -1021,7 +1044,8 @@ fn interval(
         }
         // `ne` and the saturating operations fix neither end here.
         _ => (min, max),
-    })
+    };
+    (low <= high).then_some((low, high))
 }
 
 /// `outer` applied after `inner`, exactly: `None` when a term overflows
@@ -1946,7 +1970,7 @@ fn surfaced(
 /// when `op` with `predicate` is unsigned: a mask, or an operation whose
 /// name starts with `u`. The IR prints every integer signed, so the mask
 /// `0xfffffff0` reads `-16`. Kept as printed for a signed or equality
-/// operation, or when the width is not known.
+/// operation, when the width is not known, or when no such integer holds it.
 fn unsigned_bound(
     op: GuardKind,
     predicate: Option<&str>,
@@ -1954,13 +1978,9 @@ fn unsigned_bound(
     bits: Option<u32>,
 ) -> String {
     let unsigned = signedness(op, predicate) == Some(Signedness::Unsigned);
-    let width = bits
-        .and_then(|bits| 1_i128.checked_shl(bits))
-        .filter(|width| *width > 0);
-    match (unsigned, width, bound.parse::<i128>()) {
-        (true, Some(width), Ok(value)) if value < 0 => (value + width).to_string(),
-        _ => bound.to_string(),
-    }
+    bits.filter(|_| unsigned)
+        .and_then(|bits| read_bound(bound, bits, false))
+        .map_or_else(|| bound.to_string(), |value| value.to_string())
 }
 
 /// How `predicate` reads once its operands swap sides.
@@ -3495,6 +3515,28 @@ out:
   ret void
 }
 
+define void @unsigned_negative(i8 %x) {
+  %c = icmp ult i8 %x, -16
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 10
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @unsigned_negative_wrapping(i8 %x) {
+  %c = icmp ult i8 %x, -16
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 20
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
 define void @carrying(i8 %x) {
   %c = icmp ule i8 %x, 100
   br i1 %c, label %use, label %out
@@ -3560,6 +3602,17 @@ join:
 use:
   %n = add i32 %x, 1
   call void @sink(i32 %n)
+  ret void
+}
+
+define void @never_above(i32 %x) {
+  %c = icmp ugt i32 %x, -1
+  br i1 %c, label %use, label %out
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
   ret void
 }
 
@@ -4200,6 +4253,10 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             // [0, 254] + 2 reaches 256 at 8 bits.
             ("wrapping", "sink8", affine(1, 2), wraps),
             ("carrying", "sink8", affine(1, 2), None),
+            // `-16` at 8 bits, read unsigned, is 240: [0, 239] + 10 carries,
+            // and + 20 reaches 259.
+            ("unsigned_negative", "sink8", affine(1, 10), None),
+            ("unsigned_negative_wrapping", "sink8", affine(1, 20), wraps),
             // The anchor is reached on the false edge of `x ugt 16`, where
             // `x ule 16` holds: [0, 16] + 1 carries.
             ("above", "sink", affine(1, 1), None),
@@ -4224,13 +4281,19 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
 
     /// A bound only carries from an edge that decides it: one into a block
     /// that dominates the anchor and is entered from nothing else. Without
-    /// one, or without a constant bound, nothing is known to carry.
+    /// one, without a constant bound, or past a comparison no value passes,
+    /// such as `x ugt UMAX`, nothing is known to carry.
     #[test]
     fn a_bound_with_no_deciding_edge_or_constant_cannot_be_carried() {
         let scratch = tempfile::tempdir().unwrap();
         let session =
             compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
-        for function in ["shared_successor", "unbounded", "clamped_to_value"] {
+        for function in [
+            "shared_successor",
+            "unbounded",
+            "clamped_to_value",
+            "never_above",
+        ] {
             let r = affine_ir_guards(&session, function, "sink");
             let site = only_guard(&r);
             assert_eq!(
@@ -4370,6 +4433,78 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             "an unknown width leaves the IR's spelling"
         );
         assert_eq!(read(GuardKind::Mask, None, "true", Some(1)), "true");
+    }
+
+    /// A guard site `x predicate bound` at depth 1, `affine` from the
+    /// anchored value.
+    fn carried_site(predicate: &str, bound: &str, affine: Affine) -> GuardSite {
+        GuardSite {
+            op: GuardKind::Compare,
+            predicate: Some(predicate.to_string()),
+            bound: Some(bound.to_string()),
+            location: None,
+            relation: GuardRelation::Dominates,
+            depth: 1,
+            verified: true,
+            caveat: None,
+            affine: Some(affine),
+        }
+    }
+
+    /// The IR prints `240` at 8 bits as `-16`: an unsigned comparison reads
+    /// it as 240 however it is spelled, so `x ult -16` admits [0, 239],
+    /// which `x + 10` keeps within 8 bits. A signed one reads it as -16.
+    #[test]
+    fn a_bound_is_read_in_its_guards_own_signedness() {
+        let plus_ten = Affine {
+            scale: 1,
+            offset: 10,
+        };
+        for (predicate, bound) in [("ult", "-16"), ("ult", "240"), ("slt", "-16")] {
+            let site = carried_site(predicate, bound, plus_ten);
+            assert_eq!(
+                uncarried(&site, Some(8), Some(true)),
+                None,
+                "{predicate} {bound}"
+            );
+        }
+        let site = carried_site(
+            "ult",
+            "-16",
+            Affine {
+                scale: 1,
+                offset: 20,
+            },
+        );
+        assert_eq!(
+            uncarried(&site, Some(8), Some(true)),
+            Some(Unverified::Wraps),
+            "[0, 239] + 20 reaches 259"
+        );
+    }
+
+    /// A bound the guard's integer cannot hold, or one with no width or no
+    /// number to read, is not known to wrap: it maps to nothing.
+    #[test]
+    fn a_bound_its_guard_cannot_hold_is_unmappable() {
+        let plus_one = Affine {
+            scale: 1,
+            offset: 1,
+        };
+        for (predicate, bound, bits) in [
+            ("ult", "300", Some(8)),
+            ("ult", "-200", Some(8)),
+            ("slt", "200", Some(8)),
+            ("ult", "sixteen", Some(8)),
+            ("ult", "16", None),
+        ] {
+            let site = carried_site(predicate, bound, plus_one);
+            assert_eq!(
+                uncarried(&site, bits, Some(true)),
+                Some(Unverified::Unmappable),
+                "{predicate} {bound} at {bits:?}"
+            );
+        }
     }
 
     #[test]
