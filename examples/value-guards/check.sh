@@ -89,22 +89,23 @@ flows=$(field '[(f["source"], f["verdict"]) for f in a["uncertainty"].get("annot
 [ "$flows" = "[('agent', 'infeasible')]" ] ||
     fail "annotated_flows was $flows, expected one infeasible annotation labeled agent"
 
-# 8. Past `if (left > MAX) return;`, `left` is in [0, MAX]; make_buf gets
-#    `left + 1`. The guard carries to the argument through that affine
-#    relation, without wrapping: verified.
+# 8. Past `if (left > MAX) return;`, `left` is in [0, MAX]: the comparison is
+#    reported as `left ule MAX`, the predicate that holds on the false edge into
+#    the call. make_buf gets `left + 1`, and the bound carries to it through
+#    that affine relation, without wrapping: verified.
 offset() {
     rllvm-query --catalog "$OUT/offset.json" guards --at offset.c:15 --operand 1 "$@"
 }
 text=$(offset)
-defines "$text" 'compare ugt 64' "no comparison on left: $text"
+defines "$text" 'compare ule 64' "no comparison on left, as it holds at the call: $text"
 defines "$text" 'anchored = guarded \+ 1' "the relation to left + 1 was not shown: $text"
 if grep -q 'unverified' <<<"$text"; then
     fail "the guard on left was marked unverified: $text"
 fi
 carried=$(offset --json |
-    field '[(g["op"], g["bound"], g["verified"], g["affine"]["scale"], g["affine"]["offset"]) for g in a["results"]["guards"]]')
-[ "$carried" = "[('compare', '64', True, 1, 1)]" ] ||
-    fail "guards on left + 1 reported $carried, expected one verified compare with affine {1, 1}"
+    field '[(g["op"], g["predicate"], g["bound"], g["verified"], g["affine"]["scale"], g["affine"]["offset"]) for g in a["results"]["guards"]]')
+[ "$carried" = "[('compare', 'ule', '64', True, 1, 1)]" ] ||
+    fail "guards on left + 1 reported $carried, expected one verified compare ule 64 with affine {1, 1}"
 
 # 9. `b->len` is stored the clamp and read straight back for put, with nothing
 #    between that writes memory: the load is the stored value, so the clamp
@@ -144,15 +145,16 @@ defines "$lost" 'more than one value' "--local cur alone was not refused: $lost"
 defines "$lost" 'reuse\.c:13.*reuse\.c:17' "the refusal did not list both use lines: $lost"
 
 # 12. --at names one use, and each traces the value cur holds there: the bound
-#     checked before that call, verified on the value itself.
+#     checked before that call, verified on the value itself. The call is past
+#     `return`, so what holds there is `cur ule N`.
 first=$(reused --at reuse.c:13 --json |
-    field '[(g["bound"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
-[ "$first" = "[('32', 'dominates', True)]" ] ||
-    fail "--local cur --at reuse.c:13 reported $first, expected cur > 32 dominating, verified"
+    field '[(g["predicate"], g["bound"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
+[ "$first" = "[('ule', '32', 'dominates', True)]" ] ||
+    fail "--local cur --at reuse.c:13 reported $first, expected cur ule 32 dominating, verified"
 second=$(reused --at reuse.c:17 --json |
-    field '[(g["bound"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
-[ "$second" = "[('8', 'dominates', True)]" ] ||
-    fail "--local cur --at reuse.c:17 reported $second, expected cur > 8 dominating, verified"
+    field '[(g["predicate"], g["bound"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
+[ "$second" = "[('ule', '8', 'dominates', True)]" ] ||
+    fail "--local cur --at reuse.c:17 reported $second, expected cur ule 8 dominating, verified"
 
 # 13. A line with no use of cur is an error naming the lines that have one.
 status=0
@@ -181,7 +183,7 @@ clamped=$(query guards --at clamp.c:30 --operand 2 --json |
 #     side of len < 64 holds at len: the comparison is a lead.
 joined=$(query guards --function copy --local len --json |
     field '[(g["op"], g["verified"], g.get("caveat")) for g in a["results"]["guards"]]')
-[ "$joined" = "[('compare', False, 'the bound could not be mapped to the anchored value'), ('clamp', False, 'the guard bounds a value computed from the anchored one')]" ] ||
-    fail "guards --local len reported $joined, expected an unverified compare that could not be mapped and an unverified downstream clamp"
+[ "$joined" = "[('compare', False, 'no branch edge shows the comparison held at the use'), ('clamp', False, 'the guard bounds a value computed from the anchored one')]" ] ||
+    fail "guards --local len reported $joined, expected an unverified compare with no deciding edge and an unverified downstream clamp"
 
 echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, a clamp followed through a struct field and its nearest store, a reused local traced at each use, and the comparison a downstream clamp is made of"
