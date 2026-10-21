@@ -270,7 +270,7 @@ pub struct GuardSite {
     /// anchored value is computed from lies the value it constrains, a
     /// truncation counting as a step; such a guard is not by itself a bound
     /// on the anchored value: anchored at `n = (len & 0xff) + 1000`, the
-    /// mask is at depth 1.
+    /// mask is at depth 1, and `affine` says how its bound carries to `n`.
     pub depth: u32,
     /// Whether the guard and its `affine` relation to the anchored value
     /// are both established. A site that is not is a lead, never a fact:

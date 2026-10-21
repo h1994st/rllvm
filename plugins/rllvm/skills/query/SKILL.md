@@ -222,7 +222,11 @@ Report what the answer supports, and say what it does not:
   on a value it only widens (the bound holds across zext or sext when the
   guard's signedness matches the cast's), and N on a value N steps up the
   chain it is computed from, a truncation counting as a step; that is not
-  by itself a bound on the value. A `relation` of `dominates` runs before
+  by itself a bound on the value. Its `affine` gives the anchored value as
+  `scale * guarded + offset` when constant arithmetic links them. Report a
+  guard with `verified: false` as a lead, never a bound, with its `caveat`:
+  the relation is not affine, or the bound wraps when carried to the
+  anchored value. A `relation` of `dominates` runs before
   the use on every path but does not say which way its branch goes; one that
   is on_path lies on some path to the use, not every one. `crossings` name
   the call where the value enters or leaves: ask `guards` there next. `from`

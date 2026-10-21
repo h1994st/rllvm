@@ -202,6 +202,10 @@ also hold `annotate` verdicts on whether a value is feasible, which `reach` and
 call's argument (`--at FILE:LINE --operand N`), its result (`--return`) or a
 `-g` local (`--function F --local NAME`), with each guard's bound and source
 line; `--from F` keeps only callers on a path from `F`.
+Each guard gives its `affine` relation to the value, `anchored = scale *
+guarded + offset`, and is `verified` only when that relation is affine and the
+bound carries without wraparound; otherwise it is a lead whose `caveat` says
+why.
 It is evidence, never a verdict: an empty list does not mean unbounded. See the
 [value guards example](examples/value-guards/).
 
