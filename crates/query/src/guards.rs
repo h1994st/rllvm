@@ -400,8 +400,8 @@ enum Unverified {
     /// Carried through the affine relation, the bound leaves the anchored
     /// value's range.
     Wraps,
-    /// The bound gives no interval to carry: there is no constant, or no
-    /// width.
+    /// The bound gives no interval to carry: there is no constant, no width,
+    /// or no branch edge that decides which side of a comparison holds.
     Unmappable,
 }
 
@@ -849,14 +849,16 @@ fn linear(op: BinaryOp, operands: &[Operand]) -> Option<(ValueId, Affine)> {
 /// Why `site`'s bound does not carry onto the anchored value through its
 /// affine relation, or `None` when it does: every value the guard admits,
 /// from one end of its interval to the other, must map into the anchored
-/// value's range.
+/// value's range. For a comparison, `edge` is which way its branch goes to
+/// reach the anchor, if one edge decides it.
 ///
 /// The guard's integer of `bits` is the anchored value's width: an affine
 /// relation other than the identity is arithmetic alone, which keeps one
 /// width, and the identity maps the interval to itself. The guard's
 /// signedness is the anchored value's reading. Without an interval to carry
-/// -- no constant bound, no width -- nothing is known to carry.
-fn uncarried(site: &GuardSite, bits: Option<u32>) -> Option<Unverified> {
+/// -- no constant bound, no width, no deciding edge -- nothing is known to
+/// carry.
+fn uncarried(site: &GuardSite, bits: Option<u32>, edge: Option<bool>) -> Option<Unverified> {
     let affine = site.affine.filter(|affine| *affine != Affine::IDENTITY)?;
     let carries = || {
         let signed = match signedness(site.op, site.predicate.as_deref())? {
@@ -865,7 +867,7 @@ fn uncarried(site: &GuardSite, bits: Option<u32>) -> Option<Unverified> {
             Signedness::Signed | Signedness::Equality => true,
         };
         let range = range(bits?, signed)?;
-        let (low, high) = interval(site, range)?;
+        let (low, high) = interval(site, range, edge)?;
         let map = |end: i128| affine.scale.checked_mul(end)?.checked_add(affine.offset);
         let (a, b) = (map(low)?, map(high)?);
         // A negative scale swaps the ends.
@@ -892,22 +894,35 @@ fn range(bits: u32, signed: bool) -> Option<(i128, i128)> {
 
 /// The values `site`'s guard admits for the value it bounds, read in
 /// `range`, the bounded integer's: an end the guard does not fix is the
-/// type's extreme.
-fn interval(site: &GuardSite, (min, max): (i128, i128)) -> Option<(i128, i128)> {
+/// type's extreme. A comparison admits what holds on the edge `edge` names
+/// -- its predicate on the true one, the inverse on the false -- and nothing
+/// without one.
+fn interval(
+    site: &GuardSite,
+    (min, max): (i128, i128),
+    edge: Option<bool>,
+) -> Option<(i128, i128)> {
     let bound: i128 = site.bound.as_deref()?.parse().ok()?;
-    Some(match (site.op, site.predicate.as_deref()) {
-        (GuardKind::Compare, Some("ult" | "slt")) => (min, bound.checked_sub(1)?),
-        (GuardKind::Compare, Some("ule" | "sle")) | (GuardKind::Clamp, Some("umin" | "smin")) => {
-            (min, bound)
+    let predicate = match site.op {
+        GuardKind::Compare => {
+            let predicate = site.predicate.as_deref()?;
+            if edge? {
+                predicate
+            } else {
+                int_predicate(predicate)?.inverse
+            }
         }
-        (GuardKind::Compare, Some("ugt" | "sgt")) => (bound.checked_add(1)?, max),
-        (GuardKind::Compare, Some("uge" | "sge")) | (GuardKind::Clamp, Some("umax" | "smax")) => {
-            (bound, max)
-        }
-        (GuardKind::Compare, Some("eq")) => (bound, bound),
+        _ => site.predicate.as_deref().unwrap_or_default(),
+    };
+    Some(match (site.op, predicate) {
+        (GuardKind::Compare, "ult" | "slt") => (min, bound.checked_sub(1)?),
+        (GuardKind::Compare, "ule" | "sle") | (GuardKind::Clamp, "umin" | "smin") => (min, bound),
+        (GuardKind::Compare, "ugt" | "sgt") => (bound.checked_add(1)?, max),
+        (GuardKind::Compare, "uge" | "sge") | (GuardKind::Clamp, "umax" | "smax") => (bound, max),
+        (GuardKind::Compare, "eq") => (bound, bound),
         (GuardKind::Mask, _) => (0, bound),
-        (GuardKind::Modulo, Some("urem")) => (0, bound.checked_sub(1)?),
-        (GuardKind::Modulo, Some("srem")) => {
+        (GuardKind::Modulo, "urem") => (0, bound.checked_sub(1)?),
+        (GuardKind::Modulo, "srem") => {
             let magnitude = bound.checked_abs()?.checked_sub(1)?;
             (-magnitude, magnitude)
         }
@@ -1168,11 +1183,40 @@ impl Trace<'_> {
             if site.affine.is_none() {
                 causes.insert(Unverified::NotAffine);
             } else {
-                causes.extend(uncarried(site, self.guard_width(*id)));
+                let edge = self.edge_to(*id, at);
+                causes.extend(uncarried(site, self.guard_width(*id), edge));
             }
             mark(site, &causes);
         }
         sites.into_values().collect()
+    }
+
+    /// Which edge of the branch on comparison `compare` reaches `at`: `true`
+    /// for its true successor, `false` for its false one, when that
+    /// successor dominates `at`'s block and is entered by that edge alone.
+    /// `None` when no branch on it has such an edge.
+    fn edge_to(&self, compare: ValueId, at: ValueId) -> Option<bool> {
+        let target = self.node(at).block;
+        let entries = |block: usize| {
+            self.body
+                .blocks
+                .iter()
+                .flat_map(|ir| &ir.successors)
+                .filter(|&&successor| successor == block)
+                .count()
+        };
+        (0..self.body.blocks.len()).find_map(|block| {
+            let (branched, on_true, on_false) = self.branch_on(block)?;
+            if branched != compare {
+                return None;
+            }
+            [(on_true, true), (on_false, false)]
+                .into_iter()
+                .find_map(|(successor, taken)| {
+                    (entries(successor) == 1 && self.doms.dominates(successor, target))
+                        .then_some(taken)
+                })
+        })
     }
 
     /// The width in bits of the integer the guard at `id` operates on: its
@@ -2630,7 +2674,11 @@ join:
 
 define void @agreeing(i32 %x, i1 %flag) {
   %c = icmp ult i32 %x, 16
+  br i1 %c, label %body, label %out
+body:
   br i1 %flag, label %one, label %two
+out:
+  ret void
 one:
   %a = add i32 %x, 1
   br label %join
@@ -2759,6 +2807,41 @@ define void @signed_wrapping(i8 %x) {
 use:
   %n = add i8 %x, 100
   call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @false_edge(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %out, label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @shared_successor(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %other, label %join
+other:
+  br label %join
+join:
+  br label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @reversed_within(i32 %x) {
+  %c = icmp ule i32 %x, 10
+  br i1 %c, label %use, label %out
+use:
+  %n = sub i32 10, %x
+  call void @sink(i32 %n)
   br label %out
 out:
   ret void
@@ -3367,10 +3450,15 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             // [0, 254] + 2 reaches 256 at 8 bits.
             ("wrapping", "sink8", affine(1, 2), wraps),
             ("carrying", "sink8", affine(1, 2), None),
-            // A lower bound reaches the type's maximum, which + 1 wraps.
-            ("above", "sink", affine(1, 1), wraps),
-            // 10 - [0, 15] goes below zero, unsigned.
+            // The anchor is reached on the false edge of `x ugt 16`, where
+            // `x ule 16` holds: [0, 16] + 1 carries.
+            ("above", "sink", affine(1, 1), None),
+            // ... and on the false edge of `x ult 16`, where `x uge 16`
+            // admits the maximum, which + 1 wraps.
+            ("false_edge", "sink", affine(1, 1), wraps),
+            // 10 - [0, 15] goes below zero, unsigned; 10 - [0, 10] does not.
             ("reversed", "sink", affine(-1, 10), wraps),
+            ("reversed_within", "sink", affine(-1, 10), None),
             ("signed_offset", "sink8", affine(1, 1), None),
             ("signed_wrapping", "sink8", affine(1, 100), wraps),
         ] {
@@ -3382,14 +3470,15 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         }
     }
 
-    /// A guard with no constant bound has no interval to carry onto the
-    /// anchored value, so nothing is known to carry.
+    /// A bound only carries from an edge that decides it: one into a block
+    /// that dominates the anchor and is entered from nothing else. Without
+    /// one, or without a constant bound, nothing is known to carry.
     #[test]
-    fn a_bound_with_no_constant_cannot_be_carried() {
+    fn a_bound_with_no_deciding_edge_or_constant_cannot_be_carried() {
         let scratch = tempfile::tempdir().unwrap();
         let session =
             compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
-        for function in ["unbounded", "clamped_to_value"] {
+        for function in ["shared_successor", "unbounded", "clamped_to_value"] {
             let r = affine_ir_guards(&session, function, "sink");
             let site = only_guard(&r);
             assert_eq!(
@@ -3439,11 +3528,12 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
     /// Compiled from C: `(len & 0xff) + 1000` and `len * 4`.
     #[test]
     fn a_guard_upstream_of_constant_arithmetic_carries_its_relation() {
-        // The mask admits [0, 255], so the anchor lies in [1000, 1255]; the
-        // comparison `len > 16` admits up to the maximum, which `* 4` wraps.
+        // The mask admits [0, 255], so the anchor lies in [1000, 1255]; past
+        // `if (len > 16) return;`, `len` is in [0, 16], so `len * 4` in
+        // [0, 64].
         for (source, scale, offset, verified) in [
             (MASKED_OPERAND_SOURCE, 1, 1000, true),
-            (COMPARED_OPERAND_SOURCE, 4, 0, false),
+            (COMPARED_OPERAND_SOURCE, 4, 0, true),
         ] {
             let scratch = tempfile::tempdir().unwrap();
             let session = session(&scratch, source, &["-O0", "-g"]);
