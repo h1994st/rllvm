@@ -752,15 +752,25 @@ impl Widenings {
         }
     }
 
-    /// Whether a bound read with `signedness` holds across all of them: a
-    /// `zext` keeps an unsigned value, a `sext` a signed one, and either
-    /// keeps the bits an equality reads.
-    fn keep(self, signedness: Option<Signedness>) -> bool {
-        match signedness {
-            _ if self == Widenings::NONE => true,
+    /// Whether `site`'s bound holds across all of them: a `zext` keeps an
+    /// unsigned value, a `sext` a signed one. An equality's bound is printed
+    /// signed, which a `sext` keeps, and a `zext` only when it is not
+    /// negative.
+    fn keep(self, site: &GuardSite) -> bool {
+        if self == Widenings::NONE {
+            return true;
+        }
+        match signedness(site.op, site.predicate.as_deref()) {
             Some(Signedness::Unsigned) => !self.sext,
             Some(Signedness::Signed) => !self.zext,
-            Some(Signedness::Equality) => true,
+            Some(Signedness::Equality) => {
+                !self.zext
+                    || site
+                        .bound
+                        .as_deref()
+                        .and_then(|bound| bound.parse::<i128>().ok())
+                        .is_some_and(|bound| bound >= 0)
+            }
             None => false,
         }
     }
@@ -781,13 +791,12 @@ enum Relation {
 }
 
 impl Relation {
-    /// The affine relation a guard read with `signedness` carries to the
-    /// anchored value: a widening is the identity only when it keeps the
-    /// guard's reading.
-    fn affine(self, signedness: Option<Signedness>) -> Option<Affine> {
+    /// The affine relation `site`'s guard carries to the anchored value: a
+    /// widening is the identity only when it keeps the guard's bound.
+    fn affine(self, site: &GuardSite) -> Option<Affine> {
         match self {
             Relation::Arithmetic(affine) => Some(affine),
-            Relation::Widened(widenings) if widenings.keep(signedness) => Some(Affine::IDENTITY),
+            Relation::Widened(widenings) if widenings.keep(site) => Some(Affine::IDENTITY),
             Relation::Widened(_) | Relation::Unrelated | Relation::NotAffine => None,
         }
     }
@@ -1150,7 +1159,7 @@ impl Trace<'_> {
                     .or_insert_with(|| self.relation(&followed, value, bounded)),
                 None => Relation::NotAffine,
             };
-            site.affine = relation.affine(signedness(site.op, site.predicate.as_deref()));
+            site.affine = relation.affine(site);
             let mut causes = BTreeSet::new();
             if site.affine.is_none() {
                 causes.insert(Unverified::NotAffine);
@@ -2750,6 +2759,57 @@ out:
   ret void
 }
 
+define void @unsigned_itself(i32 %x) {
+  %c = icmp ugt i32 %x, 16
+  br i1 %c, label %out, label %use
+use:
+  call void @sink(i32 %x)
+  br label %out
+out:
+  ret void
+}
+
+define void @signed_itself(i32 %x) {
+  %c = icmp slt i32 %x, -16
+  br i1 %c, label %use, label %out
+use:
+  call void @sink(i32 %x)
+  br label %out
+out:
+  ret void
+}
+
+define void @equal_itself(i32 %x) {
+  %c = icmp eq i32 %x, -1
+  br i1 %c, label %use, label %out
+use:
+  call void @sink(i32 %x)
+  br label %out
+out:
+  ret void
+}
+
+define void @equal_widened(i32 %x) {
+  %c = icmp eq i32 %x, 5
+  %n = zext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @negative_equal_widened(i32 %x) {
+  %c = icmp eq i32 %x, -1
+  %n = zext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @negative_equal_sign_extended(i32 %x) {
+  %c = icmp eq i32 %x, -1
+  %n = sext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
 define void @flag(i32 %x) {
   %c = icmp ult i32 %x, 16
   %n = zext i1 %c to i32
@@ -3296,6 +3356,33 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             assert_eq!(site.affine, relation, "{function}: {r:?}");
             assert_eq!(site.verified, caveat.is_none(), "{function}: {r:?}");
             assert_eq!(site.caveat.as_deref(), caveat, "{function}: {r:?}");
+        }
+    }
+
+    /// A comparison on the anchored value itself bounds it however it reads
+    /// its integers; across a widening, an equality's negative bound is
+    /// another number once zero-extended.
+    #[test]
+    fn a_guard_on_the_anchor_itself_is_verified_whatever_its_signedness() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        for (function, callee, expected) in [
+            ("unsigned_itself", "sink", Some(Affine::IDENTITY)),
+            ("signed_itself", "sink", Some(Affine::IDENTITY)),
+            ("equal_itself", "sink", Some(Affine::IDENTITY)),
+            ("equal_widened", "sink64", Some(Affine::IDENTITY)),
+            ("negative_equal_widened", "sink64", None),
+            (
+                "negative_equal_sign_extended",
+                "sink64",
+                Some(Affine::IDENTITY),
+            ),
+        ] {
+            let r = affine_ir_guards(&session, function, callee);
+            let site = only_guard(&r);
+            assert_eq!(site.affine, expected, "{function}: {r:?}");
+            assert_eq!(site.verified, expected.is_some(), "{function}: {r:?}");
         }
     }
 
