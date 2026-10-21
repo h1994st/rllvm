@@ -1304,7 +1304,7 @@ fn annotation_key(
 
 /// An error's message without the variant's prefix, for a caller that adds
 /// its own.
-fn bare(error: Error) -> String {
+pub(crate) fn bare(error: Error) -> String {
     match error {
         Error::InvalidArguments(message) => message,
         other => other.to_string(),
