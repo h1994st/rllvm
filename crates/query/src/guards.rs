@@ -1379,19 +1379,10 @@ impl Trace<'_> {
     }
 
     /// Which edge of the branch on comparison `compare` reaches `at`: `true`
-    /// for its true successor, `false` for its false one, when that
-    /// successor dominates `at`'s block and is entered by that edge alone.
-    /// `None` when no branch on it has such an edge.
+    /// for its true successor, `false` for its false one, when every path to
+    /// `at` crosses that edge. `None` when no branch on it has such an edge.
     fn edge_to(&self, compare: ValueId, at: ValueId) -> Option<bool> {
         let target = self.node(at).block;
-        let entries = |block: usize| {
-            self.body
-                .blocks
-                .iter()
-                .flat_map(|ir| &ir.successors)
-                .filter(|&&successor| successor == block)
-                .count()
-        };
         (0..self.body.blocks.len()).find_map(|block| {
             let (branched, on_true, on_false) = self.branch_on(block)?;
             if branched != compare {
@@ -1400,10 +1391,34 @@ impl Trace<'_> {
             [(on_true, true), (on_false, false)]
                 .into_iter()
                 .find_map(|(successor, taken)| {
-                    (entries(successor) == 1 && self.doms.dominates(successor, target))
+                    self.edge_dominates(block, successor, target)
                         .then_some(taken)
                 })
         })
+    }
+
+    /// Whether the edge `from` -> `to` dominates block `target`, as LLVM's
+    /// `DominatorTree::dominates(BasicBlockEdge, BasicBlock)` decides: it is
+    /// `from`'s only edge to `to`, `to` dominates `target`, and every other
+    /// predecessor of `to` that runs at all is dominated by `to`, as a
+    /// loop's backedge is. Any other way into `to` bypasses the edge.
+    fn edge_dominates(&self, from: usize, to: usize, target: usize) -> bool {
+        let blocks = &self.body.blocks;
+        let edges = |block: usize| {
+            blocks[block]
+                .successors
+                .iter()
+                .filter(|&&successor| successor == to)
+                .count()
+        };
+        edges(from) == 1
+            && self.doms.dominates(to, target)
+            && (0..blocks.len()).all(|pred| {
+                pred == from
+                    || edges(pred) == 0
+                    || !self.doms.reachable(pred)
+                    || self.doms.dominates(to, pred)
+            })
     }
 
     /// The width in bits of the integer the guard at `id` operates on: its
@@ -2567,6 +2582,11 @@ impl Doms {
             at = *up;
         }
         false
+    }
+
+    /// Whether the entry reaches `b`.
+    fn reachable(&self, b: usize) -> bool {
+        matches!(self.idom.get(b), Some(Some(_)))
     }
 
     /// The nearest block dominating both `a` and `b`. `None` when either
@@ -3820,6 +3840,30 @@ use:
   ret void
 }
 
+define void @both_edges_itself(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %use
+use:
+  call void @sink(i32 %x)
+  ret void
+}
+
+define void @into_loop(i32 %x) {
+entry:
+  %c = icmp ugt i32 %x, 16
+  br i1 %c, label %out, label %loop
+loop:
+  %i = phi i32 [ 0, %entry ], [ %next, %latch ]
+  call void @sink(i32 %x)
+  br label %latch
+latch:
+  %next = add i32 %i, 1
+  %again = icmp ult i32 %next, 10
+  br i1 %again, label %loop, label %out
+out:
+  ret void
+}
+
 define void @flagged_itself(i32 %x) {
   %c = icmp ult i32 %x, 16
   %f = zext i1 %c to i32
@@ -4505,11 +4549,31 @@ out:
         }
     }
 
+    /// A loop header entered on the false edge of `x ugt 16` and from the
+    /// loop's own backedge: every path to the use crosses that edge, so
+    /// `x ule 16` holds there.
+    #[test]
+    fn a_comparison_deciding_the_edge_into_a_loop_header_is_verified() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "into_loop", "sink");
+        let site = only_guard(&r);
+        assert_eq!(
+            (site.predicate.as_deref(), site.bound.as_deref()),
+            (Some("ule"), Some("16")),
+            "{r:?}"
+        );
+        assert!(site.verified, "{r:?}");
+        assert_eq!(site.caveat, None, "{r:?}");
+    }
+
     /// A comparison whose branch has no edge into the use -- its successor
-    /// is entered from elsewhere too, or its result feeds a `zext` or a
-    /// `select` -- says nothing about which side holds there, whether it
-    /// bounds the anchored value itself or one it is computed from: a lead,
-    /// keeping its predicate as written.
+    /// is entered from elsewhere too, other than by a backedge, or by both
+    /// its edges, or its result feeds a `zext` or a `select` -- says nothing
+    /// about which side holds there, whether it bounds the anchored value
+    /// itself or one it is computed from: a lead, keeping its predicate as
+    /// written.
     #[test]
     fn a_comparison_deciding_no_edge_to_the_use_is_unverified_as_written() {
         let scratch = tempfile::tempdir().unwrap();
@@ -4521,6 +4585,7 @@ out:
         });
         for (function, affine) in [
             ("shared_itself", Some(Affine::IDENTITY)),
+            ("both_edges_itself", Some(Affine::IDENTITY)),
             ("flagged_itself", Some(Affine::IDENTITY)),
             ("shared_successor", plus_one),
         ] {
