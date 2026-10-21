@@ -4636,11 +4636,11 @@ out:
     }
 
     /// A comparison whose branch has no edge into the use -- its successor
-    /// is entered from elsewhere too, other than by a backedge, or by both
-    /// its edges, or its result feeds a `zext` or a `select` -- says nothing
-    /// about which side holds there, whether it bounds the anchored value
-    /// itself or one it is computed from: a lead, keeping its predicate as
-    /// written.
+    /// is entered from elsewhere too, other than by a backedge, or both its
+    /// edges enter it, or its result feeds a `zext` or a `select` -- says
+    /// nothing about which side holds there, whether it bounds the anchored
+    /// value itself or one it is computed from: a lead, keeping its
+    /// predicate as written.
     #[test]
     fn a_comparison_deciding_no_edge_to_the_use_is_unverified_as_written() {
         let scratch = tempfile::tempdir().unwrap();
@@ -4652,6 +4652,8 @@ out:
         });
         for (function, affine) in [
             ("shared_itself", Some(Affine::IDENTITY)),
+            // `br c, S, S` decides nothing: `branch_on` rejects a branch
+            // whose edges enter one block, before any edge count.
             ("both_edges_itself", Some(Affine::IDENTITY)),
             ("flagged_itself", Some(Affine::IDENTITY)),
             ("shared_successor", plus_one),
