@@ -73,6 +73,14 @@ anchor and `verified`. A call between them (say `note(b)`) could change the
 field, so the same clamp would come back unverified, its caveat naming the
 call.
 
+```bash
+rllvm-query --catalog build/field.json guards --at field.c:25 --operand 2
+```
+
+`refill` stores `0` to `b->len`, then the clamp. The load for `put` reads back
+the nearer store, which overwrites the first, so the same clamp comes back
+`verified`.
+
 ## A reused local
 
 In `reuse.c`, `fill` hands `put` the local `cur`, first holding `head` and
@@ -129,13 +137,13 @@ local without a use-site, so a reused local cannot be annotated.
   function, and examines nothing between them.
 - A load is followed to the store it reads back: a non-volatile store of the
   same type to the same address, the same pointer or a `getelementptr` alike,
-  that runs before it. With exactly one, in the load's block, and only
-  operations that write no memory between them, the load is the stored value.
-  A call, another store or any other operation between (an `atomicrmw`, a
-  `cmpxchg`, a volatile load), more than one such store, or a store in another
-  block still leads on, but every guard reached that way is unverified, its
-  caveat saying which, and `uncertainty.value_trace_lost` says the field may
-  hold something else.
+  that runs before it. The nearest one in the load's block overwrites any
+  earlier one: with only operations that write no memory between them, the
+  load is the stored value. A call, another store or any other operation
+  between (an `atomicrmw`, a `cmpxchg`, a volatile load), never skipped to
+  reach an earlier store, or stores only in other blocks still lead on, but
+  every guard reached that way is unverified, its caveat saying which, and
+  `uncertainty.value_trace_lost` says the field may hold something else.
 - Where the trace cannot follow the value (a load with no such store, or a
   volatile or atomic one, a pointer round trip, inline assembly, an
   intrinsic it does not read through), `uncertainty.value_trace_lost` says

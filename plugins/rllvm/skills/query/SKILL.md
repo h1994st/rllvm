@@ -238,16 +238,17 @@ Report what the answer supports, and say what it does not:
   The numeric cap lives in `bound`. A verified guard with no `bound` is
   capped by a runtime value, the guard's operand: a sound relation, not a
   numeric limit, so never report a number for it; to reach one, anchor on
-  that operand and trace it. A load is followed to the store it reads back;
-  a call, another store or any other operation between them (an atomicrmw, a
-  cmpxchg, a volatile load), more than one such store, or a store in another
-  block makes every guard reached through the load a lead, with that caveat,
-  and reports the trace lost there. A `relation` of `dominates` runs before
-  the use on every path but does not say which way its branch goes; one that
-  is on_path lies on some path to the use, not every one. `crossings` name
-  the call where the value enters or leaves: ask `guards` there next. `from`
-  only keeps crossings from callers on a path from one named function;
-  nothing between it and the anchor was examined.
+  that operand and trace it. A load is followed to the nearest store before
+  it in its block, which overwrites any earlier one; a call, another store
+  or any other operation between them (an atomicrmw, a cmpxchg, a volatile
+  load), which is never skipped to reach an earlier store, or stores only in
+  other blocks make every guard reached through the load a lead, with that
+  caveat, and report the trace lost there. A `relation` of `dominates` runs
+  before the use on every path but does not say which way its branch goes;
+  one that is on_path lies on some path to the use, not every one.
+  `crossings` name the call where the value enters or leaves: ask `guards`
+  there next. `from` only keeps crossings from callers on a path from one
+  named function; nothing between it and the anchor was examined.
   `uncertainty.value_trace_lost` means the list is partial. `guards`
   promotes the anchor's module with `mem2reg`, so a local held in a register
   — any promotable scalar — is traced whatever optimization level the
