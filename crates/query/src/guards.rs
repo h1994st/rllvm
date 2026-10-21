@@ -441,17 +441,20 @@ impl Unverified {
     }
 }
 
+/// Every cause in `causes`, in order.
+fn reasons(causes: &BTreeSet<Unverified>) -> String {
+    causes
+        .iter()
+        .map(|cause| cause.reason())
+        .collect::<Vec<_>>()
+        .join(CAVEAT_SEPARATOR)
+}
+
 /// Marks `site` verified exactly when nothing in `causes` keeps it from
 /// being, and otherwise names every cause, in order, in its caveat.
 fn mark(site: &mut GuardSite, causes: &BTreeSet<Unverified>) {
     site.verified = causes.is_empty();
-    site.caveat = (!causes.is_empty()).then(|| {
-        causes
-            .iter()
-            .map(|cause| cause.reason())
-            .collect::<Vec<_>>()
-            .join(CAVEAT_SEPARATOR)
-    });
+    site.caveat = (!causes.is_empty()).then(|| reasons(causes));
 }
 
 /// The guards on the value `anchor` names, read from its function's own
@@ -1128,6 +1131,14 @@ impl Trace<'_> {
                     Some(link) => {
                         follow(&link.stored);
                         if !link.causes.is_empty() {
+                            // The guards found through it are leads, and
+                            // what else the field may hold is not traced.
+                            walk.lost.push(format!(
+                                "the value is loaded from memory{}, and the field may hold \
+                                 something other than what the store wrote ({})",
+                                place(node),
+                                reasons(&link.causes)
+                            ));
                             for stored in &link.stored {
                                 if let Operand::Value(stored) = stored {
                                     walk.unproven
@@ -4106,7 +4117,7 @@ define void @f(ptr %s, i32 %n) {
 }
 "#;
 
-    /// The trace of `symbol` in `ir`, read from `session`'s module.
+    /// The trace of `function` in `ir`, read from `session`'s module.
     fn trace_of<'a>(session: &'a Session, ir: &'a ModuleIr, function: &'a FunctionId) -> Trace<'a> {
         let body = defined(ir, &function.symbol);
         Trace {
@@ -4388,6 +4399,43 @@ next:
   ret void
 }
 
+define void @called_and_stored(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  call void @g(ptr %s)
+  %o = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  store i32 0, ptr %o, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @either(ptr %s, i32 %n, i1 %c) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  %x = select i1 %c, i32 %m, i32 %v
+  call void @sink(i32 %x)
+  ret void
+}
+
+define void @unclamped(ptr %s, i32 %n) {
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @unclamped_caller(ptr %s) {
+  call void @unclamped(ptr %s, i32 5)
+  ret void
+}
+
 define void @unstored(ptr %s) {
   %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
   %v = load i32, ptr %a, align 4
@@ -4413,19 +4461,27 @@ define void @unstored(ptr %s) {
         let store = "another store between the store and the load may change the field";
         let operation = "an operation between the store and the load may change the field";
         let several = "more than one store to this field reaches the load";
+        let other_block = "the store and the load are in different blocks";
         let not_affine = "the relation to the anchored value is not affine";
-        for (function, caveat) in [
-            ("called", call.to_string()),
-            ("stored", store.to_string()),
-            ("atomic", operation.to_string()),
-            ("exchanged", operation.to_string()),
-            ("volatile_between", operation.to_string()),
-            ("twice", several.to_string()),
-            ("twice_differing", format!("{several}; {not_affine}")),
+        let call_and_store = format!("{call}; {store}");
+        // Each fixture's memory cause, then the guard's whole caveat.
+        for (function, cause, caveat) in [
+            ("called", call, call.to_string()),
+            ("stored", store, store.to_string()),
+            ("atomic", operation, operation.to_string()),
+            ("exchanged", operation, operation.to_string()),
+            ("volatile_between", operation, operation.to_string()),
+            ("twice", several, several.to_string()),
             (
-                "other_block",
-                "the store and the load are in different blocks".to_string(),
+                "twice_differing",
+                several,
+                format!("{several}; {not_affine}"),
             ),
+            ("other_block", other_block, other_block.to_string()),
+            ("called_and_stored", &call_and_store, call_and_store.clone()),
+            // Reached both directly and through the load, the clamp still
+            // carries the load's cause.
+            ("either", call, call.to_string()),
         ] {
             let r = affine_ir_guards(&session, function, "sink");
             let site = only_guard(&r);
@@ -4436,11 +4492,50 @@ define void @unstored(ptr %s) {
             );
             assert!(!site.verified, "{function}: {r:?}");
             assert_eq!(site.caveat.as_deref(), Some(caveat.as_str()), "{function}");
-            assert!(r.lost.is_none(), "{function}: {r:?}");
+            let reason = format!(
+                "the value is loaded from memory, and the field may hold something other than \
+                 what the store wrote ({cause})"
+            );
+            assert_eq!(
+                r.lost.as_deref(),
+                Some(reason.as_str()),
+                "{function}: {r:?}"
+            );
         }
         let r = affine_ir_guards(&session, "unstored", "sink");
         assert!(r.guards.is_empty(), "{r:?}");
         let lost = r.lost.as_deref().unwrap_or_default();
         assert!(lost.contains("loaded from memory"), "{r:?}");
+    }
+
+    /// With no guard to report, an unproven load still says the trace is
+    /// incomplete: the crossing into the stored parameter is not all the
+    /// field may hold.
+    #[test]
+    fn an_unguarded_field_that_may_change_is_a_lost_trace() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            CLOBBERED_IR,
+            &["-Wno-override-module"],
+        );
+        let r = affine_ir_guards(&session, "unclamped", "sink");
+        assert!(r.guards.is_empty(), "{r:?}");
+        assert_eq!(
+            crossings(&r),
+            [(
+                "unclamped_caller",
+                CrossingDir::Into,
+                "unclamped",
+                "parameter 1"
+            )],
+            "{r:?}"
+        );
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(
+            lost.contains("the field may hold something other than what the store wrote"),
+            "{r:?}"
+        );
     }
 }
