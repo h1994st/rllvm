@@ -137,15 +137,15 @@ defines "$lost" 'more than one value' "--local cur alone was not refused: $lost"
 defines "$lost" 'reuse\.c:13.*reuse\.c:17' "the refusal did not list both use lines: $lost"
 
 # 11. --at names one use, and each traces the value cur holds there: the bound
-#     checked before that call.
+#     checked before that call, verified on the value itself.
 first=$(reused --at reuse.c:13 --json |
-    field '[(g["bound"], g["relation"]) for g in a["results"]["guards"]]')
-[ "$first" = "[('32', 'dominates')]" ] ||
-    fail "--local cur --at reuse.c:13 reported $first, expected cur > 32 dominating"
+    field '[(g["bound"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
+[ "$first" = "[('32', 'dominates', True)]" ] ||
+    fail "--local cur --at reuse.c:13 reported $first, expected cur > 32 dominating, verified"
 second=$(reused --at reuse.c:17 --json |
-    field '[(g["bound"], g["relation"]) for g in a["results"]["guards"]]')
-[ "$second" = "[('8', 'dominates')]" ] ||
-    fail "--local cur --at reuse.c:17 reported $second, expected cur > 8 dominating"
+    field '[(g["bound"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
+[ "$second" = "[('8', 'dominates', True)]" ] ||
+    fail "--local cur --at reuse.c:17 reported $second, expected cur > 8 dominating, verified"
 
 # 12. A line with no use of cur is an error naming the lines that have one.
 status=0
