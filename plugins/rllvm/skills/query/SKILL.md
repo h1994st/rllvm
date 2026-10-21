@@ -223,16 +223,22 @@ Report what the answer supports, and say what it does not:
   guard's signedness matches the cast's), and N on a value N steps up the
   chain it is computed from, a truncation counting as a step; that is not
   by itself a bound on the value. Its `affine` gives the anchored value as
-  `scale * guarded + offset` when constant arithmetic links them. Report a
-  guard with `verified: false` as a lead, never a bound, with its `caveat`:
-  the relation is not affine, the bound wraps when carried to the anchored
-  value, or it could not be mapped (no constant, or no branch edge that
-  decides which side of a comparison holds at the anchor). A `relation` of
-  `dominates` runs before the use on every path but does not say which way
-  its branch goes; one that is on_path lies on some path to the use, not
-  every one. `crossings` name the call where the value enters or leaves: ask
-  `guards` there next. `from` only keeps crossings from callers on a path
-  from one named function; nothing between it and the anchor was examined.
+  `scale * guarded + offset` when constant arithmetic links them. `verified`
+  means the bound soundly carries to the anchored value. Report a guard with
+  `verified: false` as a lead, never a bound, with its `caveat`: the
+  relation is not affine, the guard bounds a value computed from the
+  anchored one (such as a clamp of it used later), the bound wraps when
+  carried to the anchored value, or it could not be mapped (no constant, or
+  no branch edge that decides which side of a comparison holds at the
+  anchor). `verified` does not mean the guard runs on every path: report a
+  bound as unconditional only when it is `verified` and its `relation` is
+  `dominates` or `defines`; a verified one that is on_path is conditional.
+  A `relation` of `dominates` runs before the use on every path but does not
+  say which way its branch goes; one that is on_path lies on some path to
+  the use, not every one. `crossings` name the call where the value enters
+  or leaves: ask `guards` there next. `from` only keeps crossings from
+  callers on a path from one named function; nothing between it and the
+  anchor was examined.
   `uncertainty.value_trace_lost` means the list is partial. `guards`
   promotes the anchor's module with `mem2reg`, so a local held in a register
   — any promotable scalar — is traced whatever optimization level the

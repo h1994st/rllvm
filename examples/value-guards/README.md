@@ -68,7 +68,12 @@ and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
   constant `add`, `sub`, `mul` and `shl` alone, or a matching widening
   (`{1, 0}`). `verified` is `true` when the relation is affine and every value
   the guard admits maps onto the anchored value without wrapping at its width.
-  Otherwise the guard is an unverified lead, and `caveat` says why.
+  Otherwise the guard is an unverified lead, and `caveat` says why. A clamp
+  that runs on the value and is used later bounds its own result, not the
+  value, so it is unverified too.
+- `verified` does not say the guard runs on every path; `relation` does. A
+  bound holds unconditionally only when it is `verified` and `dominates` or
+  `defines` the value.
 - A comparison admits the side that holds on its branch's edge into the
   anchor: past `if (left > MAX) return;`, `left` is in `[0, MAX]`. With no
   such edge (the block it enters is also entered from elsewhere, or does not
