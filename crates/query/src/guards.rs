@@ -1261,6 +1261,11 @@ impl Trace<'_> {
     /// does not make it: dominating when it runs before `at`, the
     /// instruction the value is used at, and on its path otherwise. In
     /// instruction order.
+    ///
+    /// A downstream clamp bounds its own result, so the comparison it is
+    /// made of is listed too: it compares the anchored value. Its bound
+    /// holds only on the side of its branch that reaches `at`, so without
+    /// such an edge it is a lead.
     fn guard_sites(&self, walk: &Walk, value: ValueId, at: ValueId) -> Vec<GuardSite> {
         let depths = self.depths(walk, value);
         let depth_of = |id: &ValueId| depths.get(id).copied().unwrap_or_default();
@@ -1273,9 +1278,10 @@ impl Trace<'_> {
                 bounds.insert(*id, bounded);
             }
         }
-        let mut folded = walk.folded.clone();
         let downstream = self.downstream(value);
         let mut downstream_guards: HashSet<ValueId> = HashSet::new();
+        // The comparisons those guards are made of.
+        let mut downstream_compares: HashSet<ValueId> = HashSet::new();
         let traced = |operand: &Operand| {
             matches!(operand, Operand::Value(value)
                 if walk.chain.contains(value) || downstream.contains(value))
@@ -1298,7 +1304,7 @@ impl Trace<'_> {
                     site.relation = GuardRelation::OnPath;
                     sites.insert(id, site);
                     downstream_guards.insert(id);
-                    folded.insert(compare);
+                    downstream_compares.insert(compare);
                 }
             } else if let Some(raw) = &node.guard {
                 sites.insert(
@@ -1309,13 +1315,14 @@ impl Trace<'_> {
                 if let (OpcodeIr::Select, Some(Operand::Value(compare))) =
                     (node.opcode, node.operands.first())
                 {
-                    folded.insert(*compare);
+                    downstream_compares.insert(*compare);
                 }
             }
         }
         for (id, node) in self.body.values.iter().enumerate() {
             let id = id as ValueId;
-            if node.opcode != OpcodeIr::ICmp || sites.contains_key(&id) || folded.contains(&id) {
+            if node.opcode != OpcodeIr::ICmp || sites.contains_key(&id) || walk.folded.contains(&id)
+            {
                 continue;
             }
             let Some(raw) = &node.guard else { continue };
@@ -1364,6 +1371,9 @@ impl Trace<'_> {
                 causes.insert(Unverified::NotAffine);
             } else {
                 let edge = self.edge_to(*id, at);
+                if edge.is_none() && downstream_compares.contains(id) {
+                    causes.insert(Unverified::Unmappable);
+                }
                 causes.extend(uncarried(site, self.guard_width(*id), edge));
             }
             mark(site, &causes);
@@ -3206,6 +3216,33 @@ void f(void) {
 }
 ";
 
+    /// `n` is `len` clamped to 16, computed from the anchored `len`; the
+    /// clamp's comparison also decides the edge into the call passing `len`.
+    const DOWNSTREAM_CLAMP_DECIDING_SOURCE: &str = "extern void sink(unsigned);
+extern void keep(unsigned);
+void f(unsigned len) {
+  unsigned n;
+  if (len < 16) {
+    n = len;
+    sink(len);
+  } else {
+    n = 16;
+  }
+  keep(n);
+}
+";
+
+    /// The same clamp, whose comparison decides no edge into the call: both
+    /// of its arms join before it.
+    const DOWNSTREAM_CLAMP_JOINED_SOURCE: &str = "extern void sink(unsigned);
+extern void keep(unsigned);
+void f(unsigned len) {
+  unsigned n = len < 16 ? len : 16;
+  sink(len);
+  keep(n);
+}
+";
+
     /// Results read from a register and from memory by intrinsics.
     const READING_INTRINSIC_IR: &str = r#"
 declare i64 @llvm.read_register.i64(metadata)
@@ -3765,6 +3802,8 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             let scratch = tempfile::tempdir().unwrap();
             let session = session(&scratch, CLAMP_SOURCE, &[optimization, "-g"]);
             let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+            // The clamp reports the comparison it is made of: it is not
+            // listed again.
             assert_eq!(
                 sites(&r),
                 [(
@@ -4062,28 +4101,49 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             let session = session(&scratch, RESULT_SOURCE, &[optimization, "-g"]);
             let get = sites_calling(&session, "f", "get")[0].clone();
             let r = guards(&session, &GuardAnchor::Return { site: get }, None).unwrap();
-            assert_eq!(
-                sites(&r),
-                [
+            let mut expected = vec![
+                (
+                    GuardKind::Compare,
+                    Some("ugt"),
+                    Some("100"),
+                    GuardRelation::OnPath,
+                ),
+                (
+                    GuardKind::Clamp,
+                    Some("umin"),
+                    Some("16"),
+                    GuardRelation::OnPath,
+                ),
+            ];
+            // At -O0 the clamp is a branch on `r < 16`, which compares `r`
+            // and is listed too; at -O1 it is `llvm.umin`, with no compare.
+            if optimization == "-O0" {
+                expected.insert(
+                    1,
                     (
                         GuardKind::Compare,
-                        Some("ugt"),
-                        Some("100"),
-                        GuardRelation::OnPath
-                    ),
-                    (
-                        GuardKind::Clamp,
-                        Some("umin"),
+                        Some("ult"),
                         Some("16"),
-                        GuardRelation::OnPath
+                        GuardRelation::OnPath,
                     ),
-                ],
-                "{optimization}: {r:?}"
-            );
+                );
+            }
+            assert_eq!(sites(&r), expected, "{optimization}: {r:?}");
             assert_eq!(crossings(&r), [("f", CrossingDir::From, "get", "return")]);
             // `r` is compared itself, but only the clamp's result is capped
             // at 16: the clamp is a lead about `r`, never a bound on it.
-            let (compare, clamp) = (&r.guards[0], &r.guards[1]);
+            let (compare, clamp) = (&r.guards[0], r.guards.last().unwrap());
+            if optimization == "-O0" {
+                // Its branch joins before `r` is used: no edge says which
+                // side holds.
+                let folded = &r.guards[1];
+                assert!(!folded.verified, "{r:?}");
+                assert_eq!(
+                    folded.caveat.as_deref(),
+                    Some("the bound could not be mapped to the anchored value"),
+                    "{r:?}"
+                );
+            }
             assert!(compare.verified, "{optimization}: {r:?}");
             assert_eq!(compare.affine, Some(Affine::IDENTITY), "{optimization}");
             assert!(!clamp.verified, "{optimization}: {r:?}");
@@ -4094,6 +4154,79 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 "{optimization}: {r:?}"
             );
         }
+    }
+
+    /// A clamp computed from the anchored value bounds its own result, but
+    /// its comparison bounds the anchored value: on the edge into the call
+    /// that passes it, `len < 16` holds.
+    #[test]
+    fn a_downstream_clamps_comparison_on_the_edge_to_the_use_is_verified() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, DOWNSTREAM_CLAMP_DECIDING_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [
+                (
+                    GuardKind::Compare,
+                    Some("ult"),
+                    Some("16"),
+                    GuardRelation::Dominates
+                ),
+                (
+                    GuardKind::Clamp,
+                    Some("umin"),
+                    Some("16"),
+                    GuardRelation::OnPath
+                ),
+            ],
+            "{r:?}"
+        );
+        let (compare, clamp) = (&r.guards[0], &r.guards[1]);
+        assert!(compare.verified, "{r:?}");
+        assert_eq!(compare.caveat, None, "{r:?}");
+        assert_eq!(compare.affine, Some(Affine::IDENTITY), "{r:?}");
+        assert!(!clamp.verified, "{r:?}");
+        assert_eq!(
+            clamp.caveat.as_deref(),
+            Some("the guard bounds a value computed from the anchored one"),
+            "{r:?}"
+        );
+    }
+
+    /// The clamp's comparison runs before the use, but decides no edge into
+    /// it: which side holds there is not known, so it is a lead.
+    #[test]
+    fn a_downstream_clamps_comparison_deciding_no_edge_to_the_use_is_a_candidate() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, DOWNSTREAM_CLAMP_JOINED_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [
+                (
+                    GuardKind::Compare,
+                    Some("ult"),
+                    Some("16"),
+                    GuardRelation::Dominates
+                ),
+                (
+                    GuardKind::Clamp,
+                    Some("umin"),
+                    Some("16"),
+                    GuardRelation::OnPath
+                ),
+            ],
+            "{r:?}"
+        );
+        let compare = &r.guards[0];
+        assert!(!compare.verified, "{r:?}");
+        assert_eq!(
+            compare.caveat.as_deref(),
+            Some("the bound could not be mapped to the anchored value"),
+            "{r:?}"
+        );
+        assert_eq!(compare.affine, Some(Affine::IDENTITY), "{r:?}");
     }
 
     #[test]
