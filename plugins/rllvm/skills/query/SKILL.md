@@ -233,7 +233,8 @@ Report what the answer supports, and say what it does not:
   relation is not affine, the guard bounds a value computed from the
   anchored one (such as a clamp of it used later), no branch edge shows the
   comparison held at the use, the bound wraps when carried to the anchored
-  value, or it could not be mapped (no constant the guard's integer holds).
+  value, or it could not be mapped (no constant the guard's integer holds,
+  no width, or an interval that admits no value, such as `ult 0`).
   A comparison is verified only through its branch's edge into the use, and
   its `predicate` is the one that holds on that edge, which may negate the
   source condition: past `if (x > 16) return;` it reads `ule 16`. Report a
