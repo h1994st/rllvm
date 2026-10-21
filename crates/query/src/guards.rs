@@ -1263,9 +1263,10 @@ impl Trace<'_> {
     /// instruction order.
     ///
     /// A downstream clamp bounds its own result, so the comparison it is
-    /// made of is listed too: it compares the anchored value. Its bound
-    /// holds only on the side of its branch that reaches `at`, so without
-    /// such an edge it is a lead.
+    /// made of, when it is made of one, is listed too: it compares the
+    /// anchored value or a widening of it. Its bound holds only on the side
+    /// of its branch that reaches `at`, so without such an edge it is a
+    /// lead.
     fn guard_sites(&self, walk: &Walk, value: ValueId, at: ValueId) -> Vec<GuardSite> {
         let depths = self.depths(walk, value);
         let depth_of = |id: &ValueId| depths.get(id).copied().unwrap_or_default();
