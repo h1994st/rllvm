@@ -146,9 +146,9 @@ a use-site, so a reused local cannot be annotated.
   or `select` clamp, not an intrinsic `umin`), that comparison is listed on
   its own, since it bounds the value, and is verified only on its branch's
   edge into the use.
-- For a clamp, mask or modulo, `verified` does not say it runs on every path;
-  `relation` does. Its bound holds unconditionally only when it is `verified`
-  and `dominates` or `defines` the value.
+- For a clamp, mask, modulo or saturation, `verified` does not say it runs on
+  every path; `relation` does. Its bound holds unconditionally only when it is
+  `verified` and `dominates` or `defines` the value.
 - The numeric cap is `bound`. A `verified` guard without one, such as a clamp
   to another variable, is capped by a runtime value, the guard's operand: a
   sound relation, not a numeric limit. To reach a number, anchor on that
