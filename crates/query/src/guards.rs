@@ -5483,6 +5483,19 @@ define void @literal(ptr %s) {
   call void @sink(i32 %v)
   ret void
 }
+
+define void @compared(ptr %s, i32 %n) {
+  %c = icmp ugt i32 %n, 16
+  br i1 %c, label %out, label %use
+use:
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  br label %out
+out:
+  ret void
+}
 "#;
 
     /// A field reloaded right after its nearest store, with only
@@ -5521,6 +5534,25 @@ define void @literal(ptr %s) {
         }
         let r = affine_ir_guards(&session, "literal", "sink");
         assert!(r.guards.is_empty(), "{r:?}");
+        assert!(r.lost.is_none(), "{r:?}");
+    }
+
+    /// `n` is stored to `s->len` and read straight back past the false edge
+    /// of `n ugt 16`: the load is `n`, so `n ule 16` holds for it.
+    #[test]
+    fn a_comparison_through_a_reloaded_field_reports_what_holds_on_its_edge() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(scratch.path(), "t.ll", FIELD_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "compared", "sink");
+        let site = only_guard(&r);
+        assert_eq!(
+            (site.op, site.predicate.as_deref(), site.bound.as_deref()),
+            (GuardKind::Compare, Some("ule"), Some("16")),
+            "{r:?}"
+        );
+        assert!(site.verified && site.caveat.is_none(), "{r:?}");
+        assert_eq!(site.affine, Some(Affine::IDENTITY), "{r:?}");
+        assert_eq!(site.depth, 0, "{r:?}");
         assert!(r.lost.is_none(), "{r:?}");
     }
 
