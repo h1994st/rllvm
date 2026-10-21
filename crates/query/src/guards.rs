@@ -397,6 +397,9 @@ const CAVEAT_SEPARATOR: &str = "; ";
 enum Unverified {
     /// The anchored value is no constant affine function of the bounded one.
     NotAffine,
+    /// The guard runs on the anchored value and bounds its own result, which
+    /// the anchored value is not computed from.
+    Downstream,
     /// Carried through the affine relation, the bound leaves the anchored
     /// value's range.
     Wraps,
@@ -409,6 +412,7 @@ impl Unverified {
     fn reason(self) -> &'static str {
         match self {
             Unverified::NotAffine => "the relation to the anchored value is not affine",
+            Unverified::Downstream => "the guard bounds a value computed from the anchored one",
             Unverified::Wraps => {
                 "the bound does not carry to the anchored value without wraparound"
             }
@@ -1101,6 +1105,7 @@ impl Trace<'_> {
         }
         let mut folded = walk.folded.clone();
         let downstream = self.downstream(value);
+        let mut downstream_guards: HashSet<ValueId> = HashSet::new();
         let traced = |operand: &Operand| {
             matches!(operand, Operand::Value(value)
                 if walk.chain.contains(value) || downstream.contains(value))
@@ -1111,22 +1116,18 @@ impl Trace<'_> {
                 continue;
             }
             let operands = node.call.as_ref().map_or(&node.operands, |call| &call.args);
-            let Some((side, used)) =
-                operands
-                    .iter()
-                    .enumerate()
-                    .find_map(|(side, operand)| match operand {
-                        Operand::Value(used) if downstream.contains(used) => Some((side, *used)),
-                        _ => None,
-                    })
-            else {
+            let Some(side) = operands.iter().position(
+                |operand| matches!(operand, Operand::Value(used) if downstream.contains(used)),
+            ) else {
                 continue;
             };
+            // Each guard here bounds its own result, which is computed from
+            // the anchored value rather than the other way round.
             if node.opcode == OpcodeIr::Phi {
                 if let Some((mut site, compare)) = self.phi_clamp(node) {
                     site.relation = GuardRelation::OnPath;
                     sites.insert(id, site);
-                    bounds.insert(id, used);
+                    downstream_guards.insert(id);
                     folded.insert(compare);
                 }
             } else if let Some(raw) = &node.guard {
@@ -1134,7 +1135,7 @@ impl Trace<'_> {
                     id,
                     surfaced(raw, side == 1, node.location.clone(), GuardRelation::OnPath),
                 );
-                bounds.insert(id, used);
+                downstream_guards.insert(id);
                 if let (OpcodeIr::Select, Some(Operand::Value(compare))) =
                     (node.opcode, node.operands.first())
                 {
@@ -1168,6 +1169,11 @@ impl Trace<'_> {
         let followed = walk.followed();
         let mut relations: HashMap<ValueId, Relation> = HashMap::new();
         for (id, site) in &mut sites {
+            if downstream_guards.contains(id) {
+                site.affine = None;
+                mark(site, &BTreeSet::from([Unverified::Downstream]));
+                continue;
+            }
             let relation = match bounds.get(id) {
                 Some(&bounded) if downstream.contains(&bounded) => {
                     self.widened_from(value, bounded)
@@ -2864,6 +2870,13 @@ define void @clamped_to_value(i32 %x, i32 %y) {
   ret void
 }
 
+define void @clamped_then_added(i32 %x) {
+  %m = call i32 @llvm.umin.i32(i32 %x, i32 16)
+  %n = add i32 %m, 1
+  call void @sink(i32 %n)
+  ret void
+}
+
 define void @unsigned_itself(i32 %x) {
   %c = icmp ugt i32 %x, 16
   br i1 %c, label %out, label %use
@@ -2996,6 +3009,9 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 r.guards.iter().all(|guard| guard.depth == 0),
                 "{optimization}: {r:?}"
             );
+            // The anchor is the clamp's result: its bound is the anchor's.
+            assert!(r.guards[0].verified, "{optimization}: {r:?}");
+            assert_eq!(r.guards[0].affine, Some(Affine::IDENTITY));
         }
     }
 
@@ -3289,6 +3305,18 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 "{optimization}: {r:?}"
             );
             assert_eq!(crossings(&r), [("f", CrossingDir::From, "get", "return")]);
+            // `r` is compared itself, but only the clamp's result is capped
+            // at 16: the clamp is a lead about `r`, never a bound on it.
+            let (compare, clamp) = (&r.guards[0], &r.guards[1]);
+            assert!(compare.verified, "{optimization}: {r:?}");
+            assert_eq!(compare.affine, Some(Affine::IDENTITY), "{optimization}");
+            assert!(!clamp.verified, "{optimization}: {r:?}");
+            assert_eq!(clamp.affine, None, "{optimization}: {r:?}");
+            assert_eq!(
+                clamp.caveat.as_deref(),
+                Some("the guard bounds a value computed from the anchored one"),
+                "{optimization}: {r:?}"
+            );
         }
     }
 
@@ -3460,6 +3488,8 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             ("reversed_within", "sink", affine(-1, 10), None),
             ("signed_offset", "sink8", affine(1, 1), None),
             ("signed_wrapping", "sink8", affine(1, 100), wraps),
+            // The clamp's result, [0, 16], is what the anchor adds 1 to.
+            ("clamped_then_added", "sink", affine(1, 1), None),
         ] {
             let r = affine_ir_guards(&session, function, callee);
             let site = only_guard(&r);
