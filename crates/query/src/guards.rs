@@ -2763,6 +2763,16 @@ void g(unsigned a, unsigned b) {
 }
 ";
 
+    /// `cur` is rebound on one arm only, so line 5 reads the `phi` that
+    /// joins the two values.
+    const JOINED_LOCAL_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b, int c) {
+  unsigned cur = a;
+  if (c) cur = b;
+  sink(cur);
+}
+";
+
     /// Both calls expand from one macro use, so they share a source
     /// location; the stack slots before them are promoted away.
     const SHARED_LOCATION_SOURCE: &str = "extern void sink(unsigned);
@@ -2973,6 +2983,30 @@ void f(unsigned a, unsigned b) {
         )
         .unwrap();
         assert_eq!(node(&ir, &resolved, "g").0, g.params[1]);
+    }
+
+    /// Pins how `mem2reg` binds a local at a join: to the `phi` it creates,
+    /// in the join block. Were that binding gone, the nearest one above
+    /// would bind `a`, which line 5 does not read.
+    #[test]
+    fn a_use_after_a_join_reads_the_phi_of_the_values_joined() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, JOINED_LOCAL_SOURCE, &["-O0", "-g"], "g");
+        let resolved = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &local("g", "cur"),
+            Some(&line_of(&scratch, 5)),
+        )
+        .unwrap();
+        let (_, phi) = node(&ir, &resolved, "g");
+        assert_eq!(phi.opcode, OpcodeIr::Phi);
+        let g = defined(&ir, "g");
+        assert!(
+            phi.operands.contains(&Operand::Value(g.params[0]))
+                && phi.operands.contains(&Operand::Value(g.params[1])),
+            "{phi:?}"
+        );
     }
 
     #[test]
