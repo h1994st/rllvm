@@ -6,8 +6,11 @@ constrains: no guard is an empty list, never "unbounded". In `offset.c`,
 `reserve` returns early when `left > MAX` and hands `make_buf` `left + 1`;
 `guards` carries the bound to that argument through their affine relation. In
 `field.c`, `fill` stores the clamp to `b->len` and reads it back for `put`;
-`guards` follows the load to the store. In `reuse.c`, `fill` reuses the local
-`cur` for two values; `--at` traces the one it holds at each use.
+`guards` follows the load to the store, and in `refill`, which stores the field
+twice, to the nearer one. In `reuse.c`, `fill` reuses the local `cur` for two
+values; `--at` traces the one it holds at each use. In `clamp.c`, `peek` clamps
+`len` into `n`; a guard list on `len` there, or in `copy`, also gives the
+comparison the clamp is made of.
 
 ## Requirements
 
@@ -24,8 +27,10 @@ through it.
 It checks the clamp from a call site and from a named local, the empty answer
 for an unconstrained argument, the module `--emit-module` writes, a recorded
 verdict, an annotated `reach` that keeps its path, the verified bound on
-`left + 1`, the verified clamp through `b->len`, and a reused local traced at
-each of its uses.
+`left + 1`, the verified clamp through `b->len` and through the nearer of
+`refill`'s two stores, a reused local traced at each of its uses, and the
+comparison a downstream clamp is made of: verified on its branch's edge into
+the call in `peek`, a lead in `copy`.
 
 ## What it does
 
