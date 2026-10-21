@@ -148,6 +148,7 @@ impl Planned {
             Planned::Guards(request) => Ok(Query::Guards {
                 anchor: anchor_from_parts(session, &request.parts, AnchorSurface::Cli)
                     .map_err(Error::InvalidArguments)?,
+                at: request.parts.use_site().map(str::to_string),
                 from: request.from,
                 emit_module: request.emit_module,
             }),
@@ -763,25 +764,26 @@ mod tests {
             Query::ResolutionCandidates => QueryCommand::ResolutionCandidates,
             Query::Guards {
                 anchor,
+                at: use_site,
                 from,
                 emit_module,
             } => {
-                let (mut at, mut operand, mut ret, mut function, mut local) =
-                    (None, None, false, None, None);
-                match anchor {
+                let (mut operand, mut ret, mut function, mut local) = (None, false, None, None);
+                let at = match anchor {
                     GuardAnchor::Argument { site, operand: n } => {
-                        at = Some(serde_json::to_string(site).unwrap());
                         operand = Some(*n);
+                        Some(serde_json::to_string(site).unwrap())
                     }
                     GuardAnchor::Return { site } => {
-                        at = Some(serde_json::to_string(site).unwrap());
                         ret = true;
+                        Some(serde_json::to_string(site).unwrap())
                     }
                     GuardAnchor::Local { function: f, name } => {
                         function = Some(f.clone());
                         local = Some(name.clone());
+                        use_site.clone()
                     }
-                }
+                };
                 QueryCommand::Guards {
                     at,
                     operand,
@@ -1059,25 +1061,26 @@ mod tests {
             block_index: 1,
             instruction_index: 2,
         };
-        for (anchor, from) in [
+        let parse_len = GuardAnchor::Local {
+            function: "parse".into(),
+            name: "len".into(),
+        };
+        for (anchor, at, from) in [
             (
                 GuardAnchor::Argument {
                     site: site.clone(),
                     operand: 3,
                 },
+                None,
                 Some("main".to_string()),
             ),
-            (GuardAnchor::Return { site: site.clone() }, None),
-            (
-                GuardAnchor::Local {
-                    function: "parse".into(),
-                    name: "len".into(),
-                },
-                None,
-            ),
+            (GuardAnchor::Return { site: site.clone() }, None, None),
+            (parse_len.clone(), None, None),
+            (parse_len, Some("t.c:9".to_string()), None),
         ] {
             let query = Query::Guards {
                 anchor: anchor.clone(),
+                at: at.clone(),
                 from: from.clone(),
                 emit_module: Some("out.bc".into()),
             };
@@ -1112,7 +1115,7 @@ mod tests {
                 },
                 GuardAnchor::Local { function, name } => GuardsRequest {
                     parts: AnchorParts {
-                        at: None,
+                        at,
                         operand: None,
                         ret: false,
                         function: Some(function.clone()),
@@ -1129,7 +1132,7 @@ mod tests {
     #[test]
     fn guards_flags_parse_into_a_request() {
         let queries = parse_queries(
-            "guards --at t.c:4 --operand 0 --from main\nguards --at t.c:4 --return\nguards --function parse --local len\n",
+            "guards --at t.c:4 --operand 0 --from main\nguards --at t.c:4 --return\nguards --function parse --local len\nguards --function parse --local len --at t.c:9\n",
             QueryModifiers::default(),
         )
         .unwrap();
@@ -1146,6 +1149,8 @@ mod tests {
         assert!(requests[1].parts.ret && requests[1].parts.operand.is_none());
         assert_eq!(requests[2].parts.function.as_deref(), Some("parse"));
         assert_eq!(requests[2].parts.local.as_deref(), Some("len"));
+        assert_eq!(requests[3].parts.at.as_deref(), Some("t.c:9"));
+        assert_eq!(requests[3].parts.local.as_deref(), Some("len"));
     }
 
     #[test]

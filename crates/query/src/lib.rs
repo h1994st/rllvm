@@ -84,6 +84,7 @@ pub mod guards;
 pub use guards::{
     Affine, AnchorParts, AnchorSurface, Crossing, CrossingDir, GuardAnchor, GuardRelation,
     GuardSite, GuardsResult, anchor_from_parts, check_anchor_parts, emit_guards_module, guards,
+    guards_at_use,
 };
 
 pub mod index;
@@ -193,6 +194,11 @@ pub enum Query {
     /// verdict: no guard found is an empty list, not "unbounded".
     Guards {
         anchor: GuardAnchor,
+        /// For a `Local` anchor, the `file:line` of one use, picking which
+        /// of the values a reused local is bound to is traced. A call
+        /// site's `at` is resolved into its anchor instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<String>,
         /// Bounds the crossings into a parameter to the callers on a path
         /// from this function, which must name exactly one definition. The
         /// trace itself never leaves the anchor's function.
@@ -773,8 +779,10 @@ pub fn run_with_overlay(
         Query::ResolutionCandidates => {
             QueryResults::ResolutionCandidates(resolution_candidates(session))
         }
-        Query::Guards { anchor, from, .. } => {
-            let result = guards(session, anchor, from.as_deref())?;
+        Query::Guards {
+            anchor, at, from, ..
+        } => {
+            let result = guards_at_use(session, anchor, at.as_deref(), from.as_deref())?;
             value_trace_lost = result.lost.clone();
             value_trace_diagnostics = result.diagnostics.clone();
             QueryResults::Guards(result)
@@ -1737,6 +1745,7 @@ mod tests {
             .clone();
         let query = Query::Guards {
             anchor: GuardAnchor::Argument { site, operand: 0 },
+            at: None,
             from: None,
             emit_module: None,
         };
@@ -1758,6 +1767,7 @@ mod tests {
         let site = session.call_sites()[0].id.clone();
         let query = Query::Guards {
             anchor: GuardAnchor::Argument { site, operand: 0 },
+            at: None,
             from: None,
             emit_module: None,
         };
@@ -1789,6 +1799,7 @@ mod tests {
             .clone();
         let query = Query::Guards {
             anchor: GuardAnchor::Argument { site, operand: 0 },
+            at: None,
             from: Some("g".into()),
             emit_module: None,
         };

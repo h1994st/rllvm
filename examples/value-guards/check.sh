@@ -124,4 +124,34 @@ through=$(field_guards --json |
 [ "$through" = "([('clamp', '64', True, 0)], None)" ] ||
     fail "guards on b->len reported $through, expected one verified clamp and no lost trace"
 
-echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, and a clamp followed through a struct field"
+# 10. A reused local: `cur` in reuse.c holds `head`, then `tail`, each checked
+#     before it reaches put. Named alone it is two values, and the answer lists
+#     the lines that use it rather than tracing one.
+rllvm-cc -g -O0 reuse.c -o "$OUT/reuse"
+rllvm-info "$OUT/reuse" --json >"$OUT/reuse.json"
+reused() {
+    rllvm-query --catalog "$OUT/reuse.json" guards --function fill --local cur "$@"
+}
+lost=$(reused --json | field 'a["uncertainty"]["value_trace_lost"]')
+defines "$lost" 'more than one value' "--local cur alone was not refused: $lost"
+defines "$lost" 'reuse\.c:13.*reuse\.c:17' "the refusal did not list both use lines: $lost"
+
+# 11. --at names one use, and each traces the value cur holds there: the bound
+#     checked before that call.
+first=$(reused --at reuse.c:13 --json |
+    field '[(g["bound"], g["relation"]) for g in a["results"]["guards"]]')
+[ "$first" = "[('32', 'dominates')]" ] ||
+    fail "--local cur --at reuse.c:13 reported $first, expected cur > 32 dominating"
+second=$(reused --at reuse.c:17 --json |
+    field '[(g["bound"], g["relation"]) for g in a["results"]["guards"]]')
+[ "$second" = "[('8', 'dominates')]" ] ||
+    fail "--local cur --at reuse.c:17 reported $second, expected cur > 8 dominating"
+
+# 12. A line with no use of cur is an error naming the lines that have one.
+status=0
+error=$(reused --at reuse.c:14 2>&1) || status=$?
+[ "$status" != 0 ] || fail "--at a line with no use of cur succeeded: $error"
+defines "$error" 'no use of `cur` at reuse\.c:14.*reuse\.c:13' \
+    "the error did not name the lines that use cur: $error"
+
+echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, a clamp followed through a struct field, and a reused local traced at each use"

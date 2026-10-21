@@ -6,7 +6,8 @@ constrains: no guard is an empty list, never "unbounded". In `offset.c`,
 `reserve` returns early when `left > MAX` and hands `make_buf` `left + 1`;
 `guards` carries the bound to that argument through their affine relation. In
 `field.c`, `fill` stores the clamp to `b->len` and reads it back for `put`;
-`guards` follows the load to the store.
+`guards` follows the load to the store. In `reuse.c`, `fill` reuses the local
+`cur` for two values; `--at` traces the one it holds at each use.
 
 ## Requirements
 
@@ -23,7 +24,8 @@ through it.
 It checks the clamp from a call site and from a named local, the empty answer
 for an unconstrained argument, the module `--emit-module` writes, a recorded
 verdict, an annotated `reach` that keeps its path, the verified bound on
-`left + 1`, and the verified clamp through `b->len`.
+`left + 1`, the verified clamp through `b->len`, and a reused local traced at
+each of its uses.
 
 ## What it does
 
@@ -70,6 +72,27 @@ the stored value: the answer lists the `clamp umin 64` at `field.c:18`, on the
 anchor and `verified`. A call between them (say `note(b)`) could change the
 field, so the same clamp would come back unverified, its caveat naming the
 call.
+
+## A reused local
+
+In `reuse.c`, `fill` hands `put` the local `cur`, first holding `head` and
+then `tail`, each checked before the call. One local, two values:
+
+```bash
+rllvm-cc -g -O0 reuse.c -o build/reuse
+rllvm-info build/reuse --json > build/reuse.json
+rllvm-query --catalog build/reuse.json guards --function fill --local cur
+rllvm-query --catalog build/reuse.json guards --function fill --local cur --at reuse.c:13
+rllvm-query --catalog build/reuse.json guards --function fill --local cur --at reuse.c:17
+```
+
+Named alone, `cur` traces nothing: `value_trace_lost` says it is bound to more
+than one value and lists the lines that use it. `--at` names one of those
+lines and traces the value `cur` holds there: `compare ugt 32` at line 13,
+`compare ugt 8` at line 17, each dominating its use. A line with no use of
+`cur` is an error listing the lines that have one, and a line reading two of
+its values is an error rather than a pick. An overlay `annotate` anchor names
+a local without a use-site, so a reused local cannot be annotated.
 
 ## Reading a guard
 

@@ -2914,6 +2914,41 @@ mod mcp {
         assert_eq!(cli["uncertainty"], mcp["uncertainty"]);
     }
 
+    /// A reused local named by a use-site answers alike on both surfaces:
+    /// `--at` beside `--local` on the CLI, `at` beside `local` over MCP.
+    #[test]
+    fn a_reused_local_at_a_use_site_answers_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "r.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned cur = a;\n  if (cur > 64) return;\n  sink(cur);\n  cur = b;\n  if (cur > 16) return;\n  sink(cur);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:8", scratch.path().join("r.c").display());
+        let cli = query_json(
+            &scratch,
+            &catalog,
+            &["guards", "--function", "g", "--local", "cur", "--at", &at],
+        );
+        let bounds: Vec<&str> = cli["results"]["guards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|guard| guard["bound"].as_str().unwrap())
+            .collect();
+        assert_eq!(bounds, ["16"], "{cli}");
+
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "g", "local": "cur", "at": at }),
+        );
+        assert_eq!(cli["results"], mcp["results"]);
+        assert_eq!(cli["query"], mcp["query"]);
+        assert_eq!(cli["query"]["at"], at.as_str(), "{cli}");
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();

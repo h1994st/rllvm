@@ -155,8 +155,9 @@ copy it verbatim.
 
 An `annotate` is your feasibility verdict on a value, not an edge and never
 proof. `anchor` is an `argument` (`site`, `operand`, counting from 0), a
-`return` (`site`) or a `local` (`function`, `name`); `site` is `file:line` or
-a call site id, and optional `from` names one function. `verdict` is
+`return` (`site`) or a `local` (`function`, `name`), which carries no
+use-site, so a local reused for several values cannot be annotated; `site` is
+`file:line` or a call site id, and optional `from` names one function. `verdict` is
 `feasible`, `infeasible` or `conditional`. An anchor that does not resolve, or
 is ambiguous, rejects the batch; grounding reads the anchor's module, so it
 needs a program loaded with `load_catalog`. A `verify` or `retract` names an
