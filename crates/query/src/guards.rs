@@ -2831,7 +2831,9 @@ mod tests {
     use crate::{
         CallTarget, FunctionId,
         extract::read_module_ir,
-        ir::{BinaryOp, BlockIr, OpcodeIr, Operand, ScalarKind, TypeTag, ValueNode},
+        ir::{
+            BinaryOp, BlockIr, INT_PREDICATES, OpcodeIr, Operand, ScalarKind, TypeTag, ValueNode,
+        },
         slice::promote_anchor_module,
         testing::{compiled_session, module_session, stale_debug_info_module},
     };
@@ -4387,6 +4389,28 @@ define void @flag(i32 %x) {
   ret void
 }
 
+define void @unequal_widened(i32 %x) {
+  %c = icmp eq i32 %x, 5
+  br i1 %c, label %out, label %use
+use:
+  %n = zext i32 %x to i64
+  call void @sink64(i64 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @negative_unequal_widened(i32 %x) {
+  %c = icmp eq i32 %x, -1
+  br i1 %c, label %out, label %use
+use:
+  %n = zext i32 %x to i64
+  call void @sink64(i64 %n)
+  br label %out
+out:
+  ret void
+}
+
 define void @shared_itself(i32 %x) {
   %c = icmp ult i32 %x, 16
   br i1 %c, label %use, label %other
@@ -5035,6 +5059,48 @@ out:
                 scale: 1,
                 offset: 1
             }),
+            "{r:?}"
+        );
+    }
+
+    /// A site's affine relation is read before its predicate is inverted
+    /// for the false edge: that holds only while a predicate and its inverse
+    /// read their bound in the same signedness.
+    #[test]
+    fn a_predicate_and_its_inverse_share_a_signedness() {
+        for row in &INT_PREDICATES {
+            assert_eq!(
+                signedness(GuardKind::Compare, Some(row.spelling)),
+                signedness(GuardKind::Compare, Some(row.inverse)),
+                "{} and {}",
+                row.spelling,
+                row.inverse
+            );
+        }
+    }
+
+    /// Past the false edge of `x eq 5`, `x ne 5` holds, and across a `zext`
+    /// on the widened value too; `-1` zero-extended is another number, so
+    /// the equality on `-1` is not affine there.
+    #[test]
+    fn a_widened_equality_on_the_false_edge_is_reported_unequal() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "unequal_widened", "sink64");
+        let site = only_guard(&r);
+        assert_eq!(site.predicate.as_deref(), Some("ne"), "{r:?}");
+        assert_eq!(site.bound.as_deref(), Some("5"), "{r:?}");
+        assert_eq!(site.affine, Some(Affine::IDENTITY), "{r:?}");
+        assert!(site.verified, "{r:?}");
+
+        let r = affine_ir_guards(&session, "negative_unequal_widened", "sink64");
+        let site = only_guard(&r);
+        assert_eq!(site.predicate.as_deref(), Some("ne"), "{r:?}");
+        assert_eq!(site.affine, None, "{r:?}");
+        assert_eq!(
+            site.caveat.as_deref(),
+            Some("the relation to the anchored value is not affine"),
             "{r:?}"
         );
     }
