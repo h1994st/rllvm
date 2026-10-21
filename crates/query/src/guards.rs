@@ -4469,6 +4469,22 @@ out:
   ret void
 }
 
+define void @into_loop_redefined(i32 %x) {
+entry:
+  %c = icmp ugt i32 %x, 16
+  br i1 %c, label %out, label %loop
+loop:
+  %v = phi i32 [ %x, %entry ], [ %w, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %next, %loop ]
+  call void @sink(i32 %v)
+  %w = add i32 %v, 1
+  %next = add i32 %i, 1
+  %again = icmp ult i32 %next, 10
+  br i1 %again, label %loop, label %out
+out:
+  ret void
+}
+
 define void @flagged_itself(i32 %x) {
   %c = icmp ult i32 %x, 16
   %f = zext i1 %c to i32
@@ -5171,6 +5187,26 @@ out:
         );
         assert!(site.verified, "{r:?}");
         assert_eq!(site.caveat, None, "{r:?}");
+    }
+
+    /// The loop header holds `x` only on entry: past the first iteration
+    /// the value it holds is computed from itself, so the deciding edge's
+    /// `x ule 16` does not carry to it.
+    #[test]
+    fn a_comparison_into_a_loop_that_redefines_the_value_is_not_affine() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "into_loop_redefined", "sink");
+        let site = only_guard(&r);
+        assert_eq!(site.bound.as_deref(), Some("16"), "{r:?}");
+        assert_eq!(site.affine, None, "{r:?}");
+        assert!(!site.verified, "{r:?}");
+        assert_eq!(
+            site.caveat.as_deref(),
+            Some("the relation to the anchored value is not affine"),
+            "{r:?}"
+        );
     }
 
     /// A comparison whose branch has no edge into the use -- its successor
