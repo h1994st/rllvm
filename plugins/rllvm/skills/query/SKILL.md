@@ -232,7 +232,10 @@ Report what the answer supports, and say what it does not:
   anchored one (such as a clamp of it used later), the bound wraps when
   carried to the anchored value, or it could not be mapped (no constant, or
   no branch edge that decides which side of a comparison holds at the
-  anchor). `verified` does not mean the guard runs on every path: report a
+  anchor). A clamp of the anchored value also lists the comparison it is
+  made of, which bounds the anchored value itself: verified only when its
+  branch's edge decides the anchor, a lead otherwise.
+  `verified` does not mean the guard runs on every path: report a
   bound as unconditional only when it is `verified` and its `relation` is
   `dominates` or `defines`; a verified one that is on_path is conditional.
   The numeric cap lives in `bound`. A verified guard with no `bound` is

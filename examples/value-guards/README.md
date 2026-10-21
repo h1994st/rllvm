@@ -81,6 +81,20 @@ rllvm-query --catalog build/field.json guards --at field.c:25 --operand 2
 the nearer store, which overwrites the first, so the same clamp comes back
 `verified`.
 
+```bash
+rllvm-query --catalog build/catalog.json guards --at clamp.c:26 --operand 2
+rllvm-query --catalog build/catalog.json guards --at clamp.c:30 --operand 2
+```
+
+In `peek`, an `if` clamps `len` to 64 into `n`, and line 26 passes `len`
+itself from inside the branch where `len < 64`. The clamp bounds `n`, which is
+computed from `len`, so it comes back unverified; the `compare ult 64` it is
+made of is listed beside it and `verified`, since its true edge is the only way
+into the call. At line 30 `n` is the clamp's result: one verified clamp, its
+comparison not listed again. Traced from `copy`'s `len`, the same comparison
+is a lead: the ternary's arms join before `n` is used, so no edge says which
+side holds.
+
 ## A reused local
 
 In `reuse.c`, `fill` hands `put` the local `cur`, first holding `head` and
@@ -118,7 +132,9 @@ local without a use-site, so a reused local cannot be annotated.
   the guard admits maps onto the anchored value without wrapping at its width.
   Otherwise the guard is an unverified lead, and `caveat` says why. A clamp
   that runs on the value and is used later bounds its own result, not the
-  value, so it is unverified too.
+  value, so it is unverified too; the comparison it is made of is listed on
+  its own, since it bounds the value, and is verified only on its branch's
+  edge into the use.
 - `verified` does not say the guard runs on every path; `relation` does. A
   bound holds unconditionally only when it is `verified` and `dominates` or
   `defines` the value.
