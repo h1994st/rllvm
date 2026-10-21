@@ -397,12 +397,18 @@ const CAVEAT_SEPARATOR: &str = "; ";
 enum Unverified {
     /// The anchored value is no constant affine function of the bounded one.
     NotAffine,
+    /// Carried through the affine relation, the bound leaves the anchored
+    /// value's range.
+    Wraps,
 }
 
 impl Unverified {
     fn reason(self) -> &'static str {
         match self {
             Unverified::NotAffine => "the relation to the anchored value is not affine",
+            Unverified::Wraps => {
+                "the bound does not carry to the anchored value without wraparound"
+            }
         }
     }
 }
@@ -827,6 +833,76 @@ fn linear(op: BinaryOp, operands: &[Operand]) -> Option<(ValueId, Affine)> {
     Some((operand, affine))
 }
 
+/// Whether `site`'s bound, carried onto the anchored value through its
+/// affine relation, leaves the anchored value's range: every value the guard
+/// admits, from one end of its interval to the other, must map into it.
+///
+/// The guard's integer of `bits` is the anchored value's width: an affine
+/// relation other than the identity is arithmetic alone, which keeps one
+/// width, and the identity maps the interval to itself. The guard's
+/// signedness is the anchored value's reading. A site with no bound has no
+/// interval to carry; one whose interval cannot be read is taken to wrap.
+fn wraps(site: &GuardSite, bits: Option<u32>) -> bool {
+    let Some(affine) = site.affine.filter(|affine| *affine != Affine::IDENTITY) else {
+        return false;
+    };
+    if site.bound.is_none() {
+        return false;
+    }
+    let carries = || {
+        let signed = match signedness(site.op, site.predicate.as_deref())? {
+            Signedness::Unsigned => false,
+            // An equality's bound is printed signed.
+            Signedness::Signed | Signedness::Equality => true,
+        };
+        let range = range(bits?, signed)?;
+        let (low, high) = interval(site, range)?;
+        let map = |end: i128| affine.scale.checked_mul(end)?.checked_add(affine.offset);
+        let (a, b) = (map(low)?, map(high)?);
+        // A negative scale swaps the ends.
+        Some(range.0 <= a.min(b) && a.max(b) <= range.1)
+    };
+    !carries().unwrap_or(false)
+}
+
+/// The values an integer of `bits` holds, read `signed` or not, when `i128`
+/// holds them all.
+fn range(bits: u32, signed: bool) -> Option<(i128, i128)> {
+    if signed {
+        let max = i128::MAX.checked_shr(128_u32.checked_sub(bits)?)?;
+        (bits > 0).then_some((-max - 1, max))
+    } else {
+        let max = i128::MAX.checked_shr(127_u32.checked_sub(bits)?)?;
+        (bits > 0).then_some((0, max))
+    }
+}
+
+/// The values `site`'s guard admits for the value it bounds, read in
+/// `range`, the bounded integer's: an end the guard does not fix is the
+/// type's extreme.
+fn interval(site: &GuardSite, (min, max): (i128, i128)) -> Option<(i128, i128)> {
+    let bound: i128 = site.bound.as_deref()?.parse().ok()?;
+    Some(match (site.op, site.predicate.as_deref()) {
+        (GuardKind::Compare, Some("ult" | "slt")) => (min, bound.checked_sub(1)?),
+        (GuardKind::Compare, Some("ule" | "sle")) | (GuardKind::Clamp, Some("umin" | "smin")) => {
+            (min, bound)
+        }
+        (GuardKind::Compare, Some("ugt" | "sgt")) => (bound.checked_add(1)?, max),
+        (GuardKind::Compare, Some("uge" | "sge")) | (GuardKind::Clamp, Some("umax" | "smax")) => {
+            (bound, max)
+        }
+        (GuardKind::Compare, Some("eq")) => (bound, bound),
+        (GuardKind::Mask, _) => (0, bound),
+        (GuardKind::Modulo, Some("urem")) => (0, bound.checked_sub(1)?),
+        (GuardKind::Modulo, Some("srem")) => {
+            let magnitude = bound.checked_abs()?.checked_sub(1)?;
+            (-magnitude, magnitude)
+        }
+        // `ne` and the saturating operations fix neither end here.
+        _ => (min, max),
+    })
+}
+
 /// `outer` applied after `inner`, exactly: `None` when a term overflows
 /// `i128`.
 fn compose(outer: Affine, inner: Affine) -> Option<Affine> {
@@ -1078,10 +1154,27 @@ impl Trace<'_> {
             let mut causes = BTreeSet::new();
             if site.affine.is_none() {
                 causes.insert(Unverified::NotAffine);
+            } else if wraps(site, self.guard_width(*id)) {
+                causes.insert(Unverified::Wraps);
             }
             mark(site, &causes);
         }
         sites.into_values().collect()
+    }
+
+    /// The width in bits of the integer the guard at `id` operates on: its
+    /// operation's, or, for a `phi` read as a clamp, its constant's.
+    fn guard_width(&self, id: ValueId) -> Option<u32> {
+        let node = self.node(id);
+        node.guard.as_ref().map_or_else(
+            || {
+                node.operands.iter().find_map(|operand| match operand {
+                    Operand::Const(constant) => constant.bits,
+                    _ => None,
+                })
+            },
+            |guard| guard.bits,
+        )
     }
 
     /// The value the guard that makes `id` bounds: its result, or, for a
@@ -2434,6 +2527,7 @@ void f(void) { M(); }
     const AFFINE_IR: &str = r#"
 declare void @sink(i32)
 declare void @sink64(i64)
+declare void @sink8(i8)
 
 define void @offset(i32 %x) {
   %c = icmp ult i32 %x, 16
@@ -2596,6 +2690,61 @@ define void @summed(i32 %x, i32 %y) {
 use:
   %n = add i32 %x, %y
   call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @wrapping(i8 %x) {
+  %c = icmp ule i8 %x, -2
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 2
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @carrying(i8 %x) {
+  %c = icmp ule i8 %x, 100
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 2
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @above(i32 %x) {
+  %c = icmp ugt i32 %x, 16
+  br i1 %c, label %out, label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @signed_offset(i8 %x) {
+  %c = icmp slt i8 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 1
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @signed_wrapping(i8 %x) {
+  %c = icmp sgt i8 %x, 100
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 100
+  call void @sink8(i8 %n)
   br label %out
 out:
   ret void
@@ -3120,29 +3269,55 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         }
     }
 
+    /// A bound carried through its affine relation must stay within the
+    /// anchored value's range at its width and signedness, from either end
+    /// of the interval the guard admits; one that wraps keeps its relation
+    /// but is unverified.
+    #[test]
+    fn a_bound_that_wraps_when_carried_to_the_anchor_is_unverified() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let wraps = Some("the bound does not carry to the anchored value without wraparound");
+        let affine = |scale, offset| Some(Affine { scale, offset });
+        for (function, callee, relation, caveat) in [
+            // [0, 254] + 2 reaches 256 at 8 bits.
+            ("wrapping", "sink8", affine(1, 2), wraps),
+            ("carrying", "sink8", affine(1, 2), None),
+            // A lower bound reaches the type's maximum, which + 1 wraps.
+            ("above", "sink", affine(1, 1), wraps),
+            // 10 - [0, 15] goes below zero, unsigned.
+            ("reversed", "sink", affine(-1, 10), wraps),
+            ("signed_offset", "sink8", affine(1, 1), None),
+            ("signed_wrapping", "sink8", affine(1, 100), wraps),
+        ] {
+            let r = affine_ir_guards(&session, function, callee);
+            let site = only_guard(&r);
+            assert_eq!(site.affine, relation, "{function}: {r:?}");
+            assert_eq!(site.verified, caveat.is_none(), "{function}: {r:?}");
+            assert_eq!(site.caveat.as_deref(), caveat, "{function}: {r:?}");
+        }
+    }
+
     /// Compiled from C: `(len & 0xff) + 1000` and `len * 4`.
     #[test]
     fn a_guard_upstream_of_constant_arithmetic_carries_its_relation() {
-        for (source, expected) in [
-            (
-                MASKED_OPERAND_SOURCE,
-                Affine {
-                    scale: 1,
-                    offset: 1000,
-                },
-            ),
-            (
-                COMPARED_OPERAND_SOURCE,
-                Affine {
-                    scale: 4,
-                    offset: 0,
-                },
-            ),
+        // The mask admits [0, 255], so the anchor lies in [1000, 1255]; the
+        // comparison `len > 16` admits up to the maximum, which `* 4` wraps.
+        for (source, scale, offset, verified) in [
+            (MASKED_OPERAND_SOURCE, 1, 1000, true),
+            (COMPARED_OPERAND_SOURCE, 4, 0, false),
         ] {
             let scratch = tempfile::tempdir().unwrap();
             let session = session(&scratch, source, &["-O0", "-g"]);
             let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
-            assert_eq!(only_guard(&r).affine, Some(expected), "{source}: {r:?}");
+            let site = only_guard(&r);
+            assert_eq!(
+                site.affine,
+                Some(Affine { scale, offset }),
+                "{source}: {r:?}"
+            );
+            assert_eq!(site.verified, verified, "{source}: {r:?}");
         }
     }
 
