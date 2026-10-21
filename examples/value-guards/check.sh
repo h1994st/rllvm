@@ -161,4 +161,27 @@ error=$(reused --at reuse.c:14 2>&1) || status=$?
 defines "$error" 'no use of `cur` at reuse\.c:14.*reuse\.c:13' \
     "the error did not name the lines that use cur: $error"
 
-echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, a clamp followed through a struct field and its nearest store, and a reused local traced at each use"
+# 14. peek clamps len into n, a value computed from len. Anchored at the
+#     call that passes len itself, the clamp is a lead, but its comparison is
+#     listed too: the branch into that call is its true edge, so len < 64
+#     holds there, verified.
+peeked=$(query guards --at clamp.c:26 --operand 2 --json |
+    field '[(g["op"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
+[ "$peeked" = "[('compare', 'dominates', True), ('clamp', 'on_path', False)]" ] ||
+    fail "guards on len in peek reported $peeked, expected a verified compare and an unverified clamp"
+
+# 15. Anchored at n, the clamp defines the value and its comparison is not
+#     listed again.
+clamped=$(query guards --at clamp.c:30 --operand 2 --json |
+    field '[(g["op"], g["relation"], g["verified"]) for g in a["results"]["guards"]]')
+[ "$clamped" = "[('clamp', 'defines', True)]" ] ||
+    fail "guards on n in peek reported $clamped, expected one verified clamp"
+
+# 16. In copy the clamp's arms join before n is used, so no edge says which
+#     side of len < 64 holds at len: the comparison is a lead.
+joined=$(query guards --function copy --local len --json |
+    field '[(g["op"], g["verified"], g.get("caveat")) for g in a["results"]["guards"]][0]')
+[ "$joined" = "('compare', False, 'the bound could not be mapped to the anchored value')" ] ||
+    fail "guards --local len reported $joined, expected an unverified compare that could not be mapped"
+
+echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, a clamp followed through a struct field and its nearest store, a reused local traced at each use, and the comparison a downstream clamp is made of"
