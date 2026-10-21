@@ -227,9 +227,26 @@ pub enum GuardRelation {
     OnPath,
 }
 
+/// The relation `anchored = scale * guarded + offset` between the anchored
+/// value and the value a guard bounds, over exact integers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Affine {
+    pub scale: i128,
+    pub offset: i128,
+}
+
+impl Affine {
+    /// The guard bounds the anchored value itself, or a widening of it.
+    pub const IDENTITY: Affine = Affine {
+        scale: 1,
+        offset: 0,
+    };
+}
+
 /// One instruction that constrains the anchored value, or a value the
 /// anchored one is computed from: `depth` says which.
 #[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
 pub struct GuardSite {
     pub op: GuardKind,
     /// Reads with the traced value on the left, `value ult bound`, however
@@ -255,6 +272,18 @@ pub struct GuardSite {
     /// on the anchored value: anchored at `n = (len & 0xff) + 1000`, the
     /// mask is at depth 1.
     pub depth: u32,
+    /// Whether the guard and its `affine` relation to the anchored value
+    /// are both established. A site that is not is a lead, never a fact:
+    /// `caveat` says what was not established.
+    pub verified: bool,
+    /// What keeps the site from being verified; present exactly when it is
+    /// not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caveat: Option<String>,
+    /// How the anchored value is computed from the value the guard bounds.
+    /// Absent when it is not a constant affine function of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affine: Option<Affine>,
 }
 
 /// Which way a trace crossed a call boundary.
@@ -269,6 +298,7 @@ pub enum CrossingDir {
 
 /// A call boundary the trace crossed.
 #[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
 pub struct Crossing {
     pub site: CallSiteId,
     pub direction: CrossingDir,
@@ -278,6 +308,7 @@ pub struct Crossing {
 
 /// The `results` of a `guards` query.
 #[derive(Clone, Debug, Default, Serialize)]
+#[non_exhaustive]
 pub struct GuardsResult {
     pub anchor: Option<GuardAnchor>,
     pub guards: Vec<GuardSite>,
@@ -980,6 +1011,9 @@ impl Trace<'_> {
             location: node.location.clone().or_else(|| phi.location.clone()),
             relation: GuardRelation::Defines,
             depth: 0,
+            verified: true,
+            caveat: None,
+            affine: Some(Affine::IDENTITY),
         };
         Some((site, compare))
     }
@@ -1079,6 +1113,9 @@ fn surfaced(
         location,
         relation,
         depth: 0,
+        verified: true,
+        caveat: None,
+        affine: Some(Affine::IDENTITY),
     }
 }
 
