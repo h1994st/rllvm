@@ -1573,7 +1573,11 @@ impl Trace<'_> {
         let causes = match stores[..] {
             [] => return None,
             [store] => self.clobbers(store, id),
-            _ => BTreeSet::from([Unverified::SeveralStores]),
+            _ => {
+                let mut causes = self.clobbers_in_block(id, &stores);
+                causes.insert(Unverified::SeveralStores);
+                causes
+            }
         };
         Some(Link {
             stored: stores
@@ -1597,7 +1601,29 @@ impl Trace<'_> {
         let (Some(from), Some(to)) = (index(store), index(load)) else {
             return BTreeSet::from([Unverified::OtherBlock]);
         };
-        instrs[from + 1..to]
+        self.writers(&instrs[from + 1..to])
+    }
+
+    /// What may change memory in the load's own block before `load`: after
+    /// the last of `stores`, the stores it may read back, that runs there,
+    /// or from the block's start when none does.
+    fn clobbers_in_block(&self, load: ValueId, stores: &[ValueId]) -> BTreeSet<Unverified> {
+        let instrs = &self.body.blocks[self.node(load).block].instrs;
+        let to = instrs
+            .iter()
+            .position(|&instr| instr == load)
+            .unwrap_or(instrs.len());
+        let from = instrs[..to]
+            .iter()
+            .rposition(|instr| stores.contains(instr))
+            .map_or(0, |last| last + 1);
+        self.writers(&instrs[from..to])
+    }
+
+    /// Why each of `instrs` may write memory: anything but the operations
+    /// that write none.
+    fn writers(&self, instrs: &[ValueId]) -> BTreeSet<Unverified> {
+        instrs
             .iter()
             .filter_map(|&between| {
                 let node = self.node(between);
@@ -4434,6 +4460,21 @@ next:
   ret void
 }
 
+define void @several_then_called(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  br label %mid
+mid:
+  store i32 %m, ptr %a, align 4
+  br label %next
+next:
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
 define void @called_and_stored(ptr %s, i32 %n) {
   %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
   %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
@@ -4499,6 +4540,7 @@ define void @unstored(ptr %s) {
         let other_block = "the store and the load are in different blocks";
         let not_affine = "the relation to the anchored value is not affine";
         let call_and_store = format!("{call}; {store}");
+        let call_and_several = format!("{call}; {several}");
         // Each fixture's memory cause, then the guard's whole caveat.
         for (function, cause, caveat) in [
             ("called", call, call.to_string()),
@@ -4514,6 +4556,13 @@ define void @unstored(ptr %s) {
             ),
             ("other_block", other_block, other_block.to_string()),
             ("called_and_stored", &call_and_store, call_and_store.clone()),
+            // A call in the load's block may change the field whichever
+            // of the earlier stores reaches it.
+            (
+                "several_then_called",
+                &call_and_several,
+                call_and_several.clone(),
+            ),
             // Reached both directly and through the load, the clamp still
             // carries the load's cause.
             ("either", call, call.to_string()),
