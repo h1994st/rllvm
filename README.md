@@ -203,8 +203,10 @@ call's argument (`--at FILE:LINE --operand N`), its result (`--return`) or a
 `-g` local (`--function F --local NAME`), with each guard's bound and source
 line; `--from F` keeps only callers on a path from `F`. A local reused for
 several values is refused with the lines that use it; `--at FILE:LINE` beside
-`--local` traces the value it holds at that use. An overlay `annotate` anchor
-carries no use-site, so a reused local cannot be annotated.
+`--local` traces the value it holds at that use. A use at a line is a read of
+the value the local holds there, possibly through another variable that holds
+the same value. An overlay `annotate` anchor carries no use-site, so a reused
+local cannot be annotated.
 Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
 relation to the value is a constant one. `verified` means its bound soundly
 carries to the value; otherwise it is a lead whose `caveat` says why: the
