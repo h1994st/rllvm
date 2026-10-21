@@ -238,34 +238,34 @@ Report what the answer supports, and say what it does not:
   verified comparison's predicate as holding at the use. A clamp of the
   anchored value made of a comparison (a branch or select clamp, not an
   intrinsic umin or saturation) also lists that comparison, which bounds the
-  anchored value itself. For a clamp, mask or modulo, `verified` does not
-  mean it runs on every path: report its bound as unconditional only when it
-  is `verified` and its `relation` is `dominates` or `defines`; a verified
-  one that is on_path is conditional. The numeric cap lives in `bound`. A
-  verified guard with no `bound` is capped by a runtime value, the guard's
-  operand: a sound relation, not a numeric limit, so never report a number
-  for it; to reach one, anchor on that operand and trace it. A load is
-  followed to the nearest store before it in its block, which overwrites any
-  earlier one; a call, another store or any other operation between them (an
-  atomicrmw, a cmpxchg, a volatile load), which is never skipped to reach an
-  earlier store, or stores only in other blocks make every guard reached
-  through the load a lead, with that caveat, and report the trace lost
-  there. A `relation` of `dominates` runs before the use on every path but
-  does not say which way its branch goes; one that is on_path lies on some
-  path to the use, not every one. `crossings` name the call where the value
-  enters or leaves: ask `guards` there next. `from` only keeps crossings
-  from callers on a path from one named function; nothing between it and the
-  anchor was examined. `uncertainty.value_trace_lost` means the list is
-  partial. `guards` promotes the anchor's module with `mem2reg`, so a local
-  held in a register — any promotable scalar — is traced whatever
-  optimization level the capture used, `-O0` included. A value `mem2reg`
-  cannot promote, such as a struct field or an address-taken local, stays a
-  memory load: a lost trace unless the load is neither volatile nor atomic
-  and a store of its type, also neither, to the same address runs before it.
-  Addresses match only syntactically (the same pointer, or a `getelementptr`
-  alike), so a field of a global never matches. Capture at `-O0` for a
-  faithful call graph; it does not stop `guards` from tracing promotable
-  scalars.
+  anchored value itself. For a clamp, mask, modulo or saturation, `verified`
+  does not mean it runs on every path: report its bound as unconditional
+  only when it is `verified` and its `relation` is `dominates` or `defines`;
+  a verified one that is on_path is conditional. The numeric cap lives in
+  `bound`. A verified guard with no `bound` is capped by a runtime value,
+  the guard's operand: a sound relation, not a numeric limit, so never
+  report a number for it; to reach one, anchor on that operand and trace it.
+  A load is followed to the nearest store before it in its block, which
+  overwrites any earlier one; a call, another store or any other operation
+  between them (an atomicrmw, a cmpxchg, a volatile load), which is never
+  skipped to reach an earlier store, or stores only in other blocks make
+  every guard reached through the load a lead, with that caveat, and report
+  the trace lost there. A `relation` of `dominates` runs before the use on
+  every path but does not say which way its branch goes; one that is on_path
+  lies on some path to the use, not every one. `crossings` name the call
+  where the value enters or leaves: ask `guards` there next. `from` only
+  keeps crossings from callers on a path from one named function; nothing
+  between it and the anchor was examined. `uncertainty.value_trace_lost`
+  means the list is partial. `guards` promotes the anchor's module with
+  `mem2reg`, so a local held in a register — any promotable scalar — is
+  traced whatever optimization level the capture used, `-O0` included. A
+  value `mem2reg` cannot promote, such as a struct field or an address-taken
+  local, stays a memory load: a lost trace unless the load is neither
+  volatile nor atomic and a store of its type, also neither, to the same
+  address runs before it. Addresses match only syntactically (the same
+  pointer, or a `getelementptr` alike), so a field of a global never
+  matches. Capture at `-O0` for a faithful call graph; it does not stop
+  `guards` from tracing promotable scalars.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.
