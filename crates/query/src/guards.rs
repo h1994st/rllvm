@@ -1656,13 +1656,20 @@ impl Trace<'_> {
                     && self.runs_before(store, id)
             })
             .collect();
+        let candidates: HashSet<ValueId> = stores.iter().copied().collect();
         let instrs = &self.body.blocks[load.block].instrs;
-        let nearest = instrs.iter().rev().find(|instr| stores.contains(instr));
+        let before = &instrs[..instrs
+            .iter()
+            .position(|&instr| instr == id)
+            .unwrap_or(instrs.len())];
+        let nearest = before.iter().rev().find(|instr| candidates.contains(instr));
         let (stores, causes) = match (nearest, &stores[..]) {
             (Some(&store), _) | (None, &[store]) => (vec![store], self.clobbers(store, id)),
             (None, []) => return None,
+            // No store runs in the load's block before it, so anything
+            // there that may write memory runs after every one of them.
             (None, _) => {
-                let mut causes = self.clobbers_in_block(id, &stores);
+                let mut causes = self.writers(before);
                 causes.insert(Unverified::SeveralStores);
                 (stores, causes)
             }
@@ -1690,22 +1697,6 @@ impl Trace<'_> {
             return BTreeSet::from([Unverified::OtherBlock]);
         };
         self.writers(&instrs[from + 1..to])
-    }
-
-    /// What may change memory in the load's own block before `load`: after
-    /// the last of `stores`, the stores it may read back, that runs there,
-    /// or from the block's start when none does.
-    fn clobbers_in_block(&self, load: ValueId, stores: &[ValueId]) -> BTreeSet<Unverified> {
-        let instrs = &self.body.blocks[self.node(load).block].instrs;
-        let to = instrs
-            .iter()
-            .position(|&instr| instr == load)
-            .unwrap_or(instrs.len());
-        let from = instrs[..to]
-            .iter()
-            .rposition(|instr| stores.contains(instr))
-            .map_or(0, |last| last + 1);
-        self.writers(&instrs[from..to])
     }
 
     /// Why each of `instrs` may write memory: anything but the operations
