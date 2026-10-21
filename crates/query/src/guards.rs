@@ -4742,10 +4742,10 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             if optimization == "-O0" {
                 // Its branch joins before `r` is used: no edge says which
                 // side holds.
-                let folded = &r.guards[1];
-                assert!(!folded.verified, "{r:?}");
+                let surfaced = &r.guards[1];
+                assert!(!surfaced.verified, "{r:?}");
                 assert_eq!(
-                    folded.caveat.as_deref(),
+                    surfaced.caveat.as_deref(),
                     Some("the bound could not be mapped to the anchored value"),
                     "{r:?}"
                 );
