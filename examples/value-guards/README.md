@@ -4,7 +4,9 @@
 clamp that bounds it, and says nothing is known about a value nothing
 constrains: no guard is an empty list, never "unbounded". In `offset.c`,
 `reserve` returns early when `left > MAX` and hands `make_buf` `left + 1`;
-`guards` carries the bound to that argument through their affine relation.
+`guards` carries the bound to that argument through their affine relation. In
+`field.c`, `fill` stores the clamp to `b->len` and reads it back for `put`;
+`guards` follows the load to the store.
 
 ## Requirements
 
@@ -20,8 +22,8 @@ through it.
 
 It checks the clamp from a call site and from a named local, the empty answer
 for an unconstrained argument, the module `--emit-module` writes, a recorded
-verdict, an annotated `reach` that keeps its path, and the verified bound on
-`left + 1`.
+verdict, an annotated `reach` that keeps its path, the verified bound on
+`left + 1`, and the verified clamp through `b->len`.
 
 ## What it does
 
@@ -56,6 +58,19 @@ This names `left + 1`, the size handed to `make_buf`. The answer lists the
 and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
 `[1, 65]` stays within a `size_t`.
 
+```bash
+rllvm-cc -g -O0 field.c -o build/field
+rllvm-info build/field --json > build/field.json
+rllvm-query --catalog build/field.json guards --at field.c:19 --operand 2
+```
+
+This names `b->len`, loaded for `put` right after line 18 stores the clamp
+there. Nothing between the store and the load writes memory, so the load is
+the stored value: the answer lists the `clamp umin 64` at `field.c:18`, on the
+anchor and `verified`. A call between them (say `log(b)`) could change the
+field, so the same clamp would come back unverified, its caveat naming the
+call.
+
 ## Reading a guard
 
 - `relation`: the guard `defines` the value; `dominates` its use, running
@@ -87,9 +102,17 @@ and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
   parameter or leaves a call, `crossings` name the call to ask `guards` about
   next. `--from F` keeps only callers on a path from `F`, which must name one
   function, and examines nothing between them.
-- Where the trace cannot follow the value (a load, a pointer round trip,
-  inline assembly, an intrinsic it does not read through),
-  `uncertainty.value_trace_lost` says where, and the list is partial.
+- A load is followed to the store it reads back: a non-volatile store of
+  the same type to the same address, the same pointer or a `getelementptr`
+  alike, that runs before it. With exactly one, in the load's block, and only
+  operations that write no memory between them, the load is the stored
+  value. A call, another store or any other operation between, more than one
+  such store, or a store in another block still leads on, but every guard
+  reached that way is unverified, its caveat saying which.
+- Where the trace cannot follow the value (a load with no such store, or a
+  volatile or atomic one, a pointer round trip, inline assembly, an
+  intrinsic it does not read through), `uncertainty.value_trace_lost` says
+  where, and the list is partial.
 - Over MCP, `guards` needs a program loaded with `load_catalog`.
 
 ## Recording a verdict
