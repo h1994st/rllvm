@@ -202,6 +202,16 @@ also hold `annotate` verdicts on whether a value is feasible, which `reach` and
 call's argument (`--at FILE:LINE --operand N`), its result (`--return`) or a
 `-g` local (`--function F --local NAME`), with each guard's bound and source
 line; `--from F` keeps only callers on a path from `F`.
+Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
+relation to the value is a constant one. `verified` means its bound soundly
+carries to the value; otherwise it is a lead whose `caveat` says why: the
+relation is not affine, the guard bounds a value computed from it, the bound
+wraps, or it cannot be mapped. `verified` does not say the guard runs on every
+path, `relation` does: an unconditional bound is `verified` and `dominates` or
+`defines`, while one `on_path` is conditional. The numeric cap is `bound`: a
+`verified` guard without one is capped by a runtime value, the guard's operand,
+which is a sound relation but not a numeric limit; to reach a number, anchor on
+that operand and trace it.
 It is evidence, never a verdict: an empty list does not mean unbounded. See the
 [value guards example](examples/value-guards/).
 

@@ -16,8 +16,8 @@ use rllvm_core::{config::LlvmBindir, error::Error};
 use crate::bind::collapse_odr_duplicates;
 use crate::extract::read_module_ir;
 use crate::ir::{
-    CallIr, CastOp, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand, ValueId, ValueNode,
-    int_predicate,
+    BinaryOp, CallIr, CastOp, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand, ValueId,
+    ValueNode, int_predicate,
 };
 use crate::overlay::{function_label, site_label};
 use crate::slice::{EmittedModule, check_opt_llvm, emit_module, promote, promote_anchor_module};
@@ -227,9 +227,26 @@ pub enum GuardRelation {
     OnPath,
 }
 
+/// The relation `anchored = scale * guarded + offset` between the anchored
+/// value and the value a guard bounds, over exact integers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct Affine {
+    pub scale: i128,
+    pub offset: i128,
+}
+
+impl Affine {
+    /// The guard bounds the anchored value itself, or a widening of it.
+    pub const IDENTITY: Affine = Affine {
+        scale: 1,
+        offset: 0,
+    };
+}
+
 /// One instruction that constrains the anchored value, or a value the
 /// anchored one is computed from: `depth` says which.
 #[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
 pub struct GuardSite {
     pub op: GuardKind,
     /// Reads with the traced value on the left, `value ult bound`, however
@@ -253,8 +270,20 @@ pub struct GuardSite {
     /// anchored value is computed from lies the value it constrains, a
     /// truncation counting as a step; such a guard is not by itself a bound
     /// on the anchored value: anchored at `n = (len & 0xff) + 1000`, the
-    /// mask is at depth 1.
+    /// mask is at depth 1, and `affine` says how its bound carries to `n`.
     pub depth: u32,
+    /// Whether the guard and its `affine` relation to the anchored value
+    /// are both established. A site that is not is a lead, never a fact:
+    /// `caveat` says what was not established.
+    pub verified: bool,
+    /// What keeps the site from being verified; present exactly when it is
+    /// not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caveat: Option<String>,
+    /// How the anchored value is computed from the value the guard bounds.
+    /// Absent when it is not a constant affine function of it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub affine: Option<Affine>,
 }
 
 /// Which way a trace crossed a call boundary.
@@ -269,6 +298,7 @@ pub enum CrossingDir {
 
 /// A call boundary the trace crossed.
 #[derive(Clone, Debug, Serialize)]
+#[non_exhaustive]
 pub struct Crossing {
     pub site: CallSiteId,
     pub direction: CrossingDir,
@@ -278,6 +308,7 @@ pub struct Crossing {
 
 /// The `results` of a `guards` query.
 #[derive(Clone, Debug, Default, Serialize)]
+#[non_exhaustive]
 pub struct GuardsResult {
     pub anchor: Option<GuardAnchor>,
     pub guards: Vec<GuardSite>,
@@ -357,6 +388,51 @@ const RETURN_POSITION: &str = "return";
 
 /// What separates the reasons a trace was lost.
 const LOST_SEPARATOR: &str = "; ";
+
+/// What separates the reasons a guard site is not verified.
+const CAVEAT_SEPARATOR: &str = "; ";
+
+/// Why a guard site is not verified, in the order its caveat names them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Unverified {
+    /// The anchored value is no constant affine function of the bounded one.
+    NotAffine,
+    /// The guard runs on the anchored value and bounds its own result, which
+    /// the anchored value is not computed from.
+    Downstream,
+    /// Carried through the affine relation, the bound leaves the anchored
+    /// value's range.
+    Wraps,
+    /// The bound gives no interval to carry: there is no constant, no width,
+    /// or no branch edge that decides which side of a comparison holds.
+    Unmappable,
+}
+
+impl Unverified {
+    fn reason(self) -> &'static str {
+        match self {
+            Unverified::NotAffine => "the relation to the anchored value is not affine",
+            Unverified::Downstream => "the guard bounds a value computed from the anchored one",
+            Unverified::Wraps => {
+                "the bound does not carry to the anchored value without wraparound"
+            }
+            Unverified::Unmappable => "the bound could not be mapped to the anchored value",
+        }
+    }
+}
+
+/// Marks `site` verified exactly when nothing in `causes` keeps it from
+/// being, and otherwise names every cause, in order, in its caveat.
+fn mark(site: &mut GuardSite, causes: &BTreeSet<Unverified>) {
+    site.verified = causes.is_empty();
+    site.caveat = (!causes.is_empty()).then(|| {
+        causes
+            .iter()
+            .map(|cause| cause.reason())
+            .collect::<Vec<_>>()
+            .join(CAVEAT_SEPARATOR)
+    });
+}
 
 /// The guards on the value `anchor` names, read from its function's own
 /// module once `mem2reg` has promoted it. The trace walks the value's
@@ -627,6 +703,265 @@ struct Walk {
     lost: Vec<String>,
 }
 
+impl Walk {
+    /// The operands the walk followed back from each value, in `steps`
+    /// order.
+    fn followed(&self) -> HashMap<ValueId, Vec<ValueId>> {
+        let mut operands: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+        for (user, operand) in &self.steps {
+            operands.entry(*user).or_default().push(*operand);
+        }
+        operands
+    }
+}
+
+/// How a guard reads the integers it bounds, which decides the widenings
+/// its bound survives.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signedness {
+    Unsigned,
+    Signed,
+    /// `eq` and `ne`, which read the bits alone.
+    Equality,
+}
+
+/// How `op` with `predicate` reads its integers: a mask and an operation
+/// whose name starts with `u` unsigned, one starting with `s` signed. `None`
+/// when the predicate says neither.
+fn signedness(op: GuardKind, predicate: Option<&str>) -> Option<Signedness> {
+    if op == GuardKind::Mask {
+        return Some(Signedness::Unsigned);
+    }
+    match predicate? {
+        "eq" | "ne" => Some(Signedness::Equality),
+        p if p.starts_with('u') => Some(Signedness::Unsigned),
+        p if p.starts_with('s') => Some(Signedness::Signed),
+        _ => None,
+    }
+}
+
+/// The widenings between a value and the anchored one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Widenings {
+    zext: bool,
+    sext: bool,
+}
+
+impl Widenings {
+    const NONE: Widenings = Widenings {
+        zext: false,
+        sext: false,
+    };
+
+    fn with(self, op: CastOp) -> Self {
+        Widenings {
+            zext: self.zext || op == CastOp::ZExt,
+            sext: self.sext || op == CastOp::SExt,
+        }
+    }
+
+    /// Whether `site`'s bound holds across all of them: a `zext` keeps an
+    /// unsigned value, a `sext` a signed one. An equality's bound is printed
+    /// signed, which a `sext` keeps, and a `zext` only when it is not
+    /// negative.
+    fn keep(self, site: &GuardSite) -> bool {
+        if self == Widenings::NONE {
+            return true;
+        }
+        match signedness(site.op, site.predicate.as_deref()) {
+            Some(Signedness::Unsigned) => !self.sext,
+            Some(Signedness::Signed) => !self.zext,
+            Some(Signedness::Equality) => {
+                !self.zext
+                    || site
+                        .bound
+                        .as_deref()
+                        .and_then(|bound| bound.parse::<i128>().ok())
+                        .is_some_and(|bound| bound >= 0)
+            }
+            None => false,
+        }
+    }
+}
+
+/// How the anchored value is computed from one value of its chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Relation {
+    /// The anchored value is not computed from it.
+    Unrelated,
+    /// Through constant `add`, `sub`, `mul` and `shl` alone, at one width:
+    /// `anchored = scale * value + offset`.
+    Arithmetic(Affine),
+    /// Through widenings alone, or none: the anchored value is the value.
+    Widened(Widenings),
+    /// Through some step that is no constant affine function.
+    NotAffine,
+}
+
+impl Relation {
+    /// The affine relation `site`'s guard carries to the anchored value: a
+    /// widening is the identity only when it keeps the guard's bound.
+    fn affine(self, site: &GuardSite) -> Option<Affine> {
+        match self {
+            Relation::Arithmetic(affine) => Some(affine),
+            Relation::Widened(widenings) if widenings.keep(site) => Some(Affine::IDENTITY),
+            Relation::Widened(_) | Relation::Unrelated | Relation::NotAffine => None,
+        }
+    }
+}
+
+/// `op` with one constant operand as an affine function of the other, and
+/// that operand: `None` for any other operation, or a shift by the width or
+/// more, whose result is poison.
+fn linear(op: BinaryOp, operands: &[Operand]) -> Option<(ValueId, Affine)> {
+    let (operand, constant, constant_first) = match operands {
+        [Operand::Value(operand), Operand::Const(constant)] => (*operand, constant, false),
+        [Operand::Const(constant), Operand::Value(operand)] => (*operand, constant, true),
+        _ => return None,
+    };
+    let c: i128 = constant.value.parse().ok()?;
+    let affine = match (op, constant_first) {
+        (BinaryOp::Add, _) => Affine {
+            scale: 1,
+            offset: c,
+        },
+        (BinaryOp::Sub, false) => Affine {
+            scale: 1,
+            offset: c.checked_neg()?,
+        },
+        (BinaryOp::Sub, true) => Affine {
+            scale: -1,
+            offset: c,
+        },
+        (BinaryOp::Mul, _) => Affine {
+            scale: c,
+            offset: 0,
+        },
+        (BinaryOp::Shl, false) => {
+            let width = constant.bits?;
+            let shift = u32::try_from(c).ok().filter(|shift| *shift < width)?;
+            Affine {
+                scale: 1_i128.checked_shl(shift).filter(|scale| *scale > 0)?,
+                offset: 0,
+            }
+        }
+        _ => return None,
+    };
+    Some((operand, affine))
+}
+
+/// Why `site`'s bound does not carry onto the anchored value through its
+/// affine relation, or `None` when it does: every value the guard admits,
+/// from one end of its interval to the other, must map into the anchored
+/// value's range. For a comparison, `edge` is which way its branch goes to
+/// reach the anchor, if one edge decides it.
+///
+/// The guard's integer of `bits` is the anchored value's width: an affine
+/// relation other than the identity is arithmetic alone, which keeps one
+/// width, and the identity maps the interval to itself. The guard's
+/// signedness is the anchored value's reading. Without an interval to carry
+/// -- no constant bound, no width, no deciding edge -- nothing is known to
+/// carry.
+fn uncarried(site: &GuardSite, bits: Option<u32>, edge: Option<bool>) -> Option<Unverified> {
+    let affine = site.affine.filter(|affine| *affine != Affine::IDENTITY)?;
+    let carries = || {
+        let signed = match signedness(site.op, site.predicate.as_deref())? {
+            Signedness::Unsigned => false,
+            // An equality's bound is printed signed.
+            Signedness::Signed | Signedness::Equality => true,
+        };
+        let range = range(bits?, signed)?;
+        let (low, high) = interval(site, range, edge)?;
+        let map = |end: i128| affine.scale.checked_mul(end)?.checked_add(affine.offset);
+        let (a, b) = (map(low)?, map(high)?);
+        // A negative scale swaps the ends.
+        Some(range.0 <= a.min(b) && a.max(b) <= range.1)
+    };
+    match carries() {
+        Some(true) => None,
+        Some(false) => Some(Unverified::Wraps),
+        None => Some(Unverified::Unmappable),
+    }
+}
+
+/// The values an integer of `bits` holds, read `signed` or not, when `i128`
+/// holds them all.
+fn range(bits: u32, signed: bool) -> Option<(i128, i128)> {
+    if signed {
+        let max = i128::MAX.checked_shr(128_u32.checked_sub(bits)?)?;
+        (bits > 0).then_some((-max - 1, max))
+    } else {
+        let max = i128::MAX.checked_shr(127_u32.checked_sub(bits)?)?;
+        (bits > 0).then_some((0, max))
+    }
+}
+
+/// The values `site`'s guard admits for the value it bounds, read in
+/// `range`, the bounded integer's: an end the guard does not fix is the
+/// type's extreme. A comparison admits what holds on the edge `edge` names
+/// -- its predicate on the true one, the inverse on the false -- and nothing
+/// without one.
+fn interval(
+    site: &GuardSite,
+    (min, max): (i128, i128),
+    edge: Option<bool>,
+) -> Option<(i128, i128)> {
+    let bound: i128 = site.bound.as_deref()?.parse().ok()?;
+    let predicate = match site.op {
+        GuardKind::Compare => {
+            let predicate = site.predicate.as_deref()?;
+            if edge? {
+                predicate
+            } else {
+                int_predicate(predicate)?.inverse
+            }
+        }
+        _ => site.predicate.as_deref().unwrap_or_default(),
+    };
+    Some(match (site.op, predicate) {
+        (GuardKind::Compare, "ult" | "slt") => (min, bound.checked_sub(1)?),
+        (GuardKind::Compare, "ule" | "sle") | (GuardKind::Clamp, "umin" | "smin") => (min, bound),
+        (GuardKind::Compare, "ugt" | "sgt") => (bound.checked_add(1)?, max),
+        (GuardKind::Compare, "uge" | "sge") | (GuardKind::Clamp, "umax" | "smax") => (bound, max),
+        (GuardKind::Compare, "eq") => (bound, bound),
+        (GuardKind::Mask, _) => (0, bound),
+        (GuardKind::Modulo, "urem") => (0, bound.checked_sub(1)?),
+        (GuardKind::Modulo, "srem") => {
+            let magnitude = bound.checked_abs()?.checked_sub(1)?;
+            (-magnitude, magnitude)
+        }
+        // `ne` and the saturating operations fix neither end here.
+        _ => (min, max),
+    })
+}
+
+/// `outer` applied after `inner`, exactly: `None` when a term overflows
+/// `i128`.
+fn compose(outer: Affine, inner: Affine) -> Option<Affine> {
+    Some(Affine {
+        scale: outer.scale.checked_mul(inner.scale)?,
+        offset: outer
+            .scale
+            .checked_mul(inner.offset)?
+            .checked_add(outer.offset)?,
+    })
+}
+
+/// How a value of the chain is computed from the operands the walk followed
+/// from it.
+enum Step {
+    /// The value is one of `arms`, whichever ran: a `phi`'s incoming values,
+    /// a `select`'s arms.
+    Choice(Vec<Operand>),
+    /// The value is `affine` of `operand`, at the same width.
+    Linear { operand: ValueId, affine: Affine },
+    /// The value widens `operand`.
+    Widen { operand: ValueId, op: CastOp },
+    /// Anything else: the value is computed from its followed operands, but
+    /// no constant affine function of any.
+    Opaque,
+}
+
 impl Trace<'_> {
     fn node(&self, id: ValueId) -> &ValueNode {
         &self.body.values[id as usize]
@@ -760,11 +1095,17 @@ impl Trace<'_> {
         let depths = self.depths(walk, value);
         let depth_of = |id: &ValueId| depths.get(id).copied().unwrap_or_default();
         let mut sites = walk.defining.clone();
+        // The value each site bounds, which its affine relation is read from.
+        let mut bounds: HashMap<ValueId, ValueId> = HashMap::new();
         for (id, site) in &mut sites {
             site.depth = depth_of(id);
+            if let Some(bounded) = self.bounded(*id) {
+                bounds.insert(*id, bounded);
+            }
         }
         let mut folded = walk.folded.clone();
         let downstream = self.downstream(value);
+        let mut downstream_guards: HashSet<ValueId> = HashSet::new();
         let traced = |operand: &Operand| {
             matches!(operand, Operand::Value(value)
                 if walk.chain.contains(value) || downstream.contains(value))
@@ -780,10 +1121,13 @@ impl Trace<'_> {
             ) else {
                 continue;
             };
+            // Each guard here bounds its own result, which is computed from
+            // the anchored value rather than the other way round.
             if node.opcode == OpcodeIr::Phi {
                 if let Some((mut site, compare)) = self.phi_clamp(node) {
                     site.relation = GuardRelation::OnPath;
                     sites.insert(id, site);
+                    downstream_guards.insert(id);
                     folded.insert(compare);
                 }
             } else if let Some(raw) = &node.guard {
@@ -791,6 +1135,7 @@ impl Trace<'_> {
                     id,
                     surfaced(raw, side == 1, node.location.clone(), GuardRelation::OnPath),
                 );
+                downstream_guards.insert(id);
                 if let (OpcodeIr::Select, Some(Operand::Value(compare))) =
                     (node.opcode, node.operands.first())
                 {
@@ -813,24 +1158,250 @@ impl Trace<'_> {
                 GuardRelation::OnPath
             };
             let mut site = surfaced(raw, side == 1, node.location.clone(), relation);
-            if let Operand::Value(compared) = &node.operands[side]
-                && !downstream.contains(compared)
-            {
-                site.depth = depth_of(compared);
+            if let Operand::Value(compared) = &node.operands[side] {
+                if !downstream.contains(compared) {
+                    site.depth = depth_of(compared);
+                }
+                bounds.insert(id, *compared);
             }
             sites.insert(id, site);
         }
+        let followed = walk.followed();
+        let mut relations: HashMap<ValueId, Relation> = HashMap::new();
+        for (id, site) in &mut sites {
+            if downstream_guards.contains(id) {
+                site.affine = None;
+                mark(site, &BTreeSet::from([Unverified::Downstream]));
+                continue;
+            }
+            let relation = match bounds.get(id) {
+                Some(&bounded) if downstream.contains(&bounded) => {
+                    self.widened_from(value, bounded)
+                }
+                Some(&bounded) => *relations
+                    .entry(bounded)
+                    .or_insert_with(|| self.relation(&followed, value, bounded)),
+                None => Relation::NotAffine,
+            };
+            site.affine = relation.affine(site);
+            let mut causes = BTreeSet::new();
+            if site.affine.is_none() {
+                causes.insert(Unverified::NotAffine);
+            } else {
+                let edge = self.edge_to(*id, at);
+                causes.extend(uncarried(site, self.guard_width(*id), edge));
+            }
+            mark(site, &causes);
+        }
         sites.into_values().collect()
+    }
+
+    /// Which edge of the branch on comparison `compare` reaches `at`: `true`
+    /// for its true successor, `false` for its false one, when that
+    /// successor dominates `at`'s block and is entered by that edge alone.
+    /// `None` when no branch on it has such an edge.
+    fn edge_to(&self, compare: ValueId, at: ValueId) -> Option<bool> {
+        let target = self.node(at).block;
+        let entries = |block: usize| {
+            self.body
+                .blocks
+                .iter()
+                .flat_map(|ir| &ir.successors)
+                .filter(|&&successor| successor == block)
+                .count()
+        };
+        (0..self.body.blocks.len()).find_map(|block| {
+            let (branched, on_true, on_false) = self.branch_on(block)?;
+            if branched != compare {
+                return None;
+            }
+            [(on_true, true), (on_false, false)]
+                .into_iter()
+                .find_map(|(successor, taken)| {
+                    (entries(successor) == 1 && self.doms.dominates(successor, target))
+                        .then_some(taken)
+                })
+        })
+    }
+
+    /// The width in bits of the integer the guard at `id` operates on: its
+    /// operation's, or, for a `phi` read as a clamp, its constant's.
+    fn guard_width(&self, id: ValueId) -> Option<u32> {
+        let node = self.node(id);
+        node.guard.as_ref().map_or_else(
+            || {
+                node.operands.iter().find_map(|operand| match operand {
+                    Operand::Const(constant) => constant.bits,
+                    _ => None,
+                })
+            },
+            |guard| guard.bits,
+        )
+    }
+
+    /// The value the guard that makes `id` bounds: its result, or, for a
+    /// comparison, the operand it reads as the traced value.
+    fn bounded(&self, id: ValueId) -> Option<ValueId> {
+        let node = self.node(id);
+        if node.opcode != OpcodeIr::ICmp {
+            return Some(id);
+        }
+        node.operands.iter().find_map(|operand| match operand {
+            Operand::Value(value) => Some(*value),
+            _ => None,
+        })
+    }
+
+    /// How `id` is computed from the operands the walk followed from it.
+    fn step(&self, id: ValueId) -> Step {
+        let node = self.node(id);
+        match node.opcode {
+            OpcodeIr::Phi => Step::Choice(node.operands.clone()),
+            OpcodeIr::Select => Step::Choice(node.operands.get(1..).unwrap_or_default().to_vec()),
+            OpcodeIr::Cast { op } if WIDENING_CASTS.contains(&op) => match node.operands.first() {
+                Some(Operand::Value(operand)) => Step::Widen {
+                    operand: *operand,
+                    op,
+                },
+                _ => Step::Opaque,
+            },
+            OpcodeIr::BinOp { op } => {
+                linear(op, &node.operands).map_or(Step::Opaque, |(operand, affine)| Step::Linear {
+                    operand,
+                    affine,
+                })
+            }
+            _ => Step::Opaque,
+        }
+    }
+
+    /// How the anchored `value` is computed from `guarded`, a value of its
+    /// chain, over the steps `followed` holds: each value's relation to
+    /// `guarded` read off its operands', from `guarded` up.
+    fn relation(
+        &self,
+        followed: &HashMap<ValueId, Vec<ValueId>>,
+        value: ValueId,
+        guarded: ValueId,
+    ) -> Relation {
+        // `None` while a value's operands are pending: a cycle back to it
+        // reads as no affine function, as a loop-carried value is none.
+        let mut known: HashMap<ValueId, Option<Relation>> = HashMap::new();
+        let mut pending: Vec<(ValueId, Option<Step>)> = vec![(value, None)];
+        while let Some((id, step)) = pending.pop() {
+            let Some(step) = step else {
+                if known.contains_key(&id) {
+                    continue;
+                }
+                known.insert(id, None);
+                if id == guarded {
+                    known.insert(id, Some(Relation::Widened(Widenings::NONE)));
+                    continue;
+                }
+                let step = self.step(id);
+                let inputs: Vec<ValueId> = match &step {
+                    Step::Choice(arms) => arms
+                        .iter()
+                        .filter_map(|arm| match arm {
+                            Operand::Value(arm) => Some(*arm),
+                            _ => None,
+                        })
+                        .collect(),
+                    Step::Linear { operand, .. } | Step::Widen { operand, .. } => vec![*operand],
+                    Step::Opaque => followed.get(&id).cloned().unwrap_or_default(),
+                };
+                pending.push((id, Some(step)));
+                pending.extend(
+                    inputs
+                        .into_iter()
+                        .filter(|input| !known.contains_key(input))
+                        .map(|input| (input, None)),
+                );
+                continue;
+            };
+            let of = |input: ValueId| {
+                known
+                    .get(&input)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(Relation::NotAffine)
+            };
+            let relation = match step {
+                // One relation only when every arm has it: an arm that
+                // differs, or is not computed from `guarded`, decides the
+                // value on some path.
+                Step::Choice(arms) => {
+                    let relations: Vec<Relation> = arms
+                        .iter()
+                        .map(|arm| match arm {
+                            Operand::Value(arm) => of(*arm),
+                            _ => Relation::Unrelated,
+                        })
+                        .collect();
+                    match relations.split_first() {
+                        Some((first, rest)) if rest.iter().all(|arm| arm == first) => *first,
+                        Some(_) => Relation::NotAffine,
+                        None => Relation::Unrelated,
+                    }
+                }
+                Step::Linear { operand, affine } => match of(operand) {
+                    Relation::Widened(widenings) if widenings == Widenings::NONE => {
+                        Relation::Arithmetic(affine)
+                    }
+                    Relation::Arithmetic(below) => {
+                        compose(affine, below).map_or(Relation::NotAffine, Relation::Arithmetic)
+                    }
+                    Relation::Unrelated => Relation::Unrelated,
+                    Relation::Widened(_) | Relation::NotAffine => Relation::NotAffine,
+                },
+                Step::Widen { operand, op } => match of(operand) {
+                    Relation::Widened(widenings) => Relation::Widened(widenings.with(op)),
+                    Relation::Unrelated => Relation::Unrelated,
+                    Relation::Arithmetic(_) | Relation::NotAffine => Relation::NotAffine,
+                },
+                Step::Opaque => {
+                    let inputs = followed.get(&id).map_or(&[][..], Vec::as_slice);
+                    if inputs.iter().all(|&input| of(input) == Relation::Unrelated) {
+                        Relation::Unrelated
+                    } else {
+                        Relation::NotAffine
+                    }
+                }
+            };
+            known.insert(id, Some(relation));
+        }
+        known
+            .get(&value)
+            .copied()
+            .flatten()
+            .unwrap_or(Relation::NotAffine)
+    }
+
+    /// How `value` relates to `widened`, which only widens it downstream.
+    fn widened_from(&self, value: ValueId, mut widened: ValueId) -> Relation {
+        let mut widenings = Widenings::NONE;
+        while widened != value {
+            match (
+                self.node(widened).opcode,
+                self.node(widened).operands.first(),
+            ) {
+                (OpcodeIr::Cast { op }, Some(Operand::Value(from)))
+                    if WIDENING_CASTS.contains(&op) =>
+                {
+                    widenings = widenings.with(op);
+                    widened = *from;
+                }
+                _ => return Relation::NotAffine,
+            }
+        }
+        Relation::Widened(widenings)
     }
 
     /// How many steps back from `value` each value of `walk`'s chain lies:
     /// the fewest operands followed to reach it. A widening keeps the value,
     /// so stepping through one is no step; a truncation is one.
     fn depths(&self, walk: &Walk, value: ValueId) -> HashMap<ValueId, u32> {
-        let mut operands: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
-        for (user, operand) in &walk.steps {
-            operands.entry(*user).or_default().push(*operand);
-        }
+        let operands = walk.followed();
         let mut depths = HashMap::new();
         let mut pending = VecDeque::from([(value, 0)]);
         while let Some((id, depth)) = pending.pop_front() {
@@ -980,6 +1551,9 @@ impl Trace<'_> {
             location: node.location.clone().or_else(|| phi.location.clone()),
             relation: GuardRelation::Defines,
             depth: 0,
+            verified: true,
+            caveat: None,
+            affine: Some(Affine::IDENTITY),
         };
         Some((site, compare))
     }
@@ -1079,6 +1653,9 @@ fn surfaced(
         location,
         relation,
         depth: 0,
+        verified: true,
+        caveat: None,
+        affine: Some(Affine::IDENTITY),
     }
 }
 
@@ -1093,7 +1670,7 @@ fn unsigned_bound(
     bound: &str,
     bits: Option<u32>,
 ) -> String {
-    let unsigned = op == GuardKind::Mask || predicate.is_some_and(|p| p.starts_with('u'));
+    let unsigned = signedness(op, predicate) == Some(Signedness::Unsigned);
     let width = bits
         .and_then(|bits| 1_i128.checked_shl(bits))
         .filter(|width| *width > 0);
@@ -2007,6 +2584,358 @@ extern void sink(unsigned);
 void f(void) { M(); }
 ";
 
+    /// One function per affine rule, each passing `sink` or `sink64` a
+    /// value computed from `%x`, which one comparison bounds.
+    const AFFINE_IR: &str = r#"
+declare void @sink(i32)
+declare void @sink64(i64)
+declare void @sink8(i8)
+declare i32 @llvm.umin.i32(i32, i32)
+
+define void @offset(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @scaled(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = mul i32 4, %x
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @reversed(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = sub i32 10, %x
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @composed(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %a = mul i32 %x, 3
+  %b = sub i32 %a, 5
+  %n = shl i32 %b, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @overshifted(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = shl i32 %x, 32
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @overflowing(i64 %x) {
+  %c = icmp ult i64 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %a = mul i64 %x, 4611686018427387904
+  %b = mul i64 %a, 4611686018427387904
+  %n = mul i64 %b, 4611686018427387904
+  call void @sink64(i64 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @divergent(i32 %x, i1 %flag) {
+  %c = icmp ult i32 %x, 16
+  br i1 %flag, label %one, label %two
+one:
+  %a = add i32 %x, 1
+  br label %join
+two:
+  %b = add i32 %x, 2
+  br label %join
+join:
+  %n = phi i32 [ %a, %one ], [ %b, %two ]
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @agreeing(i32 %x, i1 %flag) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %body, label %out
+body:
+  br i1 %flag, label %one, label %two
+out:
+  ret void
+one:
+  %a = add i32 %x, 1
+  br label %join
+two:
+  %b = add i32 1, %x
+  br label %join
+join:
+  %n = phi i32 [ %a, %one ], [ %b, %two ]
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @partial(i32 %x, i1 %flag) {
+  %c = icmp ult i32 %x, 16
+  br i1 %flag, label %one, label %join
+one:
+  br label %join
+join:
+  %n = phi i32 [ %x, %one ], [ 7, %0 ]
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @widened(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  %n = zext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @signed_widened(i32 %x) {
+  %c = icmp slt i32 %x, 16
+  %n = sext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @mismatched(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  %n = sext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @widened_then_added(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  %w = zext i32 %x to i64
+  %n = add i64 %w, 1
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @added_then_widened(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  %a = add i32 %x, 1
+  %n = zext i32 %a to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @truncated(i64 %x) {
+  %c = icmp ult i64 %x, 16
+  %n = trunc i64 %x to i32
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @summed(i32 %x, i32 %y) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = add i32 %x, %y
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @wrapping(i8 %x) {
+  %c = icmp ule i8 %x, -2
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 2
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @carrying(i8 %x) {
+  %c = icmp ule i8 %x, 100
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 2
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @above(i32 %x) {
+  %c = icmp ugt i32 %x, 16
+  br i1 %c, label %out, label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @signed_offset(i8 %x) {
+  %c = icmp slt i8 %x, 16
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 1
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @signed_wrapping(i8 %x) {
+  %c = icmp sgt i8 %x, 100
+  br i1 %c, label %use, label %out
+use:
+  %n = add i8 %x, 100
+  call void @sink8(i8 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @false_edge(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %out, label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @shared_successor(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %other, label %join
+other:
+  br label %join
+join:
+  br label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @reversed_within(i32 %x) {
+  %c = icmp ule i32 %x, 10
+  br i1 %c, label %use, label %out
+use:
+  %n = sub i32 10, %x
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @unbounded(i32 %x, i32 %y) {
+  %c = icmp ugt i32 %x, %y
+  br i1 %c, label %out, label %use
+use:
+  %n = add i32 %x, 1
+  call void @sink(i32 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @clamped_to_value(i32 %x, i32 %y) {
+  %m = call i32 @llvm.umin.i32(i32 %x, i32 %y)
+  %n = add i32 %m, 1
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @clamped_then_added(i32 %x) {
+  %m = call i32 @llvm.umin.i32(i32 %x, i32 16)
+  %n = add i32 %m, 1
+  call void @sink(i32 %n)
+  ret void
+}
+
+define void @unsigned_itself(i32 %x) {
+  %c = icmp ugt i32 %x, 16
+  br i1 %c, label %out, label %use
+use:
+  call void @sink(i32 %x)
+  br label %out
+out:
+  ret void
+}
+
+define void @signed_itself(i32 %x) {
+  %c = icmp slt i32 %x, -16
+  br i1 %c, label %use, label %out
+use:
+  call void @sink(i32 %x)
+  br label %out
+out:
+  ret void
+}
+
+define void @equal_itself(i32 %x) {
+  %c = icmp eq i32 %x, -1
+  br i1 %c, label %use, label %out
+use:
+  call void @sink(i32 %x)
+  br label %out
+out:
+  ret void
+}
+
+define void @equal_widened(i32 %x) {
+  %c = icmp eq i32 %x, 5
+  %n = zext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @negative_equal_widened(i32 %x) {
+  %c = icmp eq i32 %x, -1
+  %n = zext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @negative_equal_sign_extended(i32 %x) {
+  %c = icmp eq i32 %x, -1
+  %n = sext i32 %x to i64
+  call void @sink64(i64 %n)
+  ret void
+}
+
+define void @flag(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  %n = zext i1 %c to i32
+  call void @sink(i32 %n)
+  ret void
+}
+"#;
+
     /// A saturating subtraction from the bound: `16 - len`, floored at 0.
     const SATURATE_SOURCE: &str = "extern void sink(unsigned);
 void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
@@ -2080,6 +3009,9 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 r.guards.iter().all(|guard| guard.depth == 0),
                 "{optimization}: {r:?}"
             );
+            // The anchor is the clamp's result: its bound is the anchor's.
+            assert!(r.guards[0].verified, "{optimization}: {r:?}");
+            assert_eq!(r.guards[0].affine, Some(Affine::IDENTITY));
         }
     }
 
@@ -2373,6 +3305,18 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 "{optimization}: {r:?}"
             );
             assert_eq!(crossings(&r), [("f", CrossingDir::From, "get", "return")]);
+            // `r` is compared itself, but only the clamp's result is capped
+            // at 16: the clamp is a lead about `r`, never a bound on it.
+            let (compare, clamp) = (&r.guards[0], &r.guards[1]);
+            assert!(compare.verified, "{optimization}: {r:?}");
+            assert_eq!(compare.affine, Some(Affine::IDENTITY), "{optimization}");
+            assert!(!clamp.verified, "{optimization}: {r:?}");
+            assert_eq!(clamp.affine, None, "{optimization}: {r:?}");
+            assert_eq!(
+                clamp.caveat.as_deref(),
+                Some("the guard bounds a value computed from the anchored one"),
+                "{optimization}: {r:?}"
+            );
         }
     }
 
@@ -2430,6 +3374,206 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                 .map(|guard| (guard.op, guard.depth))
                 .collect();
             assert_eq!(depths, [(op, 1)], "{r:?}");
+        }
+    }
+
+    /// The one guard `result` reports.
+    fn only_guard(result: &GuardsResult) -> &GuardSite {
+        assert_eq!(result.guards.len(), 1, "{result:?}");
+        &result.guards[0]
+    }
+
+    /// The guards of `function`'s value handed to `callee`, in [`AFFINE_IR`].
+    fn affine_ir_guards(session: &Session, function: &str, callee: &str) -> GuardsResult {
+        let site = &sites_calling(session, function, callee)[0];
+        guards(session, &argument(site, 0), None).unwrap()
+    }
+
+    /// Constant arithmetic between a bounded value and the anchored one is
+    /// recorded as the affine relation `anchored = scale * guarded + offset`;
+    /// a shift past the width, an `i128` overflow, or two paths that disagree
+    /// leave none.
+    #[test]
+    fn constant_arithmetic_to_the_anchor_is_an_affine_relation() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let affine = |scale, offset| Some(Affine { scale, offset });
+        for (function, callee, expected) in [
+            ("offset", "sink", affine(1, 1)),
+            ("scaled", "sink", affine(4, 0)),
+            ("reversed", "sink", affine(-1, 10)),
+            ("composed", "sink", affine(6, -10)),
+            ("overshifted", "sink", None),
+            ("overflowing", "sink64", None),
+            ("divergent", "sink", None),
+            ("agreeing", "sink", affine(1, 1)),
+            ("partial", "sink", None),
+        ] {
+            let r = affine_ir_guards(&session, function, callee);
+            assert_eq!(only_guard(&r).affine, expected, "{function}: {r:?}");
+        }
+    }
+
+    /// A widening whose signedness matches the guard's keeps the value; one
+    /// that does not, a truncation, or a widening mixed with arithmetic does
+    /// not. A comparison in the chain bounds its operand, which the anchored
+    /// boolean is no affine function of.
+    #[test]
+    fn only_a_matching_widening_alone_is_the_identity() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        for (function, callee, expected) in [
+            ("widened", "sink64", Some(Affine::IDENTITY)),
+            ("signed_widened", "sink64", Some(Affine::IDENTITY)),
+            ("mismatched", "sink64", None),
+            ("widened_then_added", "sink64", None),
+            ("added_then_widened", "sink64", None),
+            ("truncated", "sink", None),
+            ("flag", "sink", None),
+        ] {
+            let r = affine_ir_guards(&session, function, callee);
+            assert_eq!(only_guard(&r).affine, expected, "{function}: {r:?}");
+        }
+    }
+
+    /// A guard on a value the anchored one is no constant affine function
+    /// of is a lead, not a bound on it: unverified, saying why. One that is
+    /// stays verified.
+    #[test]
+    fn a_guard_with_no_affine_relation_is_unverified() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "summed", "sink");
+        let site = only_guard(&r);
+        assert_eq!(site.affine, None, "{r:?}");
+        assert!(!site.verified, "{r:?}");
+        assert_eq!(
+            site.caveat.as_deref(),
+            Some("the relation to the anchored value is not affine")
+        );
+
+        for function in ["offset", "agreeing"] {
+            let r = affine_ir_guards(&session, function, "sink");
+            let site = only_guard(&r);
+            assert!(site.verified && site.caveat.is_none(), "{function}: {r:?}");
+        }
+    }
+
+    /// A bound carried through its affine relation must stay within the
+    /// anchored value's range at its width and signedness, from either end
+    /// of the interval the guard admits; one that wraps keeps its relation
+    /// but is unverified.
+    #[test]
+    fn a_bound_that_wraps_when_carried_to_the_anchor_is_unverified() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let wraps = Some("the bound does not carry to the anchored value without wraparound");
+        let affine = |scale, offset| Some(Affine { scale, offset });
+        for (function, callee, relation, caveat) in [
+            // [0, 254] + 2 reaches 256 at 8 bits.
+            ("wrapping", "sink8", affine(1, 2), wraps),
+            ("carrying", "sink8", affine(1, 2), None),
+            // The anchor is reached on the false edge of `x ugt 16`, where
+            // `x ule 16` holds: [0, 16] + 1 carries.
+            ("above", "sink", affine(1, 1), None),
+            // ... and on the false edge of `x ult 16`, where `x uge 16`
+            // admits the maximum, which + 1 wraps.
+            ("false_edge", "sink", affine(1, 1), wraps),
+            // 10 - [0, 15] goes below zero, unsigned; 10 - [0, 10] does not.
+            ("reversed", "sink", affine(-1, 10), wraps),
+            ("reversed_within", "sink", affine(-1, 10), None),
+            ("signed_offset", "sink8", affine(1, 1), None),
+            ("signed_wrapping", "sink8", affine(1, 100), wraps),
+            // The clamp's result, [0, 16], is what the anchor adds 1 to.
+            ("clamped_then_added", "sink", affine(1, 1), None),
+        ] {
+            let r = affine_ir_guards(&session, function, callee);
+            let site = only_guard(&r);
+            assert_eq!(site.affine, relation, "{function}: {r:?}");
+            assert_eq!(site.verified, caveat.is_none(), "{function}: {r:?}");
+            assert_eq!(site.caveat.as_deref(), caveat, "{function}: {r:?}");
+        }
+    }
+
+    /// A bound only carries from an edge that decides it: one into a block
+    /// that dominates the anchor and is entered from nothing else. Without
+    /// one, or without a constant bound, nothing is known to carry.
+    #[test]
+    fn a_bound_with_no_deciding_edge_or_constant_cannot_be_carried() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        for function in ["shared_successor", "unbounded", "clamped_to_value"] {
+            let r = affine_ir_guards(&session, function, "sink");
+            let site = only_guard(&r);
+            assert_eq!(
+                site.affine,
+                Some(Affine {
+                    scale: 1,
+                    offset: 1
+                }),
+                "{function}: {r:?}"
+            );
+            assert!(!site.verified, "{function}: {r:?}");
+            assert_eq!(
+                site.caveat.as_deref(),
+                Some("the bound could not be mapped to the anchored value"),
+                "{function}: {r:?}"
+            );
+        }
+    }
+
+    /// A comparison on the anchored value itself bounds it however it reads
+    /// its integers; across a widening, an equality's negative bound is
+    /// another number once zero-extended.
+    #[test]
+    fn a_guard_on_the_anchor_itself_is_verified_whatever_its_signedness() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        for (function, callee, expected) in [
+            ("unsigned_itself", "sink", Some(Affine::IDENTITY)),
+            ("signed_itself", "sink", Some(Affine::IDENTITY)),
+            ("equal_itself", "sink", Some(Affine::IDENTITY)),
+            ("equal_widened", "sink64", Some(Affine::IDENTITY)),
+            ("negative_equal_widened", "sink64", None),
+            (
+                "negative_equal_sign_extended",
+                "sink64",
+                Some(Affine::IDENTITY),
+            ),
+        ] {
+            let r = affine_ir_guards(&session, function, callee);
+            let site = only_guard(&r);
+            assert_eq!(site.affine, expected, "{function}: {r:?}");
+            assert_eq!(site.verified, expected.is_some(), "{function}: {r:?}");
+        }
+    }
+
+    /// Compiled from C: `(len & 0xff) + 1000` and `len * 4`.
+    #[test]
+    fn a_guard_upstream_of_constant_arithmetic_carries_its_relation() {
+        // The mask admits [0, 255], so the anchor lies in [1000, 1255]; past
+        // `if (len > 16) return;`, `len` is in [0, 16], so `len * 4` in
+        // [0, 64].
+        for (source, scale, offset, verified) in [
+            (MASKED_OPERAND_SOURCE, 1, 1000, true),
+            (COMPARED_OPERAND_SOURCE, 4, 0, true),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let session = session(&scratch, source, &["-O0", "-g"]);
+            let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+            let site = only_guard(&r);
+            assert_eq!(
+                site.affine,
+                Some(Affine { scale, offset }),
+                "{source}: {r:?}"
+            );
+            assert_eq!(site.verified, verified, "{source}: {r:?}");
         }
     }
 
