@@ -55,10 +55,11 @@ rllvm-query --catalog build/offset.json guards --at offset.c:15 --operand 1
 ```
 
 This names `left + 1`, the size handed to `make_buf`. The answer lists the
-`compare ugt 64` on `left` at `offset.c:13`, one step upstream, with
+`compare ule 64` on `left` at `offset.c:13`, one step upstream, with
 `anchored = guarded + 1`: in `--json`, `affine` is `{"scale": 1, "offset": 1}`
-and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
-`[1, 65]` stays within a `size_t`.
+and `verified` is `true`. The source tests `left > MAX`, but the call is past
+the early return, on the false edge, where `left ule 64` holds: `left` is in
+`[0, 64]`, and `[1, 65]` stays within a `size_t`.
 
 ```bash
 rllvm-cc -g -O0 field.c -o build/field
@@ -98,8 +99,9 @@ rllvm-query --catalog build/catalog.json guards --function copy --local len
 ```
 
 Traced from `len` in `copy`, `copy`'s own clamp comes back unverified, and its
-`compare ult 64` is a lead: the ternary's arms join before `n` is used, so no
-edge says which side holds at `len`.
+`compare ult 64` is a lead, its caveat "no branch edge shows the comparison
+held at the use": the ternary's arms join before `n` is used, so no edge says
+which side holds at `len`.
 
 ## A reused local
 
@@ -118,11 +120,12 @@ Named alone, `cur` traces nothing: `value_trace_lost` says it is bound to more
 than one value and lists the lines that use it. `--at` names one of those
 lines and traces the value `cur` holds there. A use at a line is a read of the
 value the local holds there, possibly through another variable that holds the
-same value. Traced at line 13, it finds `compare ugt 32` (line 11); traced at
-line 17, `compare ugt 8` (line 15); each dominates its use. A line with no use
-of `cur` is an error listing the lines that have one, and a line reading two of
-its values is an error rather than a pick. An overlay `annotate` anchor names a
-local without a use-site, so a reused local cannot be annotated.
+same value. Traced at line 13, it finds `compare ule 32` (line 11); traced at
+line 17, `compare ule 8` (line 15); each dominates its use, reached past its
+`return`. A line with no use of `cur` is an error listing the lines that have
+one, and a line reading two of its values is an error rather than a pick. An
+overlay `annotate` anchor names a local without a use-site, so a reused local
+cannot be annotated.
 
 ## Reading a guard
 
@@ -142,18 +145,22 @@ local without a use-site, so a reused local cannot be annotated.
   or `select` clamp, not an intrinsic `umin`), that comparison is listed on
   its own, since it bounds the value, and is verified only on its branch's
   edge into the use.
-- `verified` does not say the guard runs on every path; `relation` does. A
-  bound holds unconditionally only when it is `verified` and `dominates` or
-  `defines` the value.
+- For a clamp, mask or modulo, `verified` does not say it runs on every path;
+  `relation` does. Its bound holds unconditionally only when it is `verified`
+  and `dominates` or `defines` the value.
 - The numeric cap is `bound`. A `verified` guard without one, such as a clamp
   to another variable, is capped by a runtime value, the guard's operand: a
   sound relation, not a numeric limit. To reach a number, anchor on that
   operand and trace it.
-- A comparison admits the side that holds on its branch's edge into the
-  anchor: past `if (left > MAX) return;`, `left` is in `[0, MAX]`. With no
-  such edge (the block it enters is also entered from elsewhere, or does not
-  dominate the use), or no constant bound, nothing is known to carry, and a
-  guard upstream of arithmetic is unverified.
+- A comparison's `predicate` is the side that holds on its branch's edge into
+  the anchor, so it may negate the source condition: past
+  `if (left > MAX) return;` it is `ule MAX`. A verified comparison's
+  predicate holds at the use. With no such edge (the block it enters is also
+  entered from elsewhere, or does not dominate the use, or the comparison
+  only feeds a `select` or `zext`), it keeps the predicate as written and is
+  unverified, its caveat "no branch edge shows the comparison held at the
+  use". With no constant bound, nothing is known to carry, and a guard
+  upstream of arithmetic is unverified.
 - The trace stays in the anchor's function. Where the value enters through a
   parameter or leaves a call, `crossings` name the call to ask `guards` about
   next. `--from F` keeps only callers on a path from `F`, which must name one

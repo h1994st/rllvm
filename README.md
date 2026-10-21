@@ -210,16 +210,20 @@ local cannot be annotated.
 Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
 relation to the value is a constant one. `verified` means its bound soundly
 carries to the value; otherwise it is a lead whose `caveat` says why: the
-relation is not affine, the guard bounds a value computed from it, the bound
-wraps, or it cannot be mapped. A clamp computed from the value bounds its own
+relation is not affine, the guard bounds a value computed from it, no branch
+edge shows a comparison held at the use, the bound wraps, or it cannot be
+mapped. A comparison is verified only through its branch's edge into the use,
+and gives the predicate that holds on that edge, which may negate the source
+condition: past `if (x > 16) return;` it is `ule 16`. A verified comparison's
+predicate holds at the use. A clamp computed from the value bounds its own
 result, so when it is made of a comparison (a branch or `select` clamp, not an
-intrinsic `umin`), that comparison is listed too: it bounds the value, verified
-only on its branch's edge into the use. `verified` does not say the guard runs
-on every path, `relation` does: an unconditional bound is `verified` and
-`dominates` or `defines`, while one `on_path` is conditional. The numeric cap
-is `bound`: a `verified` guard without one is capped by a runtime value, the
-guard's operand, which is a sound relation but not a numeric limit; to reach a
-number, anchor on that operand and trace it.
+intrinsic `umin`), that comparison is listed too. For a clamp, mask or modulo,
+`verified` does not say it runs on every path, `relation` does: an
+unconditional bound is `verified` and `dominates` or `defines`, while one
+`on_path` is conditional. The numeric cap is `bound`: a `verified` guard
+without one is capped by a runtime value, the guard's operand, which is a sound
+relation but not a numeric limit; to reach a number, anchor on that operand and
+trace it.
 A load is followed to the nearest store before it in its block, which
 overwrites any earlier one, with nothing between that writes memory. A call,
 another store or any other operation between (an `atomicrmw`, a `cmpxchg`, a
