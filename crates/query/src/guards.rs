@@ -292,7 +292,9 @@ pub struct GuardSite {
     pub op: GuardKind,
     /// Reads with the traced value on the left, `value ult bound`, however
     /// the instruction orders its operands. A saturating subtraction from
-    /// the bound, `bound - value`, has a `.rev` suffix: `usub.sat.rev`.
+    /// the bound, `bound - value`, has a `.rev` suffix: `usub.sat.rev`. A
+    /// comparison whose branch has an edge into the use gives the predicate
+    /// that holds on that edge: past `if (x > 16) return;`, `ule`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub predicate: Option<String>,
     /// The constant: unsigned for a mask and for an unsigned operation
@@ -303,7 +305,7 @@ pub struct GuardSite {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location: Option<SourceLocation>,
     /// `dominates` says the guard runs before the use on every path, not
-    /// which way its branch goes to reach it.
+    /// which way its branch goes to reach it: `predicate` says that.
     pub relation: GuardRelation,
     /// 0 when the guard constrains the anchored value itself, a widening of
     /// it (`zext`, `sext`), whose bound holds when the guard's signedness
@@ -315,8 +317,9 @@ pub struct GuardSite {
     /// mask is at depth 1, and `affine` says how its bound carries to `n`.
     pub depth: u32,
     /// Whether the guard and its `affine` relation to the anchored value
-    /// are both established. A site that is not is a lead, never a fact:
-    /// `caveat` says what was not established.
+    /// are both established; for a comparison, that its `predicate` holds
+    /// at the use, which takes a branch edge into it. A site that is not is
+    /// a lead, never a fact: `caveat` says what was not established.
     pub verified: bool,
     /// What keeps the site from being verified; present exactly when it is
     /// not.
@@ -453,12 +456,15 @@ enum Unverified {
     /// The guard runs on the anchored value and bounds its own result, which
     /// the anchored value is not computed from.
     Downstream,
+    /// No branch on the comparison has an edge into the use: which side of
+    /// it holds there is not known.
+    NoEdge,
     /// Carried through the affine relation, the bound leaves the anchored
     /// value's range.
     Wraps,
     /// The bound gives no interval to carry: there is no constant, no width,
-    /// no branch edge that decides which side of a comparison holds, or the
-    /// constant is one the guard's integer cannot hold or passes no value.
+    /// or the constant is one the guard's integer cannot hold or passes no
+    /// value.
     Unmappable,
 }
 
@@ -476,6 +482,7 @@ impl Unverified {
             Unverified::OtherBlock => "the store and the load are in different blocks",
             Unverified::NotAffine => "the relation to the anchored value is not affine",
             Unverified::Downstream => "the guard bounds a value computed from the anchored one",
+            Unverified::NoEdge => "no branch edge shows the comparison held at the use",
             Unverified::Wraps => {
                 "the bound does not carry to the anchored value without wraparound"
             }
@@ -954,16 +961,16 @@ fn linear(op: BinaryOp, operands: &[Operand]) -> Option<(ValueId, Affine)> {
 /// Why `site`'s bound does not carry onto the anchored value through its
 /// affine relation, or `None` when it does: every value the guard admits,
 /// from one end of its interval to the other, must map into the anchored
-/// value's range. For a comparison, `edge` is which way its branch goes to
-/// reach the anchor, if one edge decides it.
+/// value's range. A comparison's predicate is the one that holds on its
+/// branch's edge into the use.
 ///
 /// The guard's integer of `bits` is the anchored value's width: an affine
 /// relation other than the identity is arithmetic alone, which keeps one
 /// width, and the identity maps the interval to itself. The guard's
 /// signedness is the anchored value's reading, and the one its bound is
 /// read in. Without an interval to carry -- no constant bound the guard's
-/// integer holds, no width, no deciding edge -- nothing is known to carry.
-fn uncarried(site: &GuardSite, bits: Option<u32>, edge: Option<bool>) -> Option<Unverified> {
+/// integer holds, no width -- nothing is known to carry.
+fn uncarried(site: &GuardSite, bits: Option<u32>) -> Option<Unverified> {
     let affine = site.affine.filter(|affine| *affine != Affine::IDENTITY)?;
     let carries = || {
         let signed = match signedness(site.op, site.predicate.as_deref())? {
@@ -974,7 +981,7 @@ fn uncarried(site: &GuardSite, bits: Option<u32>, edge: Option<bool>) -> Option<
         let bits = bits?;
         let range = range(bits, signed)?;
         let bound = read_bound(site.bound.as_deref()?, bits, signed)?;
-        let (low, high) = interval(site, bound, range, edge)?;
+        let (low, high) = interval(site, bound, range)?;
         let map = |end: i128| affine.scale.checked_mul(end)?.checked_add(affine.offset);
         let (a, b) = (map(low)?, map(high)?);
         // A negative scale swaps the ends.
@@ -1022,27 +1029,10 @@ fn read_bound(bound: &str, bits: u32, signed: bool) -> Option<i128> {
 
 /// The values `site`'s guard with constant `bound` admits for the value it
 /// bounds, read in `range`, the bounded integer's: an end the guard does not
-/// fix is the type's extreme. A comparison admits what holds on the edge
-/// `edge` names -- its predicate on the true one, the inverse on the false
-/// -- and nothing without one. `None` when the guard passes no value, as
+/// fix is the type's extreme. `None` when the guard passes no value, as
 /// `x ult 0` does.
-fn interval(
-    site: &GuardSite,
-    bound: i128,
-    (min, max): (i128, i128),
-    edge: Option<bool>,
-) -> Option<(i128, i128)> {
-    let predicate = match site.op {
-        GuardKind::Compare => {
-            let predicate = site.predicate.as_deref()?;
-            if edge? {
-                predicate
-            } else {
-                int_predicate(predicate)?.inverse
-            }
-        }
-        _ => site.predicate.as_deref().unwrap_or_default(),
-    };
+fn interval(site: &GuardSite, bound: i128, (min, max): (i128, i128)) -> Option<(i128, i128)> {
+    let predicate = site.predicate.as_deref().unwrap_or_default();
     let (low, high) = match (site.op, predicate) {
         (GuardKind::Compare, "ult" | "slt") => (min, bound.checked_sub(1)?),
         (GuardKind::Compare, "ule" | "sle") | (GuardKind::Clamp, "umin" | "smin") => (min, bound),
@@ -1274,9 +1264,11 @@ impl Trace<'_> {
     ///
     /// A downstream clamp bounds its own result, so the comparison it is
     /// made of, when it is made of one, is listed too: it compares the
-    /// anchored value or a widening of it. Its bound holds only on the side
-    /// of its branch that reaches `at`, so without such an edge it is a
-    /// lead.
+    /// anchored value or a widening of it.
+    ///
+    /// A comparison holds only on one side of its branch, so it reports the
+    /// predicate that holds on the edge into `at`'s block, inverted on the
+    /// false edge, and without such an edge it is a lead.
     fn guard_sites(&self, walk: &Walk, value: ValueId, at: ValueId) -> Vec<GuardSite> {
         let depths = self.depths(walk, value);
         let depth_of = |id: &ValueId| depths.get(id).copied().unwrap_or_default();
@@ -1291,8 +1283,6 @@ impl Trace<'_> {
         }
         let downstream = self.downstream(value);
         let mut downstream_guards: HashSet<ValueId> = HashSet::new();
-        // The comparisons those guards are made of.
-        let mut downstream_compares: HashSet<ValueId> = HashSet::new();
         let traced = |operand: &Operand| {
             matches!(operand, Operand::Value(value)
                 if walk.chain.contains(value) || downstream.contains(value))
@@ -1311,11 +1301,10 @@ impl Trace<'_> {
             // Each guard here bounds its own result, which is computed from
             // the anchored value rather than the other way round.
             if node.opcode == OpcodeIr::Phi {
-                if let Some((mut site, compare)) = self.phi_clamp(node) {
+                if let Some((mut site, _)) = self.phi_clamp(node) {
                     site.relation = GuardRelation::OnPath;
                     sites.insert(id, site);
                     downstream_guards.insert(id);
-                    downstream_compares.insert(compare);
                 }
             } else if let Some(raw) = &node.guard {
                 sites.insert(
@@ -1323,11 +1312,6 @@ impl Trace<'_> {
                     surfaced(raw, side == 1, node.location.clone(), GuardRelation::OnPath),
                 );
                 downstream_guards.insert(id);
-                if let (OpcodeIr::Select, Some(Operand::Value(compare))) =
-                    (node.opcode, node.operands.first())
-                {
-                    downstream_compares.insert(*compare);
-                }
             }
         }
         for (id, node) in self.body.values.iter().enumerate() {
@@ -1378,14 +1362,22 @@ impl Trace<'_> {
                 .and_then(|bounded| unproven.get(bounded))
                 .cloned()
                 .unwrap_or_default();
+            if site.op == GuardKind::Compare {
+                let written = site.predicate.as_deref().and_then(int_predicate);
+                match (self.edge_to(*id, at), written) {
+                    (Some(true), _) => {}
+                    (Some(false), Some(row)) => site.predicate = Some(row.inverse.to_string()),
+                    // A predicate with no inverse cannot say what holds on
+                    // the false edge.
+                    (Some(false), None) | (None, _) => {
+                        causes.insert(Unverified::NoEdge);
+                    }
+                }
+            }
             if site.affine.is_none() {
                 causes.insert(Unverified::NotAffine);
-            } else {
-                let edge = self.edge_to(*id, at);
-                if edge.is_none() && downstream_compares.contains(id) {
-                    causes.insert(Unverified::Unmappable);
-                }
-                causes.extend(uncarried(site, self.guard_width(*id), edge));
+            } else if !causes.contains(&Unverified::NoEdge) {
+                causes.extend(uncarried(site, self.guard_width(*id)));
             }
             mark(site, &causes);
         }
@@ -3670,7 +3662,7 @@ void f(unsigned a, unsigned b) {
             sites(&first),
             [(
                 GuardKind::Compare,
-                Some("ugt"),
+                Some("ule"),
                 Some("64"),
                 GuardRelation::Dominates
             )],
@@ -3681,7 +3673,7 @@ void f(unsigned a, unsigned b) {
             sites(&second),
             [(
                 GuardKind::Compare,
-                Some("ugt"),
+                Some("ule"),
                 Some("16"),
                 GuardRelation::Dominates
             )],
@@ -3846,6 +3838,27 @@ void f(unsigned len) {
   unsigned n = len < 16 ? len : 16;
   sink(len);
   keep(n);
+}
+";
+
+    /// `x > 100` decides both arms: `x ugt 100` holds in the one calling
+    /// `act`, `x ule 100` in the one calling `sink`.
+    const EITHER_ARM_SOURCE: &str = "extern void act(unsigned);
+extern void sink(unsigned);
+void f(unsigned x) {
+  if (x > 100)
+    act(x);
+  else
+    sink(x);
+}
+";
+
+    /// Past `if (x == 7) return;`, `x ne 7` holds.
+    const EQUAL_EXIT_SOURCE: &str = "extern void sink(unsigned);
+void f(unsigned x) {
+  if (x == 7)
+    return;
+  sink(x);
 }
 ";
 
@@ -4095,15 +4108,23 @@ join:
 
 define void @widened(i32 %x) {
   %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
   %n = zext i32 %x to i64
   call void @sink64(i64 %n)
+  br label %out
+out:
   ret void
 }
 
 define void @signed_widened(i32 %x) {
   %c = icmp slt i32 %x, 16
+  br i1 %c, label %use, label %out
+use:
   %n = sext i32 %x to i64
   call void @sink64(i64 %n)
+  br label %out
+out:
   ret void
 }
 
@@ -4328,22 +4349,34 @@ out:
 
 define void @equal_widened(i32 %x) {
   %c = icmp eq i32 %x, 5
+  br i1 %c, label %use, label %out
+use:
   %n = zext i32 %x to i64
   call void @sink64(i64 %n)
+  br label %out
+out:
   ret void
 }
 
 define void @negative_equal_widened(i32 %x) {
   %c = icmp eq i32 %x, -1
+  br i1 %c, label %use, label %out
+use:
   %n = zext i32 %x to i64
   call void @sink64(i64 %n)
+  br label %out
+out:
   ret void
 }
 
 define void @negative_equal_sign_extended(i32 %x) {
   %c = icmp eq i32 %x, -1
+  br i1 %c, label %use, label %out
+use:
   %n = sext i32 %x to i64
   call void @sink64(i64 %n)
+  br label %out
+out:
   ret void
 }
 
@@ -4353,12 +4386,35 @@ define void @flag(i32 %x) {
   call void @sink(i32 %n)
   ret void
 }
+
+define void @shared_itself(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  br i1 %c, label %use, label %other
+other:
+  br label %use
+use:
+  call void @sink(i32 %x)
+  ret void
+}
+
+define void @flagged_itself(i32 %x) {
+  %c = icmp ult i32 %x, 16
+  %f = zext i1 %c to i32
+  %s = select i1 %c, i32 1, i32 2
+  call void @sink(i32 %x)
+  call void @sink(i32 %f)
+  call void @sink(i32 %s)
+  ret void
+}
 "#;
 
     /// A saturating subtraction from the bound: `16 - len`, floored at 0.
     const SATURATE_SOURCE: &str = "extern void sink(unsigned);
 void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
 ";
+
+    /// The caveat on a comparison no branch edge into the use decides.
+    const NO_EDGE: &str = "no branch edge shows the comparison held at the use";
 
     /// `source` compiled with `flags` as the one module of a session.
     fn session(scratch: &tempfile::TempDir, source: &str, flags: &[&str]) -> Session {
@@ -4443,18 +4499,23 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         let scratch = tempfile::tempdir().unwrap();
         let session = session(&scratch, DOMINATING_SOURCE, &["-O0", "-g"]);
         let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        // The call is reached past `return` on the false edge, where
+        // `len ule 16` holds.
         assert_eq!(
             sites(&r),
             [(
                 GuardKind::Compare,
-                Some("ugt"),
+                Some("ule"),
                 Some("16"),
                 GuardRelation::Dominates
             )]
         );
         assert!(r.lost.is_none(), "{r:?}");
         assert!(r.guards.iter().all(|guard| guard.depth == 0), "{r:?}");
+        assert!(only_guard(&r).verified, "{r:?}");
 
+        // The parameter itself is read before the comparison runs, so no
+        // edge says which side holds: the predicate is as written.
         let r = guards(&session, &local("f", "len"), None).unwrap();
         assert_eq!(
             sites(&r),
@@ -4466,6 +4527,7 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             )]
         );
         assert!(r.lost.is_none(), "{r:?}");
+        assert_eq!(only_guard(&r).caveat.as_deref(), Some(NO_EDGE), "{r:?}");
     }
 
     /// `16 > len` reads as `len < 16`: the traced value goes on the left.
@@ -4522,6 +4584,13 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
                     GuardRelation::OnPath
                 ),
             ]
+        );
+        // Neither decides an edge into the call: each is a lead.
+        assert!(
+            r.guards
+                .iter()
+                .all(|guard| !guard.verified && guard.caveat.as_deref() == Some(NO_EDGE)),
+            "{r:?}"
         );
     }
 
@@ -4736,21 +4805,19 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             }
             assert_eq!(sites(&r), expected, "{optimization}: {r:?}");
             assert_eq!(crossings(&r), [("f", CrossingDir::From, "get", "return")]);
-            // `r` is compared itself, but only the clamp's result is capped
-            // at 16: the clamp is a lead about `r`, never a bound on it.
+            // `r` is compared only after the call returns it: no edge into
+            // the call says which side of a comparison holds there. Only the
+            // clamp's result is capped at 16: the clamp is a lead about
+            // `r`, never a bound on it.
             let (compare, clamp) = (&r.guards[0], r.guards.last().unwrap());
-            if optimization == "-O0" {
-                // Its branch joins before `r` is used: no edge says which
-                // side holds.
-                let surfaced = &r.guards[1];
-                assert!(!surfaced.verified, "{r:?}");
+            for compare in r.guards.iter().filter(|g| g.op == GuardKind::Compare) {
+                assert!(!compare.verified, "{optimization}: {r:?}");
                 assert_eq!(
-                    surfaced.caveat.as_deref(),
-                    Some("the bound could not be mapped to the anchored value"),
-                    "{r:?}"
+                    compare.caveat.as_deref(),
+                    Some(NO_EDGE),
+                    "{optimization}: {r:?}"
                 );
             }
-            assert!(compare.verified, "{optimization}: {r:?}");
             assert_eq!(compare.affine, Some(Affine::IDENTITY), "{optimization}");
             assert!(!clamp.verified, "{optimization}: {r:?}");
             assert_eq!(clamp.affine, None, "{optimization}: {r:?}");
@@ -4827,11 +4894,7 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         );
         let compare = &r.guards[0];
         assert!(!compare.verified, "{r:?}");
-        assert_eq!(
-            compare.caveat.as_deref(),
-            Some("the bound could not be mapped to the anchored value"),
-            "{r:?}"
-        );
+        assert_eq!(compare.caveat.as_deref(), Some(NO_EDGE), "{r:?}");
         assert_eq!(compare.affine, Some(Affine::IDENTITY), "{r:?}");
     }
 
@@ -4873,10 +4936,9 @@ out:
             DOWNSTREAM_SELECT_IR,
             &["-Wno-override-module"],
         );
-        let no_edge = "the bound could not be mapped to the anchored value";
         let downstream = "the guard bounds a value computed from the anchored one";
         for (function, verified, caveat) in
-            [("selected", false, Some(no_edge)), ("decided", true, None)]
+            [("selected", false, Some(NO_EDGE)), ("decided", true, None)]
         {
             let r = affine_ir_guards(&session, function, "sink");
             assert_eq!(
@@ -4907,6 +4969,101 @@ out:
                 Some(downstream),
                 "{function}: {r:?}"
             );
+        }
+    }
+
+    /// A comparison reports the predicate that holds on its branch's edge
+    /// into the use: as written on the true edge, inverted on the false.
+    #[test]
+    fn a_comparison_reports_the_predicate_that_holds_on_the_edge_to_the_use() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, EITHER_ARM_SOURCE, &["-O0", "-g"]);
+        let act = argument(&sites_calling(&session, "f", "act")[0], 0);
+        for (anchor, predicate) in [(sink_argument(&session, "f", 0), "ule"), (act, "ugt")] {
+            let r = guards(&session, &anchor, None).unwrap();
+            assert_eq!(
+                sites(&r),
+                [(
+                    GuardKind::Compare,
+                    Some(predicate),
+                    Some("100"),
+                    GuardRelation::Dominates
+                )],
+                "{predicate}: {r:?}"
+            );
+            let site = only_guard(&r);
+            assert!(site.verified && site.caveat.is_none(), "{predicate}: {r:?}");
+            assert_eq!(site.affine, Some(Affine::IDENTITY), "{predicate}: {r:?}");
+        }
+    }
+
+    /// Past `if (x == 7) return;` the use is reached on the false edge of
+    /// the equality, where `x ne 7` holds.
+    #[test]
+    fn an_equality_on_the_false_edge_is_reported_unequal() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, EQUAL_EXIT_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "f", 0), None).unwrap();
+        assert_eq!(
+            sites(&r),
+            [(
+                GuardKind::Compare,
+                Some("ne"),
+                Some("7"),
+                GuardRelation::Dominates
+            )],
+            "{r:?}"
+        );
+        assert!(only_guard(&r).verified, "{r:?}");
+    }
+
+    /// Past `if (x > 16) return;`, `x ule 16` holds, and so carries to
+    /// `x + 1`: the site reports the inverse, `ule`, with its relation.
+    #[test]
+    fn a_bound_carried_from_the_false_edge_reports_the_inverse_predicate() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "above", "sink");
+        let site = only_guard(&r);
+        assert_eq!(site.predicate.as_deref(), Some("ule"), "{r:?}");
+        assert_eq!(site.bound.as_deref(), Some("16"), "{r:?}");
+        assert!(site.verified, "{r:?}");
+        assert_eq!(
+            site.affine,
+            Some(Affine {
+                scale: 1,
+                offset: 1
+            }),
+            "{r:?}"
+        );
+    }
+
+    /// A comparison whose branch has no edge into the use -- its successor
+    /// is entered from elsewhere too, or its result feeds a `zext` or a
+    /// `select` -- says nothing about which side holds there, whether it
+    /// bounds the anchored value itself or one it is computed from: a lead,
+    /// keeping its predicate as written.
+    #[test]
+    fn a_comparison_deciding_no_edge_to_the_use_is_unverified_as_written() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let plus_one = Some(Affine {
+            scale: 1,
+            offset: 1,
+        });
+        for (function, affine) in [
+            ("shared_itself", Some(Affine::IDENTITY)),
+            ("flagged_itself", Some(Affine::IDENTITY)),
+            ("shared_successor", plus_one),
+        ] {
+            let r = affine_ir_guards(&session, function, "sink");
+            let site = only_guard(&r);
+            assert_eq!(site.predicate.as_deref(), Some("ult"), "{function}: {r:?}");
+            assert_eq!(site.affine, affine, "{function}: {r:?}");
+            assert!(!site.verified, "{function}: {r:?}");
+            assert_eq!(site.caveat.as_deref(), Some(NO_EDGE), "{function}: {r:?}");
         }
     }
 
@@ -5094,21 +5251,14 @@ out:
         }
     }
 
-    /// A bound only carries from an edge that decides it: one into a block
-    /// that dominates the anchor and is entered from nothing else. Without
-    /// one, without a constant bound, or past a comparison no value passes,
-    /// such as `x ugt UMAX`, nothing is known to carry.
+    /// Without a constant bound, or past a comparison no value passes, such
+    /// as `x ugt UMAX`, nothing is known to carry.
     #[test]
-    fn a_bound_with_no_deciding_edge_or_constant_cannot_be_carried() {
+    fn a_bound_with_no_constant_cannot_be_carried() {
         let scratch = tempfile::tempdir().unwrap();
         let session =
             compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
-        for function in [
-            "shared_successor",
-            "unbounded",
-            "clamped_to_value",
-            "never_above",
-        ] {
+        for function in ["unbounded", "clamped_to_value", "never_above"] {
             let r = affine_ir_guards(&session, function, "sink");
             let site = only_guard(&r);
             assert_eq!(
@@ -5277,11 +5427,7 @@ out:
         };
         for (predicate, bound) in [("ult", "-16"), ("ult", "240"), ("slt", "-16")] {
             let site = carried_site(predicate, bound, plus_ten);
-            assert_eq!(
-                uncarried(&site, Some(8), Some(true)),
-                None,
-                "{predicate} {bound}"
-            );
+            assert_eq!(uncarried(&site, Some(8)), None, "{predicate} {bound}");
         }
         let site = carried_site(
             "ult",
@@ -5292,7 +5438,7 @@ out:
             },
         );
         assert_eq!(
-            uncarried(&site, Some(8), Some(true)),
+            uncarried(&site, Some(8)),
             Some(Unverified::Wraps),
             "[0, 239] + 20 reaches 259"
         );
@@ -5324,7 +5470,7 @@ out:
         ] {
             let site = carried_site(predicate, bound, plus_one);
             assert_eq!(
-                uncarried(&site, bits, Some(true)),
+                uncarried(&site, bits),
                 Some(Unverified::Unmappable),
                 "{predicate} {bound} at {bits:?}"
             );
@@ -5343,7 +5489,7 @@ out:
         assert_eq!(read_bound("-128", 8, false), Some(128));
         assert_eq!(read_bound("-129", 8, false), None);
         assert_eq!(
-            uncarried(&carried_site("ult", "-128", plus_one), Some(8), Some(true)),
+            uncarried(&carried_site("ult", "-128", plus_one), Some(8)),
             None,
             "[0, 127] + 1 stays within 8 bits"
         );
@@ -5357,7 +5503,7 @@ out:
             (modulo, "urem 0"),
         ] {
             assert_eq!(
-                uncarried(&site, Some(8), Some(true)),
+                uncarried(&site, Some(8)),
                 Some(Unverified::Unmappable),
                 "{what}"
             );
