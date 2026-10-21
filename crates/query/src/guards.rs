@@ -443,7 +443,8 @@ enum Unverified {
     StoreBetween,
     /// Some other operation that may write memory runs between them.
     OperationBetween,
-    /// More than one store to the address runs before the load.
+    /// More than one store to the address runs before the load, none in
+    /// its block.
     SeveralStores,
     /// The one store runs in another block than the load.
     OtherBlock,
@@ -1636,10 +1637,15 @@ impl Trace<'_> {
     /// The stores the load `id` reads back: the non-volatile stores of its
     /// type to its address, syntactically, that run before it. `None` when
     /// there is none, or the load is volatile or atomic, or its type is not
-    /// known: what it reads is then not traced. The load is proven to read
-    /// what the store wrote only when there is one, in its block, with only
-    /// operations that write no memory between them; otherwise `causes`
-    /// says why it may not.
+    /// known: what it reads is then not traced.
+    ///
+    /// The nearest such store in the load's block overwrites every earlier
+    /// one, so it alone is read back: proven when only operations that
+    /// write no memory sit between them. Anything else between -- a call,
+    /// any other store, an operation off that list -- may be what the load
+    /// reads instead, so it is never skipped to reach a store. With none in
+    /// the block, nothing is proven: the one store elsewhere, or the
+    /// several, are followed with `causes` saying why.
     fn link(&self, id: ValueId) -> Option<Link> {
         let load = self.node(id);
         if load.opcode != OpcodeIr::Load || load.volatile {
@@ -1660,13 +1666,15 @@ impl Trace<'_> {
                     && self.runs_before(store, id)
             })
             .collect();
-        let causes = match stores[..] {
-            [] => return None,
-            [store] => self.clobbers(store, id),
-            _ => {
+        let instrs = &self.body.blocks[load.block].instrs;
+        let nearest = instrs.iter().rev().find(|instr| stores.contains(instr));
+        let (stores, causes) = match (nearest, &stores[..]) {
+            (Some(&store), _) | (None, &[store]) => (vec![store], self.clobbers(store, id)),
+            (None, []) => return None,
+            (None, _) => {
                 let mut causes = self.clobbers_in_block(id, &stores);
                 causes.insert(Unverified::SeveralStores);
-                causes
+                (stores, causes)
             }
         };
         Some(Link {
@@ -5565,9 +5573,10 @@ define void @f(ptr %s, i32 %n) {
     }
 
     /// A clamp stored to `s->len`, reloaded and passed to `sink`: with
-    /// nothing or only non-writing operations between, through a volatile,
-    /// an atomic or a wider load, after a volatile store, and with a literal
-    /// stored instead.
+    /// nothing or only non-writing operations between, over an earlier
+    /// store in its block or in another, through a volatile, an atomic or a
+    /// wider load, after a volatile store, and with a literal stored
+    /// instead.
     const FIELD_IR: &str = r#"
 %struct.S = type { i32, i32 }
 declare void @sink(i32)
@@ -5638,6 +5647,28 @@ define void @wider(ptr %s, i32 %n) {
   ret void
 }
 
+define void @overwritten(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  store i32 %m, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @overwritten_across(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  br label %next
+next:
+  store i32 %m, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
 define void @literal(ptr %s) {
   %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
   store i32 7, ptr %a, align 4
@@ -5647,16 +5678,16 @@ define void @literal(ptr %s) {
 }
 "#;
 
-    /// A field reloaded right after one store, with only non-writing
-    /// operations between, is the stored value: the clamp on it is a
-    /// verified guard on the anchor. A volatile or atomic access, or a load
-    /// of another type, is never forwarded; a stored literal ends the trace
-    /// with no guard.
+    /// A field reloaded right after its nearest store, with only
+    /// non-writing operations between, is the stored value, whatever was
+    /// stored to it earlier: the clamp on it is a verified guard on the
+    /// anchor. A volatile or atomic access, or a load of another type, is
+    /// never forwarded; a stored literal ends the trace with no guard.
     #[test]
     fn a_clamp_stored_to_a_field_and_reloaded_is_a_verified_guard() {
         let scratch = tempfile::tempdir().unwrap();
         let session = compiled_session(scratch.path(), "t.ll", FIELD_IR, &["-Wno-override-module"]);
-        for function in ["proven", "allowed"] {
+        for function in ["proven", "allowed", "overwritten", "overwritten_across"] {
             let r = affine_ir_guards(&session, function, "sink");
             let site = only_guard(&r);
             assert_eq!(
@@ -5687,8 +5718,10 @@ define void @literal(ptr %s) {
     }
 
     /// The clamp of [`FIELD_IR`] stored to `s->len` and reloaded, with
-    /// something that may change the field between, or the store in an
-    /// earlier block; and a load with no store to its field at all.
+    /// something that may change the field between -- a call, another
+    /// store, or a store to the same field that is volatile or of another
+    /// type -- even over an earlier store, or the stores in earlier blocks;
+    /// and a load with no store to its field at all.
     const CLOBBERED_IR: &str = r#"
 %struct.S = type { i32, i32 }
 declare void @sink(i32)
@@ -5753,7 +5786,11 @@ define void @twice(ptr %s, i32 %n) {
   %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
   %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
   store i32 %m, ptr %a, align 4
+  br label %mid
+mid:
   store i32 %m, ptr %a, align 4
+  br label %next
+next:
   %v = load i32, ptr %a, align 4
   call void @sink(i32 %v)
   ret void
@@ -5763,7 +5800,56 @@ define void @twice_differing(ptr %s, i32 %n) {
   %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
   %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
   store i32 %m, ptr %a, align 4
+  br label %mid
+mid:
   store i32 7, ptr %a, align 4
+  br label %next
+next:
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @overwritten_called(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  br label %next
+next:
+  store i32 %m, ptr %a, align 4
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @volatile_nearest(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  store volatile i32 %n, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @narrower_nearest(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %h = trunc i32 %n to i16
+  store i16 %h, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @retyped_nearest(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %b = getelementptr inbounds { i32, i32 }, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %b, align 4
   %v = load i32, ptr %a, align 4
   call void @sink(i32 %v)
   ret void
@@ -5841,9 +5927,9 @@ define void @unstored(ptr %s) {
 "#;
 
     /// A store the load may not read back -- something between them may
-    /// change the field, more than one store reaches it, or it is in
-    /// another block -- still leads to the clamp, as a candidate saying
-    /// why. A field nothing stores to stays a lost trace.
+    /// change the field, or it is in another block, or more than one does
+    /// and none in the load's -- still leads to the clamp, as a candidate
+    /// saying why. A field nothing stores to stays a lost trace.
     #[test]
     fn a_clamp_stored_to_a_field_that_may_change_is_a_candidate() {
         let scratch = tempfile::tempdir().unwrap();
@@ -5875,6 +5961,12 @@ define void @unstored(ptr %s) {
                 format!("{several}; {not_affine}"),
             ),
             ("other_block", other_block, other_block.to_string()),
+            // The nearest store is the one to read back; anything else that
+            // may write the field first is never skipped to reach a store.
+            ("overwritten_called", call, call.to_string()),
+            ("volatile_nearest", store, store.to_string()),
+            ("narrower_nearest", store, store.to_string()),
+            ("retyped_nearest", store, store.to_string()),
             ("called_and_stored", &call_and_store, call_and_store.clone()),
             // A call in the load's block may change the field whichever
             // of the earlier stores reaches it.

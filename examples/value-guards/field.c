@@ -19,7 +19,14 @@ void fill(struct buffer *b, const char *src, size_t n) {
     put(b->data, src, b->len);
 }
 
+void refill(struct buffer *b, const char *src, size_t n) {
+    b->len = 0;
+    b->len = n < MAX ? n : MAX;
+    put(b->data, src, b->len);
+}
+
 int main(int argc, char **argv) {
     fill(&out, argv[0], (size_t)argc * 100);
+    refill(&out, argv[0], (size_t)argc * 100);
     return out.data[0];
 }
