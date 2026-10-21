@@ -258,10 +258,11 @@ Report what the answer supports, and say what it does not:
   store, or stores only in other blocks make every guard reached through the
   load a lead, with that caveat, and report the trace lost there. A
   `relation` of `dominates` runs before the use on every path but does not
-  say which way its branch goes; one that is on_path lies on some path to
-  the use, not every one. `crossings` name the call where the value enters
-  or leaves: ask `guards` there next. `from` only keeps crossings from
-  callers on a path from one named function;
+  say which way its branch goes (for a verified comparison, its `predicate`
+  does); one that is on_path lies on some path to the use, not every one.
+  `crossings` name the call where the value enters or leaves: ask `guards`
+  there next. `from` only keeps crossings from callers on a path from one
+  named function;
   nothing between it and the anchor was examined.
   `uncertainty.value_trace_lost` means the list is partial. `guards`
   promotes the anchor's module with `mem2reg`, so a local held in a register
