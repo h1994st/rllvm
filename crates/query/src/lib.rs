@@ -112,8 +112,12 @@ pub(crate) mod testing;
 
 /// One of the thirteen source-level queries. Serializes with a `kind` tag, e.g.
 /// `{"kind": "callers", "name": "parse_frame"}`.
+///
+/// Non-exhaustive: a query kind added later is not a breaking change, so a
+/// match outside this crate needs a wildcard arm.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum Query {
     /// Every definition of the symbol, with module and configuration.
     Defs { name: String },
