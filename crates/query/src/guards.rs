@@ -3880,6 +3880,19 @@ out:
   ret void
 }
 
+define void @into_with_dead(i32 %x) {
+entry:
+  %c = icmp ugt i32 %x, 16
+  br i1 %c, label %out, label %use
+dead:
+  br label %use
+use:
+  call void @sink(i32 %x)
+  br label %out
+out:
+  ret void
+}
+
 define void @flagged_itself(i32 %x) {
   %c = icmp ult i32 %x, 16
   %f = zext i1 %c to i32
@@ -4602,6 +4615,24 @@ out:
             Some("the relation to the anchored value is not affine"),
             "{r:?}"
         );
+    }
+
+    /// A block the entry never reaches also branches into the successor:
+    /// it never runs, so every path to the use still crosses the edge.
+    #[test]
+    fn an_unreachable_predecessor_leaves_the_deciding_edge_dominant() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        let r = affine_ir_guards(&session, "into_with_dead", "sink");
+        let site = only_guard(&r);
+        assert_eq!(
+            (site.predicate.as_deref(), site.bound.as_deref()),
+            (Some("ule"), Some("16")),
+            "{r:?}"
+        );
+        assert!(site.verified, "{r:?}");
+        assert_eq!(site.caveat, None, "{r:?}");
     }
 
     /// A comparison whose branch has no edge into the use -- its successor
