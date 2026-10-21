@@ -180,8 +180,8 @@ clamped=$(query guards --at clamp.c:30 --operand 2 --json |
 # 16. In copy the clamp's arms join before n is used, so no edge says which
 #     side of len < 64 holds at len: the comparison is a lead.
 joined=$(query guards --function copy --local len --json |
-    field '[(g["op"], g["verified"], g.get("caveat")) for g in a["results"]["guards"]][0]')
-[ "$joined" = "('compare', False, 'the bound could not be mapped to the anchored value')" ] ||
-    fail "guards --local len reported $joined, expected an unverified compare that could not be mapped"
+    field '[(g["op"], g["verified"], g.get("caveat")) for g in a["results"]["guards"]]')
+[ "$joined" = "[('compare', False, 'the bound could not be mapped to the anchored value'), ('clamp', False, 'the guard bounds a value computed from the anchored one')]" ] ||
+    fail "guards --local len reported $joined, expected an unverified compare that could not be mapped and an unverified downstream clamp"
 
 echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, a clamp followed through a struct field and its nearest store, a reused local traced at each use, and the comparison a downstream clamp is made of"
