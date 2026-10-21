@@ -71,9 +71,9 @@ and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
   Otherwise the guard is an unverified lead, and `caveat` says why.
 - A comparison admits the side that holds on its branch's edge into the
   anchor: past `if (left > MAX) return;`, `left` is in `[0, MAX]`. With no
-  such edge (the block it enters is entered from elsewhere too), or no
-  constant bound, nothing is known to carry, and a guard upstream of
-  arithmetic is unverified.
+  such edge (the block it enters is also entered from elsewhere, or does not
+  dominate the use), or no constant bound, nothing is known to carry, and a
+  guard upstream of arithmetic is unverified.
 - The trace stays in the anchor's function. Where the value enters through a
   parameter or leaves a call, `crossings` name the call to ask `guards` about
   next. `--from F` keeps only callers on a path from `F`, which must name one

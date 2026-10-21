@@ -227,12 +227,12 @@ Report what the answer supports, and say what it does not:
   guard with `verified: false` as a lead, never a bound, with its `caveat`:
   the relation is not affine, the bound wraps when carried to the anchored
   value, or it could not be mapped (no constant, or no branch edge that
-  decides which side of a comparison holds at the anchor). A `relation` of `dominates` runs before
-  the use on every path but does not say which way its branch goes; one that
-  is on_path lies on some path to the use, not every one. `crossings` name
-  the call where the value enters or leaves: ask `guards` there next. `from`
-  only keeps crossings from callers on a path from one named function;
-  nothing between it and the anchor was examined.
+  decides which side of a comparison holds at the anchor). A `relation` of
+  `dominates` runs before the use on every path but does not say which way
+  its branch goes; one that is on_path lies on some path to the use, not
+  every one. `crossings` name the call where the value enters or leaves: ask
+  `guards` there next. `from` only keeps crossings from callers on a path
+  from one named function; nothing between it and the anchor was examined.
   `uncertainty.value_trace_lost` means the list is partial. `guards`
   promotes the anchor's module with `mem2reg`, so a local held in a register
   — any promotable scalar — is traced whatever optimization level the
