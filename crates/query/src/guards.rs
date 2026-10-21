@@ -4518,6 +4518,39 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         }
     }
 
+    /// At 8 bits, `-128` is the lowest signed spelling, so unsigned it is
+    /// 128; `-129` is no 8-bit integer. A guard that passes no value --
+    /// `x ult 0`, `x urem 0` -- has no interval to carry.
+    #[test]
+    fn a_bound_at_the_edge_of_its_width_is_read_or_unmappable() {
+        let plus_one = Affine {
+            scale: 1,
+            offset: 1,
+        };
+        assert_eq!(read_bound("-128", 8, false), Some(128));
+        assert_eq!(read_bound("-129", 8, false), None);
+        assert_eq!(
+            uncarried(&carried_site("ult", "-128", plus_one), Some(8), Some(true)),
+            None,
+            "[0, 127] + 1 stays within 8 bits"
+        );
+        let modulo = GuardSite {
+            op: GuardKind::Modulo,
+            ..carried_site("urem", "0", plus_one)
+        };
+        for (site, what) in [
+            (carried_site("ult", "-129", plus_one), "ult -129"),
+            (carried_site("ult", "0", plus_one), "ult 0"),
+            (modulo, "urem 0"),
+        ] {
+            assert_eq!(
+                uncarried(&site, Some(8), Some(true)),
+                Some(Unverified::Unmappable),
+                "{what}"
+            );
+        }
+    }
+
     #[test]
     fn a_from_naming_several_functions_is_rejected_naming_them() {
         let scratch = tempfile::tempdir().unwrap();
