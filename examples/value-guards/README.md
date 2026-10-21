@@ -131,7 +131,8 @@ a use-site, so a reused local cannot be annotated.
 ## Reading a guard
 
 - `relation`: the guard `defines` the value; `dominates` its use, running
-  first on every path whichever way it branches; or is only `on_path` to it.
+  first on every path whichever way it branches (for a verified comparison,
+  `predicate` says which way); or is only `on_path` to it.
 - `depth` 0 is the value itself, or a value it only widens: a bound holds
   across `zext` or `sext` when the guard's signedness matches the cast's.
   Depth N is N steps up the chain the value is computed from, a truncation
