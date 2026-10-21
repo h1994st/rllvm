@@ -4834,6 +4834,81 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         assert_eq!(compare.affine, Some(Affine::IDENTITY), "{r:?}");
     }
 
+    /// A `select` clamp of the anchored value: its comparison decides no
+    /// branch in `selected`, and also a branch into the use in `decided`.
+    const DOWNSTREAM_SELECT_IR: &str = r#"
+declare void @sink(i32)
+declare void @keep(i32)
+
+define void @selected(i32 %n) {
+  %c = icmp ult i32 %n, 16
+  %m = select i1 %c, i32 %n, i32 16
+  call void @sink(i32 %n)
+  call void @keep(i32 %m)
+  ret void
+}
+
+define void @decided(i32 %n) {
+  %c = icmp ult i32 %n, 16
+  %m = select i1 %c, i32 %n, i32 16
+  br i1 %c, label %use, label %out
+use:
+  call void @sink(i32 %n)
+  br label %out
+out:
+  call void @keep(i32 %m)
+  ret void
+}
+"#;
+
+    /// A `select` clamp's comparison is listed beside the clamp, verified
+    /// only when it also decides the branch into the use.
+    #[test]
+    fn a_downstream_select_clamps_comparison_is_verified_only_on_a_deciding_edge() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            DOWNSTREAM_SELECT_IR,
+            &["-Wno-override-module"],
+        );
+        let no_edge = "the bound could not be mapped to the anchored value";
+        let downstream = "the guard bounds a value computed from the anchored one";
+        for (function, verified, caveat) in
+            [("selected", false, Some(no_edge)), ("decided", true, None)]
+        {
+            let r = affine_ir_guards(&session, function, "sink");
+            assert_eq!(
+                sites(&r),
+                [
+                    (
+                        GuardKind::Compare,
+                        Some("ult"),
+                        Some("16"),
+                        GuardRelation::Dominates
+                    ),
+                    (
+                        GuardKind::Clamp,
+                        Some("umin"),
+                        Some("16"),
+                        GuardRelation::OnPath
+                    ),
+                ],
+                "{function}: {r:?}"
+            );
+            let (compare, clamp) = (&r.guards[0], &r.guards[1]);
+            assert_eq!(compare.verified, verified, "{function}: {r:?}");
+            assert_eq!(compare.caveat.as_deref(), caveat, "{function}: {r:?}");
+            assert_eq!(compare.affine, Some(Affine::IDENTITY), "{function}: {r:?}");
+            assert!(!clamp.verified, "{function}: {r:?}");
+            assert_eq!(
+                clamp.caveat.as_deref(),
+                Some(downstream),
+                "{function}: {r:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_value_an_intrinsic_reads_from_memory_loses_the_trace() {
         let scratch = tempfile::tempdir().unwrap();
