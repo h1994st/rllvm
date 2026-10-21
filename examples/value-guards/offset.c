@@ -10,8 +10,9 @@ static void make_buf(char *dst, size_t size) {
 }
 
 void reserve(size_t left) {
-    if (left < MAX)
-        make_buf(buf, left + 1);
+    if (left > MAX)
+        return;
+    make_buf(buf, left + 1);
 }
 
 int main(int argc, char **argv) {

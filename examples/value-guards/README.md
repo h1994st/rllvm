@@ -3,8 +3,8 @@
 `copy` hands `put` the length `n = len < CAP ? len : CAP`. `guards` finds the
 clamp that bounds it, and says nothing is known about a value nothing
 constrains: no guard is an empty list, never "unbounded". In `offset.c`,
-`reserve` checks `left < MAX` and hands `make_buf` `left + 1`; `guards` carries
-the bound to that argument through their affine relation.
+`reserve` returns early when `left > MAX` and hands `make_buf` `left + 1`;
+`guards` carries the bound to that argument through their affine relation.
 
 ## Requirements
 
@@ -47,13 +47,14 @@ no call site, and finds the same clamp.
 ```bash
 rllvm-cc -g -O0 offset.c -o build/offset
 rllvm-info build/offset --json > build/offset.json
-rllvm-query --catalog build/offset.json guards --at offset.c:14 --operand 1
+rllvm-query --catalog build/offset.json guards --at offset.c:15 --operand 1
 ```
 
 This names `left + 1`, the size handed to `make_buf`. The answer lists the
-`compare ult 64` on `left` at `offset.c:13`, one step upstream, with
+`compare ugt 64` on `left` at `offset.c:13`, one step upstream, with
 `anchored = guarded + 1`: in `--json`, `affine` is `{"scale": 1, "offset": 1}`
-and `verified` is `true`, since `[0, 63] + 1` stays within a `size_t`.
+and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
+`[1, 65]` stays within a `size_t`.
 
 ## Reading a guard
 
@@ -67,9 +68,12 @@ and `verified` is `true`, since `[0, 63] + 1` stays within a `size_t`.
   constant `add`, `sub`, `mul` and `shl` alone, or a matching widening
   (`{1, 0}`). `verified` is `true` when the relation is affine and every value
   the guard admits maps onto the anchored value without wrapping at its width.
-  Otherwise the guard is an unverified lead, and `caveat` says why. A lower
-  bound such as `left > MAX` admits values up to the type's maximum, which
-  `+ 1` wraps, so it is unverified there.
+  Otherwise the guard is an unverified lead, and `caveat` says why.
+- A comparison admits the side that holds on its branch's edge into the
+  anchor: past `if (left > MAX) return;`, `left` is in `[0, MAX]`. With no
+  such edge (the block it enters is entered from elsewhere too), or no
+  constant bound, nothing is known to carry, and a guard upstream of
+  arithmetic is unverified.
 - The trace stays in the anchor's function. Where the value enters through a
   parameter or leaves a call, `crossings` name the call to ask `guards` about
   next. `--from F` keeps only callers on a path from `F`, which must name one

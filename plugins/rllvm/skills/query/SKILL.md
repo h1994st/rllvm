@@ -225,8 +225,9 @@ Report what the answer supports, and say what it does not:
   by itself a bound on the value. Its `affine` gives the anchored value as
   `scale * guarded + offset` when constant arithmetic links them. Report a
   guard with `verified: false` as a lead, never a bound, with its `caveat`:
-  the relation is not affine, or the bound wraps when carried to the
-  anchored value. A `relation` of `dominates` runs before
+  the relation is not affine, the bound wraps when carried to the anchored
+  value, or it could not be mapped (no constant, or no branch edge that
+  decides which side of a comparison holds at the anchor). A `relation` of `dominates` runs before
   the use on every path but does not say which way its branch goes; one that
   is on_path lies on some path to the use, not every one. `crossings` name
   the call where the value enters or leaves: ask `guards` there next. `from`

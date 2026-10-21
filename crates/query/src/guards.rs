@@ -947,8 +947,7 @@ fn compose(outer: Affine, inner: Affine) -> Option<Affine> {
 /// from it.
 enum Step {
     /// The value is one of `arms`, whichever ran: a `phi`'s incoming values,
-    /// a `select`'s arms. A value that equals its one operand is a choice of
-    /// one.
+    /// a `select`'s arms.
     Choice(Vec<Operand>),
     /// The value is `affine` of `operand`, at the same width.
     Linear { operand: ValueId, affine: Affine },

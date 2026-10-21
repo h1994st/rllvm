@@ -87,13 +87,14 @@ flows=$(field '[(f["source"], f["verdict"]) for f in a["uncertainty"].get("annot
 [ "$flows" = "[('agent', 'infeasible')]" ] ||
     fail "annotated_flows was $flows, expected one infeasible annotation labeled agent"
 
-# 8. The comparison bounds `left`; make_buf gets `left + 1`. The guard carries
-#    to the argument through that affine relation, without wrapping: verified.
+# 8. Past `if (left > MAX) return;`, `left` is in [0, MAX]; make_buf gets
+#    `left + 1`. The guard carries to the argument through that affine
+#    relation, without wrapping: verified.
 offset() {
-    rllvm-query --catalog "$OUT/offset.json" guards --at offset.c:14 --operand 1 "$@"
+    rllvm-query --catalog "$OUT/offset.json" guards --at offset.c:15 --operand 1 "$@"
 }
 text=$(offset)
-defines "$text" 'compare ult 64' "no comparison on left: $text"
+defines "$text" 'compare ugt 64' "no comparison on left: $text"
 defines "$text" 'anchored = guarded \+ 1' "the relation to left + 1 was not shown: $text"
 if grep -q 'unverified' <<<"$text"; then
     fail "the guard on left was marked unverified: $text"
