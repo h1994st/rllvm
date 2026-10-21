@@ -32,10 +32,10 @@ use tracing_subscriber::FmtSubscriber;
 /// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
 /// arm here fails to compile. That alone does not catch the opposite drift --
 /// a new [`Query`] variant added without a matching `QueryCommand` --
-/// which compiles cleanly on its own. `cli_command_for` in this file's tests
-/// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
-/// fails to compile there instead, until this file is updated to drive it
-/// from the command line.
+/// which compiles cleanly on its own, and `Query` is non-exhaustive, so no
+/// match here can fail to compile over it. This file's tests close that gap:
+/// `every_query_tool_has_a_cli_subcommand` fails for a query the MCP server
+/// lists with no subcommand to drive it from the command line.
 fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned> {
     let QueryModifiers {
         heuristics,
@@ -724,12 +724,10 @@ mod tests {
         }
     }
 
-    /// The reverse of `to_query`'s exhaustiveness: every [`Query`]
-    /// variant must appear here, with no wildcard arm. A `Query` variant
-    /// added without a matching arm fails to compile, so a new query cannot
-    /// ship without a `QueryCommand` (and a `to_query` arm) to drive it from
-    /// the command line -- closing the drift gap `to_query` alone leaves
-    /// open, since it is only ever exhaustive over `QueryCommand`.
+    /// The reverse of `to_query`: the `QueryCommand` that drives `query`.
+    /// `Query` is non-exhaustive, so the wildcard arm is required; a query
+    /// with no arm here panics, and `every_query_tool_has_a_cli_subcommand`
+    /// fails for one with no subcommand at all.
     fn cli_command_for(query: &Query) -> QueryCommand {
         match query {
             Query::Defs { name } => QueryCommand::Defs { name: name.clone() },
@@ -794,6 +792,51 @@ mod tests {
                     emit_module: emit_module.clone(),
                 }
             }
+            other => panic!("{other:?} has no CLI command"),
+        }
+    }
+
+    /// The tools `tools/list` reports that decide which catalogs are loaded
+    /// or keep the overlay, rather than ask a question: none is a query
+    /// subcommand.
+    const MANAGEMENT_TOOLS: [&str; 8] = [
+        "load_catalog",
+        "inventory",
+        "list_catalogs",
+        "unload_catalog",
+        "load_overlay",
+        "record_edges",
+        "save_overlay",
+        "list_overlay",
+    ];
+
+    /// The fence `Query`'s non-exhaustiveness takes from `cli_command_for`:
+    /// every query the MCP server lists, which it lists from every `Query`
+    /// variant, has a subcommand that drives it from the command line.
+    #[test]
+    fn every_query_tool_has_a_cli_subcommand() {
+        let mut output = Vec::new();
+        mcp::serve(
+            &mut mcp::Registry::new(),
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n".as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let tools: Vec<&str> = reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .filter(|name| !MANAGEMENT_TOOLS.contains(name))
+            .collect();
+        assert_eq!(tools.len(), 13, "{tools:?}");
+        let command = QueryArgs::command();
+        for tool in tools {
+            assert!(
+                command.find_subcommand(tool.replace('_', "-")).is_some(),
+                "the `{tool}` tool has no `rllvm-query` subcommand"
+            );
         }
     }
 
