@@ -15,8 +15,8 @@ use std::{
 };
 
 use llvm_sys::{
-    LLVMDbgRecordKind, LLVMDiagnosticSeverity, LLVMIntPredicate, LLVMLinkage, LLVMOpcode,
-    LLVMTypeKind,
+    LLVMAtomicOrdering, LLVMDbgRecordKind, LLVMDiagnosticSeverity, LLVMIntPredicate, LLVMLinkage,
+    LLVMOpcode, LLVMTypeKind,
     bit_reader::LLVMParseBitcodeInContext2,
     core::*,
     debuginfo::{
@@ -29,7 +29,10 @@ use llvm_sys::{
     },
     error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage},
     prelude::*,
-    target::{LLVMABISizeOfType, LLVMGetModuleDataLayout, LLVMOffsetOfElement, LLVMTargetDataRef},
+    target::{
+        LLVMABISizeOfType, LLVMGetModuleDataLayout, LLVMOffsetOfElement, LLVMPointerSizeForAS,
+        LLVMTargetDataRef,
+    },
     transforms::pass_builder::{
         LLVMCreatePassBuilderOptions, LLVMDisposePassBuilderOptions, LLVMRunPasses,
     },
@@ -2544,6 +2547,8 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
     // SAFETY: the caller guarantees a live function, and every handle below
     // is read from it or from a block or instruction it owns.
     unsafe {
+        // Owned by the module, which outlives this call.
+        let layout = LLVMGetModuleDataLayout(LLVMGetGlobalParent(function));
         let param_count = LLVMCountParams(function);
         for index in 0..param_count {
             handles.push((LLVMGetParam(function, index), 0));
@@ -2590,11 +2595,14 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
                     call: None,
                     guard: None,
                     location: None,
+                    volatile: false,
+                    ty: None,
+                    element: None,
                 });
                 continue;
             }
             block_irs[block].instrs.push(id);
-            values.push(read_instruction(handle, block, &ids, &block_ids));
+            values.push(read_instruction(handle, block, &ids, &block_ids, layout));
             read_bindings(context, handle, id, &ids, &mut dbg_values);
         }
 
@@ -2635,17 +2643,19 @@ unsafe fn successors(
 
 /// # Safety
 /// `instruction` must be a live instruction of the function `ids` and
-/// `block_ids` number.
+/// `block_ids` number, and `layout` its module's data layout.
 unsafe fn read_instruction(
     instruction: LLVMValueRef,
     block: usize,
     ids: &HashMap<LLVMValueRef, ValueId>,
     block_ids: &HashMap<LLVMBasicBlockRef, usize>,
+    layout: LLVMTargetDataRef,
 ) -> ValueNode {
     // SAFETY: the caller guarantees a live instruction; every operand and
     // incoming index is below the count it reports, the incoming accessors
-    // are reached only for a `phi`, and the call accessors only for a call
-    // or invoke.
+    // are reached only for a `phi`, the call accessors only for a call or
+    // invoke, the memory accessors only for a load or store, and the GEP
+    // accessor only for a `getelementptr`.
     unsafe {
         let opcode = LLVMGetInstructionOpcode(instruction);
         let operands = (0..LLVMGetNumOperands(instruction) as u32)
@@ -2665,6 +2675,12 @@ unsafe fn read_instruction(
         };
         let call = matches!(opcode, LLVMOpcode::LLVMCall | LLVMOpcode::LLVMInvoke)
             .then(|| call_ir(instruction, ids));
+        // The value a store writes is its first operand.
+        let accessed = match opcode {
+            LLVMOpcode::LLVMLoad => Some(instruction),
+            LLVMOpcode::LLVMStore => Some(LLVMGetOperand(instruction, 0)),
+            _ => None,
+        };
         ValueNode {
             block,
             opcode: opcode_ir(opcode),
@@ -2673,7 +2689,56 @@ unsafe fn read_instruction(
             guard: guard_of(instruction, opcode, call.as_ref()),
             call,
             location: location_of(instruction),
+            volatile: accessed.is_some()
+                && (LLVMGetVolatile(instruction) != 0
+                    || LLVMGetOrdering(instruction)
+                        != LLVMAtomicOrdering::LLVMAtomicOrderingNotAtomic),
+            ty: accessed.and_then(|value| type_tag(LLVMTypeOf(value), layout)),
+            // `LLVMPrintTypeToString` hands over the string it returns.
+            element: (opcode == LLVMOpcode::LLVMGetElementPtr).then(|| {
+                owned_message(LLVMPrintTypeToString(LLVMGetGEPSourceElementType(
+                    instruction,
+                )))
+            }),
         }
+    }
+}
+
+/// Floating-point types by kind, with their width. `bfloat` and
+/// `ppc_fp128` are left out: each shares its width with another type here,
+/// which a tag could not tell apart.
+const FLOAT_WIDTHS: [(LLVMTypeKind, u32); 5] = [
+    (LLVMTypeKind::LLVMHalfTypeKind, 16),
+    (LLVMTypeKind::LLVMFloatTypeKind, 32),
+    (LLVMTypeKind::LLVMDoubleTypeKind, 64),
+    (LLVMTypeKind::LLVMX86_FP80TypeKind, 80),
+    (LLVMTypeKind::LLVMFP128TypeKind, 128),
+];
+
+/// `ty` as a tag, when it is a scalar the tag tells apart from every other
+/// type: an integer, a float of [`FLOAT_WIDTHS`], or a pointer in the
+/// default address space.
+///
+/// # Safety
+/// `ty` must be a live type, and `layout` the data layout of its module.
+unsafe fn type_tag(ty: LLVMTypeRef, layout: LLVMTargetDataRef) -> Option<TypeTag> {
+    // SAFETY: the caller guarantees a live type and layout; each accessor
+    // is reached only for the kind of type it requires.
+    unsafe {
+        let kind = LLVMGetTypeKind(ty);
+        let (kind, bits) = match kind {
+            LLVMTypeKind::LLVMIntegerTypeKind => (ScalarKind::Int, LLVMGetIntTypeWidth(ty)),
+            LLVMTypeKind::LLVMPointerTypeKind if LLVMGetPointerAddressSpace(ty) == 0 => {
+                (ScalarKind::Ptr, LLVMPointerSizeForAS(layout, 0) * 8)
+            }
+            _ => (
+                ScalarKind::Float,
+                FLOAT_WIDTHS
+                    .iter()
+                    .find_map(|&(float, bits)| (float == kind).then_some(bits))?,
+            ),
+        };
+        Some(TypeTag { kind, bits })
     }
 }
 
@@ -2766,6 +2831,7 @@ fn opcode_ir(opcode: LLVMOpcode) -> OpcodeIr {
         LLVMICmp => OpcodeIr::ICmp,
         LLVMSelect => OpcodeIr::Select,
         LLVMPHI => OpcodeIr::Phi,
+        LLVMGetElementPtr => OpcodeIr::Gep,
         LLVMLoad => OpcodeIr::Load,
         LLVMStore => OpcodeIr::Store,
         LLVMRet => OpcodeIr::Ret,

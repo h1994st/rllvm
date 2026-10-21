@@ -1074,7 +1074,7 @@ impl Trace<'_> {
                     "the value is loaded from memory{}, and what was stored there is not traced",
                     place(node)
                 )),
-                OpcodeIr::Other => walk.lost.push(format!(
+                OpcodeIr::Gep | OpcodeIr::Other => walk.lost.push(format!(
                     "the value comes from an instruction the trace does not read through{}",
                     place(node)
                 )),
@@ -1441,6 +1441,35 @@ impl Trace<'_> {
             }
         }
         values
+    }
+
+    /// Whether addresses `a` and `b` are syntactically one: the same value,
+    /// or two `getelementptr`s through one type over the same operands. A
+    /// GEP's operands are compared one level deep, by value identity and
+    /// constant; anything else -- a global, a cast, two loads -- is never
+    /// matched, which only keeps a store from being forwarded.
+    fn same_address(&self, a: &Operand, b: &Operand) -> bool {
+        let (Operand::Value(a), Operand::Value(b)) = (a, b) else {
+            return false;
+        };
+        if a == b {
+            return true;
+        }
+        let (a, b) = (self.node(*a), self.node(*b));
+        let identical = |x: &Operand, y: &Operand| match (x, y) {
+            (Operand::Value(x), Operand::Value(y)) => x == y,
+            (Operand::Const(x), Operand::Const(y)) => x == y,
+            _ => false,
+        };
+        a.opcode == OpcodeIr::Gep
+            && b.opcode == OpcodeIr::Gep
+            && a.element.is_some()
+            && a.element == b.element
+            && a.operands.len() == b.operands.len()
+            && a.operands
+                .iter()
+                .zip(&b.operands)
+                .all(|(x, y)| identical(x, y))
     }
 
     /// Whether instruction `a` runs before `b` on every path to `b`.
@@ -2111,7 +2140,7 @@ mod tests {
     use crate::{
         CallTarget, FunctionId,
         extract::read_module_ir,
-        ir::{BinaryOp, BlockIr, OpcodeIr, Operand, ValueNode},
+        ir::{BinaryOp, BlockIr, OpcodeIr, Operand, ScalarKind, TypeTag, ValueNode},
         slice::promote_anchor_module,
         testing::{compiled_session, module_session, stale_debug_info_module},
     };
@@ -3893,5 +3922,97 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             let error = parts.unwrap_err();
             assert!(error.contains(fragment), "{error}");
         }
+    }
+
+    /// Field addresses of `%s` and the loads of one: by two GEPs alike, by a
+    /// GEP into another field, by a GEP alike but through another type, and
+    /// a volatile, an atomic and a wider load.
+    const ADDRESSES_IR: &str = r#"
+%struct.S = type { i32, i32 }
+declare void @sink(i32)
+declare void @sink64(i64)
+
+define void @f(ptr %s, i32 %n) {
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  %b = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  %c = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  %d = getelementptr inbounds { i64, i64 }, ptr %s, i32 0, i32 1
+  %v = load i32, ptr %b, align 4
+  %w = load volatile i32, ptr %b, align 4
+  %x = load atomic i32, ptr %b seq_cst, align 4
+  %y = load i64, ptr %b, align 8
+  call void @sink(i32 %v)
+  call void @sink(i32 %w)
+  call void @sink(i32 %x)
+  call void @sink64(i64 %y)
+  ret void
+}
+"#;
+
+    /// The trace of `symbol` in `ir`, read from `session`'s module.
+    fn trace_of<'a>(session: &'a Session, ir: &'a ModuleIr, function: &'a FunctionId) -> Trace<'a> {
+        let body = defined(ir, &function.symbol);
+        Trace {
+            session,
+            body,
+            function,
+            scope: None,
+            doms: dominators(body),
+        }
+    }
+
+    /// The ids of `body`'s instructions, in order.
+    fn instructions(body: &FunctionIr) -> Vec<ValueId> {
+        body.blocks
+            .iter()
+            .flat_map(|block| block.instrs.clone())
+            .collect()
+    }
+
+    /// Two GEPs alike are one address; one into another field, or alike but
+    /// through another type, is not. A load records its type and whether it
+    /// is volatile or atomic; a store, the type of the value it writes.
+    #[test]
+    fn a_field_address_matches_only_the_same_field_of_the_same_type() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            ADDRESSES_IR,
+            &["-Wno-override-module"],
+        );
+        let function = FunctionId {
+            module_id: "m".into(),
+            symbol: "f".into(),
+        };
+        let bytes = promote_anchor_module(&session, &function).unwrap().bytes;
+        let ir = read_module_ir(&bytes).unwrap();
+        let trace = trace_of(&session, &ir, &function);
+        let ids = instructions(trace.body);
+        let [a, store, b, c, d, v, w, x, y] = ids[..9] else {
+            panic!("{ids:?}");
+        };
+        let value = Operand::Value;
+        assert!(trace.same_address(&value(a), &value(a)));
+        assert!(trace.same_address(&value(b), &value(a)));
+        assert!(!trace.same_address(&value(c), &value(a)));
+        assert!(!trace.same_address(&value(d), &value(a)));
+        assert!(!trace.same_address(&Operand::Other, &Operand::Other));
+
+        let int = |bits| {
+            Some(TypeTag {
+                kind: ScalarKind::Int,
+                bits,
+            })
+        };
+        let node = |id| trace.node(id);
+        assert_eq!(node(store).opcode, OpcodeIr::Store);
+        assert_eq!((node(store).ty, node(store).volatile), (int(32), false));
+        assert_eq!((node(v).ty, node(v).volatile), (int(32), false));
+        assert_eq!((node(w).ty, node(w).volatile), (int(32), true));
+        assert_eq!((node(x).ty, node(x).volatile), (int(32), true));
+        assert_eq!((node(y).ty, node(y).volatile), (int(64), false));
+        assert_eq!((node(a).ty, node(a).volatile), (None, false));
     }
 }
