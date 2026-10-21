@@ -242,7 +242,8 @@ Report what the answer supports, and say what it does not:
   use for a local or an argument anchor on the call that consumes a returned
   value. A clamp of the anchored value made of a comparison (a branch or
   select clamp, not an intrinsic umin or saturation) also lists that
-  comparison, which bounds the anchored value itself. For a clamp, mask,
+  comparison, which bounds the anchored value itself, verified only through
+  its branch's edge into the use. For a clamp, mask,
   modulo or saturation, `verified` does not mean it runs on every path:
   report its bound as unconditional only when it is `verified` and its
   `relation` is `dominates` or `defines`; a verified one that is on_path is
