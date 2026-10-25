@@ -2550,14 +2550,26 @@ struct DebugNumbers {
     scopes: HashMap<LLVMMetadataRef, ScopeId>,
     /// The scope each numbered block scope is nested in.
     parents: HashMap<ScopeId, ScopeId>,
+    /// The numbered scopes that are subprograms.
+    subprograms: HashSet<ScopeId>,
+}
+
+/// The scope links one function's values and variables need, copied out of
+/// the module's [`DebugNumbers`] as they are met.
+#[derive(Default)]
+struct FunctionScopes {
+    /// Each link up the chains met.
+    links: HashMap<ScopeId, ScopeId>,
+    /// The chains' outermost scopes known to be subprograms.
+    subprograms: HashSet<ScopeId>,
 }
 
 impl DebugNumbers {
     /// `scope`'s number, numbering it and the scopes it is nested in on
-    /// first sight, and recording each link up its chain in `links`, the
-    /// links of the function being read. `None` for no scope. Only a block
-    /// scope (`DILexicalBlock`, `DILexicalBlockFile`) links to the scope
-    /// enclosing it; a subprogram, or anything else, is outermost.
+    /// first sight, and recording its chain in `function`, the scopes of
+    /// the function being read. `None` for no scope. Only a block scope
+    /// (`DILexicalBlock`, `DILexicalBlockFile`) links to the scope enclosing
+    /// it; a subprogram, or anything else, is outermost.
     ///
     /// # Safety
     /// `scope` must be null or live metadata in `context`.
@@ -2565,7 +2577,7 @@ impl DebugNumbers {
         &mut self,
         context: LLVMContextRef,
         scope: LLVMMetadataRef,
-        links: &mut HashMap<ScopeId, ScopeId>,
+        function: &mut FunctionScopes,
     ) -> Option<ScopeId> {
         if scope.is_null() {
             return None;
@@ -2577,6 +2589,14 @@ impl DebugNumbers {
                 // Numbered before its parent is read, so a malformed cycle
                 // finds it numbered and stops.
                 self.scopes.insert(scope, id);
+                // SAFETY: the caller guarantees live metadata, whose kind
+                // any metadata answers.
+                if matches!(
+                    unsafe { LLVMGetMetadataKind(scope) },
+                    LLVMMetadataKind::LLVMDISubprogramMetadataKind
+                ) {
+                    self.subprograms.insert(id);
+                }
                 // SAFETY: the caller guarantees live metadata; its operands
                 // are read only once it is known to be a block scope, whose
                 // enclosing scope is live metadata of the same module.
@@ -2591,7 +2611,7 @@ impl DebugNumbers {
                         operand_metadata(*operands.get(DI_SCOPE_OPERAND)?)
                     })
                     .flatten()
-                    .and_then(|parent| self.scope(context, parent, links))
+                    .and_then(|parent| self.scope(context, parent, function))
                 };
                 if let Some(parent) = parent {
                     self.parents.insert(id, parent);
@@ -2601,10 +2621,16 @@ impl DebugNumbers {
         };
         let mut at = id;
         while let Some(&parent) = self.parents.get(&at) {
-            if links.insert(at, parent).is_some() {
+            if function.links.insert(at, parent).is_some() {
                 break;
             }
             at = parent;
+        }
+        while let Some(&parent) = self.parents.get(&at) {
+            at = parent;
+        }
+        if self.subprograms.contains(&at) {
+            function.subprograms.insert(at);
         }
         Some(id)
     }
@@ -2665,7 +2691,8 @@ unsafe fn read_function_ir(
         let mut values = Vec::with_capacity(handles.len());
         let mut dbg_values = Vec::new();
         let mut scopes = Vec::with_capacity(handles.len());
-        let mut scope_parents = HashMap::new();
+        let mut function_scopes = FunctionScopes::default();
+        let subprogram = numbers.scope(context, LLVMGetSubprogram(function), &mut function_scopes);
         for (id, &(handle, block)) in handles.iter().enumerate() {
             let id = id as ValueId;
             if id < param_count {
@@ -2693,7 +2720,7 @@ unsafe fn read_function_ir(
                 numbers.scope(
                     context,
                     LLVMDILocationGetScope(location),
-                    &mut scope_parents,
+                    &mut function_scopes,
                 )
             });
             read_bindings(
@@ -2702,7 +2729,7 @@ unsafe fn read_function_ir(
                 id,
                 &ids,
                 numbers,
-                &mut scope_parents,
+                &mut function_scopes,
                 &mut dbg_values,
             );
         }
@@ -2717,7 +2744,9 @@ unsafe fn read_function_ir(
             values,
             dbg_values,
             scopes,
-            scope_parents,
+            scope_parents: function_scopes.links,
+            subprogram,
+            subprograms: function_scopes.subprograms,
         }
     }
 }
@@ -3108,7 +3137,7 @@ unsafe fn read_bindings(
     at: ValueId,
     ids: &HashMap<LLVMValueRef, ValueId>,
     numbers: &mut DebugNumbers,
-    links: &mut HashMap<ScopeId, ScopeId>,
+    scopes: &mut FunctionScopes,
     out: &mut Vec<DbgValue>,
 ) {
     // SAFETY: the caller guarantees a live instruction; each record is read
@@ -3125,7 +3154,7 @@ unsafe fn read_bindings(
             if let (Some(name), Some(variable)) = (name, variable) {
                 let next = numbers.variables.len() as u32;
                 let id = *numbers.variables.entry(variable).or_insert(next);
-                let scope = numbers.scope(context, LLVMDIVariableGetScope(variable), links);
+                let scope = numbers.scope(context, LLVMDIVariableGetScope(variable), scopes);
                 let file = LLVMDIVariableGetFile(variable);
                 let declared_file = if file.is_null() {
                     String::new()

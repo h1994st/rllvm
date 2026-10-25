@@ -4,7 +4,7 @@
 //! Function ids carry no module id, like neutral facts: the IR is read from
 //! bytes alone, so it cannot know which catalog module they came from.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::facts::{FunctionId, GuardKind, SourceLocation};
 
@@ -45,12 +45,37 @@ pub(crate) struct FunctionIr {
     /// scope with no entry is outermost: a subprogram, or one whose parent
     /// is not a lexical scope.
     pub(crate) scope_parents: HashMap<ScopeId, ScopeId>,
+    /// The function's own `DISubprogram`, when its debug info has one.
+    pub(crate) subprogram: Option<ScopeId>,
+    /// Which of the outermost scopes in `scope_parents`' chains are known
+    /// to be subprograms: the function's own, and those inlined into it.
+    pub(crate) subprograms: HashSet<ScopeId>,
 }
 
 /// A lexical scope's number in its module: see [`FunctionIr::scopes`].
 pub(crate) type ScopeId = u32;
 
 impl FunctionIr {
+    /// Whether a variable declared in `scope` may be this function's own
+    /// rather than one of a function inlined into it. Only a scope chain
+    /// known to end at another subprogram rules it out: an unplaced scope,
+    /// or a function with no subprogram, keeps it.
+    pub(crate) fn may_own(&self, scope: Option<ScopeId>) -> bool {
+        let (Some(own), Some(mut at)) = (self.subprogram, scope) else {
+            return true;
+        };
+        for _ in 0..=self.scope_parents.len() {
+            if at == own {
+                return true;
+            }
+            match self.scope_parents.get(&at) {
+                Some(&parent) => at = parent,
+                None => return !self.subprograms.contains(&at),
+            }
+        }
+        true
+    }
+
     /// Whether `inner` is `outer` or nested in it. False when either is
     /// unknown: a scope that cannot be placed is not taken to lie inside.
     pub(crate) fn within(&self, inner: Option<ScopeId>, outer: Option<ScopeId>) -> bool {

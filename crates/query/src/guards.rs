@@ -547,13 +547,13 @@ pub fn guards_at_use(
         } => {
             let body = &ir.functions[index];
             let uses = match anchor {
-                GuardAnchor::Local { name, .. } => body
-                    .dbg_values
-                    .iter()
-                    .find(|binding| binding.name == *name)
-                    .map_or_else(Vec::new, |binding| {
-                        use_lines(body, &local_uses(body, &dominators(body), binding.variable))
-                    }),
+                GuardAnchor::Local { name, .. } => {
+                    own_bindings(body, name)
+                        .next()
+                        .map_or_else(Vec::new, |binding| {
+                            use_lines(body, &local_uses(body, &dominators(body), binding.variable))
+                        })
+                }
                 GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => Vec::new(),
             };
             lost.push(format!(
@@ -732,10 +732,8 @@ fn use_point(
         GuardAnchor::Argument { site, .. } | GuardAnchor::Return { site } => {
             promoted_call(body, session, site)?.0
         }
-        GuardAnchor::Local { name, .. } => body
-            .dbg_values
-            .iter()
-            .find(|binding| binding.name == *name && binding.value == Operand::Value(value))
+        GuardAnchor::Local { name, .. } => own_bindings(body, name)
+            .find(|binding| binding.value == Operand::Value(value))
             .map_or(value, |binding| binding.at),
     })
 }
@@ -2247,6 +2245,15 @@ fn promoted_peers<'a>(
         .map(|(id, _, call)| (id, call))
 }
 
+/// The debug bindings of `body`'s own variables named `name`: a variable of
+/// a function inlined into it is left out, unless its scope cannot be placed
+/// outside `body`.
+fn own_bindings<'a>(body: &'a FunctionIr, name: &'a str) -> impl Iterator<Item = &'a DbgValue> {
+    body.dbg_values
+        .iter()
+        .filter(move |binding| binding.name == name && body.may_own(binding.scope))
+}
+
 /// The value the source variable `name` is bound to in `body`, which is
 /// `ir.functions[function]` and the catalog's `id`. Bindings to one value are one value however
 /// often they recur; bindings to several are reported, never chosen
@@ -2263,11 +2270,7 @@ fn resolve_local(
 ) -> Result<Resolved, Error> {
     let mut bound: Vec<&Operand> = Vec::new();
     let mut variables: Vec<&DbgValue> = Vec::new();
-    for binding in body
-        .dbg_values
-        .iter()
-        .filter(|binding| binding.name == name)
-    {
+    for binding in own_bindings(body, name) {
         if !bound.contains(&&binding.value) {
             bound.push(&binding.value);
         }
@@ -2849,6 +2852,8 @@ mod tests {
             dbg_values: Vec::new(),
             scopes: Vec::new(),
             scope_parents: HashMap::new(),
+            subprogram: None,
+            subprograms: HashSet::new(),
         }
     }
 
@@ -2981,6 +2986,30 @@ void g(unsigned a) {
   unsigned cur = a;
   unsigned keep = cur;
   sink(keep);
+}
+";
+
+    /// Optimized, `f` inlines `helper`, whose parameter `x` lands in `f`'s
+    /// body beside `f`'s own `x`.
+    const INLINED_NAMESAKE_SOURCE: &str = "extern void sink(int);
+static void helper(int x) {
+  if (x > 8) return;
+  sink(x);
+}
+void f(int x) {
+  helper(x);
+  sink(x);
+}
+";
+
+    /// Optimized, `f` inlines `helper`'s `x` but has no `x` of its own.
+    const INLINED_ONLY_SOURCE: &str = "extern void sink(int);
+static void helper(int x) {
+  if (x > 8) return;
+  sink(x);
+}
+void f(int y) {
+  helper(y);
 }
 ";
 
@@ -3375,6 +3404,35 @@ void f(unsigned a, unsigned b) {
         assert_eq!(lines, [3]);
         let (_, lines) = identities(SHADOWED_LOCAL_SOURCE, "x");
         assert_eq!(lines, [4, 5]);
+    }
+
+    /// A variable of a function inlined into `f` is not one of `f`'s: it
+    /// neither makes `f`'s own `x` ambiguous nor stands in for one.
+    #[test]
+    fn an_inlined_callees_namesake_is_not_one_of_the_functions_locals() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, INLINED_NAMESAKE_SOURCE, &["-O1", "-g"], "f");
+        let f = defined(&ir, "f");
+        assert!(
+            f.dbg_values
+                .iter()
+                .filter(|binding| binding.name == "x")
+                .any(|binding| binding.declared_line == 2),
+            "helper must be inlined with its `x`: {:?}",
+            f.dbg_values
+        );
+        let resolved = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None).unwrap();
+        assert_eq!(node(&ir, &resolved, "f").0, f.params[0]);
+
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, INLINED_ONLY_SOURCE, &["-O1", "-g"], "f");
+        let error = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("no debug binding of local `x` in f"),
+            "{error}"
+        );
     }
 
     /// A name two variables share is refused, with or without a use-site,

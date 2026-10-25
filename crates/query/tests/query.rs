@@ -3124,6 +3124,33 @@ mod mcp {
         assert!(text.contains(message), "{text}\n{stderr}");
     }
 
+    /// An optimized `f` that inlines a callee's namesake parameter answers
+    /// for its own `x` alike on both surfaces.
+    #[test]
+    fn an_inlined_namesake_leaves_the_local_answered_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let source = scratch.path().join("i.c");
+        std::fs::write(
+            &source,
+            "extern void sink(int);\nstatic void helper(int x) {\n  if (x > 8) return;\n  sink(x);\n}\nvoid f(int x) {\n  helper(x);\n  sink(x);\n}\n",
+        )
+        .unwrap();
+        let module = rllvm_testkit::compile_bitcode_file(&source, &["-g", "-O1"]);
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let cli = query_json(
+            &scratch,
+            &catalog,
+            &["guards", "--function", "f", "--local", "x"],
+        );
+        assert_eq!(cli["results"]["anchor"]["kind"], "local", "{cli}");
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "f", "local": "x" }),
+        );
+        assert_eq!(cli["results"], mcp["results"]);
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();
