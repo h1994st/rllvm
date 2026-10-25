@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.4.0](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.3.0...rllvm-plugin-v0.4.0) (2026-10-25)
+
+
+### ⚠ BREAKING CHANGES
+
+* report the predicate a compare holds at the use ([#357](https://github.com/h1994st/rllvm/issues/357))
+* disambiguate a reused local by use-site ([#352](https://github.com/h1994st/rllvm/issues/352))
+* carry verified, caveat and affine on guard sites ([#350](https://github.com/h1994st/rllvm/issues/350))
+
+### Features
+
+* carry verified, caveat and affine on guard sites ([#350](https://github.com/h1994st/rllvm/issues/350)) ([4b0f8d2](https://github.com/h1994st/rllvm/commit/4b0f8d26f4e37a6bcd715434467606d400086969))
+* disambiguate a reused local by use-site ([#352](https://github.com/h1994st/rllvm/issues/352)) ([e042325](https://github.com/h1994st/rllvm/commit/e042325e6ba4cec91b2c74561d49a67169142206))
+* explain which capture levels guards can trace ([#347](https://github.com/h1994st/rllvm/issues/347)) ([6688fd1](https://github.com/h1994st/rllvm/commit/6688fd152a1ee1d0bea2333db6b9c143264a2ee5))
+* follow a guard through a single-store field load ([#351](https://github.com/h1994st/rllvm/issues/351)) ([0aedda4](https://github.com/h1994st/rllvm/commit/0aedda42fd37201e3c5e6259f9a5b9ec02b17ad3))
+* prove a field load from its nearest store ([#354](https://github.com/h1994st/rllvm/issues/354)) ([3bac09b](https://github.com/h1994st/rllvm/commit/3bac09b8feea6183fef571774bd8da0da7cd2017))
+* surface a downstream clamp's compare as a guard ([#355](https://github.com/h1994st/rllvm/issues/355)) ([c765cc3](https://github.com/h1994st/rllvm/commit/c765cc3caeb817a53d8a2bde490297e637a4ea6e))
+
+
+### Bug Fixes
+
+* report the predicate a compare holds at the use ([#357](https://github.com/h1994st/rllvm/issues/357)) ([8bce15f](https://github.com/h1994st/rllvm/commit/8bce15f82eaceb9c00d41fdb8c16ee426a7fb8d4))
+
 ## [0.3.0](https://github.com/h1994st/rllvm/compare/rllvm-plugin-v0.2.0...rllvm-plugin-v0.3.0) (2026-10-19)
 
 
