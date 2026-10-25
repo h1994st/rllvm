@@ -2300,6 +2300,12 @@ fn resolve_local(
             last[0]
         )));
     }
+    if bound.is_empty() && body.dbg_values.iter().any(|binding| binding.name == name) {
+        return Err(Error::InvalidArguments(format!(
+            "no local `{name}` in {label}; `{name}` is only a variable of a function inlined \
+             into it"
+        )));
+    }
     if bound.is_empty() {
         return Err(Error::InvalidArguments(format!(
             "no debug binding of local `{name}` in {label}; resolving a local needs a module \
@@ -3013,6 +3019,17 @@ void f(int y) {
 }
 ";
 
+    /// `f` has no debug info of its own, but inlines `helper`'s `x`.
+    const NODEBUG_INLINER_SOURCE: &str = "extern void sink(int);
+static void helper(int x) {
+  if (x > 8) return;
+  sink(x);
+}
+__attribute__((nodebug)) void f(int y) {
+  helper(y);
+}
+";
+
     /// Two variables named `x`, each in its own block.
     const SIBLING_LOCALS_SOURCE: &str = "extern void sink(unsigned);
 void g(unsigned a, unsigned b) {
@@ -3430,9 +3447,61 @@ void f(unsigned a, unsigned b) {
             .unwrap_err()
             .to_string();
         assert!(
-            error.contains("no debug binding of local `x` in f"),
+            error.contains(INLINED_ONLY_MESSAGE) && !error.contains("-g"),
             "{error}"
         );
+    }
+
+    /// What a function that has no `x` of its own, but inlines one, is told.
+    const INLINED_ONLY_MESSAGE: &str =
+        "no local `x` in f [m]; `x` is only a variable of a function inlined into it";
+
+    /// A function without debug info has no variables of its own: one
+    /// inlined into it is still not its own.
+    #[test]
+    fn a_function_without_debug_info_owns_no_inlined_local() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, NODEBUG_INLINER_SOURCE, &["-O1", "-g"], "f");
+        assert!(
+            defined(&ir, "f")
+                .dbg_values
+                .iter()
+                .any(|binding| binding.name == "x"),
+            "helper must be inlined with its `x`"
+        );
+        let error = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(INLINED_ONLY_MESSAGE), "{error}");
+    }
+
+    /// Only a scope chain known to end at another subprogram rules a
+    /// variable out; anything that cannot be placed keeps it.
+    #[test]
+    fn a_variable_is_ruled_out_only_by_a_chain_to_another_subprogram() {
+        let mut body = cfg(&[&[]]);
+        // 0: f's subprogram; 1: a block in it; 2: another subprogram; 3: a
+        // block in that; 4: a block whose parent is no subprogram, 5;
+        // 6 and 7: a cycle.
+        body.subprogram = Some(0);
+        body.subprograms = HashSet::from([0, 2]);
+        body.scope_parents = HashMap::from([(1, 0), (3, 2), (4, 5), (6, 7), (7, 6)]);
+        for (scope, owned) in [
+            (None, true),
+            (Some(9), true),
+            (Some(4), true),
+            (Some(6), true),
+            (Some(3), false),
+            (Some(2), false),
+            (Some(1), true),
+            (Some(0), true),
+        ] {
+            assert_eq!(body.may_own(scope), owned, "{scope:?}");
+        }
+        // With no subprogram of its own, a chain to a known one is not its.
+        body.subprogram = None;
+        assert!(!body.may_own(Some(1)));
+        assert!(body.may_own(Some(4)));
     }
 
     /// A name two variables share is refused, with or without a use-site,

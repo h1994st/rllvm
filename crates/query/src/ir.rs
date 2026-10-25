@@ -58,14 +58,16 @@ pub(crate) type ScopeId = u32;
 impl FunctionIr {
     /// Whether a variable declared in `scope` may be this function's own
     /// rather than one of a function inlined into it. Only a scope chain
-    /// known to end at another subprogram rules it out: an unplaced scope,
-    /// or a function with no subprogram, keeps it.
+    /// known to end at a subprogram other than the function's own rules it
+    /// out, and a function with no subprogram owns none of those. An unknown
+    /// scope, a chain whose end is not known to be a subprogram, or a cycle
+    /// keeps it.
     pub(crate) fn may_own(&self, scope: Option<ScopeId>) -> bool {
-        let (Some(own), Some(mut at)) = (self.subprogram, scope) else {
+        let Some(mut at) = scope else {
             return true;
         };
         for _ in 0..=self.scope_parents.len() {
-            if at == own {
+            if Some(at) == self.subprogram {
                 return true;
             }
             match self.scope_parents.get(&at) {
