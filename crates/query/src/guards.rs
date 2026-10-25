@@ -2336,20 +2336,34 @@ fn resolve_local_at(
     // Every value the line reads counts, a constant one too: it is never
     // traced, but a line reading it beside a value reads two.
     let (mut values, mut constants): (Vec<ValueId>, Vec<&str>) = (Vec::new(), Vec::new());
-    for &(_, held) in &here {
-        match held {
-            Operand::Value(value) if !values.contains(value) => values.push(*value),
-            Operand::Const(constant) if !constants.contains(&constant.value.as_str()) => {
-                constants.push(&constant.value)
-            }
-            Operand::Func(callee) if !constants.contains(&callee.symbol.as_str()) => {
-                constants.push(&callee.symbol)
-            }
-            _ => {}
+    tally(
+        here.iter().map(|&(_, held)| held),
+        &mut values,
+        &mut constants,
+    );
+    // A binding no operand identifies a read of counts too, when it reaches
+    // any instruction on the line beside another binding: it may be what one
+    // of the line's reads reads.
+    let held = held_bindings(body, &doms, name);
+    let mut reaching: Vec<&Operand> = Vec::new();
+    for (id, node) in body.values.iter().enumerate() {
+        if !matches!(node.opcode, OpcodeIr::Param | OpcodeIr::Phi)
+            && node
+                .location
+                .as_ref()
+                .is_some_and(|location| at.holds(location))
+            && let Some(binding) = held[id]
+            && !reaching.contains(&binding)
+        {
+            reaching.push(binding);
         }
     }
-    let plural = |n: usize, one: &str, many: &str| if n == 1 { one } else { many }.to_string();
+    let untraceable = reaching.contains(&&Operand::Other) && reaching.len() > 1;
+    if untraceable {
+        tally(reaching.iter().copied(), &mut values, &mut constants);
+    }
     match (values.as_slice(), constants.as_slice()) {
+        _ if untraceable => Err(more_than_one(name, label, at, &values, &constants, true)),
         ([], []) => Err(Error::InvalidArguments(format!(
             "no use of `{name}` at {} in {label}: {}",
             at.spelled,
@@ -2372,30 +2386,71 @@ fn resolve_local_at(
                 used_at: Some(shared_point(body, &doms, &instrs)),
             })
         }
-        (values, constants) => {
-            let mut read = Vec::new();
-            if !values.is_empty() {
-                read.push(format!(
-                    "{} SSA {}",
-                    values.len(),
-                    plural(values.len(), "value", "values")
-                ));
+        (values, constants) => Err(more_than_one(name, label, at, values, constants, false)),
+    }
+}
+
+/// Adds each of `bindings` not yet listed: a value to `values`, an integer
+/// or function constant to `constants`. An untraceable one adds nothing.
+fn tally<'a>(
+    bindings: impl Iterator<Item = &'a Operand>,
+    values: &mut Vec<ValueId>,
+    constants: &mut Vec<&'a str>,
+) {
+    for binding in bindings {
+        match binding {
+            Operand::Value(value) if !values.contains(value) => values.push(*value),
+            Operand::Const(constant) if !constants.contains(&constant.value.as_str()) => {
+                constants.push(&constant.value)
             }
-            if !constants.is_empty() {
-                read.push(format!(
-                    "the {} {}",
-                    plural(constants.len(), "constant", "constants"),
-                    constants.join(", ")
-                ));
+            Operand::Func(callee) if !constants.contains(&callee.symbol.as_str()) => {
+                constants.push(&callee.symbol)
             }
-            Err(Error::InvalidArguments(format!(
-                "the uses of `{name}` in {label} at {} read more than one of its values ({}), \
-                 so none is picked",
-                at.spelled,
-                read.join(" and ")
-            )))
+            _ => {}
         }
     }
+}
+
+/// `one` for a count of 1, else `many`.
+fn plural(n: usize, one: &'static str, many: &'static str) -> &'static str {
+    if n == 1 { one } else { many }
+}
+
+/// The refusal of a line at `at` that reads more than one value of local
+/// `name` in the function `label` names: `values` SSA values, `constants`,
+/// and, when `untraceable`, a binding no operand identifies a read of.
+fn more_than_one(
+    name: &str,
+    label: &str,
+    at: &UseSite,
+    values: &[ValueId],
+    constants: &[&str],
+    untraceable: bool,
+) -> Error {
+    let mut read = Vec::new();
+    if !values.is_empty() {
+        read.push(format!(
+            "{} SSA {}",
+            values.len(),
+            plural(values.len(), "value", "values")
+        ));
+    }
+    if !constants.is_empty() {
+        read.push(format!(
+            "the {} {}",
+            plural(constants.len(), "constant", "constants"),
+            constants.join(", ")
+        ));
+    }
+    if untraceable {
+        read.push("a value it cannot trace".to_string());
+    }
+    Error::InvalidArguments(format!(
+        "the uses of `{name}` in {label} at {} read more than one of its values ({}), so none \
+         is picked",
+        at.spelled,
+        read.join(" and ")
+    ))
 }
 
 /// A `file:line` naming the uses of a local, with each spelling of the file
@@ -2430,14 +2485,12 @@ impl UseSite {
     }
 }
 
-/// Each instruction of `body` that reads the value local `name` holds
-/// there, with that value. The value held is the one the last binding
-/// before the instruction binds: in its block, or else the last in the
-/// nearest block dominating it that has one. A constant held counts when
-/// the instruction reads that constant, though it is never traced. A `phi`
-/// merges values rather than reading one, so it is no use; nor is any read
-/// where `name` holds nothing an operand can be matched to.
-fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, &'a Operand)> {
+/// What local `name` holds at each value of `body`, by `ValueId`: the
+/// operand the last binding before it binds, in its block, or else the last
+/// in the nearest block dominating it that has one. A binding made at an
+/// instruction takes effect from that instruction on. `None` where no
+/// binding reaches; an untraceable binding is kept as `Operand::Other`.
+fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<Option<&'a Operand>> {
     let mut position = vec![0; body.values.len()];
     for block in &body.blocks {
         for (index, &id) in block.instrs.iter().enumerate() {
@@ -2458,12 +2511,12 @@ fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId
             block.push((position[binding.at as usize], &binding.value));
         }
     }
-    let held = |id: ValueId| {
-        let mut block = body.values[id as usize].block;
+    let held = |id: usize| {
+        let mut block = body.values[id].block;
         let mut binding = bindings[block]
             .iter()
             .rev()
-            .find(|(at, _)| *at <= position[id as usize]);
+            .find(|(at, _)| *at <= position[id]);
         while binding.is_none() {
             match doms.idom.get(block) {
                 Some(&Some(up)) if up != block => block = up,
@@ -2471,24 +2524,31 @@ fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId
             }
             binding = bindings[block].last();
         }
-        binding
-            .map(|&(_, held)| held)
-            .filter(|held| !matches!(held, Operand::Other))
+        binding.map(|&(_, held)| held)
     };
+    (0..body.values.len()).map(held).collect()
+}
+
+/// Each instruction of `body` that reads the value local `name` holds
+/// there, with that value, as [`held_bindings`] finds it. A constant held
+/// counts when the instruction reads that constant, though it is never
+/// traced. A `phi` merges values rather than reading one, so it is no use;
+/// nor is any read where `name` holds nothing an operand can be matched to.
+fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, &'a Operand)> {
+    let held = held_bindings(body, doms, name);
     body.values
         .iter()
         .enumerate()
         .filter(|(_, node)| !matches!(node.opcode, OpcodeIr::Param | OpcodeIr::Phi))
         .filter_map(|(id, node)| {
-            let id = id as ValueId;
-            let held = held(id)?;
+            let held = held[id].filter(|held| !matches!(held, Operand::Other))?;
             // A call reads its arguments and its callee, the last operand,
             // but not its bundle operands.
             let reads = match &node.call {
                 Some(call) => call.args.contains(held) || node.operands.last() == Some(held),
                 None => node.operands.contains(held),
             };
-            reads.then_some((id, held))
+            reads.then_some((id as ValueId, held))
         })
         .collect()
 }
@@ -2819,6 +2879,25 @@ void g(unsigned a) {
 }
 ";
 
+    /// Line 4 reads `p` while it holds `a`, then again once it holds a null
+    /// pointer, which no operand identifies as a read of it.
+    const UNTRACEABLE_REBINDING_SOURCE: &str = "extern void use(int *);
+void g(int *a) {
+  int *p = a;
+  use(p); p = 0; use(p);
+}
+";
+
+    /// The null pointer bound on line 3 reaches line 4's first read; `a`,
+    /// bound there, its second. Line 5 reads `a` alone.
+    const UNTRACEABLE_REACHING_SOURCE: &str = "extern void use(int *);
+void g(int *a) {
+  int *p = 0;
+  use(p); p = a; use(p);
+  use(p);
+}
+";
+
     /// Line 4 reads `cur` only while it holds the constant 7.
     const CONSTANT_READ_SOURCE: &str = "extern void sink(unsigned);
 void g(unsigned a) {
@@ -3143,6 +3222,42 @@ void f(unsigned a, unsigned b) {
             error.contains("more than one of its values") && error.contains("1000"),
             "{error}"
         );
+    }
+
+    /// A binding no operand can be matched to still counts toward the line's
+    /// values, whether it is made on the line or reaches it from above.
+    #[test]
+    fn a_line_an_untraceable_binding_reaches_beside_another_is_refused() {
+        for (source, line) in [
+            (UNTRACEABLE_REBINDING_SOURCE, 4),
+            (UNTRACEABLE_REACHING_SOURCE, 4),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let (session, ir) = promoted(&scratch, source, &["-O0", "-g"], "g");
+            let error = resolve_anchor_at_use(
+                &ir,
+                &session,
+                &local("g", "p"),
+                Some(&line_of(&scratch, line)),
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(
+                error.contains("more than one of its values")
+                    && error.contains("a value it cannot trace"),
+                "{source}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_line_reached_by_one_traceable_binding_still_resolves() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, UNTRACEABLE_REACHING_SOURCE, &["-O0", "-g"], "g");
+        let resolved =
+            resolve_anchor_at_use(&ir, &session, &local("g", "p"), Some(&line_of(&scratch, 5)))
+                .unwrap();
+        assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[0]);
     }
 
     #[test]
