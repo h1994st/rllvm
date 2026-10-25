@@ -3442,6 +3442,24 @@ void f(unsigned a, unsigned b) {
         }
     }
 
+    /// A block whose body comes from another file is a `DILexicalBlockFile`
+    /// nested in the block it is included into: a read there is still in
+    /// the local's scope.
+    #[test]
+    fn a_read_in_an_included_block_is_a_use() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("body.inc"), "sink(cur);\n").unwrap();
+        let (session, ir) = promoted(
+            &scratch,
+            "extern void sink(unsigned);\nvoid g(unsigned a) {\n  unsigned cur = a;\n  {\n#include \"body.inc\"\n  }\n}\n",
+            &["-O0", "-g"],
+            "g",
+        );
+        let at = format!("{}:1", scratch.path().join("body.inc").display());
+        let resolved = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at)).unwrap();
+        assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[0]);
+    }
+
     #[test]
     fn a_line_reached_by_one_traceable_binding_still_resolves() {
         let scratch = tempfile::tempdir().unwrap();
