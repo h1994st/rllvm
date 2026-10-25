@@ -2981,6 +2981,47 @@ mod mcp {
         assert_eq!(second["results"], mcp["results"]);
     }
 
+    /// A line reading a local's value and then a constant it is rebound to
+    /// is refused alike on both surfaces, never answered with the value.
+    #[test]
+    fn a_line_reading_a_value_and_a_constant_is_refused_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "k.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a) {\n  unsigned cur = a;\n  if (cur > 64) return;\n  sink(cur); cur = 1000; sink(cur);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:5", scratch.path().join("k.c").display());
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["guards", "--function", "g", "--local", "cur", "--at", &at])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("more than one of its values"), "{stderr}");
+
+        let response = mcp_exchange_in(
+            &scratch,
+            &catalog,
+            &modern_request(
+                "call",
+                "tools/call",
+                serde_json::json!({
+                    "name": "guards",
+                    "arguments": { "function": "g", "local": "cur", "at": at },
+                }),
+            ),
+        );
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        let message = stderr.trim().trim_start_matches("error: ");
+        assert!(text.contains(message), "{text}\n{stderr}");
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();

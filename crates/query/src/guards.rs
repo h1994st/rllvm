@@ -2323,7 +2323,7 @@ fn resolve_local_at(
 ) -> Result<Resolved, Error> {
     let doms = dominators(body);
     let uses = local_uses(body, &doms, name);
-    let here: Vec<(ValueId, ValueId)> = uses
+    let here: Vec<(ValueId, &Operand)> = uses
         .iter()
         .copied()
         .filter(|&(instr, _)| {
@@ -2333,14 +2333,24 @@ fn resolve_local_at(
                 .is_some_and(|location| at.holds(location))
         })
         .collect();
-    let mut values: Vec<ValueId> = Vec::new();
-    for &(_, value) in &here {
-        if !values.contains(&value) {
-            values.push(value);
+    // Every value the line reads counts, a constant one too: it is never
+    // traced, but a line reading it beside a value reads two.
+    let (mut values, mut constants): (Vec<ValueId>, Vec<&str>) = (Vec::new(), Vec::new());
+    for &(_, held) in &here {
+        match held {
+            Operand::Value(value) if !values.contains(value) => values.push(*value),
+            Operand::Const(constant) if !constants.contains(&constant.value.as_str()) => {
+                constants.push(&constant.value)
+            }
+            Operand::Func(callee) if !constants.contains(&callee.symbol.as_str()) => {
+                constants.push(&callee.symbol)
+            }
+            _ => {}
         }
     }
-    match values.as_slice() {
-        [] => Err(Error::InvalidArguments(format!(
+    let plural = |n: usize, one: &str, many: &str| if n == 1 { one } else { many }.to_string();
+    match (values.as_slice(), constants.as_slice()) {
+        ([], []) => Err(Error::InvalidArguments(format!(
             "no use of `{name}` at {} in {label}: {}",
             at.spelled,
             match use_lines(body, &uses).as_slice() {
@@ -2348,7 +2358,13 @@ fn resolve_local_at(
                 lines => format!("it is used at {}", lines.join(", ")),
             }
         ))),
-        &[value] => {
+        ([], constants) => Err(Error::InvalidArguments(format!(
+            "at {}, `{name}` in {label} holds only the {} {}, not a value to trace",
+            at.spelled,
+            plural(constants.len(), "constant", "constants"),
+            constants.join(", ")
+        ))),
+        (&[value], []) => {
             let instrs: Vec<ValueId> = here.iter().map(|&(instr, _)| instr).collect();
             Ok(Resolved::One {
                 function,
@@ -2356,12 +2372,29 @@ fn resolve_local_at(
                 used_at: Some(shared_point(body, &doms, &instrs)),
             })
         }
-        several => Err(Error::InvalidArguments(format!(
-            "the uses of `{name}` in {label} at {} read more than one of its values ({} SSA \
-             values), so none is picked",
-            at.spelled,
-            several.len()
-        ))),
+        (values, constants) => {
+            let mut read = Vec::new();
+            if !values.is_empty() {
+                read.push(format!(
+                    "{} SSA {}",
+                    values.len(),
+                    plural(values.len(), "value", "values")
+                ));
+            }
+            if !constants.is_empty() {
+                read.push(format!(
+                    "the {} {}",
+                    plural(constants.len(), "constant", "constants"),
+                    constants.join(", ")
+                ));
+            }
+            Err(Error::InvalidArguments(format!(
+                "the uses of `{name}` in {label} at {} read more than one of its values ({}), \
+                 so none is picked",
+                at.spelled,
+                read.join(" and ")
+            )))
+        }
     }
 }
 
@@ -2400,10 +2433,11 @@ impl UseSite {
 /// Each instruction of `body` that reads the value local `name` holds
 /// there, with that value. The value held is the one the last binding
 /// before the instruction binds: in its block, or else the last in the
-/// nearest block dominating it that has one. A `phi` merges values rather
-/// than reading one, so it is no use; nor is any read where `name` holds a
-/// constant or nothing traceable.
-fn local_uses(body: &FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, ValueId)> {
+/// nearest block dominating it that has one. A constant held counts when
+/// the instruction reads that constant, though it is never traced. A `phi`
+/// merges values rather than reading one, so it is no use; nor is any read
+/// where `name` holds nothing an operand can be matched to.
+fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, &'a Operand)> {
     let mut position = vec![0; body.values.len()];
     for block in &body.blocks {
         for (index, &id) in block.instrs.iter().enumerate() {
@@ -2437,10 +2471,9 @@ fn local_uses(body: &FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, Value
             }
             binding = bindings[block].last();
         }
-        match binding? {
-            (_, Operand::Value(value)) => Some(*value),
-            _ => None,
-        }
+        binding
+            .map(|&(_, held)| held)
+            .filter(|held| !matches!(held, Operand::Other))
     };
     body.values
         .iter()
@@ -2448,21 +2481,20 @@ fn local_uses(body: &FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, Value
         .filter(|(_, node)| !matches!(node.opcode, OpcodeIr::Param | OpcodeIr::Phi))
         .filter_map(|(id, node)| {
             let id = id as ValueId;
-            let value = held(id)?;
-            let read = Operand::Value(value);
+            let held = held(id)?;
             // A call reads its arguments and its callee, the last operand,
             // but not its bundle operands.
             let reads = match &node.call {
-                Some(call) => call.args.contains(&read) || node.operands.last() == Some(&read),
-                None => node.operands.contains(&read),
+                Some(call) => call.args.contains(held) || node.operands.last() == Some(held),
+                None => node.operands.contains(held),
             };
-            reads.then_some((id, value))
+            reads.then_some((id, held))
         })
         .collect()
 }
 
 /// The `file:line` of each of `uses`, once each, in order.
-fn use_lines(body: &FunctionIr, uses: &[(ValueId, ValueId)]) -> Vec<String> {
+fn use_lines<T>(body: &FunctionIr, uses: &[(ValueId, T)]) -> Vec<String> {
     let lines: BTreeSet<(String, u32)> = uses
         .iter()
         .filter_map(|&(instr, _)| body.values[instr as usize].location.as_ref())
@@ -2777,6 +2809,26 @@ void g(unsigned a, unsigned b) {
 }
 ";
 
+    /// Line 5 reads `cur` while it holds `a`, then again once it holds the
+    /// constant 1000: two values on one line, though only one is traced.
+    const CONSTANT_REBINDING_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a) {
+  unsigned cur = a;
+  if (cur > 64) return;
+  sink(cur); cur = 1000; sink(cur);
+}
+";
+
+    /// Line 4 reads `cur` only while it holds the constant 7.
+    const CONSTANT_READ_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a) {
+  unsigned cur = 7;
+  sink(cur);
+  cur = a;
+  sink(cur);
+}
+";
+
     /// `cur` is rebound on one arm only, so line 5 reads the `phi` that
     /// joins the two values.
     const JOINED_LOCAL_SOURCE: &str = "extern void sink(unsigned);
@@ -3071,6 +3123,44 @@ void f(unsigned a, unsigned b) {
             error.contains("`cur`") && error.contains("more than one of its values"),
             "{error}"
         );
+    }
+
+    /// The constant read counts toward the line's values: the traceable
+    /// one is not picked over it.
+    #[test]
+    fn a_line_reading_a_value_and_a_constant_of_the_local_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, CONSTANT_REBINDING_SOURCE, &["-O0", "-g"], "g");
+        let error = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &local("g", "cur"),
+            Some(&line_of(&scratch, 5)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("more than one of its values") && error.contains("1000"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_line_reading_only_a_constant_of_the_local_is_refused_naming_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, CONSTANT_READ_SOURCE, &["-O0", "-g"], "g");
+        let cur = local("g", "cur");
+        let error = resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 4)))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("only the constant 7") && error.contains("not a value to trace"),
+            "{error}"
+        );
+        // The line reading the parameter still resolves to it.
+        let resolved =
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 6))).unwrap();
+        assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[0]);
     }
 
     #[test]
