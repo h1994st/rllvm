@@ -2449,10 +2449,14 @@ fn local_uses(body: &FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, Value
         .filter_map(|(id, node)| {
             let id = id as ValueId;
             let value = held(id)?;
-            let operands = node.call.as_ref().map_or(&node.operands, |call| &call.args);
-            operands
-                .contains(&Operand::Value(value))
-                .then_some((id, value))
+            let read = Operand::Value(value);
+            // A call reads its arguments and its callee, the last operand,
+            // but not its bundle operands.
+            let reads = match &node.call {
+                Some(call) => call.args.contains(&read) || node.operands.last() == Some(&read),
+                None => node.operands.contains(&read),
+            };
+            reads.then_some((id, value))
         })
         .collect()
 }
@@ -2744,6 +2748,16 @@ void g(unsigned a, unsigned b) {
 }
 ";
 
+    /// `cur` holds `a` when line 3 calls through it and `b` when line 5
+    /// does: each call reads the local as its callee, not as an argument.
+    const CALLED_LOCAL_SOURCE: &str = "void g(void (*a)(void), void (*b)(void)) {
+  void (*cur)(void) = a;
+  cur();
+  cur = b;
+  cur();
+}
+";
+
     /// Line 6 reads `keep`, which holds `cur`'s first value, beside `cur`,
     /// which by then holds its second.
     const KEPT_VALUE_SOURCE: &str = "extern void sink(unsigned, unsigned);
@@ -2965,6 +2979,20 @@ void f(unsigned a, unsigned b) {
         assert_eq!(node(&ir, &first, "g").0, g.params[0]);
         let second =
             resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 8))).unwrap();
+        assert_eq!(node(&ir, &second, "g").0, g.params[1]);
+    }
+
+    #[test]
+    fn a_local_called_through_resolves_to_the_value_it_holds_at_each_call() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, CALLED_LOCAL_SOURCE, &["-O0", "-g"], "g");
+        let g = defined(&ir, "g");
+        let cur = local("g", "cur");
+        let first =
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 3))).unwrap();
+        assert_eq!(node(&ir, &first, "g").0, g.params[0]);
+        let second =
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 5))).unwrap();
         assert_eq!(node(&ir, &second, "g").0, g.params[1]);
     }
 

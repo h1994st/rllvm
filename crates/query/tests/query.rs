@@ -2949,6 +2949,38 @@ mod mcp {
         assert_eq!(cli["query"]["at"], at.as_str(), "{cli}");
     }
 
+    /// A local called through is used at each call: both surfaces read the
+    /// value it holds there, each parameter crossing in from the caller.
+    #[test]
+    fn a_local_called_through_answers_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "c.c",
+            "void g(void (*a)(void), void (*b)(void)) {\n  void (*cur)(void) = a;\n  cur();\n  cur = b;\n  cur();\n}\nextern void x(void);\nextern void y(void);\nvoid h(void) { g(x, y); }\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let line = |n: u32| format!("{}:{n}", scratch.path().join("c.c").display());
+        let cli = |at: &str| {
+            query_json(
+                &scratch,
+                &catalog,
+                &["guards", "--function", "g", "--local", "cur", "--at", at],
+            )
+        };
+        let (first, second) = (cli(&line(3)), cli(&line(5)));
+        assert_ne!(
+            first["results"]["crossings"], second["results"]["crossings"],
+            "{first}\n{second}"
+        );
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "g", "local": "cur", "at": line(5) }),
+        );
+        assert_eq!(second["results"], mcp["results"]);
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();
