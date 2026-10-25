@@ -3035,6 +3035,51 @@ mod mcp {
         }
     }
 
+    /// A shadowed local's name matches two variables: both surfaces refuse
+    /// it alike, under one prefix, naming where each is declared.
+    #[test]
+    fn a_shadowed_local_is_refused_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "s.c",
+            "extern void sink(unsigned);\nextern void sink2(unsigned, unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned x = a;\n  { unsigned x = b; sink(x); }\n  sink2(x, b);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:6", scratch.path().join("s.c").display());
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["guards", "--function", "g", "--local", "x", "--at", &at])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("`x` names 2 variables in g")
+                && stderr.matches("Invalid arguments").count() == 1,
+            "{stderr}"
+        );
+
+        let response = mcp_exchange_in(
+            &scratch,
+            &catalog,
+            &modern_request(
+                "call",
+                "tools/call",
+                serde_json::json!({
+                    "name": "guards",
+                    "arguments": { "function": "g", "local": "x", "at": at },
+                }),
+            ),
+        );
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        let message = stderr.trim().trim_start_matches("error: ");
+        assert!(text.contains(message), "{text}\n{stderr}");
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();

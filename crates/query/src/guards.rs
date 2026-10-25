@@ -16,8 +16,8 @@ use rllvm_core::{config::LlvmBindir, error::Error};
 use crate::bind::collapse_odr_duplicates;
 use crate::extract::read_module_ir;
 use crate::ir::{
-    BinaryOp, CallIr, CastOp, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand, ValueId,
-    ValueNode, int_predicate,
+    BinaryOp, CallIr, CastOp, DbgValue, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand,
+    ValueId, ValueNode, int_predicate,
 };
 use crate::overlay::{bare, function_label, site_label};
 use crate::slice::{EmittedModule, check_opt_llvm, emit_module, promote, promote_anchor_module};
@@ -547,9 +547,13 @@ pub fn guards_at_use(
         } => {
             let body = &ir.functions[index];
             let uses = match anchor {
-                GuardAnchor::Local { name, .. } => {
-                    use_lines(body, &local_uses(body, &dominators(body), name))
-                }
+                GuardAnchor::Local { name, .. } => body
+                    .dbg_values
+                    .iter()
+                    .find(|binding| binding.name == *name)
+                    .map_or_else(Vec::new, |binding| {
+                        use_lines(body, &local_uses(body, &dominators(body), binding.variable))
+                    }),
                 GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => Vec::new(),
             };
             lost.push(format!(
@@ -2247,7 +2251,9 @@ fn promoted_peers<'a>(
 /// `ir.functions[function]` and the catalog's `id`. Bindings to one value are one value however
 /// often they recur; bindings to several are reported, never chosen
 /// between, unless `at` names a use: then the one value the local holds at
-/// that use, refused when the line reads none or several.
+/// that use, refused when the line reads none or several. A name several
+/// variables share, a shadowed one or one reused in sibling scopes, is
+/// refused before any of that: their bindings are never merged.
 fn resolve_local(
     body: &FunctionIr,
     id: &FunctionId,
@@ -2256,6 +2262,7 @@ fn resolve_local(
     at: Option<&UseSite>,
 ) -> Result<Resolved, Error> {
     let mut bound: Vec<&Operand> = Vec::new();
+    let mut variables: Vec<&DbgValue> = Vec::new();
     for binding in body
         .dbg_values
         .iter()
@@ -2264,8 +2271,32 @@ fn resolve_local(
         if !bound.contains(&&binding.value) {
             bound.push(&binding.value);
         }
+        if !variables
+            .iter()
+            .any(|known| known.variable == binding.variable)
+        {
+            variables.push(binding);
+        }
     }
     let label = function_label(id);
+    if variables.len() > 1 {
+        let declared: Vec<String> = variables
+            .iter()
+            .map(
+                |variable| match (variable.declared_file.as_str(), variable.declared_line) {
+                    ("", _) | (_, 0) => "an unrecorded line".to_string(),
+                    (file, line) => format!("{file}:{line}"),
+                },
+            )
+            .collect();
+        let (others, last) = declared.split_at(declared.len() - 1);
+        return Err(Error::InvalidArguments(format!(
+            "`{name}` names {} variables in {label} (declared at {} and {})",
+            variables.len(),
+            others.join(", "),
+            last[0]
+        )));
+    }
     if bound.is_empty() {
         return Err(Error::InvalidArguments(format!(
             "no debug binding of local `{name}` in {label}; resolving a local needs a module \
@@ -2302,7 +2333,9 @@ fn resolve_local(
                 )
             }))
         }
-        (_, _, Some(at)) => resolve_local_at(body, &label, function, name, at),
+        (_, _, Some(at)) => {
+            resolve_local_at(body, &label, function, name, variables[0].variable, at)
+        }
         (1, &[value], None) => Ok(Resolved::One {
             function,
             value,
@@ -2313,16 +2346,17 @@ fn resolve_local(
 }
 
 /// The one value local `name` of `body`, the function `label` names, holds
-/// at the uses on `at`.
+/// at the uses on `at`. `variable` is the one variable the name matches.
 fn resolve_local_at(
     body: &FunctionIr,
     label: &str,
     function: usize,
     name: &str,
+    variable: u32,
     at: &UseSite,
 ) -> Result<Resolved, Error> {
     let doms = dominators(body);
-    let uses = local_uses(body, &doms, name);
+    let uses = local_uses(body, &doms, variable);
     let here: Vec<(ValueId, &Operand)> = uses
         .iter()
         .copied()
@@ -2344,7 +2378,7 @@ fn resolve_local_at(
     // A binding no operand identifies a read of counts too, when it reaches
     // any instruction on the line beside another binding: it may be what one
     // of the line's reads reads.
-    let held = held_bindings(body, &doms, name);
+    let held = held_bindings(body, &doms, variable);
     let mut reaching: Vec<&Operand> = Vec::new();
     for (id, node) in body.values.iter().enumerate() {
         if !matches!(node.opcode, OpcodeIr::Param | OpcodeIr::Phi)
@@ -2485,25 +2519,25 @@ impl UseSite {
     }
 }
 
-/// What local `name` holds at each value of `body`, by `ValueId`: the
+/// What the local `variable` holds at each value of `body`, by `ValueId`: the
 /// operand the last binding before it binds, in its block, or else the last
 /// in the nearest block dominating it that has one. A binding made at an
 /// instruction takes effect from that instruction on. `None` where no
 /// binding reaches; an untraceable binding is kept as `Operand::Other`.
-fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<Option<&'a Operand>> {
+fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, variable: u32) -> Vec<Option<&'a Operand>> {
     let mut position = vec![0; body.values.len()];
     for block in &body.blocks {
         for (index, &id) in block.instrs.iter().enumerate() {
             position[id as usize] = index;
         }
     }
-    // Each block's bindings of `name` in order, by the position each takes
-    // effect before.
+    // Each block's bindings of `variable` in order, by the position each
+    // takes effect before.
     let mut bindings: Vec<Vec<(usize, &Operand)>> = vec![Vec::new(); body.blocks.len()];
     for binding in body
         .dbg_values
         .iter()
-        .filter(|binding| binding.name == name)
+        .filter(|binding| binding.variable == variable)
     {
         if let Some(node) = body.values.get(binding.at as usize)
             && let Some(block) = bindings.get_mut(node.block)
@@ -2529,13 +2563,13 @@ fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<Optio
     (0..body.values.len()).map(held).collect()
 }
 
-/// Each instruction of `body` that reads the value local `name` holds
+/// Each instruction of `body` that reads the value the local `variable` holds
 /// there, with that value, as [`held_bindings`] finds it. A constant held
 /// counts when the instruction reads that constant, though it is never
 /// traced. A `phi` merges values rather than reading one, so it is no use;
 /// nor is any read where `name` holds nothing an operand can be matched to.
-fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, name: &str) -> Vec<(ValueId, &'a Operand)> {
-    let held = held_bindings(body, doms, name);
+fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, variable: u32) -> Vec<(ValueId, &'a Operand)> {
+    let held = held_bindings(body, doms, variable);
     body.values
         .iter()
         .enumerate()
@@ -2898,6 +2932,25 @@ void g(int *a) {
 }
 ";
 
+    /// Two variables named `x`: the outer one holds `a` throughout, the
+    /// inner one `b` inside its block. Line 6 reads the outer one.
+    const SHADOWED_LOCAL_SOURCE: &str = "extern void sink(unsigned);
+extern void sink2(unsigned, unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned x = a;
+  { unsigned x = b; sink(x); }
+  sink2(x, b);
+}
+";
+
+    /// Two variables named `x`, each in its own block.
+    const SIBLING_LOCALS_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  { unsigned x = a; sink(x); }
+  { unsigned x = b; sink(x); }
+}
+";
+
     /// Line 4 reads `cur` only while it holds the constant 7.
     const CONSTANT_READ_SOURCE: &str = "extern void sink(unsigned);
 void g(unsigned a) {
@@ -3247,6 +3300,66 @@ void f(unsigned a, unsigned b) {
                     && error.contains("a value it cannot trace"),
                 "{source}: {error}"
             );
+        }
+    }
+
+    /// Every record of one variable carries one identity, however often
+    /// it is rebound; two variables sharing a name carry two, each with its
+    /// own declaration line.
+    #[test]
+    fn debug_bindings_are_grouped_by_variable_not_name() {
+        let identities = |source: &str, name: &str| {
+            let scratch = tempfile::tempdir().unwrap();
+            let (_, ir) = promoted(&scratch, source, &["-O0", "-g"], "g");
+            let mut seen: Vec<(u32, u32)> = Vec::new();
+            let mut records = 0;
+            for binding in &defined(&ir, "g").dbg_values {
+                if binding.name == name {
+                    records += 1;
+                    if !seen
+                        .iter()
+                        .any(|(variable, _)| *variable == binding.variable)
+                    {
+                        seen.push((binding.variable, binding.declared_line));
+                    }
+                }
+            }
+            (
+                records,
+                seen.iter().map(|&(_, line)| line).collect::<Vec<_>>(),
+            )
+        };
+        let (records, lines) = identities(REUSED_LOCAL_SOURCE, "cur");
+        assert!(records > 1, "{records}");
+        assert_eq!(lines, [3]);
+        let (_, lines) = identities(SHADOWED_LOCAL_SOURCE, "x");
+        assert_eq!(lines, [4, 5]);
+    }
+
+    /// A name two variables share is refused, with or without a use-site,
+    /// naming where each is declared: a binding of one is never taken for
+    /// the other.
+    #[test]
+    fn a_name_several_variables_share_is_refused_naming_their_declarations() {
+        for (source, line, declared) in [
+            (SHADOWED_LOCAL_SOURCE, 6, (4, 5)),
+            (SIBLING_LOCALS_SOURCE, 4, (3, 4)),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let (session, ir) = promoted(&scratch, source, &["-O0", "-g"], "g");
+            let x = local("g", "x");
+            for at in [None, Some(line_of(&scratch, line))] {
+                let error = resolve_anchor_at_use(&ir, &session, &x, at.as_deref())
+                    .unwrap_err()
+                    .to_string();
+                let (first, second) = declared;
+                assert!(
+                    error.contains("`x` names 2 variables in g")
+                        && error.contains(&format!("t.c:{first} and "))
+                        && error.contains(&format!("t.c:{second})")),
+                    "{at:?}: {error}"
+                );
+            }
         }
     }
 

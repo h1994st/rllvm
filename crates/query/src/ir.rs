@@ -254,6 +254,15 @@ pub(crate) fn int_predicate(spelling: &str) -> Option<&'static IntPredicate> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DbgValue {
     pub(crate) name: String,
+    /// Which variable it binds: the module's reader numbers each
+    /// `DILocalVariable` it meets, so every record of one variable carries
+    /// one number and two variables sharing a name carry two. A grouping key
+    /// for this read only, never written out.
+    pub(crate) variable: u32,
+    /// The file the variable is declared in, as the debug info spells it,
+    /// and its line there: 0 when the debug info records none.
+    pub(crate) declared_file: String,
+    pub(crate) declared_line: u32,
     /// What the variable holds from `at` on. [`Operand::Other`] when the
     /// record does not bind it to a value directly: it lives in memory
     /// (`#dbg_declare`), is computed from its operands (a non-empty

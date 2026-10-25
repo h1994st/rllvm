@@ -24,8 +24,8 @@ use llvm_sys::{
         LLVMDIGlobalVariableExpressionGetVariable, LLVMDILocationGetColumn,
         LLVMDILocationGetInlinedAt, LLVMDILocationGetLine, LLVMDILocationGetScope,
         LLVMDIScopeGetFile, LLVMDITypeGetFlags, LLVMDITypeGetName, LLVMDITypeGetOffsetInBits,
-        LLVMDITypeGetSizeInBits, LLVMGetDINodeTag, LLVMGetMetadataKind, LLVMGetSubprogram,
-        LLVMInstructionGetDebugLoc, LLVMMetadataKind,
+        LLVMDITypeGetSizeInBits, LLVMDIVariableGetFile, LLVMDIVariableGetLine, LLVMGetDINodeTag,
+        LLVMGetMetadataKind, LLVMGetSubprogram, LLVMInstructionGetDebugLoc, LLVMMetadataKind,
     },
     error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage},
     prelude::*,
@@ -2520,13 +2520,15 @@ unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
     let parsed = unsafe { parse_bitcode(bytes) }
         .map_err(|diagnostics| unreadable("bitcode", &diagnostics))?;
     let mut functions = Vec::new();
+    // Each `DILocalVariable` met, numbered in the order met.
+    let mut variables = HashMap::new();
     // SAFETY: `parsed.module` is a module in its live context.
     let mut function = unsafe { LLVMGetFirstFunction(parsed.module.0) };
     while !function.is_null() {
         // SAFETY: `function` is a live function in that module, and only a
         // definition is read as one.
         if unsafe { LLVMIsDeclaration(function) } == 0 {
-            functions.push(unsafe { read_function_ir(parsed.context.0, function) });
+            functions.push(unsafe { read_function_ir(parsed.context.0, function, &mut variables) });
         }
         // SAFETY: as above.
         function = unsafe { LLVMGetNextFunction(function) };
@@ -2537,9 +2539,16 @@ unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
     })
 }
 
+/// `variables` numbers each `DILocalVariable` the module's functions bind,
+/// shared across them so one variable keeps one number.
+///
 /// # Safety
 /// `function` must be a live function definition in `context`.
-unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> FunctionIr {
+unsafe fn read_function_ir(
+    context: LLVMContextRef,
+    function: LLVMValueRef,
+    variables: &mut HashMap<LLVMMetadataRef, u32>,
+) -> FunctionIr {
     // Every parameter and instruction is numbered before any is read, so an
     // operand defined further on -- a loop's `phi` -- still resolves.
     let mut handles = Vec::new();
@@ -2603,7 +2612,7 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
             }
             block_irs[block].instrs.push(id);
             values.push(read_instruction(handle, block, &ids, &block_ids, layout));
-            read_bindings(context, handle, id, &ids, &mut dbg_values);
+            read_bindings(context, handle, id, &ids, variables, &mut dbg_values);
         }
 
         FunctionIr {
@@ -2992,7 +3001,9 @@ unsafe fn select_clamp(select: LLVMValueRef) -> Option<GuardOpRaw> {
 
 /// Every variable binding recorded before `instruction`, appended to `out`.
 /// LLVM 19 and later attach these as debug records rather than calls to
-/// `llvm.dbg.value`.
+/// `llvm.dbg.value`. Each binding's variable is told apart by its metadata
+/// node's identity, numbered in `variables`: two variables that share a
+/// name are never merged under it.
 ///
 /// # Safety
 /// `instruction` must be a live instruction in `context`, of the function
@@ -3002,19 +3013,30 @@ unsafe fn read_bindings(
     instruction: LLVMValueRef,
     at: ValueId,
     ids: &HashMap<LLVMValueRef, ValueId>,
+    variables: &mut HashMap<LLVMMetadataRef, u32>,
     out: &mut Vec<DbgValue>,
 ) {
     // SAFETY: the caller guarantees a live instruction; each record is read
     // only while it is live, and the variable accessors only for a record
-    // that is not a label.
+    // that is not a label, on a variable `variable_name` has checked is a
+    // live `DILocalVariable`.
     unsafe {
         let mut record = LLVMGetFirstDbgRecord(instruction);
         while !record.is_null() {
             let kind = LLVMDbgRecordGetKind(record);
-            let name = (kind != LLVMDbgRecordKind::LLVMDbgRecordLabel)
-                .then(|| variable_name(context, LLVMDbgVariableRecordGetVariable(record)))
-                .flatten();
-            if let Some(name) = name {
+            let variable = (kind != LLVMDbgRecordKind::LLVMDbgRecordLabel)
+                .then(|| LLVMDbgVariableRecordGetVariable(record));
+            let name = variable.and_then(|variable| variable_name(context, variable));
+            if let (Some(name), Some(variable)) = (name, variable) {
+                let next = variables.len() as u32;
+                let id = *variables.entry(variable).or_insert(next);
+                let file = LLVMDIVariableGetFile(variable);
+                let declared_file = if file.is_null() {
+                    String::new()
+                } else {
+                    let mut length = 0;
+                    owned(LLVMDIFileGetFilename(file, &mut length), length as usize)
+                };
                 let direct = kind != LLVMDbgRecordKind::LLVMDbgRecordDeclare
                     && is_empty_expression(context, LLVMDbgVariableRecordGetExpression(record));
                 let value = if direct {
@@ -3022,7 +3044,14 @@ unsafe fn read_bindings(
                 } else {
                     Operand::Other
                 };
-                out.push(DbgValue { name, value, at });
+                out.push(DbgValue {
+                    name,
+                    variable: id,
+                    declared_file,
+                    declared_line: LLVMDIVariableGetLine(variable),
+                    value,
+                    at,
+                });
             }
             record = LLVMGetNextDbgRecord(record);
         }
