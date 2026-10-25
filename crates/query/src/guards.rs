@@ -272,9 +272,10 @@ pub struct GuardSite {
     /// `dominates` says the guard runs before the use on every path, not
     /// which way its branch goes to reach it.
     pub relation: GuardRelation,
-    /// 0 when the guard constrains the anchored value itself, or a widening
-    /// of it (`zext`, `sext`), whose bound holds when the guard's signedness
-    /// matches the cast's. Otherwise how many steps up the chain the
+    /// 0 when the guard constrains the anchored value itself, a widening of
+    /// it (`zext`, `sext`), whose bound holds when the guard's signedness
+    /// matches the cast's, or the value a store wrote that it was loaded
+    /// back from. Otherwise how many steps up the chain the
     /// anchored value is computed from lies the value it constrains, a
     /// truncation counting as a step; such a guard is not by itself a bound
     /// on the anchored value: anchored at `n = (len & 0xff) + 1000`, the
@@ -403,6 +404,16 @@ const CAVEAT_SEPARATOR: &str = "; ";
 /// Why a guard site is not verified, in the order its caveat names them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Unverified {
+    /// A call runs between a store and the load that reads it back.
+    CallBetween,
+    /// Another store runs between them.
+    StoreBetween,
+    /// Some other operation that may write memory runs between them.
+    OperationBetween,
+    /// More than one store to the address runs before the load.
+    SeveralStores,
+    /// The one store runs in another block than the load.
+    OtherBlock,
     /// The anchored value is no constant affine function of the bounded one.
     NotAffine,
     /// The guard runs on the anchored value and bounds its own result, which
@@ -419,6 +430,15 @@ enum Unverified {
 impl Unverified {
     fn reason(self) -> &'static str {
         match self {
+            Unverified::CallBetween => "a call between the store and the load may change the field",
+            Unverified::StoreBetween => {
+                "another store between the store and the load may change the field"
+            }
+            Unverified::OperationBetween => {
+                "an operation between the store and the load may change the field"
+            }
+            Unverified::SeveralStores => "more than one store to this field reaches the load",
+            Unverified::OtherBlock => "the store and the load are in different blocks",
             Unverified::NotAffine => "the relation to the anchored value is not affine",
             Unverified::Downstream => "the guard bounds a value computed from the anchored one",
             Unverified::Wraps => {
@@ -429,17 +449,20 @@ impl Unverified {
     }
 }
 
+/// Every cause in `causes`, in order.
+fn reasons(causes: &BTreeSet<Unverified>) -> String {
+    causes
+        .iter()
+        .map(|cause| cause.reason())
+        .collect::<Vec<_>>()
+        .join(CAVEAT_SEPARATOR)
+}
+
 /// Marks `site` verified exactly when nothing in `causes` keeps it from
 /// being, and otherwise names every cause, in order, in its caveat.
 fn mark(site: &mut GuardSite, causes: &BTreeSet<Unverified>) {
     site.verified = causes.is_empty();
-    site.caveat = (!causes.is_empty()).then(|| {
-        causes
-            .iter()
-            .map(|cause| cause.reason())
-            .collect::<Vec<_>>()
-            .join(CAVEAT_SEPARATOR)
-    });
+    site.caveat = (!causes.is_empty()).then(|| reasons(causes));
 }
 
 /// The guards on the value `anchor` names, read from its function's own
@@ -709,6 +732,10 @@ struct Walk {
     steps: Vec<(ValueId, ValueId)>,
     crossings: Vec<Crossing>,
     lost: Vec<String>,
+    /// Each value a load may not read back from its store, by the value
+    /// stored, with why: every guard on it, or on what it is computed from,
+    /// is a candidate.
+    unproven: BTreeMap<ValueId, BTreeSet<Unverified>>,
 }
 
 impl Walk {
@@ -955,6 +982,36 @@ fn compose(outer: Affine, inner: Affine) -> Option<Affine> {
     })
 }
 
+/// Why each value of `walk`'s chain may not be what the anchored value is
+/// computed from: the causes of every unproven load link on a path to it,
+/// read along the steps `followed` holds.
+fn unproven_upstream(
+    walk: &Walk,
+    followed: &HashMap<ValueId, Vec<ValueId>>,
+) -> HashMap<ValueId, BTreeSet<Unverified>> {
+    let mut unproven: HashMap<ValueId, BTreeSet<Unverified>> = HashMap::new();
+    for (stored, causes) in &walk.unproven {
+        let mut pending = vec![*stored];
+        let mut seen = HashSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            unproven.entry(id).or_default().extend(causes);
+            pending.extend(followed.get(&id).into_iter().flatten());
+        }
+    }
+    unproven
+}
+
+/// The stores a load reads back, which [`Trace::link`] finds.
+struct Link {
+    /// The values they write.
+    stored: Vec<Operand>,
+    /// Why the load may not read what they wrote; empty when it must.
+    causes: BTreeSet<Unverified>,
+}
+
 /// How a value of the chain is computed from the operands the walk followed
 /// from it.
 enum Step {
@@ -1078,11 +1135,35 @@ impl Trace<'_> {
                     }
                     follow(&node.operands);
                 }
-                OpcodeIr::Load => walk.lost.push(format!(
-                    "the value is loaded from memory{}, and what was stored there is not traced",
-                    place(node)
-                )),
-                OpcodeIr::Other => walk.lost.push(format!(
+                OpcodeIr::Load => match self.link(id) {
+                    Some(link) => {
+                        follow(&link.stored);
+                        if !link.causes.is_empty() {
+                            // The guards found through it are leads, and
+                            // what else the field may hold is not traced.
+                            walk.lost.push(format!(
+                                "the value is loaded from memory{}, and the field may hold \
+                                 something other than what the store wrote ({})",
+                                place(node),
+                                reasons(&link.causes)
+                            ));
+                            for stored in &link.stored {
+                                if let Operand::Value(stored) = stored {
+                                    walk.unproven
+                                        .entry(*stored)
+                                        .or_default()
+                                        .extend(&link.causes);
+                                }
+                            }
+                        }
+                    }
+                    None => walk.lost.push(format!(
+                        "the value is loaded from memory{}, and what was stored there is not \
+                         traced",
+                        place(node)
+                    )),
+                },
+                OpcodeIr::Gep | OpcodeIr::Other => walk.lost.push(format!(
                     "the value comes from an instruction the trace does not read through{}",
                     place(node)
                 )),
@@ -1175,6 +1256,7 @@ impl Trace<'_> {
             sites.insert(id, site);
         }
         let followed = walk.followed();
+        let unproven = unproven_upstream(walk, &followed);
         let mut relations: HashMap<ValueId, Relation> = HashMap::new();
         for (id, site) in &mut sites {
             if downstream_guards.contains(id) {
@@ -1192,7 +1274,11 @@ impl Trace<'_> {
                 None => Relation::NotAffine,
             };
             site.affine = relation.affine(site);
-            let mut causes = BTreeSet::new();
+            let mut causes = bounds
+                .get(id)
+                .and_then(|bounded| unproven.get(bounded))
+                .cloned()
+                .unwrap_or_default();
             if site.affine.is_none() {
                 causes.insert(Unverified::NotAffine);
             } else {
@@ -1265,6 +1351,10 @@ impl Trace<'_> {
         let node = self.node(id);
         match node.opcode {
             OpcodeIr::Phi => Step::Choice(node.operands.clone()),
+            // The load reads back what the store wrote.
+            OpcodeIr::Load => self
+                .link(id)
+                .map_or(Step::Opaque, |link| Step::Choice(link.stored)),
             OpcodeIr::Select => Step::Choice(node.operands.get(1..).unwrap_or_default().to_vec()),
             OpcodeIr::Cast { op } if WIDENING_CASTS.contains(&op) => match node.operands.first() {
                 Some(Operand::Value(operand)) => Step::Widen {
@@ -1407,7 +1497,8 @@ impl Trace<'_> {
 
     /// How many steps back from `value` each value of `walk`'s chain lies:
     /// the fewest operands followed to reach it. A widening keeps the value,
-    /// so stepping through one is no step; a truncation is one.
+    /// so stepping through one is no step, nor is a load back to what was
+    /// stored; a truncation is one.
     fn depths(&self, walk: &Walk, value: ValueId) -> HashMap<ValueId, u32> {
         let operands = walk.followed();
         let mut depths = HashMap::new();
@@ -1418,7 +1509,8 @@ impl Trace<'_> {
             }
             depths.insert(id, depth);
             let widens = matches!(self.node(id).opcode,
-                OpcodeIr::Cast { op } if WIDENING_CASTS.contains(&op));
+                OpcodeIr::Cast { op } if WIDENING_CASTS.contains(&op))
+                || self.node(id).opcode == OpcodeIr::Load;
             for &operand in operands.get(&id).into_iter().flatten() {
                 if widens {
                     pending.push_front((operand, depth));
@@ -1449,6 +1541,135 @@ impl Trace<'_> {
             }
         }
         values
+    }
+
+    /// The stores the load `id` reads back: the non-volatile stores of its
+    /// type to its address, syntactically, that run before it. `None` when
+    /// there is none, or the load is volatile or atomic, or its type is not
+    /// known: what it reads is then not traced. The load is proven to read
+    /// what the store wrote only when there is one, in its block, with only
+    /// operations that write no memory between them; otherwise `causes`
+    /// says why it may not.
+    fn link(&self, id: ValueId) -> Option<Link> {
+        let load = self.node(id);
+        if load.opcode != OpcodeIr::Load || load.volatile {
+            return None;
+        }
+        let (ty, address) = (load.ty?, load.operands.first()?);
+        // A store's operands are the value it writes, then the address.
+        let stores: Vec<ValueId> = (0..self.body.values.len() as ValueId)
+            .filter(|&store| {
+                let node = self.node(store);
+                node.opcode == OpcodeIr::Store
+                    && !node.volatile
+                    && node.ty == Some(ty)
+                    && node
+                        .operands
+                        .get(1)
+                        .is_some_and(|stored_to| self.same_address(stored_to, address))
+                    && self.runs_before(store, id)
+            })
+            .collect();
+        let causes = match stores[..] {
+            [] => return None,
+            [store] => self.clobbers(store, id),
+            _ => {
+                let mut causes = self.clobbers_in_block(id, &stores);
+                causes.insert(Unverified::SeveralStores);
+                causes
+            }
+        };
+        Some(Link {
+            stored: stores
+                .iter()
+                .filter_map(|&store| self.node(store).operands.first().cloned())
+                .collect(),
+            causes,
+        })
+    }
+
+    /// What may change memory between `store` and `load`, which it runs
+    /// before: anything but the operations that write none, or the blocks
+    /// themselves when they differ.
+    fn clobbers(&self, store: ValueId, load: ValueId) -> BTreeSet<Unverified> {
+        let block = self.node(store).block;
+        if block != self.node(load).block {
+            return BTreeSet::from([Unverified::OtherBlock]);
+        }
+        let instrs = &self.body.blocks[block].instrs;
+        let index = |id| instrs.iter().position(|&instr| instr == id);
+        let (Some(from), Some(to)) = (index(store), index(load)) else {
+            return BTreeSet::from([Unverified::OtherBlock]);
+        };
+        self.writers(&instrs[from + 1..to])
+    }
+
+    /// What may change memory in the load's own block before `load`: after
+    /// the last of `stores`, the stores it may read back, that runs there,
+    /// or from the block's start when none does.
+    fn clobbers_in_block(&self, load: ValueId, stores: &[ValueId]) -> BTreeSet<Unverified> {
+        let instrs = &self.body.blocks[self.node(load).block].instrs;
+        let to = instrs
+            .iter()
+            .position(|&instr| instr == load)
+            .unwrap_or(instrs.len());
+        let from = instrs[..to]
+            .iter()
+            .rposition(|instr| stores.contains(instr))
+            .map_or(0, |last| last + 1);
+        self.writers(&instrs[from..to])
+    }
+
+    /// Why each of `instrs` may write memory: anything but the operations
+    /// that write none.
+    fn writers(&self, instrs: &[ValueId]) -> BTreeSet<Unverified> {
+        instrs
+            .iter()
+            .filter_map(|&between| {
+                let node = self.node(between);
+                match node.opcode {
+                    OpcodeIr::BinOp { .. }
+                    | OpcodeIr::Cast { .. }
+                    | OpcodeIr::ICmp
+                    | OpcodeIr::Gep
+                    | OpcodeIr::Select
+                    | OpcodeIr::Phi => None,
+                    OpcodeIr::Load if !node.volatile => None,
+                    OpcodeIr::Call => Some(Unverified::CallBetween),
+                    OpcodeIr::Store => Some(Unverified::StoreBetween),
+                    _ => Some(Unverified::OperationBetween),
+                }
+            })
+            .collect()
+    }
+
+    /// Whether addresses `a` and `b` are syntactically one: the same value,
+    /// or two `getelementptr`s through one type over the same operands. A
+    /// GEP's operands are compared one level deep, by value identity and
+    /// constant; anything else -- a global, a cast, two loads -- is never
+    /// matched, which only keeps a store from being forwarded.
+    fn same_address(&self, a: &Operand, b: &Operand) -> bool {
+        let (Operand::Value(a), Operand::Value(b)) = (a, b) else {
+            return false;
+        };
+        if a == b {
+            return true;
+        }
+        let (a, b) = (self.node(*a), self.node(*b));
+        let identical = |x: &Operand, y: &Operand| match (x, y) {
+            (Operand::Value(x), Operand::Value(y)) => x == y,
+            (Operand::Const(x), Operand::Const(y)) => x == y,
+            _ => false,
+        };
+        a.opcode == OpcodeIr::Gep
+            && b.opcode == OpcodeIr::Gep
+            && a.element.is_some()
+            && a.element == b.element
+            && a.operands.len() == b.operands.len()
+            && a.operands
+                .iter()
+                .zip(&b.operands)
+                .all(|(x, y)| identical(x, y))
     }
 
     /// Whether instruction `a` runs before `b` on every path to `b`.
@@ -2119,7 +2340,7 @@ mod tests {
     use crate::{
         CallTarget, FunctionId,
         extract::read_module_ir,
-        ir::{BinaryOp, BlockIr, OpcodeIr, Operand, ValueNode},
+        ir::{BinaryOp, BlockIr, OpcodeIr, Operand, ScalarKind, TypeTag, ValueNode},
         slice::promote_anchor_module,
         testing::{compiled_session, module_session, stale_debug_info_module},
     };
@@ -3418,7 +3639,8 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         &result.guards[0]
     }
 
-    /// The guards of `function`'s value handed to `callee`, in [`AFFINE_IR`].
+    /// The guards of `function`'s value handed to `callee` first, in an IR
+    /// fixture such as [`AFFINE_IR`].
     fn affine_ir_guards(session: &Session, function: &str, callee: &str) -> GuardsResult {
         let site = &sites_calling(session, function, callee)[0];
         guards(session, &argument(site, 0), None).unwrap()
@@ -3928,5 +4150,476 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
             let error = parts.unwrap_err();
             assert!(error.contains(fragment), "{error}");
         }
+    }
+
+    /// Field addresses of `%s` and the loads of one: by two GEPs alike, by a
+    /// GEP into another field, by a GEP alike but through another type, and
+    /// a volatile, an atomic and a wider load.
+    const ADDRESSES_IR: &str = r#"
+%struct.S = type { i32, i32 }
+declare void @sink(i32)
+declare void @sink64(i64)
+
+define void @f(ptr %s, i32 %n) {
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  %b = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  %c = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  %d = getelementptr inbounds { i64, i64 }, ptr %s, i32 0, i32 1
+  %v = load i32, ptr %b, align 4
+  %w = load volatile i32, ptr %b, align 4
+  %x = load atomic i32, ptr %b seq_cst, align 4
+  %y = load i64, ptr %b, align 8
+  call void @sink(i32 %v)
+  call void @sink(i32 %w)
+  call void @sink(i32 %x)
+  call void @sink64(i64 %y)
+  ret void
+}
+"#;
+
+    /// The trace of `function` in `ir`, read from `session`'s module.
+    fn trace_of<'a>(session: &'a Session, ir: &'a ModuleIr, function: &'a FunctionId) -> Trace<'a> {
+        let body = defined(ir, &function.symbol);
+        Trace {
+            session,
+            body,
+            function,
+            scope: None,
+            doms: dominators(body),
+        }
+    }
+
+    /// The ids of `body`'s instructions, in order.
+    fn instructions(body: &FunctionIr) -> Vec<ValueId> {
+        body.blocks
+            .iter()
+            .flat_map(|block| block.instrs.clone())
+            .collect()
+    }
+
+    /// Two GEPs alike are one address; one into another field, or alike but
+    /// through another type, is not. A load records its type and whether it
+    /// is volatile or atomic; a store, the type of the value it writes.
+    #[test]
+    fn a_field_address_matches_only_the_same_field_of_the_same_type() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            ADDRESSES_IR,
+            &["-Wno-override-module"],
+        );
+        let function = FunctionId {
+            module_id: "m".into(),
+            symbol: "f".into(),
+        };
+        let bytes = promote_anchor_module(&session, &function).unwrap().bytes;
+        let ir = read_module_ir(&bytes).unwrap();
+        let trace = trace_of(&session, &ir, &function);
+        let ids = instructions(trace.body);
+        let [a, store, b, c, d, v, w, x, y] = ids[..9] else {
+            panic!("{ids:?}");
+        };
+        let value = Operand::Value;
+        assert!(trace.same_address(&value(a), &value(a)));
+        assert!(trace.same_address(&value(b), &value(a)));
+        assert!(!trace.same_address(&value(c), &value(a)));
+        assert!(!trace.same_address(&value(d), &value(a)));
+        assert!(!trace.same_address(&Operand::Other, &Operand::Other));
+
+        let int = |bits| {
+            Some(TypeTag {
+                kind: ScalarKind::Int,
+                bits,
+            })
+        };
+        let node = |id| trace.node(id);
+        assert_eq!(node(store).opcode, OpcodeIr::Store);
+        assert_eq!((node(store).ty, node(store).volatile), (int(32), false));
+        assert_eq!((node(v).ty, node(v).volatile), (int(32), false));
+        assert_eq!((node(w).ty, node(w).volatile), (int(32), true));
+        assert_eq!((node(x).ty, node(x).volatile), (int(32), true));
+        assert_eq!((node(y).ty, node(y).volatile), (int(64), false));
+        assert_eq!((node(a).ty, node(a).volatile), (None, false));
+    }
+
+    /// A clamp stored to `s->len`, reloaded and passed to `sink`: with
+    /// nothing or only non-writing operations between, through a volatile,
+    /// an atomic or a wider load, after a volatile store, and with a literal
+    /// stored instead.
+    const FIELD_IR: &str = r#"
+%struct.S = type { i32, i32 }
+declare void @sink(i32)
+declare void @sink64(i64)
+declare i32 @llvm.umin.i32(i32, i32)
+
+define void @proven(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %b = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  %v = load i32, ptr %b, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @allowed(ptr %s, i32 %n, i32 %k) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %t = add i32 %k, 1
+  %q = icmp ult i32 %t, 3
+  %r = select i1 %q, i32 %t, i32 0
+  %w = zext i32 %r to i64
+  %o = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  %p = load i32, ptr %o, align 4
+  %b = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  %v = load i32, ptr %b, align 4
+  call void @sink(i32 %v)
+  call void @sink64(i64 %w)
+  call void @sink(i32 %p)
+  ret void
+}
+
+define void @volatile_load(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %v = load volatile i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @atomic_load(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %v = load atomic i32, ptr %a acquire, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @volatile_store(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store volatile i32 %m, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @wider(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %v = load i64, ptr %a, align 8
+  call void @sink64(i64 %v)
+  ret void
+}
+
+define void @literal(ptr %s) {
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 7, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+"#;
+
+    /// A field reloaded right after one store, with only non-writing
+    /// operations between, is the stored value: the clamp on it is a
+    /// verified guard on the anchor. A volatile or atomic access, or a load
+    /// of another type, is never forwarded; a stored literal ends the trace
+    /// with no guard.
+    #[test]
+    fn a_clamp_stored_to_a_field_and_reloaded_is_a_verified_guard() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(scratch.path(), "t.ll", FIELD_IR, &["-Wno-override-module"]);
+        for function in ["proven", "allowed"] {
+            let r = affine_ir_guards(&session, function, "sink");
+            let site = only_guard(&r);
+            assert_eq!(
+                (site.op, site.predicate.as_deref(), site.bound.as_deref()),
+                (GuardKind::Clamp, Some("umin"), Some("16")),
+                "{function}: {r:?}"
+            );
+            assert!(site.verified, "{function}: {r:?}");
+            assert_eq!(site.caveat, None, "{function}: {r:?}");
+            assert_eq!(site.affine, Some(Affine::IDENTITY), "{function}: {r:?}");
+            assert_eq!(site.depth, 0, "{function}: {r:?}");
+            assert!(r.lost.is_none(), "{function}: {r:?}");
+        }
+        for (function, callee) in [
+            ("volatile_load", "sink"),
+            ("atomic_load", "sink"),
+            ("volatile_store", "sink"),
+            ("wider", "sink64"),
+        ] {
+            let r = affine_ir_guards(&session, function, callee);
+            assert!(r.guards.is_empty(), "{function}: {r:?}");
+            let lost = r.lost.as_deref().unwrap_or_default();
+            assert!(lost.contains("loaded from memory"), "{function}: {r:?}");
+        }
+        let r = affine_ir_guards(&session, "literal", "sink");
+        assert!(r.guards.is_empty(), "{r:?}");
+        assert!(r.lost.is_none(), "{r:?}");
+    }
+
+    /// The clamp of [`FIELD_IR`] stored to `s->len` and reloaded, with
+    /// something that may change the field between, or the store in an
+    /// earlier block; and a load with no store to its field at all.
+    const CLOBBERED_IR: &str = r#"
+%struct.S = type { i32, i32 }
+declare void @sink(i32)
+declare void @g(ptr)
+declare i32 @llvm.umin.i32(i32, i32)
+
+define void @called(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @stored(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %o = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  store i32 0, ptr %o, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @atomic(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %o = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  %old = atomicrmw add ptr %o, i32 1 seq_cst, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @exchanged(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %o = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  %pair = cmpxchg ptr %o, i32 0, i32 1 seq_cst seq_cst, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @volatile_between(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  %o = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  %x = load volatile i32, ptr %o, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @twice(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  store i32 %m, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @twice_differing(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  store i32 7, ptr %a, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @other_block(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  br label %next
+next:
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @several_then_called(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  br label %mid
+mid:
+  store i32 %m, ptr %a, align 4
+  br label %next
+next:
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @called_and_stored(ptr %s, i32 %n) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  call void @g(ptr %s)
+  %o = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 0
+  store i32 0, ptr %o, align 4
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @either(ptr %s, i32 %n, i1 %c) {
+  %m = call i32 @llvm.umin.i32(i32 %n, i32 16)
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %m, ptr %a, align 4
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  %x = select i1 %c, i32 %m, i32 %v
+  call void @sink(i32 %x)
+  ret void
+}
+
+define void @unclamped(ptr %s, i32 %n) {
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  store i32 %n, ptr %a, align 4
+  call void @g(ptr %s)
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+
+define void @unclamped_caller(ptr %s) {
+  call void @unclamped(ptr %s, i32 5)
+  ret void
+}
+
+define void @unstored(ptr %s) {
+  %a = getelementptr inbounds %struct.S, ptr %s, i32 0, i32 1
+  %v = load i32, ptr %a, align 4
+  call void @sink(i32 %v)
+  ret void
+}
+"#;
+
+    /// A store the load may not read back -- something between them may
+    /// change the field, more than one store reaches it, or it is in
+    /// another block -- still leads to the clamp, as a candidate saying
+    /// why. A field nothing stores to stays a lost trace.
+    #[test]
+    fn a_clamp_stored_to_a_field_that_may_change_is_a_candidate() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            CLOBBERED_IR,
+            &["-Wno-override-module"],
+        );
+        let call = "a call between the store and the load may change the field";
+        let store = "another store between the store and the load may change the field";
+        let operation = "an operation between the store and the load may change the field";
+        let several = "more than one store to this field reaches the load";
+        let other_block = "the store and the load are in different blocks";
+        let not_affine = "the relation to the anchored value is not affine";
+        let call_and_store = format!("{call}; {store}");
+        let call_and_several = format!("{call}; {several}");
+        // Each fixture's memory cause, then the guard's whole caveat.
+        for (function, cause, caveat) in [
+            ("called", call, call.to_string()),
+            ("stored", store, store.to_string()),
+            ("atomic", operation, operation.to_string()),
+            ("exchanged", operation, operation.to_string()),
+            ("volatile_between", operation, operation.to_string()),
+            ("twice", several, several.to_string()),
+            (
+                "twice_differing",
+                several,
+                format!("{several}; {not_affine}"),
+            ),
+            ("other_block", other_block, other_block.to_string()),
+            ("called_and_stored", &call_and_store, call_and_store.clone()),
+            // A call in the load's block may change the field whichever
+            // of the earlier stores reaches it.
+            (
+                "several_then_called",
+                &call_and_several,
+                call_and_several.clone(),
+            ),
+            // Reached both directly and through the load, the clamp still
+            // carries the load's cause.
+            ("either", call, call.to_string()),
+        ] {
+            let r = affine_ir_guards(&session, function, "sink");
+            let site = only_guard(&r);
+            assert_eq!(
+                (site.op, site.predicate.as_deref(), site.bound.as_deref()),
+                (GuardKind::Clamp, Some("umin"), Some("16")),
+                "{function}: {r:?}"
+            );
+            assert!(!site.verified, "{function}: {r:?}");
+            assert_eq!(site.caveat.as_deref(), Some(caveat.as_str()), "{function}");
+            let reason = format!(
+                "the value is loaded from memory, and the field may hold something other than \
+                 what the store wrote ({cause})"
+            );
+            assert_eq!(
+                r.lost.as_deref(),
+                Some(reason.as_str()),
+                "{function}: {r:?}"
+            );
+        }
+        let r = affine_ir_guards(&session, "unstored", "sink");
+        assert!(r.guards.is_empty(), "{r:?}");
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(lost.contains("loaded from memory"), "{r:?}");
+    }
+
+    /// With no guard to report, an unproven load still says the trace is
+    /// incomplete: the crossing into the stored parameter is not all the
+    /// field may hold.
+    #[test]
+    fn an_unguarded_field_that_may_change_is_a_lost_trace() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            CLOBBERED_IR,
+            &["-Wno-override-module"],
+        );
+        let r = affine_ir_guards(&session, "unclamped", "sink");
+        assert!(r.guards.is_empty(), "{r:?}");
+        assert_eq!(
+            crossings(&r),
+            [(
+                "unclamped_caller",
+                CrossingDir::Into,
+                "unclamped",
+                "parameter 1"
+            )],
+            "{r:?}"
+        );
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(
+            lost.contains("the field may hold something other than what the store wrote"),
+            "{r:?}"
+        );
     }
 }

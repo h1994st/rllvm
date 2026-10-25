@@ -217,12 +217,12 @@ Report what the answer supports, and say what it does not:
   functions found flowing into it through stores, arguments and accessors in
   the captured program; a path the facts do not follow, such as `memcpy` or
   pointer arithmetic, can add more.
-- **A guard list covers one function.** `guards` traces the value inside
-  the anchor's function only. A guard's `depth` is 0 on the value itself, or
-  on a value it only widens (the bound holds across zext or sext when the
+- **A guard list covers one function.** `guards` traces the value inside the
+  anchor's function only. A guard's `depth` is 0 on the value itself, or on
+  a value it only widens (the bound holds across zext or sext when the
   guard's signedness matches the cast's), and N on a value N steps up the
-  chain it is computed from, a truncation counting as a step; that is not
-  by itself a bound on the value. Its `affine` gives the anchored value as
+  chain it is computed from, a truncation counting as a step; that is not by
+  itself a bound on the value. Its `affine` gives the anchored value as
   `scale * guarded + offset` when constant arithmetic links them. Both
   coefficients are decimal strings of integers that may exceed 64 bits:
   parse them as big integers, never as JSON numbers. `verified` means the
@@ -238,20 +238,26 @@ Report what the answer supports, and say what it does not:
   The numeric cap lives in `bound`. A verified guard with no `bound` is
   capped by a runtime value, the guard's operand: a sound relation, not a
   numeric limit, so never report a number for it; to reach one, anchor on
-  that operand and trace it.
-  A `relation` of `dominates` runs before the use on every path but does not
-  say which way its branch goes; one that is on_path lies on some path to
-  the use, not every one. `crossings` name the call where the value enters
-  or leaves: ask `guards` there next. `from` only keeps crossings from
-  callers on a path from one named function; nothing between it and the
-  anchor was examined.
+  that operand and trace it. A load is followed to the store it reads back;
+  a call, another store or any other operation between them (an atomicrmw, a
+  cmpxchg, a volatile load), more than one such store, or a store in another
+  block makes every guard reached through the load a lead, with that caveat,
+  and reports the trace lost there. A `relation` of `dominates` runs before
+  the use on every path but does not say which way its branch goes; one that
+  is on_path lies on some path to the use, not every one. `crossings` name
+  the call where the value enters or leaves: ask `guards` there next. `from`
+  only keeps crossings from callers on a path from one named function;
+  nothing between it and the anchor was examined.
   `uncertainty.value_trace_lost` means the list is partial. `guards`
   promotes the anchor's module with `mem2reg`, so a local held in a register
   — any promotable scalar — is traced whatever optimization level the
-  capture used, `-O0` included; a value `mem2reg` cannot promote, such as a
-  struct field or an address-taken local, stays a memory load and shows as a
-  lost trace. Capture at `-O0` for a faithful call graph; it does not stop
-  `guards` from tracing promotable scalars.
+  capture used, `-O0` included. A value `mem2reg` cannot promote, such as a
+  struct field or an address-taken local, stays a memory load: a lost trace
+  unless the load is neither volatile nor atomic and a store of its type,
+  also neither, to the same address runs before it. Addresses match only
+  syntactically (the same pointer, or a `getelementptr` alike), so a field
+  of a global never matches. Capture at `-O0` for a faithful call graph; it
+  does not stop `guards` from tracing promotable scalars.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.
