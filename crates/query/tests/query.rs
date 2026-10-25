@@ -4429,6 +4429,42 @@ fn guards_read_unsigned_bounds_unsigned_and_print_masks_in_hex() {
     assert!(stderr.contains("no call site at absent.c:4"), "{stderr}");
 }
 
+/// `(x - 1) * 2^62 * 2^62` at 128 bits: the anchored value is
+/// `2^124 * x - 2^124`, coefficients past what a JSON number holds.
+const WIDE_AFFINE_SOURCE: &str = "extern void sink(__int128);\n\
+     void f(__int128 x) {\n\
+       if (x > 4) return;\n\
+       sink((x - 1) * ((__int128)1 << 62) * ((__int128)1 << 62));\n\
+     }\n";
+
+/// 2^124, the scale of [`WIDE_AFFINE_SOURCE`]'s relation.
+const TWO_TO_THE_124: &str = "21267647932558653966460912964485513216";
+
+#[test]
+fn guards_json_writes_a_wide_affine_relation_as_decimal_strings() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "w.c", WIDE_AFFINE_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    let at = format!("{}:4", scratch.path().join("w.c").display());
+    let json = query_json(
+        &scratch,
+        &catalog,
+        &["guards", "--at", at.as_str(), "--operand", "0"],
+    );
+    let affines: Vec<&serde_json::Value> = json["results"]["guards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|guard| &guard["affine"])
+        .collect();
+    let negative = format!("-{TWO_TO_THE_124}");
+    assert_eq!(
+        affines,
+        [&serde_json::json!({"scale": TWO_TO_THE_124, "offset": negative})],
+        "{json}"
+    );
+}
+
 const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\
      void callee(unsigned n) {\n\
        if (n > 15) return;\n\

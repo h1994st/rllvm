@@ -203,7 +203,8 @@ call's argument (`--at FILE:LINE --operand N`), its result (`--return`) or a
 `-g` local (`--function F --local NAME`), with each guard's bound and source
 line; `--from F` keeps only callers on a path from `F`.
 Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
-relation to the value is a constant one. `verified` means its bound soundly
+relation to the value is a constant one. Its `scale` and `offset` are decimal
+strings, since they may exceed 64 bits. `verified` means its bound soundly
 carries to the value; otherwise it is a lead whose `caveat` says why: the
 relation is not affine, the guard bounds a value computed from it, the bound
 wraps, or it cannot be mapped. `verified` does not say the guard runs on every

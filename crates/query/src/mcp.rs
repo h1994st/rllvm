@@ -1104,7 +1104,7 @@ fn query_tool(query: &Query) -> Value {
         }),
         Query::Guards { .. } => json!({
             "name": name,
-            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `affine` gives the anchored value as `scale * guarded + offset` when constant arithmetic links them, and `verified` true means the bound soundly carries to the value, while false is a lead, not a bound, whose `caveat` says why (not affine, a guard on a value computed from it, wraps, or could not be mapped); `verified` does not mean the guard runs on every path, so an unconditional bound is `verified` with `relation` `dominates` or `defines`; `relation` `on_path` runs on some path to the use but not every one. The numeric cap lives in `bound`: a `verified` guard with no `bound` is capped by a runtime value, the guard's operand, which is a sound relation, not a numeric limit; to reach a number, anchor on that operand and trace it. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
+            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `affine` gives the anchored value as `scale * guarded + offset` when constant arithmetic links them (`scale` and `offset` are decimal strings of integers that may exceed 64 bits), and `verified` true means the bound soundly carries to the value, while false is a lead, not a bound, whose `caveat` says why (not affine, a guard on a value computed from it, wraps, or could not be mapped); `verified` does not mean the guard runs on every path, so an unconditional bound is `verified` with `relation` `dominates` or `defines`; `relation` `on_path` runs on some path to the use but not every one. The numeric cap lives in `bound`: a `verified` guard with no `bound` is capped by a runtime value, the guard's operand, which is a sound relation, not a numeric limit; to reach a number, anchor on that operand and trace it. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1594,6 +1594,29 @@ mod tests {
                 && text.contains("inventory")
                 && text.contains("load_catalog"),
             "{text}"
+        );
+    }
+
+    /// `(x - 1) * 2^62 * 2^62` at 128 bits relates the argument to `x` by
+    /// coefficients no JSON number holds: the answer still arrives, each
+    /// one an exact decimal string.
+    #[test]
+    fn a_guards_answer_with_a_wide_affine_relation_is_not_lost() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(__int128);\nvoid f(__int128 x) {\n  if (x > 4) return;\n  sink((x - 1) * ((__int128)1 << 62) * ((__int128)1 << 62));\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        let at = format!("{}:4", scratch.path().join("t.c").display());
+        let payload = answer(&mut registry, "guards", json!({ "at": at, "operand": 0 }));
+        let two_to_the_124 = "21267647932558653966460912964485513216";
+        assert_eq!(
+            payload["results"]["guards"][0]["affine"],
+            json!({ "scale": two_to_the_124, "offset": format!("-{two_to_the_124}") }),
+            "{payload}"
         );
     }
 

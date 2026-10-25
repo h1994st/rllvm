@@ -223,8 +223,10 @@ Report what the answer supports, and say what it does not:
   guard's signedness matches the cast's), and N on a value N steps up the
   chain it is computed from, a truncation counting as a step; that is not
   by itself a bound on the value. Its `affine` gives the anchored value as
-  `scale * guarded + offset` when constant arithmetic links them. `verified`
-  means the bound soundly carries to the anchored value. Report a guard with
+  `scale * guarded + offset` when constant arithmetic links them. Both
+  coefficients are decimal strings of integers that may exceed 64 bits:
+  parse them as big integers, never as JSON numbers. `verified` means the
+  bound soundly carries to the anchored value. Report a guard with
   `verified: false` as a lead, never a bound, with its `caveat`: the
   relation is not affine, the guard bounds a value computed from the
   anchored one (such as a clamp of it used later), the bound wraps when

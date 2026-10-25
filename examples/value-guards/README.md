@@ -52,9 +52,10 @@ rllvm-query --catalog build/offset.json guards --at offset.c:15 --operand 1
 
 This names `left + 1`, the size handed to `make_buf`. The answer lists the
 `compare ugt 64` on `left` at `offset.c:13`, one step upstream, with
-`anchored = guarded + 1`: in `--json`, `affine` is `{"scale": 1, "offset": 1}`
-and `verified` is `true`. Past the early return `left` is in `[0, 64]`, and
-`[1, 65]` stays within a `size_t`.
+`anchored = guarded + 1`: in `--json`, `affine` is
+`{"scale": "1", "offset": "1"}`, decimal strings, and `verified` is `true`.
+Past the early return `left` is in `[0, 64]`, and `[1, 65]` stays within a
+`size_t`.
 
 ## Reading a guard
 

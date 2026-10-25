@@ -228,11 +228,19 @@ pub enum GuardRelation {
 }
 
 /// The relation `anchored = scale * guarded + offset` between the anchored
-/// value and the value a guard bounds, over exact integers.
+/// value and the value a guard bounds, over exact integers. Each coefficient
+/// is written as a decimal string: it may exceed what a JSON number holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Affine {
+    #[serde(serialize_with = "decimal")]
     pub scale: i128,
+    #[serde(serialize_with = "decimal")]
     pub offset: i128,
+}
+
+/// `value` as its decimal string.
+fn decimal<S: serde::Serializer>(value: &i128, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(value)
 }
 
 impl Affine {
@@ -2115,6 +2123,33 @@ mod tests {
         slice::promote_anchor_module,
         testing::{compiled_session, module_session, stale_debug_info_module},
     };
+
+    /// Every coefficient an `i128` holds, the extremes and negatives
+    /// included, is written as its decimal string and reads back exactly.
+    #[test]
+    fn affine_coefficients_round_trip_as_decimal_strings() {
+        let wide = 1_i128 << 124;
+        for (scale, offset) in [
+            (i128::MIN, i128::MAX),
+            (i128::MAX, i128::MIN),
+            (wide, -wide),
+            (-wide, wide),
+            (-4, -3),
+            (1, 0),
+        ] {
+            let json = serde_json::to_value(Affine { scale, offset }).unwrap();
+            let read = |field: &str| {
+                json[field]
+                    .as_str()
+                    .and_then(|text| text.parse::<i128>().ok())
+            };
+            assert_eq!(
+                (read("scale"), read("offset")),
+                (Some(scale), Some(offset)),
+                "{json}"
+            );
+        }
+    }
 
     /// A function whose block `i` branches to `successors[i]`.
     fn cfg(successors: &[&[usize]]) -> FunctionIr {

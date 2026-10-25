@@ -101,7 +101,7 @@ if grep -q 'unverified' <<<"$text"; then
 fi
 carried=$(offset --json |
     field '[(g["op"], g["bound"], g["verified"], g["affine"]["scale"], g["affine"]["offset"]) for g in a["results"]["guards"]]')
-[ "$carried" = "[('compare', '64', True, 1, 1)]" ] ||
+[ "$carried" = "[('compare', '64', True, '1', '1')]" ] ||
     fail "guards on left + 1 reported $carried, expected one verified compare with affine {1, 1}"
 
 echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, and a verified bound carried to left + 1"

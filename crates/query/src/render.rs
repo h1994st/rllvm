@@ -2598,7 +2598,10 @@ mod tests {
         let json = serde_json::to_value(&site).unwrap();
         assert_eq!(json["verified"], serde_json::json!(true));
         assert!(json.get("caveat").is_none(), "no caveat on a proven guard");
-        assert_eq!(json["affine"], serde_json::json!({"scale": 1, "offset": 0}));
+        assert_eq!(
+            json["affine"],
+            serde_json::json!({"scale": "1", "offset": "0"})
+        );
         let text = render(&guards_answer(vec![site]), TextMode::Full, Color::Never);
         assert_eq!(
             text.lines().next(),
