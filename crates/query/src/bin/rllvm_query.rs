@@ -32,10 +32,10 @@ use tracing_subscriber::FmtSubscriber;
 /// Exhaustive over `QueryCommand`, so a new `QueryCommand` variant with no
 /// arm here fails to compile. That alone does not catch the opposite drift --
 /// a new [`Query`] variant added without a matching `QueryCommand` --
-/// which compiles cleanly on its own. `cli_command_for` in this file's tests
-/// closes that gap: it is exhaustive over `Query`, so a new `Query` variant
-/// fails to compile there instead, until this file is updated to drive it
-/// from the command line.
+/// which compiles cleanly on its own, and `Query` is non-exhaustive, so no
+/// match here can fail to compile over it. This file's tests close that gap:
+/// `every_query_tool_has_a_cli_subcommand` fails for a query the MCP server
+/// lists with no subcommand to drive it from the command line.
 fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned> {
     let QueryModifiers {
         heuristics,
@@ -148,6 +148,7 @@ impl Planned {
             Planned::Guards(request) => Ok(Query::Guards {
                 anchor: anchor_from_parts(session, &request.parts, AnchorSurface::Cli)
                     .map_err(Error::InvalidArguments)?,
+                at: request.parts.use_site().map(str::to_string),
                 from: request.from,
                 emit_module: request.emit_module,
             }),
@@ -723,12 +724,10 @@ mod tests {
         }
     }
 
-    /// The reverse of `to_query`'s exhaustiveness: every [`Query`]
-    /// variant must appear here, with no wildcard arm. A `Query` variant
-    /// added without a matching arm fails to compile, so a new query cannot
-    /// ship without a `QueryCommand` (and a `to_query` arm) to drive it from
-    /// the command line -- closing the drift gap `to_query` alone leaves
-    /// open, since it is only ever exhaustive over `QueryCommand`.
+    /// The reverse of `to_query`: the `QueryCommand` that drives `query`.
+    /// `Query` is non-exhaustive, so the wildcard arm is required; a query
+    /// with no arm here panics, and `every_query_tool_has_a_cli_subcommand`
+    /// fails for one with no subcommand at all.
     fn cli_command_for(query: &Query) -> QueryCommand {
         match query {
             Query::Defs { name } => QueryCommand::Defs { name: name.clone() },
@@ -763,25 +762,26 @@ mod tests {
             Query::ResolutionCandidates => QueryCommand::ResolutionCandidates,
             Query::Guards {
                 anchor,
+                at: use_site,
                 from,
                 emit_module,
             } => {
-                let (mut at, mut operand, mut ret, mut function, mut local) =
-                    (None, None, false, None, None);
-                match anchor {
+                let (mut operand, mut ret, mut function, mut local) = (None, false, None, None);
+                let at = match anchor {
                     GuardAnchor::Argument { site, operand: n } => {
-                        at = Some(serde_json::to_string(site).unwrap());
                         operand = Some(*n);
+                        Some(serde_json::to_string(site).unwrap())
                     }
                     GuardAnchor::Return { site } => {
-                        at = Some(serde_json::to_string(site).unwrap());
                         ret = true;
+                        Some(serde_json::to_string(site).unwrap())
                     }
                     GuardAnchor::Local { function: f, name } => {
                         function = Some(f.clone());
                         local = Some(name.clone());
+                        use_site.clone()
                     }
-                }
+                };
                 QueryCommand::Guards {
                     at,
                     operand,
@@ -792,6 +792,51 @@ mod tests {
                     emit_module: emit_module.clone(),
                 }
             }
+            other => panic!("{other:?} has no CLI command"),
+        }
+    }
+
+    /// The tools `tools/list` reports that decide which catalogs are loaded
+    /// or keep the overlay, rather than ask a question: none is a query
+    /// subcommand.
+    const MANAGEMENT_TOOLS: [&str; 8] = [
+        "load_catalog",
+        "inventory",
+        "list_catalogs",
+        "unload_catalog",
+        "load_overlay",
+        "record_edges",
+        "save_overlay",
+        "list_overlay",
+    ];
+
+    /// The fence `Query`'s non-exhaustiveness takes from `cli_command_for`:
+    /// every query the MCP server lists, which it lists from every `Query`
+    /// variant, has a subcommand that drives it from the command line.
+    #[test]
+    fn every_query_tool_has_a_cli_subcommand() {
+        let mut output = Vec::new();
+        mcp::serve(
+            &mut mcp::Registry::new(),
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n".as_bytes(),
+            &mut output,
+        )
+        .unwrap();
+        let reply: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let tools: Vec<&str> = reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .filter(|name| !MANAGEMENT_TOOLS.contains(name))
+            .collect();
+        assert_eq!(tools.len(), 13, "{tools:?}");
+        let command = QueryArgs::command();
+        for tool in tools {
+            assert!(
+                command.find_subcommand(tool.replace('_', "-")).is_some(),
+                "the `{tool}` tool has no `rllvm-query` subcommand"
+            );
         }
     }
 
@@ -1059,25 +1104,26 @@ mod tests {
             block_index: 1,
             instruction_index: 2,
         };
-        for (anchor, from) in [
+        let parse_len = GuardAnchor::Local {
+            function: "parse".into(),
+            name: "len".into(),
+        };
+        for (anchor, at, from) in [
             (
                 GuardAnchor::Argument {
                     site: site.clone(),
                     operand: 3,
                 },
+                None,
                 Some("main".to_string()),
             ),
-            (GuardAnchor::Return { site: site.clone() }, None),
-            (
-                GuardAnchor::Local {
-                    function: "parse".into(),
-                    name: "len".into(),
-                },
-                None,
-            ),
+            (GuardAnchor::Return { site: site.clone() }, None, None),
+            (parse_len.clone(), None, None),
+            (parse_len, Some("t.c:9".to_string()), None),
         ] {
             let query = Query::Guards {
                 anchor: anchor.clone(),
+                at: at.clone(),
                 from: from.clone(),
                 emit_module: Some("out.bc".into()),
             };
@@ -1112,7 +1158,7 @@ mod tests {
                 },
                 GuardAnchor::Local { function, name } => GuardsRequest {
                     parts: AnchorParts {
-                        at: None,
+                        at,
                         operand: None,
                         ret: false,
                         function: Some(function.clone()),
@@ -1129,7 +1175,7 @@ mod tests {
     #[test]
     fn guards_flags_parse_into_a_request() {
         let queries = parse_queries(
-            "guards --at t.c:4 --operand 0 --from main\nguards --at t.c:4 --return\nguards --function parse --local len\n",
+            "guards --at t.c:4 --operand 0 --from main\nguards --at t.c:4 --return\nguards --function parse --local len\nguards --function parse --local len --at t.c:9\n",
             QueryModifiers::default(),
         )
         .unwrap();
@@ -1146,6 +1192,8 @@ mod tests {
         assert!(requests[1].parts.ret && requests[1].parts.operand.is_none());
         assert_eq!(requests[2].parts.function.as_deref(), Some("parse"));
         assert_eq!(requests[2].parts.local.as_deref(), Some("len"));
+        assert_eq!(requests[3].parts.at.as_deref(), Some("t.c:9"));
+        assert_eq!(requests[3].parts.local.as_deref(), Some("len"));
     }
 
     #[test]

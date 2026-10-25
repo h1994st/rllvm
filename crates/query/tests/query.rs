@@ -2914,6 +2914,243 @@ mod mcp {
         assert_eq!(cli["uncertainty"], mcp["uncertainty"]);
     }
 
+    /// A reused local named by a use-site answers alike on both surfaces:
+    /// `--at` beside `--local` on the CLI, `at` beside `local` over MCP.
+    #[test]
+    fn a_reused_local_at_a_use_site_answers_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "r.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned cur = a;\n  if (cur > 64) return;\n  sink(cur);\n  cur = b;\n  if (cur > 16) return;\n  sink(cur);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:8", scratch.path().join("r.c").display());
+        let cli = query_json(
+            &scratch,
+            &catalog,
+            &["guards", "--function", "g", "--local", "cur", "--at", &at],
+        );
+        let bounds: Vec<&str> = cli["results"]["guards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|guard| guard["bound"].as_str().unwrap())
+            .collect();
+        assert_eq!(bounds, ["16"], "{cli}");
+
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "g", "local": "cur", "at": at }),
+        );
+        assert_eq!(cli["results"], mcp["results"]);
+        assert_eq!(cli["query"], mcp["query"]);
+        assert_eq!(cli["query"]["at"], at.as_str(), "{cli}");
+    }
+
+    /// A local called through is used at each call: both surfaces read the
+    /// value it holds there, each parameter crossing in from the caller.
+    #[test]
+    fn a_local_called_through_answers_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "c.c",
+            "void g(void (*a)(void), void (*b)(void)) {\n  void (*cur)(void) = a;\n  cur();\n  cur = b;\n  cur();\n}\nextern void x(void);\nextern void y(void);\nvoid h(void) { g(x, y); }\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let line = |n: u32| format!("{}:{n}", scratch.path().join("c.c").display());
+        let cli = |at: &str| {
+            query_json(
+                &scratch,
+                &catalog,
+                &["guards", "--function", "g", "--local", "cur", "--at", at],
+            )
+        };
+        let (first, second) = (cli(&line(3)), cli(&line(5)));
+        assert_ne!(
+            first["results"]["crossings"], second["results"]["crossings"],
+            "{first}\n{second}"
+        );
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "g", "local": "cur", "at": line(5) }),
+        );
+        assert_eq!(second["results"], mcp["results"]);
+    }
+
+    /// A line reading a local's value and then a constant, or a null
+    /// pointer, it is rebound to is refused alike on both surfaces, never
+    /// answered with the value.
+    #[test]
+    fn a_line_reading_a_value_and_another_binding_is_refused_alike_on_the_cli_and_mcp() {
+        for (source, local, expected) in [
+            (
+                "extern void sink(unsigned);\nvoid g(unsigned a) {\n  unsigned cur = a;\n  if (cur > 64) return;\n  sink(cur); cur = 1000; sink(cur);\n}\n",
+                "cur",
+                "the constant 1000",
+            ),
+            (
+                "extern void use(int *);\nvoid g(int *a) {\n  int *p = a;\n  if (!a) return;\n  use(p); p = 0; use(p);\n}\n",
+                "p",
+                "a value it cannot trace",
+            ),
+        ] {
+            let scratch = tempfile::tempdir().unwrap();
+            let module = compile_bitcode(&scratch, "k.c", source);
+            let catalog = plain_module_catalog(&scratch, &[module]);
+            let at = format!("{}:5", scratch.path().join("k.c").display());
+            let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+                .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+                .arg("--catalog")
+                .arg(&catalog)
+                .args(["guards", "--function", "g", "--local", local, "--at", &at])
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{local}");
+            let stderr = String::from_utf8(output.stderr).unwrap();
+            assert!(
+                stderr.contains("more than one of its values") && stderr.contains(expected),
+                "{stderr}"
+            );
+
+            let response = mcp_exchange_in(
+                &scratch,
+                &catalog,
+                &modern_request(
+                    "call",
+                    "tools/call",
+                    serde_json::json!({
+                        "name": "guards",
+                        "arguments": { "function": "g", "local": local, "at": at },
+                    }),
+                ),
+            );
+            assert_eq!(response["result"]["isError"], true, "{response}");
+            let text = response["result"]["content"][0]["text"].as_str().unwrap();
+            let message = stderr.trim().trim_start_matches("error: ");
+            assert!(text.contains(message), "{text}\n{stderr}");
+        }
+    }
+
+    /// A shadowed local's name matches two variables: both surfaces refuse
+    /// it alike, under one prefix, naming where each is declared.
+    #[test]
+    fn a_shadowed_local_is_refused_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "s.c",
+            "extern void sink(unsigned);\nextern void sink2(unsigned, unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned x = a;\n  { unsigned x = b; sink(x); }\n  sink2(x, b);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:6", scratch.path().join("s.c").display());
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["guards", "--function", "g", "--local", "x", "--at", &at])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("`x` names 2 variables in g")
+                && stderr.matches("Invalid arguments").count() == 1,
+            "{stderr}"
+        );
+
+        let response = mcp_exchange_in(
+            &scratch,
+            &catalog,
+            &modern_request(
+                "call",
+                "tools/call",
+                serde_json::json!({
+                    "name": "guards",
+                    "arguments": { "function": "g", "local": "x", "at": at },
+                }),
+            ),
+        );
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        let message = stderr.trim().trim_start_matches("error: ");
+        assert!(text.contains(message), "{text}\n{stderr}");
+    }
+
+    /// A read of a local's value after its block ends is no use of it, on
+    /// either surface.
+    #[test]
+    fn a_read_outside_a_locals_scope_is_refused_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "o.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a) {\n  { unsigned cur = a; sink(cur); }\n  sink(a);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:4", scratch.path().join("o.c").display());
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["guards", "--function", "g", "--local", "cur", "--at", &at])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("no use of `cur` at {at}")),
+            "{stderr}"
+        );
+
+        let response = mcp_exchange_in(
+            &scratch,
+            &catalog,
+            &modern_request(
+                "call",
+                "tools/call",
+                serde_json::json!({
+                    "name": "guards",
+                    "arguments": { "function": "g", "local": "cur", "at": at },
+                }),
+            ),
+        );
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        let message = stderr.trim().trim_start_matches("error: ");
+        assert!(text.contains(message), "{text}\n{stderr}");
+    }
+
+    /// An optimized `f` that inlines a callee's namesake parameter answers
+    /// for its own `x` alike on both surfaces.
+    #[test]
+    fn an_inlined_namesake_leaves_the_local_answered_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let source = scratch.path().join("i.c");
+        std::fs::write(
+            &source,
+            "extern void sink(int);\nstatic void helper(int x) {\n  if (x > 8) return;\n  sink(x);\n}\nvoid f(int x) {\n  helper(x);\n  sink(x);\n}\n",
+        )
+        .unwrap();
+        let module = rllvm_testkit::compile_bitcode_file(&source, &["-g", "-O1"]);
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let cli = query_json(
+            &scratch,
+            &catalog,
+            &["guards", "--function", "f", "--local", "x"],
+        );
+        assert_eq!(cli["results"]["anchor"]["kind"], "local", "{cli}");
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "f", "local": "x" }),
+        );
+        assert_eq!(cli["results"], mcp["results"]);
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();
@@ -4463,6 +4700,36 @@ fn guards_json_writes_a_wide_affine_relation_as_decimal_strings() {
         [&serde_json::json!({"scale": TWO_TO_THE_124, "offset": negative})],
         "{json}"
     );
+}
+
+/// A location that is no `file:line` is named once, under one prefix, on
+/// either path that reads one: a call site's and a local's use.
+#[test]
+fn guards_name_a_malformed_location_under_one_prefix() {
+    let scratch = tempfile::tempdir().unwrap();
+    let module = compile_bitcode(&scratch, "u.c", UNSIGNED_GUARDS_SOURCE);
+    let catalog = plain_module_catalog(&scratch, &[module]);
+    for anchor in [
+        &["--at", "j.c", "--operand", "0"][..],
+        &["--function", "f", "--local", "len", "--at", "j.c"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .arg("guards")
+            .args(anchor)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(
+                "Invalid arguments: invalid location `j.c`: expected `file:line`, e.g. `parser.c:8`"
+            ) && stderr.matches("Invalid arguments").count() == 1,
+            "{anchor:?}: {stderr}"
+        );
+    }
 }
 
 const GUARDS_SLICE_SOURCE: &str = "extern void sink(unsigned);\n\

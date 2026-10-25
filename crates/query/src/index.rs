@@ -531,7 +531,7 @@ impl Session {
     /// not in its recorded directory. Only a location that resolves to an
     /// absolute path is compared, so a relative file with no recorded
     /// directory is never guessed at.
-    fn spellings_of(&self, file: &Path) -> HashSet<(&str, &Path)> {
+    pub(crate) fn spellings_of(&self, file: &Path) -> HashSet<(&str, &Path)> {
         let mut spellings = HashSet::new();
         let Ok(named) = std::path::absolute(file) else {
             return spellings;

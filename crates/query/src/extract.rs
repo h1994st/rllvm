@@ -24,7 +24,8 @@ use llvm_sys::{
         LLVMDIGlobalVariableExpressionGetVariable, LLVMDILocationGetColumn,
         LLVMDILocationGetInlinedAt, LLVMDILocationGetLine, LLVMDILocationGetScope,
         LLVMDIScopeGetFile, LLVMDITypeGetFlags, LLVMDITypeGetName, LLVMDITypeGetOffsetInBits,
-        LLVMDITypeGetSizeInBits, LLVMGetDINodeTag, LLVMGetMetadataKind, LLVMGetSubprogram,
+        LLVMDITypeGetSizeInBits, LLVMDIVariableGetFile, LLVMDIVariableGetLine,
+        LLVMDIVariableGetScope, LLVMGetDINodeTag, LLVMGetMetadataKind, LLVMGetSubprogram,
         LLVMInstructionGetDebugLoc, LLVMMetadataKind,
     },
     error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage},
@@ -2520,13 +2521,14 @@ unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
     let parsed = unsafe { parse_bitcode(bytes) }
         .map_err(|diagnostics| unreadable("bitcode", &diagnostics))?;
     let mut functions = Vec::new();
+    let mut numbers = DebugNumbers::default();
     // SAFETY: `parsed.module` is a module in its live context.
     let mut function = unsafe { LLVMGetFirstFunction(parsed.module.0) };
     while !function.is_null() {
         // SAFETY: `function` is a live function in that module, and only a
         // definition is read as one.
         if unsafe { LLVMIsDeclaration(function) } == 0 {
-            functions.push(unsafe { read_function_ir(parsed.context.0, function) });
+            functions.push(unsafe { read_function_ir(parsed.context.0, function, &mut numbers) });
         }
         // SAFETY: as above.
         function = unsafe { LLVMGetNextFunction(function) };
@@ -2537,9 +2539,127 @@ unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
     })
 }
 
+/// The numbers a module's debug-info nodes get as its functions are read:
+/// shared across them, so one variable or scope keeps one number. Only the
+/// numbers leave this module.
+#[derive(Default)]
+struct DebugNumbers {
+    /// Each `DILocalVariable` met, numbered in the order met.
+    variables: HashMap<LLVMMetadataRef, u32>,
+    /// Each lexical scope met, numbered in the order met.
+    scopes: HashMap<LLVMMetadataRef, ScopeId>,
+    /// The scope each numbered block scope is nested in.
+    parents: HashMap<ScopeId, ScopeId>,
+    /// The numbered scopes that are subprograms.
+    subprograms: HashSet<ScopeId>,
+}
+
+/// The scope links one function's values and variables need, copied out of
+/// the module's [`DebugNumbers`] as they are met.
+#[derive(Default)]
+struct FunctionScopes {
+    /// Each link up the chains met.
+    links: HashMap<ScopeId, ScopeId>,
+    /// The chains' outermost scopes known to be subprograms.
+    subprograms: HashSet<ScopeId>,
+}
+
+impl DebugNumbers {
+    /// `scope`'s number, numbering it and the scopes it is nested in on
+    /// first sight, and recording its chain in `function`, the scopes of
+    /// the function being read. `None` for no scope. Only a block scope
+    /// (`DILexicalBlock`, `DILexicalBlockFile`) links to the scope enclosing
+    /// it; a subprogram, or anything else, is outermost.
+    ///
+    /// # Safety
+    /// `scope` must be null or live metadata in `context`.
+    unsafe fn scope(
+        &mut self,
+        context: LLVMContextRef,
+        scope: LLVMMetadataRef,
+        function: &mut FunctionScopes,
+    ) -> Option<ScopeId> {
+        if scope.is_null() {
+            return None;
+        }
+        let id = match self.scopes.get(&scope) {
+            Some(&id) => id,
+            None => {
+                let id = self.scopes.len() as ScopeId;
+                // Numbered before its parent is read, so a malformed cycle
+                // finds it numbered and stops.
+                self.scopes.insert(scope, id);
+                // SAFETY: the caller guarantees live metadata, whose kind
+                // any metadata answers.
+                if matches!(
+                    unsafe { LLVMGetMetadataKind(scope) },
+                    LLVMMetadataKind::LLVMDISubprogramMetadataKind
+                ) {
+                    self.subprograms.insert(id);
+                }
+                // SAFETY: the caller guarantees live metadata; its operands
+                // are read only once it is known to be a block scope, whose
+                // enclosing scope is live metadata of the same module.
+                let parent = unsafe {
+                    matches!(
+                        LLVMGetMetadataKind(scope),
+                        LLVMMetadataKind::LLVMDILexicalBlockMetadataKind
+                            | LLVMMetadataKind::LLVMDILexicalBlockFileMetadataKind
+                    )
+                    .then(|| {
+                        let operands = md_node_operands(LLVMMetadataAsValue(context, scope));
+                        operand_metadata(*operands.get(DI_SCOPE_OPERAND)?)
+                    })
+                    .flatten()
+                    .and_then(|parent| self.scope(context, parent, function))
+                };
+                if let Some(parent) = parent {
+                    self.parents.insert(id, parent);
+                }
+                id
+            }
+        };
+        let mut at = id;
+        while let Some(&parent) = self.parents.get(&at) {
+            if function.links.insert(at, parent).is_some() {
+                break;
+            }
+            at = parent;
+        }
+        if let Some(root) = outermost(id, |scope| self.parents.get(&scope).copied())
+            && self.subprograms.contains(&root)
+        {
+            function.subprograms.insert(root);
+        }
+        Some(id)
+    }
+}
+
+/// The outermost scope `scope` is nested in, following `parent` up. `None`
+/// when the chain loops, as a malformed module's may: such a chain is placed
+/// nowhere, so nothing is taken to lie in it or outside its function.
+fn outermost(scope: ScopeId, parent: impl Fn(ScopeId) -> Option<ScopeId>) -> Option<ScopeId> {
+    let mut seen = HashSet::new();
+    let mut at = scope;
+    while seen.insert(at) {
+        match parent(at) {
+            Some(up) => at = up,
+            None => return Some(at),
+        }
+    }
+    None
+}
+
+/// `numbers` holds the module's debug-info numbering, shared across its
+/// functions.
+///
 /// # Safety
 /// `function` must be a live function definition in `context`.
-unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> FunctionIr {
+unsafe fn read_function_ir(
+    context: LLVMContextRef,
+    function: LLVMValueRef,
+    numbers: &mut DebugNumbers,
+) -> FunctionIr {
     // Every parameter and instruction is numbered before any is read, so an
     // operand defined further on -- a loop's `phi` -- still resolves.
     let mut handles = Vec::new();
@@ -2584,9 +2704,13 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
             .collect();
         let mut values = Vec::with_capacity(handles.len());
         let mut dbg_values = Vec::new();
+        let mut scopes = Vec::with_capacity(handles.len());
+        let mut function_scopes = FunctionScopes::default();
+        let subprogram = numbers.scope(context, LLVMGetSubprogram(function), &mut function_scopes);
         for (id, &(handle, block)) in handles.iter().enumerate() {
             let id = id as ValueId;
             if id < param_count {
+                scopes.push(None);
                 values.push(ValueNode {
                     block,
                     opcode: OpcodeIr::Param,
@@ -2603,7 +2727,25 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
             }
             block_irs[block].instrs.push(id);
             values.push(read_instruction(handle, block, &ids, &block_ids, layout));
-            read_bindings(context, handle, id, &ids, &mut dbg_values);
+            let location = LLVMInstructionGetDebugLoc(handle);
+            scopes.push(if location.is_null() {
+                None
+            } else {
+                numbers.scope(
+                    context,
+                    LLVMDILocationGetScope(location),
+                    &mut function_scopes,
+                )
+            });
+            read_bindings(
+                context,
+                handle,
+                id,
+                &ids,
+                numbers,
+                &mut function_scopes,
+                &mut dbg_values,
+            );
         }
 
         FunctionIr {
@@ -2615,6 +2757,10 @@ unsafe fn read_function_ir(context: LLVMContextRef, function: LLVMValueRef) -> F
             blocks: block_irs,
             values,
             dbg_values,
+            scopes,
+            scope_parents: function_scopes.links,
+            subprogram,
+            subprograms: function_scopes.subprograms,
         }
     }
 }
@@ -2992,7 +3138,9 @@ unsafe fn select_clamp(select: LLVMValueRef) -> Option<GuardOpRaw> {
 
 /// Every variable binding recorded before `instruction`, appended to `out`.
 /// LLVM 19 and later attach these as debug records rather than calls to
-/// `llvm.dbg.value`.
+/// `llvm.dbg.value`. Each binding's variable is told apart by its metadata
+/// node's identity, numbered in `variables`: two variables that share a
+/// name are never merged under it.
 ///
 /// # Safety
 /// `instruction` must be a live instruction in `context`, of the function
@@ -3002,19 +3150,32 @@ unsafe fn read_bindings(
     instruction: LLVMValueRef,
     at: ValueId,
     ids: &HashMap<LLVMValueRef, ValueId>,
+    numbers: &mut DebugNumbers,
+    scopes: &mut FunctionScopes,
     out: &mut Vec<DbgValue>,
 ) {
     // SAFETY: the caller guarantees a live instruction; each record is read
     // only while it is live, and the variable accessors only for a record
-    // that is not a label.
+    // that is not a label, on a variable `variable_name` has checked is a
+    // live `DILocalVariable`.
     unsafe {
         let mut record = LLVMGetFirstDbgRecord(instruction);
         while !record.is_null() {
             let kind = LLVMDbgRecordGetKind(record);
-            let name = (kind != LLVMDbgRecordKind::LLVMDbgRecordLabel)
-                .then(|| variable_name(context, LLVMDbgVariableRecordGetVariable(record)))
-                .flatten();
-            if let Some(name) = name {
+            let variable = (kind != LLVMDbgRecordKind::LLVMDbgRecordLabel)
+                .then(|| LLVMDbgVariableRecordGetVariable(record));
+            let name = variable.and_then(|variable| variable_name(context, variable));
+            if let (Some(name), Some(variable)) = (name, variable) {
+                let next = numbers.variables.len() as u32;
+                let id = *numbers.variables.entry(variable).or_insert(next);
+                let scope = numbers.scope(context, LLVMDIVariableGetScope(variable), scopes);
+                let file = LLVMDIVariableGetFile(variable);
+                let declared_file = if file.is_null() {
+                    String::new()
+                } else {
+                    let mut length = 0;
+                    owned(LLVMDIFileGetFilename(file, &mut length), length as usize)
+                };
                 let direct = kind != LLVMDbgRecordKind::LLVMDbgRecordDeclare
                     && is_empty_expression(context, LLVMDbgVariableRecordGetExpression(record));
                 let value = if direct {
@@ -3022,7 +3183,15 @@ unsafe fn read_bindings(
                 } else {
                     Operand::Other
                 };
-                out.push(DbgValue { name, value, at });
+                out.push(DbgValue {
+                    name,
+                    variable: id,
+                    declared_file,
+                    declared_line: LLVMDIVariableGetLine(variable),
+                    scope,
+                    value,
+                    at,
+                });
             }
             record = LLVMGetNextDbgRecord(record);
         }
@@ -3074,6 +3243,22 @@ unsafe fn is_empty_expression(context: LLVMContextRef, expression: LLVMMetadataR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A malformed module may nest two block scopes in each other: the
+    /// walk up ends, placing the chain nowhere, rather than looping.
+    #[test]
+    fn a_cyclic_scope_chain_has_no_outermost_scope() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let parents = HashMap::from([(1, 2), (2, 1), (3, 1), (4, 5)]);
+            let root = |scope| outermost(scope, |at| parents.get(&at).copied());
+            let _ = sender.send([root(3), root(1), root(4), root(5)]);
+        });
+        let roots = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the walk up a cyclic chain must end");
+        assert_eq!(roots, [None, None, Some(5), Some(5)]);
+    }
 
     #[test]
     fn producers_decide_a_module_only_when_they_agree() {

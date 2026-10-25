@@ -201,7 +201,14 @@ also hold `annotate` verdicts on whether a value is feasible, which `reach` and
 `guards` lists the comparisons, clamps, masks and moduli that constrain a
 call's argument (`--at FILE:LINE --operand N`), its result (`--return`) or a
 `-g` local (`--function F --local NAME`), with each guard's bound and source
-line; `--from F` keeps only callers on a path from `F`.
+line; `--from F` keeps only callers on a path from `F`. A local reused for
+several values is refused with the lines that use it; a name several variables
+share, such as a shadowed local, is refused with the line each is declared at,
+though a variable of an inlined callee does not count;
+`--at FILE:LINE` beside `--local` traces the value it holds at that use. A use
+at a line is a read of the value the local holds there, possibly through
+another variable that holds the same value inside the local's scope. An overlay
+`annotate` anchor carries no use-site, so a reused local cannot be annotated.
 Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
 relation to the value is a constant one. Its `scale` and `offset` are decimal
 strings, since they may exceed 64 bits. `verified` means its bound soundly
