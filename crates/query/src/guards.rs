@@ -871,8 +871,8 @@ impl Widenings {
     /// Whether `site`'s bound holds across all of them: a `zext` keeps an
     /// unsigned value, a `sext` a signed one. An equality's bound is printed
     /// signed, which a `sext` keeps, and a `zext` only when it is not
-    /// negative. An inequality is kept by none: it is no identity across a
-    /// widening.
+    /// negative. An inequality admits a negative value whatever its bound,
+    /// so only `sext`s keep it.
     fn keep(self, site: &GuardSite) -> bool {
         if self == Widenings::NONE {
             return true;
@@ -880,7 +880,7 @@ impl Widenings {
         match signedness(site.op, site.predicate.as_deref()) {
             Some(Signedness::Unsigned) => !self.sext,
             Some(Signedness::Signed) => !self.zext,
-            Some(Signedness::Equality) if site.predicate.as_deref() == Some("ne") => false,
+            Some(Signedness::Equality) if site.predicate.as_deref() == Some("ne") => !self.zext,
             Some(Signedness::Equality) => {
                 !self.zext
                     || site
@@ -4424,6 +4424,40 @@ out:
   ret void
 }
 
+define void @unequal_sign_extended(i32 %x) {
+  %c = icmp eq i32 %x, 5
+  br i1 %c, label %out, label %use
+use:
+  %n = sext i32 %x to i64
+  call void @sink64(i64 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @negative_unequal_sign_extended(i32 %x) {
+  %c = icmp eq i32 %x, -3
+  br i1 %c, label %out, label %use
+use:
+  %n = sext i32 %x to i64
+  call void @sink64(i64 %n)
+  br label %out
+out:
+  ret void
+}
+
+define void @unequal_mixed_widened(i16 %x) {
+  %c = icmp eq i16 %x, 5
+  br i1 %c, label %out, label %use
+use:
+  %s = sext i16 %x to i32
+  %n = zext i32 %s to i64
+  call void @sink64(i64 %n)
+  br label %out
+out:
+  ret void
+}
+
 define void @negative_unequal_widened(i32 %x) {
   %c = icmp eq i32 %x, -1
   br i1 %c, label %out, label %use
@@ -5158,14 +5192,20 @@ out:
 
     /// Past the false edge of `x eq 5`, `x ne 5` holds. The relation is
     /// read with that predicate: an inequality admits nearly every value,
-    /// so across a `zext` it is no identity, and the site is not affine
-    /// whatever its bound.
+    /// and a `zext` turns a negative one into another number, so across any
+    /// `zext`, alone or after a `sext`, the site is not affine whatever its
+    /// bound. `unequal_widened` is the sentinel for the sext/zext split: it
+    /// verifies if `ne` is kept across a `zext` too.
     #[test]
-    fn a_widened_equality_on_the_false_edge_is_unequal_and_not_affine() {
+    fn a_zero_extended_equality_on_the_false_edge_is_unequal_and_not_affine() {
         let scratch = tempfile::tempdir().unwrap();
         let session =
             compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
-        for (function, bound) in [("unequal_widened", "5"), ("negative_unequal_widened", "-1")] {
+        for (function, bound) in [
+            ("unequal_widened", "5"),
+            ("negative_unequal_widened", "-1"),
+            ("unequal_mixed_widened", "5"),
+        ] {
             let r = affine_ir_guards(&session, function, "sink64");
             let site = only_guard(&r);
             assert_eq!(
@@ -5180,6 +5220,31 @@ out:
                 Some("the relation to the anchored value is not affine"),
                 "{function}: {r:?}"
             );
+        }
+    }
+
+    /// A `sext` keeps every signed value, and an inequality's bound is read
+    /// signed: past the false edge of `x eq K`, the widened value is `ne K`
+    /// too, a negative `K` included.
+    #[test]
+    fn a_sign_extended_equality_on_the_false_edge_is_unequal_and_verified() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session =
+            compiled_session(scratch.path(), "t.ll", AFFINE_IR, &["-Wno-override-module"]);
+        for (function, bound) in [
+            ("unequal_sign_extended", "5"),
+            ("negative_unequal_sign_extended", "-3"),
+        ] {
+            let r = affine_ir_guards(&session, function, "sink64");
+            let site = only_guard(&r);
+            assert_eq!(
+                (site.predicate.as_deref(), site.bound.as_deref()),
+                (Some("ne"), Some(bound)),
+                "{function}: {r:?}"
+            );
+            assert_eq!(site.affine, Some(Affine::IDENTITY), "{function}: {r:?}");
+            assert!(site.verified, "{function}: {r:?}");
+            assert_eq!(site.caveat, None, "{function}: {r:?}");
         }
     }
 
