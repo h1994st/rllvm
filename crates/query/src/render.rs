@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use owo_colors::OwoColorize;
 
 use crate::{
-    EdgeKey, GuardSite, PathStep, QueryResult, QueryResults, Resolution,
+    Affine, EdgeKey, GuardSite, PathStep, QueryResult, QueryResults, Resolution,
     bind::BindingStatus,
     facts::{CallSiteFact, CallTarget, FieldEvidence, FunctionId, GuardKind, Slot, SourceLocation},
     overlay::verdict_label,
@@ -154,6 +154,35 @@ fn guard_depth(depth: u32) -> String {
         1 => "1 step upstream".to_string(),
         n => format!("{n} steps upstream"),
     }
+}
+
+/// A guard's relation to the anchored value as the text says it:
+/// `anchored = 4 * guarded + 1`.
+fn guard_affine(affine: Affine) -> String {
+    let term = match affine.scale {
+        1 => "guarded".to_string(),
+        -1 => "-guarded".to_string(),
+        scale => format!("{scale} * guarded"),
+    };
+    let offset = match affine.offset {
+        0 => String::new(),
+        offset if offset < 0 => format!(" - {}", offset.unsigned_abs()),
+        offset => format!(" + {offset}"),
+    };
+    format!("anchored = {term}{offset}")
+}
+
+/// The candidate marker on a guard that is not verified, naming why; nothing
+/// on one that is.
+fn guard_caveat(guard: &GuardSite, ctx: Ctx) -> String {
+    if guard.verified {
+        return String::new();
+    }
+    let marker = format!(
+        "[unverified: {}]",
+        guard.caveat.as_deref().unwrap_or(UNKNOWN)
+    );
+    format!(" {}", paint(&marker, ctx.color, Paint::Uncertain))
 }
 
 /// The name a unit-variant enum carries into the JSON envelope, not the
@@ -960,7 +989,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
         QueryResults::Guards(result) => {
             for guard in &result.guards {
                 out.push_str(&format!(
-                    "{}  {}{}{} ({}, {})\n",
+                    "{}  {}{}{} ({}, {}{}){}\n",
                     location(guard.location.as_ref(), ctx),
                     serde_name(&guard.op),
                     guard
@@ -969,7 +998,15 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                         .map_or(String::new(), |p| format!(" {p}")),
                     guard_bound(guard).map_or(String::new(), |b| format!(" {b}")),
                     serde_name(&guard.relation),
-                    guard_depth(guard.depth)
+                    guard_depth(guard.depth),
+                    guard
+                        .affine
+                        .filter(|affine| *affine != Affine::IDENTITY)
+                        .map_or(String::new(), |affine| format!(
+                            ", {}",
+                            guard_affine(affine)
+                        )),
+                    guard_caveat(guard, ctx)
                 ));
             }
             for crossing in &result.crossings {
@@ -2532,7 +2569,107 @@ mod tests {
             location: None,
             relation,
             depth,
+            verified: true,
+            caveat: None,
+            affine: Some(crate::Affine::IDENTITY),
         }
+    }
+
+    /// A guards answer listing `guards`, and nothing else.
+    fn guards_answer(guards: Vec<GuardSite>) -> crate::QueryResult {
+        let session = session_from(&[("a", "b")]);
+        let mut answer = run(&session, &Query::Externals).unwrap();
+        answer.results = QueryResults::Guards(crate::GuardsResult {
+            guards,
+            ..crate::GuardsResult::default()
+        });
+        answer
+    }
+
+    #[test]
+    fn a_proven_guard_is_verified_and_shows_no_candidate_marker() {
+        let site = guard(
+            GuardKind::Compare,
+            Some("ult"),
+            "16",
+            crate::GuardRelation::Dominates,
+            0,
+        );
+        let json = serde_json::to_value(&site).unwrap();
+        assert_eq!(json["verified"], serde_json::json!(true));
+        assert!(json.get("caveat").is_none(), "no caveat on a proven guard");
+        assert_eq!(
+            json["affine"],
+            serde_json::json!({"scale": "1", "offset": "0"})
+        );
+        let text = render(&guards_answer(vec![site]), TextMode::Full, Color::Never);
+        assert_eq!(
+            text.lines().next(),
+            Some("<no location>  compare ult 16 (dominates, on the anchor)"),
+            "a proven identity guard's line is unchanged"
+        );
+        assert!(!text.contains("unverified"), "{text}");
+    }
+
+    #[test]
+    fn an_unverified_guard_shows_its_relation_and_caveat() {
+        let mut offset = guard(
+            GuardKind::Mask,
+            None,
+            "255",
+            crate::GuardRelation::Defines,
+            1,
+        );
+        offset.affine = Some(crate::Affine {
+            scale: 1,
+            offset: 1000,
+        });
+        let mut scaled = guard(
+            GuardKind::Compare,
+            Some("ugt"),
+            "16",
+            crate::GuardRelation::Dominates,
+            1,
+        );
+        scaled.affine = Some(crate::Affine {
+            scale: -4,
+            offset: -3,
+        });
+        scaled.verified = false;
+        scaled.caveat = Some("the bound does not carry".into());
+        let mut opaque = guard(
+            GuardKind::Compare,
+            Some("ult"),
+            "16",
+            crate::GuardRelation::Dominates,
+            2,
+        );
+        opaque.affine = None;
+        opaque.verified = false;
+        opaque.caveat = Some("not affine".into());
+        let json = serde_json::to_value(&opaque).unwrap();
+        assert_eq!(json["verified"], serde_json::json!(false));
+        assert_eq!(json["caveat"], serde_json::json!("not affine"));
+        assert!(json.get("affine").is_none(), "{json}");
+        let text = render(
+            &guards_answer(vec![offset, scaled, opaque]),
+            TextMode::Full,
+            Color::Never,
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(
+            lines[0],
+            "<no location>  mask 0xff (defines, 1 step upstream, anchored = guarded + 1000)"
+        );
+        assert_eq!(
+            lines[1],
+            "<no location>  compare ugt 16 (dominates, 1 step upstream, anchored = -4 * guarded - 3) \
+             [unverified: the bound does not carry]"
+        );
+        assert_eq!(
+            lines[2],
+            "<no location>  compare ult 16 (dominates, 2 steps upstream) [unverified: not affine]"
+        );
     }
 
     #[test]

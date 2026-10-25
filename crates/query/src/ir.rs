@@ -181,6 +181,8 @@ pub(crate) struct IntPredicate {
     pub(crate) spelling: &'static str,
     /// The same comparison with its operands swapped: `ugt` for `ult`.
     pub(crate) swapped: &'static str,
+    /// The comparison that holds when this one does not: `uge` for `ult`.
+    pub(crate) inverse: &'static str,
     /// The clamp a choice between the two compared values makes under it:
     /// the first when it picks the left-hand value on true, the second when
     /// it picks the right. `None` for an equality, which bounds nothing.
@@ -189,26 +191,28 @@ pub(crate) struct IntPredicate {
 
 /// Every integer predicate.
 pub(crate) const INT_PREDICATES: [IntPredicate; 10] = [
-    predicate("eq", "eq", None),
-    predicate("ne", "ne", None),
-    predicate("ugt", "ult", Some(["umax", "umin"])),
-    predicate("uge", "ule", Some(["umax", "umin"])),
-    predicate("ult", "ugt", Some(["umin", "umax"])),
-    predicate("ule", "uge", Some(["umin", "umax"])),
-    predicate("sgt", "slt", Some(["smax", "smin"])),
-    predicate("sge", "sle", Some(["smax", "smin"])),
-    predicate("slt", "sgt", Some(["smin", "smax"])),
-    predicate("sle", "sge", Some(["smin", "smax"])),
+    predicate("eq", "eq", "ne", None),
+    predicate("ne", "ne", "eq", None),
+    predicate("ugt", "ult", "ule", Some(["umax", "umin"])),
+    predicate("uge", "ule", "ult", Some(["umax", "umin"])),
+    predicate("ult", "ugt", "uge", Some(["umin", "umax"])),
+    predicate("ule", "uge", "ugt", Some(["umin", "umax"])),
+    predicate("sgt", "slt", "sle", Some(["smax", "smin"])),
+    predicate("sge", "sle", "slt", Some(["smax", "smin"])),
+    predicate("slt", "sgt", "sge", Some(["smin", "smax"])),
+    predicate("sle", "sge", "sgt", Some(["smin", "smax"])),
 ];
 
 const fn predicate(
     spelling: &'static str,
     swapped: &'static str,
+    inverse: &'static str,
     clamps: Option<[&'static str; 2]>,
 ) -> IntPredicate {
     IntPredicate {
         spelling,
         swapped,
+        inverse,
         clamps,
     }
 }

@@ -2,7 +2,9 @@
 
 `copy` hands `put` the length `n = len < CAP ? len : CAP`. `guards` finds the
 clamp that bounds it, and says nothing is known about a value nothing
-constrains: no guard is an empty list, never "unbounded".
+constrains: no guard is an empty list, never "unbounded". In `offset.c`,
+`reserve` returns early when `left > MAX` and hands `make_buf` `left + 1`;
+`guards` carries the bound to that argument through their affine relation.
 
 ## Requirements
 
@@ -18,7 +20,8 @@ through it.
 
 It checks the clamp from a call site and from a named local, the empty answer
 for an unconstrained argument, the module `--emit-module` writes, a recorded
-verdict, and an annotated `reach` that keeps its path.
+verdict, an annotated `reach` that keeps its path, and the verified bound on
+`left + 1`.
 
 ## What it does
 
@@ -41,6 +44,19 @@ named by the call site id the error prints.
 The second names the same value as the `-g` local `n` in `copy`, which needs
 no call site, and finds the same clamp.
 
+```bash
+rllvm-cc -g -O0 offset.c -o build/offset
+rllvm-info build/offset --json > build/offset.json
+rllvm-query --catalog build/offset.json guards --at offset.c:15 --operand 1
+```
+
+This names `left + 1`, the size handed to `make_buf`. The answer lists the
+`compare ugt 64` on `left` at `offset.c:13`, one step upstream, with
+`anchored = guarded + 1`: in `--json`, `affine` is
+`{"scale": "1", "offset": "1"}`, decimal strings, and `verified` is `true`.
+Past the early return `left` is in `[0, 64]`, and `[1, 65]` stays within a
+`size_t`.
+
 ## Reading a guard
 
 - `relation`: the guard `defines` the value; `dominates` its use, running
@@ -49,6 +65,25 @@ no call site, and finds the same clamp.
   across `zext` or `sext` when the guard's signedness matches the cast's.
   Depth N is N steps up the chain the value is computed from, a truncation
   counting as a step, and is not by itself a bound on the value.
+- `affine` is that chain as `anchored = scale * guarded + offset` when it is
+  constant `add`, `sub`, `mul` and `shl` alone, or a matching widening
+  (`{1, 0}`). `verified` is `true` when the relation is affine and every value
+  the guard admits maps onto the anchored value without wrapping at its width.
+  Otherwise the guard is an unverified lead, and `caveat` says why. A clamp
+  that runs on the value and is used later bounds its own result, not the
+  value, so it is unverified too.
+- `verified` does not say the guard runs on every path; `relation` does. A
+  bound holds unconditionally only when it is `verified` and `dominates` or
+  `defines` the value.
+- The numeric cap is `bound`. A `verified` guard without one, such as a clamp
+  to another variable, is capped by a runtime value, the guard's operand: a
+  sound relation, not a numeric limit. To reach a number, anchor on that
+  operand and trace it.
+- A comparison admits the side that holds on its branch's edge into the
+  anchor: past `if (left > MAX) return;`, `left` is in `[0, MAX]`. With no
+  such edge (the block it enters is also entered from elsewhere, or does not
+  dominate the use), or no constant bound, nothing is known to carry, and a
+  guard upstream of arithmetic is unverified.
 - The trace stays in the anchor's function. Where the value enters through a
   parameter or leaves a call, `crossings` name the call to ask `guards` about
   next. `--from F` keeps only callers on a path from `F`, which must name one

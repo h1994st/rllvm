@@ -9,6 +9,8 @@ require rllvm-cc rllvm-info rllvm-query python3 llvm:opt llvm:llvm-nm
 mkdir -p "$OUT"
 rllvm-cc -g -O0 clamp.c -o "$OUT/clamp"
 rllvm-info "$OUT/clamp" --json >"$OUT/catalog.json"
+rllvm-cc -g -O0 offset.c -o "$OUT/offset"
+rllvm-info "$OUT/offset" --json >"$OUT/offset.json"
 
 query() {
     rllvm-query --catalog "$OUT/catalog.json" "$@"
@@ -29,6 +31,9 @@ defines "$text" 'clamp' "no clamp guard on the length handed to put: $text"
 defines "$text" 'defines' "the clamp was not reported as defining the value: $text"
 defines "$text" 'clamp\.c:13' "the clamp did not name its source line: $text"
 defines "$text" 'on the anchor' "the clamp was not reported on the value itself: $text"
+if grep -q 'unverified' <<<"$text"; then
+    fail "the clamp on the value itself was marked unverified: $text"
+fi
 
 # 2. The same answer as JSON: one clamp, defining the length, with its bound.
 guards=$(query guards --at clamp.c:14 --operand 2 --from copy --json |
@@ -38,6 +43,9 @@ defines "$guards" "\('clamp', 'defines'\)" \
 bound=$(query guards --at clamp.c:14 --operand 2 --from copy --json |
     field '[g for g in a["results"]["guards"] if g["op"] == "clamp"][0]["bound"]')
 defines "$bound" '64' "the clamp bound was $bound, expected CAP (64)"
+verified=$(query guards --at clamp.c:14 --operand 2 --from copy --json |
+    field '[g["verified"] for g in a["results"]["guards"]]')
+[ "$verified" = "[True]" ] || fail "the clamp was not verified: $verified"
 
 # 3. The same value named as a source local needs no call site.
 named=$(query guards --function copy --local n --json |
@@ -79,4 +87,21 @@ flows=$(field '[(f["source"], f["verdict"]) for f in a["uncertainty"].get("annot
 [ "$flows" = "[('agent', 'infeasible')]" ] ||
     fail "annotated_flows was $flows, expected one infeasible annotation labeled agent"
 
-echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, and an annotated reach that keeps its path"
+# 8. Past `if (left > MAX) return;`, `left` is in [0, MAX]; make_buf gets
+#    `left + 1`. The guard carries to the argument through that affine
+#    relation, without wrapping: verified.
+offset() {
+    rllvm-query --catalog "$OUT/offset.json" guards --at offset.c:15 --operand 1 "$@"
+}
+text=$(offset)
+defines "$text" 'compare ugt 64' "no comparison on left: $text"
+defines "$text" 'anchored = guarded \+ 1' "the relation to left + 1 was not shown: $text"
+if grep -q 'unverified' <<<"$text"; then
+    fail "the guard on left was marked unverified: $text"
+fi
+carried=$(offset --json |
+    field '[(g["op"], g["bound"], g["verified"], g["affine"]["scale"], g["affine"]["offset"]) for g in a["results"]["guards"]]')
+[ "$carried" = "[('compare', '64', True, '1', '1')]" ] ||
+    fail "guards on left + 1 reported $carried, expected one verified compare with affine {1, 1}"
+
+echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, and a verified bound carried to left + 1"
