@@ -339,3 +339,21 @@ pub(crate) struct DbgValue {
     /// just before it.
     pub(crate) at: ValueId,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A comparison's inverse is a predicate too, and inverting it again
+    /// gives the comparison back: a guard read off a branch's false edge
+    /// reports that inverse.
+    #[test]
+    fn every_predicate_inverts_back_to_itself() {
+        for row in &INT_PREDICATES {
+            let inverse = int_predicate(row.inverse)
+                .unwrap_or_else(|| panic!("{} has no inverse row", row.spelling));
+            assert_ne!(inverse.spelling, row.spelling);
+            assert_eq!(inverse.inverse, row.spelling);
+        }
+    }
+}

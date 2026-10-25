@@ -231,27 +231,38 @@ Report what the answer supports, and say what it does not:
   bound soundly carries to the anchored value. Report a guard with
   `verified: false` as a lead, never a bound, with its `caveat`: the
   relation is not affine, the guard bounds a value computed from the
-  anchored one (such as a clamp of it used later), the bound wraps when
-  carried to the anchored value, or it could not be mapped (no constant, or
-  no branch edge that decides which side of a comparison holds at the
-  anchor). A clamp of the anchored value made of a comparison (a branch or
-  select clamp, not an intrinsic umin or saturation) also lists that
-  comparison, which bounds the anchored value itself: verified only when its
-  branch's edge decides the anchor, a lead otherwise.
-  `verified` does not mean the guard runs on every path: report a
-  bound as unconditional only when it is `verified` and its `relation` is
-  `dominates` or `defines`; a verified one that is on_path is conditional.
-  The numeric cap lives in `bound`. A verified guard with no `bound` is
-  capped by a runtime value, the guard's operand: a sound relation, not a
-  numeric limit, so never report a number for it; to reach one, anchor on
-  that operand and trace it. A load is followed to the nearest store before
-  it in its block, which overwrites any earlier one; a call, another store
-  or any other operation between them (an atomicrmw, a cmpxchg, a volatile
-  load), which is never skipped to reach an earlier store, or stores only in
-  other blocks make every guard reached through the load a lead, with that
-  caveat, and report the trace lost there. A `relation` of `dominates` runs
-  before the use on every path but does not say which way its branch goes;
-  one that is on_path lies on some path to the use, not every one.
+  anchored one (such as a clamp of it used later), no branch edge shows the
+  comparison held at the use, the bound wraps when carried to the anchored
+  value, or it could not be mapped (no constant the guard's integer holds,
+  no width, or an interval that admits no value, such as `ult 0`).
+  A comparison is verified only through its branch's edge into the use, one
+  every path to the use crosses (a loop's backedge into the block it enters
+  is fine), and its `predicate` is the one that holds on that edge, which
+  may negate the source condition: past `if (x > 16) return;` it reads
+  `ule 16`. Report a verified comparison's predicate as holding at the use;
+  one with no deciding edge keeps its predicate as written. A `return`
+  anchor, or a `local` without `at`, sits before the comparisons that test
+  the value, so they are leads there: for their bound, anchor at the later
+  use, `at` that use for a local or an argument anchor on the call that
+  consumes a returned value. A clamp of the anchored value made of a
+  comparison (a branch or select clamp, not an intrinsic umin or saturation)
+  also lists that comparison, which bounds the anchored value itself,
+  verified only through its branch's edge into the use. For a clamp, mask,
+  modulo or saturation, `verified` does not mean it runs on every path:
+  report its bound as unconditional only when it is `verified` and its
+  `relation` is `dominates` or `defines`; a verified one that is on_path is
+  conditional. The numeric cap lives in `bound`. A verified guard with no
+  `bound` is capped by a runtime value, the guard's operand: a sound
+  relation, not a numeric limit, so never report a number for it; to reach
+  one, anchor on that operand and trace it. A load is followed to the
+  nearest store before it in its block, which overwrites any earlier one; a
+  call, another store or any other operation between them (an atomicrmw, a
+  cmpxchg, a volatile load), which is never skipped to reach an earlier
+  store, or stores only in other blocks make every guard reached through the
+  load a lead, with that caveat, and report the trace lost there. A
+  `relation` of `dominates` runs before the use on every path but does not
+  say which way its branch goes (for a verified comparison, its `predicate`
+  does); one that is on_path lies on some path to the use, not every one.
   `crossings` name the call where the value enters or leaves: ask `guards`
   there next. `from` only keeps crossings from callers on a path from one
   named function; nothing between it and the anchor was examined.
