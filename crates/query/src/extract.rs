@@ -2626,14 +2626,28 @@ impl DebugNumbers {
             }
             at = parent;
         }
-        while let Some(&parent) = self.parents.get(&at) {
-            at = parent;
-        }
-        if self.subprograms.contains(&at) {
-            function.subprograms.insert(at);
+        if let Some(root) = outermost(id, |scope| self.parents.get(&scope).copied())
+            && self.subprograms.contains(&root)
+        {
+            function.subprograms.insert(root);
         }
         Some(id)
     }
+}
+
+/// The outermost scope `scope` is nested in, following `parent` up. `None`
+/// when the chain loops, as a malformed module's may: such a chain is placed
+/// nowhere, so nothing is taken to lie in it or outside its function.
+fn outermost(scope: ScopeId, parent: impl Fn(ScopeId) -> Option<ScopeId>) -> Option<ScopeId> {
+    let mut seen = HashSet::new();
+    let mut at = scope;
+    while seen.insert(at) {
+        match parent(at) {
+            Some(up) => at = up,
+            None => return Some(at),
+        }
+    }
+    None
 }
 
 /// `numbers` holds the module's debug-info numbering, shared across its
@@ -3229,6 +3243,22 @@ unsafe fn is_empty_expression(context: LLVMContextRef, expression: LLVMMetadataR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A malformed module may nest two block scopes in each other: the
+    /// walk up ends, placing the chain nowhere, rather than looping.
+    #[test]
+    fn a_cyclic_scope_chain_has_no_outermost_scope() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let parents = HashMap::from([(1, 2), (2, 1), (3, 1), (4, 5)]);
+            let root = |scope| outermost(scope, |at| parents.get(&at).copied());
+            let _ = sender.send([root(3), root(1), root(4), root(5)]);
+        });
+        let roots = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the walk up a cyclic chain must end");
+        assert_eq!(roots, [None, None, Some(5), Some(5)]);
+    }
 
     #[test]
     fn producers_decide_a_module_only_when_they_agree() {
