@@ -2523,7 +2523,10 @@ impl UseSite {
 /// operand the last binding before it binds, in its block, or else the last
 /// in the nearest block dominating it that has one. A binding made at an
 /// instruction takes effect from that instruction on. `None` where no
-/// binding reaches; an untraceable binding is kept as `Operand::Other`.
+/// binding reaches, and outside the variable's scope, where it does not
+/// exist whatever value it last held: only a value whose scope is the
+/// variable's or nested in it holds anything. An untraceable binding is kept
+/// as `Operand::Other`.
 fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, variable: u32) -> Vec<Option<&'a Operand>> {
     let mut position = vec![0; body.values.len()];
     for block in &body.blocks {
@@ -2560,7 +2563,17 @@ fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, variable: u32) -> Vec<Op
         }
         binding.map(|&(_, held)| held)
     };
-    (0..body.values.len()).map(held).collect()
+    let declared = body
+        .dbg_values
+        .iter()
+        .find(|binding| binding.variable == variable)
+        .and_then(|binding| binding.scope);
+    (0..body.values.len())
+        .map(|id| {
+            let scope = body.scopes.get(id).copied().flatten();
+            held(id).filter(|_| body.within(scope, declared))
+        })
+        .collect()
 }
 
 /// Each instruction of `body` that reads the value the local `variable` holds
@@ -2834,6 +2847,8 @@ mod tests {
                 .collect(),
             values: Vec::new(),
             dbg_values: Vec::new(),
+            scopes: Vec::new(),
+            scope_parents: HashMap::new(),
         }
     }
 
@@ -2940,6 +2955,32 @@ void g(unsigned a, unsigned b) {
   unsigned x = a;
   { unsigned x = b; sink(x); }
   sink2(x, b);
+}
+";
+
+    /// `cur` lives only in the block on line 3; line 4 reads `a`, the value
+    /// it held, after the block ends.
+    const OUT_OF_SCOPE_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a) {
+  { unsigned cur = a; sink(cur); }
+  sink(a);
+}
+";
+
+    /// Line 4 reads `cur` inside a block nested in its own.
+    const NESTED_SCOPE_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned cur = a;
+  { unsigned other = b; sink(cur); sink(other); }
+}
+";
+
+    /// Line 5 reads `cur`'s value through `keep`, inside `cur`'s scope.
+    const IN_SCOPE_ALIAS_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a) {
+  unsigned cur = a;
+  unsigned keep = cur;
+  sink(keep);
 }
 ";
 
@@ -3360,6 +3401,44 @@ void f(unsigned a, unsigned b) {
                     "{at:?}: {error}"
                 );
             }
+        }
+    }
+
+    /// After its block ends `cur` does not exist: a read of the value it
+    /// held is no use of it.
+    #[test]
+    fn a_read_outside_the_locals_scope_is_no_use() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, OUT_OF_SCOPE_SOURCE, &["-O0", "-g"], "g");
+        let at = line_of(&scratch, 4);
+        let error = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("no use of `cur` at {at}")),
+            "{error}"
+        );
+    }
+
+    /// A read in a block nested in the local's, or through another variable
+    /// holding its value within its scope, is still a use.
+    #[test]
+    fn a_read_inside_the_locals_scope_is_a_use() {
+        for (source, line) in [(NESTED_SCOPE_SOURCE, 4), (IN_SCOPE_ALIAS_SOURCE, 5)] {
+            let scratch = tempfile::tempdir().unwrap();
+            let (session, ir) = promoted(&scratch, source, &["-O0", "-g"], "g");
+            let resolved = resolve_anchor_at_use(
+                &ir,
+                &session,
+                &local("g", "cur"),
+                Some(&line_of(&scratch, line)),
+            )
+            .unwrap();
+            assert_eq!(
+                node(&ir, &resolved, "g").0,
+                defined(&ir, "g").params[0],
+                "{source}"
+            );
         }
     }
 

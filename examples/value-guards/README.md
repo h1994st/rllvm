@@ -91,11 +91,12 @@ Named alone, `cur` traces nothing: `value_trace_lost` says it is bound to more
 than one value and lists the lines that use it. `--at` names one of those
 lines and traces the value `cur` holds there. A use at a line is a read of the
 value the local holds there, possibly through another variable that holds the
-same value. Traced at line 13, it finds `compare ugt 32` (line 11); traced at
-line 17, `compare ugt 8` (line 15); each dominates its use. A line with no use
-of `cur` is an error listing the lines that have one, and a line reading two of
-its values is an error rather than a pick. An overlay `annotate` anchor names a
-local without a use-site, so a reused local cannot be annotated.
+same value inside the local's scope. Traced at line 13, it finds
+`compare ugt 32` (line 11); traced at line 17, `compare ugt 8` (line 15); each
+dominates its use. A line with no use of `cur` is an error listing the lines
+that have one, and a line reading two of its values is an error rather than a
+pick. An overlay `annotate` anchor names a local without a use-site, so a
+reused local cannot be annotated.
 
 ## Reading a guard
 

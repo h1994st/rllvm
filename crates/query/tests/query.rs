@@ -3080,6 +3080,50 @@ mod mcp {
         assert!(text.contains(message), "{text}\n{stderr}");
     }
 
+    /// A read of a local's value after its block ends is no use of it, on
+    /// either surface.
+    #[test]
+    fn a_read_outside_a_locals_scope_is_refused_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "o.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a) {\n  { unsigned cur = a; sink(cur); }\n  sink(a);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let at = format!("{}:4", scratch.path().join("o.c").display());
+        let output = Command::new(env!("CARGO_BIN_EXE_rllvm-query"))
+            .env("RLLVM_CONFIG", scratch_rllvm_config(scratch.path()))
+            .arg("--catalog")
+            .arg(&catalog)
+            .args(["guards", "--function", "g", "--local", "cur", "--at", &at])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("no use of `cur` at {at}")),
+            "{stderr}"
+        );
+
+        let response = mcp_exchange_in(
+            &scratch,
+            &catalog,
+            &modern_request(
+                "call",
+                "tools/call",
+                serde_json::json!({
+                    "name": "guards",
+                    "arguments": { "function": "g", "local": "cur", "at": at },
+                }),
+            ),
+        );
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let text = response["result"]["content"][0]["text"].as_str().unwrap();
+        let message = stderr.trim().trim_start_matches("error: ");
+        assert!(text.contains(message), "{text}\n{stderr}");
+    }
+
     #[test]
     fn an_mcp_slice_emits_the_module_it_answers_for() {
         let scratch = tempfile::tempdir().unwrap();

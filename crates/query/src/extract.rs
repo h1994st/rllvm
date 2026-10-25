@@ -24,8 +24,9 @@ use llvm_sys::{
         LLVMDIGlobalVariableExpressionGetVariable, LLVMDILocationGetColumn,
         LLVMDILocationGetInlinedAt, LLVMDILocationGetLine, LLVMDILocationGetScope,
         LLVMDIScopeGetFile, LLVMDITypeGetFlags, LLVMDITypeGetName, LLVMDITypeGetOffsetInBits,
-        LLVMDITypeGetSizeInBits, LLVMDIVariableGetFile, LLVMDIVariableGetLine, LLVMGetDINodeTag,
-        LLVMGetMetadataKind, LLVMGetSubprogram, LLVMInstructionGetDebugLoc, LLVMMetadataKind,
+        LLVMDITypeGetSizeInBits, LLVMDIVariableGetFile, LLVMDIVariableGetLine,
+        LLVMDIVariableGetScope, LLVMGetDINodeTag, LLVMGetMetadataKind, LLVMGetSubprogram,
+        LLVMInstructionGetDebugLoc, LLVMMetadataKind,
     },
     error::{LLVMDisposeErrorMessage, LLVMErrorRef, LLVMGetErrorMessage},
     prelude::*,
@@ -2520,15 +2521,14 @@ unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
     let parsed = unsafe { parse_bitcode(bytes) }
         .map_err(|diagnostics| unreadable("bitcode", &diagnostics))?;
     let mut functions = Vec::new();
-    // Each `DILocalVariable` met, numbered in the order met.
-    let mut variables = HashMap::new();
+    let mut numbers = DebugNumbers::default();
     // SAFETY: `parsed.module` is a module in its live context.
     let mut function = unsafe { LLVMGetFirstFunction(parsed.module.0) };
     while !function.is_null() {
         // SAFETY: `function` is a live function in that module, and only a
         // definition is read as one.
         if unsafe { LLVMIsDeclaration(function) } == 0 {
-            functions.push(unsafe { read_function_ir(parsed.context.0, function, &mut variables) });
+            functions.push(unsafe { read_function_ir(parsed.context.0, function, &mut numbers) });
         }
         // SAFETY: as above.
         function = unsafe { LLVMGetNextFunction(function) };
@@ -2539,15 +2539,86 @@ unsafe fn read_module_ir_inner(bytes: &[u8]) -> Result<ModuleIr, Error> {
     })
 }
 
-/// `variables` numbers each `DILocalVariable` the module's functions bind,
-/// shared across them so one variable keeps one number.
+/// The numbers a module's debug-info nodes get as its functions are read:
+/// shared across them, so one variable or scope keeps one number. Only the
+/// numbers leave this module.
+#[derive(Default)]
+struct DebugNumbers {
+    /// Each `DILocalVariable` met, numbered in the order met.
+    variables: HashMap<LLVMMetadataRef, u32>,
+    /// Each lexical scope met, numbered in the order met.
+    scopes: HashMap<LLVMMetadataRef, ScopeId>,
+    /// The scope each numbered block scope is nested in.
+    parents: HashMap<ScopeId, ScopeId>,
+}
+
+impl DebugNumbers {
+    /// `scope`'s number, numbering it and the scopes it is nested in on
+    /// first sight, and recording each link up its chain in `links`, the
+    /// links of the function being read. `None` for no scope. Only a block
+    /// scope (`DILexicalBlock`, `DILexicalBlockFile`) links to the scope
+    /// enclosing it; a subprogram, or anything else, is outermost.
+    ///
+    /// # Safety
+    /// `scope` must be null or live metadata in `context`.
+    unsafe fn scope(
+        &mut self,
+        context: LLVMContextRef,
+        scope: LLVMMetadataRef,
+        links: &mut HashMap<ScopeId, ScopeId>,
+    ) -> Option<ScopeId> {
+        if scope.is_null() {
+            return None;
+        }
+        let id = match self.scopes.get(&scope) {
+            Some(&id) => id,
+            None => {
+                let id = self.scopes.len() as ScopeId;
+                // Numbered before its parent is read, so a malformed cycle
+                // finds it numbered and stops.
+                self.scopes.insert(scope, id);
+                // SAFETY: the caller guarantees live metadata; its operands
+                // are read only once it is known to be a block scope, whose
+                // enclosing scope is live metadata of the same module.
+                let parent = unsafe {
+                    matches!(
+                        LLVMGetMetadataKind(scope),
+                        LLVMMetadataKind::LLVMDILexicalBlockMetadataKind
+                            | LLVMMetadataKind::LLVMDILexicalBlockFileMetadataKind
+                    )
+                    .then(|| {
+                        let operands = md_node_operands(LLVMMetadataAsValue(context, scope));
+                        operand_metadata(*operands.get(DI_SCOPE_OPERAND)?)
+                    })
+                    .flatten()
+                    .and_then(|parent| self.scope(context, parent, links))
+                };
+                if let Some(parent) = parent {
+                    self.parents.insert(id, parent);
+                }
+                id
+            }
+        };
+        let mut at = id;
+        while let Some(&parent) = self.parents.get(&at) {
+            if links.insert(at, parent).is_some() {
+                break;
+            }
+            at = parent;
+        }
+        Some(id)
+    }
+}
+
+/// `numbers` holds the module's debug-info numbering, shared across its
+/// functions.
 ///
 /// # Safety
 /// `function` must be a live function definition in `context`.
 unsafe fn read_function_ir(
     context: LLVMContextRef,
     function: LLVMValueRef,
-    variables: &mut HashMap<LLVMMetadataRef, u32>,
+    numbers: &mut DebugNumbers,
 ) -> FunctionIr {
     // Every parameter and instruction is numbered before any is read, so an
     // operand defined further on -- a loop's `phi` -- still resolves.
@@ -2593,9 +2664,12 @@ unsafe fn read_function_ir(
             .collect();
         let mut values = Vec::with_capacity(handles.len());
         let mut dbg_values = Vec::new();
+        let mut scopes = Vec::with_capacity(handles.len());
+        let mut scope_parents = HashMap::new();
         for (id, &(handle, block)) in handles.iter().enumerate() {
             let id = id as ValueId;
             if id < param_count {
+                scopes.push(None);
                 values.push(ValueNode {
                     block,
                     opcode: OpcodeIr::Param,
@@ -2612,7 +2686,25 @@ unsafe fn read_function_ir(
             }
             block_irs[block].instrs.push(id);
             values.push(read_instruction(handle, block, &ids, &block_ids, layout));
-            read_bindings(context, handle, id, &ids, variables, &mut dbg_values);
+            let location = LLVMInstructionGetDebugLoc(handle);
+            scopes.push(if location.is_null() {
+                None
+            } else {
+                numbers.scope(
+                    context,
+                    LLVMDILocationGetScope(location),
+                    &mut scope_parents,
+                )
+            });
+            read_bindings(
+                context,
+                handle,
+                id,
+                &ids,
+                numbers,
+                &mut scope_parents,
+                &mut dbg_values,
+            );
         }
 
         FunctionIr {
@@ -2624,6 +2716,8 @@ unsafe fn read_function_ir(
             blocks: block_irs,
             values,
             dbg_values,
+            scopes,
+            scope_parents,
         }
     }
 }
@@ -3013,7 +3107,8 @@ unsafe fn read_bindings(
     instruction: LLVMValueRef,
     at: ValueId,
     ids: &HashMap<LLVMValueRef, ValueId>,
-    variables: &mut HashMap<LLVMMetadataRef, u32>,
+    numbers: &mut DebugNumbers,
+    links: &mut HashMap<ScopeId, ScopeId>,
     out: &mut Vec<DbgValue>,
 ) {
     // SAFETY: the caller guarantees a live instruction; each record is read
@@ -3028,8 +3123,9 @@ unsafe fn read_bindings(
                 .then(|| LLVMDbgVariableRecordGetVariable(record));
             let name = variable.and_then(|variable| variable_name(context, variable));
             if let (Some(name), Some(variable)) = (name, variable) {
-                let next = variables.len() as u32;
-                let id = *variables.entry(variable).or_insert(next);
+                let next = numbers.variables.len() as u32;
+                let id = *numbers.variables.entry(variable).or_insert(next);
+                let scope = numbers.scope(context, LLVMDIVariableGetScope(variable), links);
                 let file = LLVMDIVariableGetFile(variable);
                 let declared_file = if file.is_null() {
                     String::new()
@@ -3049,6 +3145,7 @@ unsafe fn read_bindings(
                     variable: id,
                     declared_file,
                     declared_line: LLVMDIVariableGetLine(variable),
+                    scope,
                     value,
                     at,
                 });

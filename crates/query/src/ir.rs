@@ -4,6 +4,8 @@
 //! Function ids carry no module id, like neutral facts: the IR is read from
 //! bytes alone, so it cannot know which catalog module they came from.
 
+use std::collections::HashMap;
+
 use crate::facts::{FunctionId, GuardKind, SourceLocation};
 
 /// Dense index into [`FunctionIr::values`]. Parameters get ids too, ahead of
@@ -33,6 +35,41 @@ pub(crate) struct FunctionIr {
     /// Never deduplicated by name: a variable rebound over its lifetime has
     /// one entry per binding.
     pub(crate) dbg_values: Vec<DbgValue>,
+    /// The lexical scope each value's debug location lies in, by
+    /// [`ValueId`]: `None` for a parameter or an instruction with no
+    /// location. Scopes are numbered per module, like
+    /// [`DbgValue::variable`]: grouping keys only, never written out.
+    pub(crate) scopes: Vec<Option<ScopeId>>,
+    /// The scope each of this function's scopes is nested in, for every
+    /// scope its values and variables lie in and those enclosing them. A
+    /// scope with no entry is outermost: a subprogram, or one whose parent
+    /// is not a lexical scope.
+    pub(crate) scope_parents: HashMap<ScopeId, ScopeId>,
+}
+
+/// A lexical scope's number in its module: see [`FunctionIr::scopes`].
+pub(crate) type ScopeId = u32;
+
+impl FunctionIr {
+    /// Whether `inner` is `outer` or nested in it. False when either is
+    /// unknown: a scope that cannot be placed is not taken to lie inside.
+    pub(crate) fn within(&self, inner: Option<ScopeId>, outer: Option<ScopeId>) -> bool {
+        let (Some(mut at), Some(outer)) = (inner, outer) else {
+            return false;
+        };
+        // Each step climbs one parent link; a chain is at most as long as
+        // the links recorded, so a malformed cycle ends too.
+        for _ in 0..=self.scope_parents.len() {
+            if at == outer {
+                return true;
+            }
+            match self.scope_parents.get(&at) {
+                Some(&parent) => at = parent,
+                None => return false,
+            }
+        }
+        false
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -263,6 +300,9 @@ pub(crate) struct DbgValue {
     /// and its line there: 0 when the debug info records none.
     pub(crate) declared_file: String,
     pub(crate) declared_line: u32,
+    /// The lexical scope the variable is declared in, `None` when the debug
+    /// info places it nowhere this reader numbers.
+    pub(crate) scope: Option<ScopeId>,
     /// What the variable holds from `at` on. [`Operand::Other`] when the
     /// record does not bind it to a value directly: it lives in memory
     /// (`#dbg_declare`), is computed from its operands (a non-empty
