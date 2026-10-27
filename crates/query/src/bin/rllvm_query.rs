@@ -52,6 +52,7 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
         ret,
         function,
         local,
+        declared_at,
         from,
         emit_module,
     } = command
@@ -63,6 +64,7 @@ fn to_query(command: QueryCommand, modifiers: QueryModifiers) -> Option<Planned>
                 ret,
                 function,
                 local,
+                declared_at,
             },
             from,
             emit_module,
@@ -149,6 +151,7 @@ impl Planned {
                 anchor: anchor_from_parts(session, &request.parts, AnchorSurface::Cli)
                     .map_err(Error::InvalidArguments)?,
                 at: request.parts.use_site().map(str::to_string),
+                declared_at: request.parts.declared_at,
                 from: request.from,
                 emit_module: request.emit_module,
             }),
@@ -763,6 +766,7 @@ mod tests {
             Query::Guards {
                 anchor,
                 at: use_site,
+                declared_at,
                 from,
                 emit_module,
             } => {
@@ -788,6 +792,7 @@ mod tests {
                     ret,
                     function,
                     local,
+                    declared_at: declared_at.clone(),
                     from: from.clone(),
                     emit_module: emit_module.clone(),
                 }
@@ -1108,22 +1113,30 @@ mod tests {
             function: "parse".into(),
             name: "len".into(),
         };
-        for (anchor, at, from) in [
+        for (anchor, at, declared_at, from) in [
             (
                 GuardAnchor::Argument {
                     site: site.clone(),
                     operand: 3,
                 },
                 None,
+                None,
                 Some("main".to_string()),
             ),
-            (GuardAnchor::Return { site: site.clone() }, None, None),
-            (parse_len.clone(), None, None),
-            (parse_len, Some("t.c:9".to_string()), None),
+            (GuardAnchor::Return { site: site.clone() }, None, None, None),
+            (parse_len.clone(), None, None, None),
+            (parse_len.clone(), Some("t.c:9".to_string()), None, None),
+            (
+                parse_len,
+                Some("t.c:9".to_string()),
+                Some("t.c:7".to_string()),
+                None,
+            ),
         ] {
             let query = Query::Guards {
                 anchor: anchor.clone(),
                 at: at.clone(),
+                declared_at: declared_at.clone(),
                 from: from.clone(),
                 emit_module: Some("out.bc".into()),
             };
@@ -1141,6 +1154,7 @@ mod tests {
                         ret: false,
                         function: None,
                         local: None,
+                        declared_at: None,
                     },
                     from,
                     emit_module: Some("out.bc".into()),
@@ -1152,6 +1166,7 @@ mod tests {
                         ret: true,
                         function: None,
                         local: None,
+                        declared_at: None,
                     },
                     from,
                     emit_module: Some("out.bc".into()),
@@ -1163,6 +1178,7 @@ mod tests {
                         ret: false,
                         function: Some(function.clone()),
                         local: Some(name.clone()),
+                        declared_at,
                     },
                     from,
                     emit_module: Some("out.bc".into()),
@@ -1175,7 +1191,7 @@ mod tests {
     #[test]
     fn guards_flags_parse_into_a_request() {
         let queries = parse_queries(
-            "guards --at t.c:4 --operand 0 --from main\nguards --at t.c:4 --return\nguards --function parse --local len\nguards --function parse --local len --at t.c:9\n",
+            "guards --at t.c:4 --operand 0 --from main\nguards --at t.c:4 --return\nguards --function parse --local len\nguards --function parse --local len --at t.c:9\nguards --function parse --local len --declared-at t.c:7\n",
             QueryModifiers::default(),
         )
         .unwrap();
@@ -1194,6 +1210,7 @@ mod tests {
         assert_eq!(requests[2].parts.local.as_deref(), Some("len"));
         assert_eq!(requests[3].parts.at.as_deref(), Some("t.c:9"));
         assert_eq!(requests[3].parts.local.as_deref(), Some("len"));
+        assert_eq!(requests[4].parts.declared_at.as_deref(), Some("t.c:7"));
     }
 
     #[test]
@@ -1205,6 +1222,10 @@ mod tests {
             ("guards --at t.c:4 --operand 0 --return\n", "give one"),
             ("guards --local n\n", "needs --function"),
             ("guards --function f\n", "needs --local"),
+            (
+                "guards --at t.c:4 --operand 0 --declared-at t.c:3\n",
+                "--declared-at: a declaration line",
+            ),
             (
                 "guards --at t.c:4 --return --local n --function f\n",
                 "give one",

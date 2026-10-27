@@ -206,7 +206,7 @@ pub enum QueryCommand {
     ResolutionCandidates,
     /// The comparisons, clamps, masks and moduli that constrain a value. Evidence, not a verdict: no guard found is not "unbounded".
     ///
-    /// Name the value by a call site (`--at t.c:40` with `--operand N` for an argument or `--return` for the result) or by a named local (`--function f --local n`, needs `-g`; a local reused for several values needs `--at t.c:42`, a line that uses it).
+    /// Name the value by a call site (`--at t.c:40` with `--operand N` for an argument or `--return` for the result) or by a named local (`--function f --local n`, needs `-g`; a local reused for several values needs `--at t.c:42`, a line that uses it, and a name several variables share, such as a shadowed local, needs `--declared-at t.c:38`, the line one is declared on).
     Guards {
         /// Call site: `file:line`, or a call site id as JSON when a line holds several calls.
         /// With `--local`: the `file:line` of a use, picking the value a reused local holds there
@@ -224,6 +224,9 @@ pub enum QueryCommand {
         /// Source variable to trace in `--function`
         #[arg(long)]
         local: Option<String>,
+        /// With `--local`: the `file:line` the variable is declared on, picking one of several sharing its name
+        #[arg(long, value_name = "FILE:LINE")]
+        declared_at: Option<String>,
         /// Bound a parameter's callers to those on a path from this function
         #[arg(long)]
         from: Option<String>,

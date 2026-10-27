@@ -204,11 +204,14 @@ call's argument (`--at FILE:LINE --operand N`), its result (`--return`) or a
 line; `--from F` keeps only callers on a path from `F`. A local reused for
 several values is refused with the lines that use it; a name several variables
 share, such as a shadowed local, is refused with the line each is declared at,
-though a variable of an inlined callee does not count;
-`--at FILE:LINE` beside `--local` traces the value it holds at that use. A use
-at a line is a read of the value the local holds there, possibly through
-another variable that holds the same value inside the local's scope. An overlay
-`annotate` anchor carries no use-site, so a reused local cannot be annotated.
+though a variable of an inlined callee does not count.
+`--declared-at FILE:LINE` beside `--local` picks the variable declared on that
+line, refusing a line none or several are declared on, and `--at FILE:LINE`
+traces the value the local holds at that use. A use at a line is a read of the
+value the local holds there, possibly through another variable that holds the
+same value inside the local's scope. An overlay `annotate` anchor carries no
+use-site or declaration line, so a reused or shadowed local cannot be
+annotated.
 Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
 relation to the value is a constant one. Its `scale` and `offset` are decimal
 strings, since they may exceed 64 bits. `verified` means its bound soundly

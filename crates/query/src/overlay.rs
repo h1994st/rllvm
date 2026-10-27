@@ -2636,6 +2636,40 @@ int main(void) { f(3); return 0; }
         assert_eq!(overlay.annotations().len(), 1);
     }
 
+    /// An annotate anchor has no declaration line, so a shadowed local is
+    /// refused saying it cannot be annotated, never told to name one by
+    /// where it is declared.
+    #[test]
+    fn an_annotate_on_a_shadowed_local_is_refused_without_a_declaration_hint() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned x = a;\n  { unsigned x = b; sink(x); }\n  sink(x);\n}\n",
+            &["-O0", "-g"],
+        );
+        let anchor = AnchorSpec::Local {
+            function: "g".into(),
+            name: "x".into(),
+        };
+        let mut overlay = Overlay::empty(&session, None).unwrap();
+        let error = message(
+            overlay
+                .record(
+                    &session,
+                    vec![annotate(anchor, None, Feasibility::Infeasible)],
+                )
+                .unwrap_err(),
+        );
+        assert!(
+            error.contains("`x` names 2 variables in g")
+                && error.contains("a shadowed local cannot be annotated")
+                && !error.contains("where it is declared"),
+            "{error}"
+        );
+        assert!(overlay.annotations().is_empty());
+    }
+
     #[test]
     fn an_annotate_without_provenance_is_rejected() {
         let scratch = tempfile::tempdir().unwrap();

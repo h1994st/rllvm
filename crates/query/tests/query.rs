@@ -2949,6 +2949,52 @@ mod mcp {
         assert_eq!(cli["query"]["at"], at.as_str(), "{cli}");
     }
 
+    /// A shadowed local named by its declaration line answers alike on both
+    /// surfaces: `--declared-at` on the CLI, `declared_at` over MCP.
+    #[test]
+    fn a_shadowed_local_by_its_declaration_line_answers_alike_on_the_cli_and_mcp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let module = compile_bitcode(
+            &scratch,
+            "s.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned x = a;\n  if (x > 64) return;\n  {\n    unsigned x = b;\n    if (x > 16) return;\n    sink(x);\n  }\n  sink(x);\n}\n",
+        );
+        let catalog = plain_module_catalog(&scratch, &[module]);
+        let line = |n: u32| format!("{}:{n}", scratch.path().join("s.c").display());
+        let (declared, at) = (line(6), line(8));
+        let cli = query_json(
+            &scratch,
+            &catalog,
+            &[
+                "guards",
+                "--function",
+                "g",
+                "--local",
+                "x",
+                "--declared-at",
+                &declared,
+                "--at",
+                &at,
+            ],
+        );
+        let bounds: Vec<&str> = cli["results"]["guards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|guard| guard["bound"].as_str().unwrap())
+            .collect();
+        assert_eq!(bounds, ["16"], "{cli}");
+
+        let mcp = mcp_tool_call(
+            &catalog,
+            "guards",
+            serde_json::json!({ "function": "g", "local": "x", "declared_at": declared, "at": at }),
+        );
+        assert_eq!(cli["results"], mcp["results"]);
+        assert_eq!(cli["query"], mcp["query"]);
+        assert_eq!(cli["query"]["declared_at"], declared.as_str(), "{cli}");
+    }
+
     /// A local called through is used at each call: both surfaces read the
     /// value it holds there, each parameter crossing in from the caller.
     #[test]
