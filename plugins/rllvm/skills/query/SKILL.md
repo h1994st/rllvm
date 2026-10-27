@@ -275,7 +275,11 @@ Report what the answer supports, and say what it does not:
   also neither, to the same address runs before it. Addresses match only
   syntactically (the same pointer, or a `getelementptr` alike), so a field
   of a global never matches. Capture at `-O0` for a faithful call graph; it
-  does not stop `guards` from tracing promotable scalars.
+  does not stop `guards` from tracing promotable scalars. It does keep small
+  helpers out of line: a clamp inside one, such as a `min` function, is not
+  traced into, so its return appears under `crossings` with no guard. `-Og`
+  inlines such helpers and their clamps are found; capture there when bounds
+  matter more than call-graph faithfulness.
 - **ODR copies are one definition.** A template or `inline` body emitted into
   many translation units is one function; plain `weak` copies may differ and
   stay ambiguous.
