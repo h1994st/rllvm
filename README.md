@@ -237,6 +237,10 @@ overwrites any earlier one, with nothing between that writes memory. A call,
 another store or any other operation between (an `atomicrmw`, a `cmpxchg`, a
 volatile load), or stores only in other blocks, make each guard reached
 through it a lead, and the trace is reported lost there.
+A clamp inside a helper the build keeps out of line, such as a small `min`
+function at `-O0`, is not traced into: its return is listed under `crossings`
+and no guard is reported for it. `-Og` inlines such helpers, so capture there
+when bounds matter more than a faithful call graph.
 It is evidence, never a verdict: an empty list does not mean unbounded. See the
 [value guards example](examples/value-guards/).
 
