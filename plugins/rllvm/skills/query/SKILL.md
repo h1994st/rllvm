@@ -43,7 +43,7 @@ When a warning about the facts cache appears, offer `rllvm-query cache clear
 | Who can call X through a pointer? | `uses` for address-taken sites, then `indirect_targets` at each |
 | What can this indirect call reach? | `indirect_targets` at the call site (`heuristics: true` adds the address-taken inventory) |
 | Which functions could an unresolved indirect call reach, grouped by the record field it dispatches through or the slot it reads its callee from? | `resolution_candidates` (`resolution-candidates`): candidates, never edges; no walk follows them |
-| What comparisons, clamps, masks or moduli constrain a value, such as a length handed to a copy? | `guards` (`--at file:line` with `--operand N`, counting from 0, or `--return`; or `--function F --local NAME`, adding `--at file:line` for a local reused for several values, which reads it at that use (a read of the value it holds there, possibly through another variable that holds the same value inside the local's scope); a name several variables share, such as a shadowed local, is refused with the line each is declared at, though a variable of an inlined callee does not count; `--from F` bounds a parameter's callers): evidence only, so an empty list is not "unbounded"; reads the anchor's module through `opt` from `llvm_bindir`, so over MCP it needs `load_catalog`, not `inventory` |
+| What comparisons, clamps, masks or moduli constrain a value, such as a length handed to a copy? | `guards` (`--at file:line` with `--operand N`, counting from 0, or `--return`; or `--function F --local NAME`, adding `--at file:line` for a local reused for several values, which reads it at that use (a read of the value it holds there, possibly through another variable that holds the same value inside the local's scope); a name several variables share, such as a shadowed local, is refused with the line each is declared at, though a variable of an inlined callee does not count, and `--declared-at file:line` picks the one declared on that line, refusing a line none or several are declared on; `--from F` bounds a parameter's callers): evidence only, so an empty list is not "unbounded"; reads the anchor's module through `opt` from `llvm_bindir`, so over MCP it needs `load_catalog`, not `inventory` |
 | Can A reach B — for example, is a vulnerable function reachable? | `reach`; if it finds no path, `closure` to see where the search stopped |
 | Every function on some path from A to B, and the edges among them | `slice`; `emit_module` (`--emit-module OUT.bc`) also writes their definitions as one module |
 | Everything that reaches X, or that X reaches | `closure` with `direction` `in` or `out` |
@@ -81,14 +81,13 @@ changed. Records are the same over MCP and the command line:
 - `{"op":"annotate","anchor":{"kind":"argument","site":"clamp.c:14","operand":2},"verdict":"infeasible","confidence":"high","provenance":["clamp.c:13: n = len < CAP ? len : CAP"]}`
   is your own feasibility verdict on a value, never proof. `anchor` is an
   `argument` (`site`, `operand`, counting from 0), a `return` (`site`) or a
-  `local` (`function`, `name`), which carries no use-site, so a local reused
-  for several values cannot be annotated; `site` is `file:line` or a call
-  site id;
-  optional `from` names one function. `verdict` is `feasible`, `infeasible`
-  or `conditional`. It is checked against the catalog on write, reading the
-  anchor's module (over MCP, a program loaded with `load_catalog`): an anchor
-  that does not resolve, or is ambiguous, is rejected. rllvm-query never
-  writes one itself.
+  `local` (`function`, `name`), which carries no use-site or declaration line,
+  so a local reused for several values, or shadowed, cannot be annotated; `site`
+  is `file:line` or a call site id; optional `from` names one function.
+  `verdict` is `feasible`, `infeasible` or `conditional`. It is checked against
+  the catalog on write, reading the anchor's module (over MCP, a program loaded
+  with `load_catalog`): an anchor that does not resolve, or is ambiguous, is
+  rejected. rllvm-query never writes one itself.
 - `{"op":"verify","annotation":{"anchor":<anchor>,"from":...},"tool":...,"verdict":"confirmed|refuted|inconclusive"}`
   and `{"op":"retract","annotation":{"anchor":<anchor>,"from":...},"reason":...}`
   name an annotation by its anchor and `from` (omitted when it has none).

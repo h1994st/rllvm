@@ -203,6 +203,11 @@ pub enum Query {
         /// site's `at` is resolved into its anchor instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         at: Option<String>,
+        /// For a `Local` anchor, the `file:line` a variable of its name is
+        /// declared on, picking one of the variables that share the name,
+        /// such as a shadowed one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        declared_at: Option<String>,
         /// Bounds the crossings into a parameter to the callers on a path
         /// from this function, which must name exactly one definition. The
         /// trace itself never leaves the anchor's function.
@@ -784,9 +789,19 @@ pub fn run_with_overlay(
             QueryResults::ResolutionCandidates(resolution_candidates(session))
         }
         Query::Guards {
-            anchor, at, from, ..
+            anchor,
+            at,
+            declared_at,
+            from,
+            ..
         } => {
-            let result = guards_at_use(session, anchor, at.as_deref(), from.as_deref())?;
+            let result = guards_at_use(
+                session,
+                anchor,
+                at.as_deref(),
+                declared_at.as_deref(),
+                from.as_deref(),
+            )?;
             value_trace_lost = result.lost.clone();
             value_trace_diagnostics = result.diagnostics.clone();
             QueryResults::Guards(result)
@@ -1750,6 +1765,7 @@ mod tests {
         let query = Query::Guards {
             anchor: GuardAnchor::Argument { site, operand: 0 },
             at: None,
+            declared_at: None,
             from: None,
             emit_module: None,
         };
@@ -1772,6 +1788,7 @@ mod tests {
         let query = Query::Guards {
             anchor: GuardAnchor::Argument { site, operand: 0 },
             at: None,
+            declared_at: None,
             from: None,
             emit_module: None,
         };
@@ -1804,6 +1821,7 @@ mod tests {
         let query = Query::Guards {
             anchor: GuardAnchor::Argument { site, operand: 0 },
             at: None,
+            declared_at: None,
             from: Some("g".into()),
             emit_module: None,
         };

@@ -8,9 +8,10 @@ constrains: no guard is an empty list, never "unbounded". In `offset.c`,
 `field.c`, `fill` stores the clamp to `b->len` and reads it back for `put`;
 `guards` follows the load to the store, and in `refill`, which stores the field
 twice, to the nearer one. In `reuse.c`, `fill` reuses the local `cur` for two
-values; `--at` traces the one it holds at each use. In `clamp.c`, `peek` clamps
-`len` into `n`; a guard list on `len` there, or in `copy`, also gives the
-comparison the clamp is made of.
+values; `--at` traces the one it holds at each use. `drain` shadows `cur`;
+`--declared-at` picks a variable by the line it is declared on. In `clamp.c`,
+`peek` clamps `len` into `n`; a guard list on `len` there, or in `copy`, also
+gives the comparison the clamp is made of.
 
 ## Requirements
 
@@ -28,9 +29,10 @@ It checks the clamp from a call site and from a named local, the empty answer
 for an unconstrained argument, the module `--emit-module` writes, a recorded
 verdict, an annotated `reach` that keeps its path, the verified bound on
 `left + 1`, the verified clamp through `b->len` and through the nearer of
-`refill`'s two stores, a reused local traced at each of its uses, and the
-comparison a downstream clamp is made of: verified on its branch's edge into
-the call in `peek`, a lead in `copy`.
+`refill`'s two stores, a reused local traced at each of its uses, a shadowed
+local picked by its declaration line, and the comparison a downstream clamp is
+made of: verified on its branch's edge into the call in `peek`, a lead in
+`copy`.
 
 ## What it does
 
@@ -132,6 +134,27 @@ dominates its use, reached past its `return`. A line with no use of `cur` is an
 error listing the lines that have one, and a line reading two of its values is
 an error rather than a pick. An overlay `annotate` anchor names a local without
 a use-site, so a reused local cannot be annotated.
+
+## A shadowed local
+
+`drain` declares `cur` on line 21, holding `head`, and again on line 25 inside
+a block, holding `tail`. One name, two variables:
+
+```bash
+rllvm-query --catalog build/reuse.json guards --function drain --local cur
+rllvm-query --catalog build/reuse.json guards --function drain --local cur --declared-at reuse.c:25 --at reuse.c:28
+rllvm-query --catalog build/reuse.json guards --function drain --local cur --declared-at reuse.c:21 --at reuse.c:30
+```
+
+Named alone, `cur` is an error naming the line each is declared on.
+`--declared-at` names one of those lines and picks that variable, and `--at`
+then reads it at a use as for a reused local: at line 28 the inner `cur`,
+`compare ule 8` (line 26); at line 30 the outer, `compare ule 32` (line 22). A
+line no `cur` is declared on is an error listing those that are, and a line two
+are declared on, as one macro can declare both, is an error rather than a pick.
+A variable of a function inlined into `drain` is not one of its own. An overlay
+`annotate` anchor carries no declaration line either, so a shadowed local cannot
+be annotated.
 
 ## Reading a guard
 

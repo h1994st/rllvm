@@ -45,8 +45,9 @@ enum AnchorShape<'a> {
 }
 
 /// The parts a surface's flags or arguments give for an anchor: `at` with
-/// `operand` or `ret`, or `function` with `local`. Every surface fills this
-/// in and hands it to [`anchor_from_parts`], so none validates on its own.
+/// `operand` or `ret`, or `function` with `local`, which `declared_at` may
+/// join. Every surface fills this in and hands it to [`anchor_from_parts`],
+/// so none validates on its own.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AnchorParts {
     pub at: Option<String>,
@@ -54,6 +55,9 @@ pub struct AnchorParts {
     pub ret: bool,
     pub function: Option<String>,
     pub local: Option<String>,
+    /// The `file:line` a variable of `local` is declared on, picking one of
+    /// several variables that share its name.
+    pub declared_at: Option<String>,
 }
 
 /// How a surface spells the parts of an anchor in its errors: the CLI's
@@ -80,6 +84,9 @@ impl AnchorSurface {
     fn local(self) -> &'static str {
         self.pick("--local", "`local`")
     }
+    fn declared_at(self) -> &'static str {
+        self.pick("--declared-at", "`declared_at`")
+    }
     fn pick(self, flag: &'static str, argument: &'static str) -> &'static str {
         match self {
             AnchorSurface::Cli => flag,
@@ -92,7 +99,7 @@ impl AnchorParts {
     /// What these parts name, or why they do not name one. Needs no
     /// catalog, so a surface can reject a bad combination before loading one.
     /// `at` is the call site with `operand` or `ret`, and a use of the
-    /// local with `function` and `local`.
+    /// local with `function` and `local`; `declared_at` joins only a local.
     fn shape(&self, surface: AnchorSurface) -> Result<AnchorShape<'_>, String> {
         let (at, operand, ret) = (self.at.as_deref(), self.operand, self.ret);
         let (function, local) = (self.function.as_deref(), self.local.as_deref());
@@ -116,6 +123,12 @@ impl AnchorParts {
                  name two values: give one"
             )),
             (true, false) => {
+                if self.declared_at.is_some() {
+                    return Err(format!(
+                        "{}: {CALL_SITE_DECLARED_AT}",
+                        surface.declared_at()
+                    ));
+                }
                 let at = at.ok_or_else(|| {
                     format!("{n_operand} and {n_ret} need {n_at}, the call site they refer to")
                 })?;
@@ -130,7 +143,20 @@ impl AnchorParts {
             (false, true) => match (function, local) {
                 (Some(function), Some(name)) => {
                     if let Some(at) = at {
-                        check_use_site(at, surface)?;
+                        check_line(
+                            at,
+                            &format!("{n_at} with {n_local}"),
+                            "a use of the local",
+                            "a line that reads the local",
+                        )?;
+                    }
+                    if let Some(declared_at) = self.declared_at.as_deref() {
+                        check_line(
+                            declared_at,
+                            surface.declared_at(),
+                            "a variable's declaration",
+                            "the line a variable is declared on",
+                        )?;
                     }
                     Ok(AnchorShape::Local { function, name })
                 }
@@ -152,19 +178,23 @@ impl AnchorParts {
     }
 }
 
-/// Rejects a local's use-site `at` that is not a `file:line`: a call site
-/// id names one call, not a line that reads the local.
-fn check_use_site(at: &str, surface: AnchorSurface) -> Result<(), String> {
-    if at.trim_start().starts_with('{') {
+/// Rejects `value`, a local's `file:line` part spelled `part`, that is not
+/// one: a call site id names one call, not `line`, so it is no `of`.
+fn check_line(value: &str, part: &str, of: &str, line: &str) -> Result<(), String> {
+    if value.trim_start().starts_with('{') {
         return Err(format!(
-            "{} with {} is the `file:line` of a use of the local, not a call site id: an id \
-             names a call, not a line that reads the local",
-            surface.at(),
-            surface.local()
+            "{part} is the `file:line` of {of}, not a call site id: an id names a call, not \
+             {line}"
         ));
     }
-    crate::parse_location(at.trim()).map(|_| ()).map_err(bare)
+    crate::parse_location(value.trim())
+        .map(|_| ())
+        .map_err(bare)
 }
+
+/// Why a declaration line cannot join a call site's value.
+const CALL_SITE_DECLARED_AT: &str = "a declaration line picks one variable of a local; a call \
+                                     site's argument or result is already one value";
 
 /// Rejects a combination of anchor parts that names no value, without
 /// reading a catalog. [`anchor_from_parts`] makes the same check.
@@ -522,15 +552,18 @@ pub fn guards(
     anchor: &GuardAnchor,
     from: Option<&str>,
 ) -> Result<GuardsResult, Error> {
-    guards_at_use(session, anchor, None, from)
+    guards_at_use(session, anchor, None, None, from)
 }
 
 /// [`guards`], with a local read at one use: `at`, a `file:line`, picks
-/// which of the values a reused local is bound to is traced.
+/// which of the values a reused local is bound to is traced, and
+/// `declared_at`, the `file:line` a variable is declared on, which of the
+/// variables sharing the local's name.
 pub fn guards_at_use(
     session: &Session,
     anchor: &GuardAnchor,
     at: Option<&str>,
+    declared_at: Option<&str>,
     from: Option<&str>,
 ) -> Result<GuardsResult, Error> {
     let function = anchor_function(session, anchor)?;
@@ -549,22 +582,14 @@ pub fn guards_at_use(
             .collect(),
         ..GuardsResult::default()
     };
-    match resolve_anchor_at_use(&ir, session, anchor, at)? {
+    match resolve_anchor_at_use(&ir, session, anchor, at, declared_at)? {
         Resolved::Ambiguous {
             function: index,
+            variable,
             values,
         } => {
             let body = &ir.functions[index];
-            let uses = match anchor {
-                GuardAnchor::Local { name, .. } => {
-                    own_bindings(body, name)
-                        .next()
-                        .map_or_else(Vec::new, |binding| {
-                            use_lines(body, &local_uses(body, &dominators(body), binding.variable))
-                        })
-                }
-                GuardAnchor::Argument { .. } | GuardAnchor::Return { .. } => Vec::new(),
-            };
+            let uses = use_lines(body, &local_uses(body, &dominators(body), variable));
             lost.push(format!(
                 "{}, so none is traced{}",
                 bound_to_several(anchor, &function, values.len()),
@@ -729,8 +754,9 @@ pub(crate) fn caller_scope(
     Ok(scope)
 }
 
-/// The instruction the anchored `value` is used at: the call, for a call
-/// site's argument or result; for a local, the first binding to `value`.
+/// The instruction the anchored `value` is used at when [`Resolved::One`]
+/// does not say: the call, for a call site's argument or result. A local's
+/// is always given, so `value` itself stands in for one.
 fn use_point(
     body: &FunctionIr,
     session: &Session,
@@ -741,9 +767,7 @@ fn use_point(
         GuardAnchor::Argument { site, .. } | GuardAnchor::Return { site } => {
             promoted_call(body, session, site)?.0
         }
-        GuardAnchor::Local { name, .. } => own_bindings(body, name)
-            .find(|binding| binding.value == Operand::Value(value))
-            .map_or(value, |binding| binding.at),
+        GuardAnchor::Local { .. } => value,
     })
 }
 
@@ -2046,18 +2070,21 @@ const PROMOTION_DELETES: &[&str] = &["llvm.lifetime."];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Resolved {
     /// Value `value` of `ir.functions[function]`. `used_at` is the
-    /// instruction a local read at a use-site is used at, when it was.
+    /// instruction a local's value is used at: the use on its use-site, or
+    /// else its variable's first binding to it. `None` for a call site's
+    /// value, used at its call.
     One {
         function: usize,
         value: ValueId,
         used_at: Option<ValueId>,
     },
-    /// A local of `ir.functions[function]` bound to more than one value over
-    /// its lifetime: each SSA value it is bound to, in binding order. A
-    /// binding to a constant, or to nothing traceable, counts toward the
-    /// ambiguity but is not listed.
+    /// A local of `ir.functions[function]`, the debug variable `variable`,
+    /// bound to more than one value over its lifetime: each SSA value it is
+    /// bound to, in binding order. A binding to a constant, or to nothing
+    /// traceable, counts toward the ambiguity but is not listed.
     Ambiguous {
         function: usize,
+        variable: u32,
         values: Vec<ValueId>,
     },
 }
@@ -2113,28 +2140,61 @@ pub(crate) fn one_definition(
 /// location and its order among the calls sharing it, which promotion keeps:
 /// `mem2reg` deletes slot accesses before a call, shifting its index, but
 /// never the call itself.
+///
+/// Read as an overlay `annotate` grounds it: its anchor has no use-site or
+/// declaration line to pick by.
 pub(crate) fn resolve_anchor(
     ir: &ModuleIr,
     session: &Session,
     anchor: &GuardAnchor,
 ) -> Result<Resolved, Error> {
-    resolve_anchor_at_use(ir, session, anchor, None)
+    resolve_picking(ir, session, anchor, None, None, SHADOWED_UNANNOTATABLE)
 }
 
-/// [`resolve_anchor`], with a local read at the use on `at`, a `file:line`.
+/// [`resolve_anchor`] as `guards` reads it, with a local read at the use on
+/// `at`, a `file:line`, and the variable declared on `declared_at`, another,
+/// picked among those sharing its name.
 pub(crate) fn resolve_anchor_at_use(
     ir: &ModuleIr,
     session: &Session,
     anchor: &GuardAnchor,
     at: Option<&str>,
+    declared_at: Option<&str>,
+) -> Result<Resolved, Error> {
+    resolve_picking(ir, session, anchor, at, declared_at, PICK_BY_DECLARATION)
+}
+
+/// What the refusal of a name several variables share ends with for
+/// `guards`, which takes a declaration line.
+const PICK_BY_DECLARATION: &str = "name one by where it is declared";
+
+/// What it ends with for an `annotate` anchor, which takes none.
+const SHADOWED_UNANNOTATABLE: &str = "a shadowed local cannot be annotated";
+
+/// The value `anchor` names, picked by `at` and `declared_at` as
+/// [`resolve_anchor_at_use`] says. `shared` ends the refusal of a name
+/// several variables share: how the caller's surface picks one, or why it
+/// cannot.
+fn resolve_picking(
+    ir: &ModuleIr,
+    session: &Session,
+    anchor: &GuardAnchor,
+    at: Option<&str>,
+    declared_at: Option<&str>,
+    shared: &str,
 ) -> Result<Resolved, Error> {
     let id = anchor_function(session, anchor)?;
-    if at.is_some() && !matches!(anchor, GuardAnchor::Local { .. }) {
-        return Err(Error::InvalidArguments(
-            "a use-site picks one value of a local; a call site's argument or result is \
-             already one value"
-                .to_string(),
-        ));
+    if !matches!(anchor, GuardAnchor::Local { .. }) {
+        if at.is_some() {
+            return Err(Error::InvalidArguments(
+                "a use-site picks one value of a local; a call site's argument or result is \
+                 already one value"
+                    .to_string(),
+            ));
+        }
+        if declared_at.is_some() {
+            return Err(Error::InvalidArguments(CALL_SITE_DECLARED_AT.to_string()));
+        }
     }
     let function = ir
         .functions
@@ -2198,10 +2258,20 @@ pub(crate) fn resolve_anchor_at_use(
             })
         }
         GuardAnchor::Local { name, .. } => {
-            let at = at
-                .map(|at| UseSite::new(session, &id.module_id, at))
-                .transpose()?;
-            resolve_local(body, &id, function, name, at.as_ref())
+            let site = |line: Option<&str>| {
+                line.map(|line| UseSite::new(session, &id.module_id, line))
+                    .transpose()
+            };
+            let (at, declared_at) = (site(at)?, site(declared_at)?);
+            resolve_local(
+                body,
+                &id,
+                function,
+                name,
+                at.as_ref(),
+                declared_at.as_ref(),
+                shared,
+            )
         }
     }
 }
@@ -2303,20 +2373,20 @@ fn own_bindings<'a>(body: &'a FunctionIr, name: &'a str) -> impl Iterator<Item =
 /// between, unless `at` names a use: then the one value the local holds at
 /// that use, refused when the line reads none or several. A name several
 /// variables share, a shadowed one or one reused in sibling scopes, is
-/// refused before any of that: their bindings are never merged.
+/// refused before any of that, unless `declared_at` names the line exactly
+/// one of them is declared on: their bindings are never merged. `shared`
+/// ends that refusal.
 fn resolve_local(
     body: &FunctionIr,
     id: &FunctionId,
     function: usize,
     name: &str,
     at: Option<&UseSite>,
+    declared_at: Option<&UseSite>,
+    shared: &str,
 ) -> Result<Resolved, Error> {
-    let mut bound: Vec<&Operand> = Vec::new();
     let mut variables: Vec<&DbgValue> = Vec::new();
     for binding in own_bindings(body, name) {
-        if !bound.contains(&&binding.value) {
-            bound.push(&binding.value);
-        }
         if !variables
             .iter()
             .any(|known| known.variable == binding.variable)
@@ -2325,23 +2395,51 @@ fn resolve_local(
         }
     }
     let label = function_label(id);
-    if variables.len() > 1 {
-        let declared: Vec<String> = variables
+    if let Some(declared_at) = declared_at
+        && !variables.is_empty()
+    {
+        let picked: Vec<&DbgValue> = variables
             .iter()
-            .map(
-                |variable| match (variable.declared_file.as_str(), variable.declared_line) {
-                    ("", _) | (_, 0) => "an unrecorded line".to_string(),
-                    (file, line) => format!("{file}:{line}"),
-                },
-            )
+            .copied()
+            .filter(|variable| {
+                declared_at.declares(&variable.declared_file, variable.declared_line)
+            })
             .collect();
-        let (others, last) = declared.split_at(declared.len() - 1);
+        match picked.len() {
+            0 => {
+                return Err(Error::InvalidArguments(format!(
+                    "no variable `{name}` in {label} is declared at {}; `{name}` is declared at {}",
+                    declared_at.spelled,
+                    declarations(&variables)
+                )));
+            }
+            1 => variables = picked,
+            several => {
+                return Err(Error::InvalidArguments(format!(
+                    "`{name}` names {several} variables declared at {} in {label}, as a macro \
+                     can; a declaration line cannot tell them apart",
+                    declared_at.spelled
+                )));
+            }
+        }
+    }
+    if variables.len() > 1 {
         return Err(Error::InvalidArguments(format!(
-            "`{name}` names {} variables in {label} (declared at {} and {})",
+            "`{name}` names {} variables in {label} (declared at {}); {shared}",
             variables.len(),
-            others.join(", "),
-            last[0]
+            declarations(&variables)
         )));
+    }
+    // One variable at most is left: its bindings are the local's.
+    let picked = variables.first().map(|variable| variable.variable);
+    let own: Vec<&DbgValue> = own_bindings(body, name)
+        .filter(|binding| picked == Some(binding.variable))
+        .collect();
+    let mut bound: Vec<&Operand> = Vec::new();
+    for binding in &own {
+        if !bound.contains(&&binding.value) {
+            bound.push(&binding.value);
+        }
     }
     if bound.is_empty() && body.dbg_values.iter().any(|binding| binding.name == name) {
         return Err(Error::InvalidArguments(format!(
@@ -2391,9 +2489,35 @@ fn resolve_local(
         (1, &[value], None) => Ok(Resolved::One {
             function,
             value,
-            used_at: None,
+            used_at: own
+                .iter()
+                .find(|binding| binding.value == Operand::Value(value))
+                .map(|binding| binding.at),
         }),
-        (_, _, None) => Ok(Resolved::Ambiguous { function, values }),
+        (_, _, None) => Ok(Resolved::Ambiguous {
+            function,
+            variable: variables[0].variable,
+            values,
+        }),
+    }
+}
+
+/// Where each of `variables` is declared, `file:line` or "an unrecorded
+/// line", listed for a sentence: "A", "A and B", "A, B and C".
+fn declarations(variables: &[&DbgValue]) -> String {
+    let declared: Vec<String> = variables
+        .iter()
+        .map(
+            |variable| match (variable.declared_file.as_str(), variable.declared_line) {
+                ("", _) | (_, 0) => "an unrecorded line".to_string(),
+                (file, line) => format!("{file}:{line}"),
+            },
+        )
+        .collect();
+    match declared.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, others)) => format!("{} and {last}", others.join(", ")),
+        None => String::new(),
     }
 }
 
@@ -2539,8 +2663,8 @@ fn more_than_one(
     ))
 }
 
-/// A `file:line` naming the uses of a local, with each spelling of the file
-/// the anchor's module recorded.
+/// A `file:line` naming the uses of a local, or the line a variable is
+/// declared on, with each spelling of the file the anchor's module recorded.
 struct UseSite {
     /// As written, for errors.
     spelled: String,
@@ -2567,7 +2691,20 @@ impl UseSite {
     }
 
     fn holds(&self, location: &SourceLocation) -> bool {
-        location.line == self.line && self.files.contains(&location.file)
+        self.names(&location.file, location.line)
+    }
+
+    /// Whether a variable declared on `line` of `file`, as its debug info
+    /// spells them, is declared here. A declaration with no recorded file
+    /// or line is declared nowhere.
+    fn declares(&self, file: &str, line: u32) -> bool {
+        !file.is_empty() && line != 0 && self.names(Path::new(file), line)
+    }
+
+    /// Whether `line` of `file`, spelled as the module records it, is this
+    /// line.
+    fn names(&self, file: &Path, line: u32) -> bool {
+        line == self.line && self.files.contains(file)
     }
 }
 
@@ -3088,6 +3225,56 @@ void g(unsigned a, unsigned b) {
 }
 ";
 
+    /// The outer `x`, declared on line 3, holds `a` and is checked against
+    /// 64; the inner one, declared on line 6, holds `b` and is checked
+    /// against 16. Line 8 reads the inner one, line 10 the outer.
+    const SHADOWED_GUARDS_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned x = a;
+  if (x > 64) return;
+  {
+    unsigned x = b;
+    if (x > 16) return;
+    sink(x);
+  }
+  sink(x);
+}
+";
+
+    /// The inner `x`, declared on line 5, is reused: `b`, read on line 7,
+    /// then `c`, read on line 10. The outer one holds `a`, read on line 12.
+    const SHADOWED_REUSED_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b, unsigned c) {
+  unsigned x = a;
+  {
+    unsigned x = b;
+    if (x > 16) return;
+    sink(x);
+    x = c;
+    if (x > 8) return;
+    sink(x);
+  }
+  sink(x);
+}
+";
+
+    /// Both `x` come from one macro use, so both are declared on line 4.
+    const ONE_LINE_LOCALS_SOURCE: &str = "extern void sink(unsigned);
+#define TWICE(v, w) { unsigned x = v; sink(x); } { unsigned x = w; sink(x); }
+void g(unsigned a, unsigned b) {
+  TWICE(a, b);
+}
+";
+
+    /// Both `x` hold `a`, but only the first is bound past `a > 5`: the
+    /// second, declared on line 4, is bound where that check does not run.
+    const SAME_VALUE_SIBLINGS_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, int c) {
+  if (c) { if (a > 5) return; unsigned x = a; sink(x); }
+  { unsigned x = a; sink(x); }
+}
+";
+
     /// Line 4 reads `cur` only while it holds the constant 7.
     const CONSTANT_READ_SOURCE: &str = "extern void sink(unsigned);
 void g(unsigned a) {
@@ -3296,10 +3483,10 @@ void f(unsigned a, unsigned b) {
         let cur = local("g", "cur");
 
         let first =
-            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 5))).unwrap();
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 5)), None).unwrap();
         assert_eq!(node(&ir, &first, "g").0, g.params[0]);
         let second =
-            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 8))).unwrap();
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 8)), None).unwrap();
         assert_eq!(node(&ir, &second, "g").0, g.params[1]);
     }
 
@@ -3310,10 +3497,10 @@ void f(unsigned a, unsigned b) {
         let g = defined(&ir, "g");
         let cur = local("g", "cur");
         let first =
-            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 3))).unwrap();
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 3)), None).unwrap();
         assert_eq!(node(&ir, &first, "g").0, g.params[0]);
         let second =
-            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 5))).unwrap();
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 5)), None).unwrap();
         assert_eq!(node(&ir, &second, "g").0, g.params[1]);
     }
 
@@ -3329,6 +3516,7 @@ void f(unsigned a, unsigned b) {
             &session,
             &local("g", "cur"),
             Some(&line_of(&scratch, 6)),
+            None,
         )
         .unwrap();
         assert_eq!(node(&ir, &resolved, "g").0, g.params[1]);
@@ -3346,6 +3534,7 @@ void f(unsigned a, unsigned b) {
             &session,
             &local("g", "cur"),
             Some(&line_of(&scratch, 5)),
+            None,
         )
         .unwrap();
         let (_, phi) = node(&ir, &resolved, "g");
@@ -3363,7 +3552,7 @@ void f(unsigned a, unsigned b) {
         let scratch = tempfile::tempdir().unwrap();
         let (session, ir) = promoted(&scratch, REUSED_LOCAL_SOURCE, &["-O0", "-g"], "g");
         let at = line_of(&scratch, 99);
-        let error = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at))
+        let error = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at), None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3385,6 +3574,7 @@ void f(unsigned a, unsigned b) {
             &session,
             &local("g", "cur"),
             Some(&line_of(&scratch, 4)),
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -3405,6 +3595,7 @@ void f(unsigned a, unsigned b) {
             &session,
             &local("g", "cur"),
             Some(&line_of(&scratch, 5)),
+            None,
         )
         .unwrap_err()
         .to_string();
@@ -3429,6 +3620,7 @@ void f(unsigned a, unsigned b) {
                 &session,
                 &local("g", "p"),
                 Some(&line_of(&scratch, line)),
+                None,
             )
             .unwrap_err()
             .to_string();
@@ -3488,12 +3680,12 @@ void f(unsigned a, unsigned b) {
             "helper must be inlined with its `x`: {:?}",
             f.dbg_values
         );
-        let resolved = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None).unwrap();
+        let resolved = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None, None).unwrap();
         assert_eq!(node(&ir, &resolved, "f").0, f.params[0]);
 
         let scratch = tempfile::tempdir().unwrap();
         let (session, ir) = promoted(&scratch, INLINED_ONLY_SOURCE, &["-O1", "-g"], "f");
-        let error = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None)
+        let error = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None, None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3519,7 +3711,7 @@ void f(unsigned a, unsigned b) {
                 .any(|binding| binding.name == "x"),
             "helper must be inlined with its `x`"
         );
-        let error = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None)
+        let error = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None, None)
             .unwrap_err()
             .to_string();
         assert!(error.contains(INLINED_ONLY_MESSAGE), "{error}");
@@ -3567,18 +3759,237 @@ void f(unsigned a, unsigned b) {
             let (session, ir) = promoted(&scratch, source, &["-O0", "-g"], "g");
             let x = local("g", "x");
             for at in [None, Some(line_of(&scratch, line))] {
-                let error = resolve_anchor_at_use(&ir, &session, &x, at.as_deref())
+                let error = resolve_anchor_at_use(&ir, &session, &x, at.as_deref(), None)
                     .unwrap_err()
                     .to_string();
                 let (first, second) = declared;
                 assert!(
                     error.contains("`x` names 2 variables in g")
                         && error.contains(&format!("t.c:{first} and "))
-                        && error.contains(&format!("t.c:{second})")),
+                        && error.contains(&format!("t.c:{second})"))
+                        && error.ends_with("; name one by where it is declared"),
                     "{at:?}: {error}"
                 );
             }
         }
+    }
+
+    /// A declaration line picks one of the variables a name shares: the
+    /// inner `x` or the outer one, each with its own value, and each traced
+    /// at its use with its own bound.
+    #[test]
+    fn a_declaration_line_picks_one_of_the_variables_a_name_shares() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, SHADOWED_GUARDS_SOURCE, &["-O0", "-g"], "g");
+        let g = defined(&ir, "g");
+        let x = local("g", "x");
+        for (declared, param) in [(6, 1), (3, 0)] {
+            let resolved =
+                resolve_anchor_at_use(&ir, &session, &x, None, Some(&line_of(&scratch, declared)))
+                    .unwrap();
+            assert_eq!(node(&ir, &resolved, "g").0, g.params[param], "{declared}");
+        }
+        for (declared, at, bound) in [(6, 8, "16"), (3, 10, "64")] {
+            let result = guards_at_use(
+                &session,
+                &x,
+                Some(&line_of(&scratch, at)),
+                Some(&line_of(&scratch, declared)),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                sites(&result),
+                [(
+                    GuardKind::Compare,
+                    Some("ule"),
+                    Some(bound),
+                    GuardRelation::Dominates
+                )],
+                "{declared}: {result:?}"
+            );
+            assert!(result.lost.is_none(), "{result:?}");
+        }
+    }
+
+    /// The file part of a declaration line matches as a use-site's does: by
+    /// the file it names, however it is spelled.
+    #[test]
+    fn a_declaration_line_matches_its_file_however_it_is_spelled() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, SHADOWED_GUARDS_SOURCE, &["-O0", "-g"], "g");
+        let spelled = format!("{}:6", scratch.path().join(".").join("t.c").display());
+        let resolved =
+            resolve_anchor_at_use(&ir, &session, &local("g", "x"), None, Some(&spelled)).unwrap();
+        assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[1]);
+    }
+
+    /// A line no variable of the name is declared on is refused naming the
+    /// lines each one is, never answered with one of them.
+    #[test]
+    fn a_line_no_variable_is_declared_on_is_refused_naming_their_declarations() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, SHADOWED_LOCAL_SOURCE, &["-O0", "-g"], "g");
+        let declared = line_of(&scratch, 6);
+        let error = resolve_anchor_at_use(&ir, &session, &local("g", "x"), None, Some(&declared))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "no variable `x` in g [m] is declared at {declared}; `x` is declared at "
+            )) && error.contains("t.c:4 and ")
+                && error.ends_with("t.c:5"),
+            "{error}"
+        );
+    }
+
+    /// Two variables declared on one line, as a macro can declare them,
+    /// are refused: the line cannot tell them apart.
+    #[test]
+    fn variables_declared_on_one_line_are_refused_not_picked() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, ONE_LINE_LOCALS_SOURCE, &["-O0", "-g"], "g");
+        let declared = line_of(&scratch, 4);
+        let error = resolve_anchor_at_use(&ir, &session, &local("g", "x"), None, Some(&declared))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            format!(
+                "Invalid arguments: `x` names 2 variables declared at {declared} in g [m], as a \
+                 macro can; a declaration line cannot tell them apart"
+            )
+        );
+    }
+
+    /// The variable a declaration line picks may itself be reused: a use
+    /// then picks its value, and without one its own use lines are listed,
+    /// not those of the variable it shadows.
+    #[test]
+    fn a_declaration_line_and_a_use_site_pick_a_reused_shadowing_value() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, SHADOWED_REUSED_SOURCE, &["-O0", "-g"]);
+        let x = local("g", "x");
+        let declared = line_of(&scratch, 5);
+        for (at, bound) in [(7, "16"), (10, "8")] {
+            let result = guards_at_use(
+                &session,
+                &x,
+                Some(&line_of(&scratch, at)),
+                Some(&declared),
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                sites(&result),
+                [(
+                    GuardKind::Compare,
+                    Some("ule"),
+                    Some(bound),
+                    GuardRelation::Dominates
+                )],
+                "{at}: {result:?}"
+            );
+        }
+        let result = guards_at_use(&session, &x, None, Some(&declared), None).unwrap();
+        assert!(result.guards.is_empty(), "{result:?}");
+        let lost = result.lost.as_deref().unwrap_or_default();
+        assert!(
+            lost.contains("bound to more than one value")
+                && lost.contains("t.c:7")
+                && lost.contains("t.c:10")
+                && !lost.contains("t.c:12"),
+            "{lost}"
+        );
+    }
+
+    /// The variable a declaration line picks is used where it is bound,
+    /// not where a namesake holding the same value is: a check that runs
+    /// before only the namesake's binding is no bound on it.
+    #[test]
+    fn a_picked_variable_is_used_where_it_is_bound_not_where_its_namesake_is() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, SAME_VALUE_SIBLINGS_SOURCE, &["-O0", "-g"]);
+        let result = guards_at_use(
+            &session,
+            &local("g", "x"),
+            None,
+            Some(&line_of(&scratch, 4)),
+            None,
+        )
+        .unwrap();
+        // The check runs on some path to the binding, not every one, so it
+        // keeps its predicate as written and is a lead.
+        assert_eq!(
+            sites(&result),
+            [(
+                GuardKind::Compare,
+                Some("ugt"),
+                Some("5"),
+                GuardRelation::OnPath
+            )],
+            "{result:?}"
+        );
+        assert!(!result.guards[0].verified, "{result:?}");
+    }
+
+    /// A variable of an inlined callee is no variable of the function, so
+    /// its declaration line picks nothing.
+    #[test]
+    fn an_inlined_callees_declaration_line_picks_no_variable() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, INLINED_NAMESAKE_SOURCE, &["-O1", "-g"], "f");
+        let declared = line_of(&scratch, 2);
+        let error = resolve_anchor_at_use(&ir, &session, &local("f", "x"), None, Some(&declared))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "no variable `x` in f [m] is declared at {declared}"
+            )) && error.ends_with("t.c:6"),
+            "{error}"
+        );
+    }
+
+    /// A call site's argument or result is one value already: a
+    /// declaration line beside it is refused.
+    #[test]
+    fn a_declaration_line_beside_a_call_site_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, ARGUMENT_SOURCE, &["-O0", "-g"], "f");
+        let site = &sites_calling(&session, "f", "sink")[0];
+        let error = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &argument(site, 0),
+            None,
+            Some(&line_of(&scratch, 2)),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains(
+                "a declaration line picks one variable of a local; a call site's argument or \
+                 result is already one value"
+            ),
+            "{error}"
+        );
+    }
+
+    /// A declaration with no recorded file or line is declared nowhere a
+    /// line can name.
+    #[test]
+    fn a_declaration_with_no_recorded_line_is_never_matched() {
+        let site = |line| UseSite {
+            spelled: format!("t.c:{line}"),
+            files: HashSet::from([std::path::PathBuf::from("t.c")]),
+            line,
+        };
+        assert!(site(4).declares("t.c", 4));
+        assert!(!site(4).declares("t.c", 5));
+        assert!(!site(4).declares("u.c", 4));
+        assert!(!site(4).declares("", 4));
+        assert!(!site(0).declares("t.c", 0));
     }
 
     /// After its block ends `cur` does not exist: a read of the value it
@@ -3588,7 +3999,7 @@ void f(unsigned a, unsigned b) {
         let scratch = tempfile::tempdir().unwrap();
         let (session, ir) = promoted(&scratch, OUT_OF_SCOPE_SOURCE, &["-O0", "-g"], "g");
         let at = line_of(&scratch, 4);
-        let error = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at))
+        let error = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at), None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3609,6 +4020,7 @@ void f(unsigned a, unsigned b) {
                 &session,
                 &local("g", "cur"),
                 Some(&line_of(&scratch, line)),
+                None,
             )
             .unwrap();
             assert_eq!(
@@ -3633,7 +4045,8 @@ void f(unsigned a, unsigned b) {
             "g",
         );
         let at = format!("{}:1", scratch.path().join("body.inc").display());
-        let resolved = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at)).unwrap();
+        let resolved =
+            resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at), None).unwrap();
         assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[0]);
     }
 
@@ -3641,9 +4054,14 @@ void f(unsigned a, unsigned b) {
     fn a_line_reached_by_one_traceable_binding_still_resolves() {
         let scratch = tempfile::tempdir().unwrap();
         let (session, ir) = promoted(&scratch, UNTRACEABLE_REACHING_SOURCE, &["-O0", "-g"], "g");
-        let resolved =
-            resolve_anchor_at_use(&ir, &session, &local("g", "p"), Some(&line_of(&scratch, 5)))
-                .unwrap();
+        let resolved = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &local("g", "p"),
+            Some(&line_of(&scratch, 5)),
+            None,
+        )
+        .unwrap();
         assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[0]);
     }
 
@@ -3652,7 +4070,7 @@ void f(unsigned a, unsigned b) {
         let scratch = tempfile::tempdir().unwrap();
         let (session, ir) = promoted(&scratch, CONSTANT_READ_SOURCE, &["-O0", "-g"], "g");
         let cur = local("g", "cur");
-        let error = resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 4)))
+        let error = resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 4)), None)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3661,7 +4079,7 @@ void f(unsigned a, unsigned b) {
         );
         // The line reading the parameter still resolves to it.
         let resolved =
-            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 6))).unwrap();
+            resolve_anchor_at_use(&ir, &session, &cur, Some(&line_of(&scratch, 6)), None).unwrap();
         assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[0]);
     }
 
@@ -3683,7 +4101,7 @@ void f(unsigned a, unsigned b) {
         let scratch = tempfile::tempdir().unwrap();
         let session = session(&scratch, REUSED_LOCAL_SOURCE, &["-O0", "-g"]);
         let cur = local("g", "cur");
-        let first = guards_at_use(&session, &cur, Some(&line_of(&scratch, 5)), None).unwrap();
+        let first = guards_at_use(&session, &cur, Some(&line_of(&scratch, 5)), None, None).unwrap();
         assert_eq!(
             sites(&first),
             [(
@@ -3694,7 +4112,8 @@ void f(unsigned a, unsigned b) {
             )],
             "{first:?}"
         );
-        let second = guards_at_use(&session, &cur, Some(&line_of(&scratch, 8)), None).unwrap();
+        let second =
+            guards_at_use(&session, &cur, Some(&line_of(&scratch, 8)), None, None).unwrap();
         assert_eq!(
             sites(&second),
             [(
@@ -5946,6 +6365,7 @@ out:
             ret,
             function: function.map(str::to_string),
             local: local.map(str::to_string),
+            declared_at: None,
         }
     }
 

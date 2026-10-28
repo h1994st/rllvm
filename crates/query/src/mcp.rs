@@ -768,7 +768,7 @@ management_tool_surface! {
                 "records": {
                     "type": "array",
                     "items": { "type": "object" },
-                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it), `\"via_slot\"` (a group's `slot`, every unresolved site reading it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it. `{\"op\":\"annotate\",\"anchor\":{\"kind\":\"argument\",\"site\":\"clamp.c:14\",\"operand\":2},\"verdict\":\"infeasible\",\"confidence\":\"high\",\"provenance\":[\"clamp.c:13: n = len < CAP ? len : CAP\"]}` is your feasibility verdict (`feasible`, `infeasible` or `conditional`) on a value, never proof: `anchor` is an `argument` (`site`, `operand`, counting from 0), a `return` (`site`) or a `local` (`function`, `name`; it carries no use-site, so a local reused for several values cannot be annotated), `site` a `file:line` or a call site id, and the optional `from` a function the verdict holds for. It is grounded in the catalog on write, so an unresolvable or ambiguous anchor is rejected, and grounding reads the anchor's module, so it needs a catalog loaded by `load_catalog`, not `inventory`. `{\"op\":\"verify\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"reason\":...}` judge or remove an annotation, named by its anchor and `from` (omitted when it has none)."
+                    "description": "`{\"op\":\"add\",\"via_field\":{\"record\":\"ops\",\"offset\":8},\"to\":\"h3\",\"confidence\":\"high\",\"provenance\":[\"init: o->on_event = h3\"]}` names a field (every unresolved site through it), `\"via_slot\"` (a group's `slot`, every unresolved site reading it) or `\"site\"` (one call site id); `to` is an exact symbol or `{\"module_id\",\"symbol\"}`. `{\"op\":\"verify\",\"edge\":<key>,\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"edge\":<key>,\"reason\":...}` name an edge's key as `list_overlay` reports it. `{\"op\":\"annotate\",\"anchor\":{\"kind\":\"argument\",\"site\":\"clamp.c:14\",\"operand\":2},\"verdict\":\"infeasible\",\"confidence\":\"high\",\"provenance\":[\"clamp.c:13: n = len < CAP ? len : CAP\"]}` is your feasibility verdict (`feasible`, `infeasible` or `conditional`) on a value, never proof: `anchor` is an `argument` (`site`, `operand`, counting from 0), a `return` (`site`) or a `local` (`function`, `name`; it carries no use-site or declaration line, so a local reused for several values, or shadowed, cannot be annotated), `site` a `file:line` or a call site id, and the optional `from` a function the verdict holds for. It is grounded in the catalog on write, so an unresolvable or ambiguous anchor is rejected, and grounding reads the anchor's module, so it needs a catalog loaded by `load_catalog`, not `inventory`. `{\"op\":\"verify\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"tool\":...,\"verdict\":\"confirmed|refuted|inconclusive\"}` and `{\"op\":\"retract\",\"annotation\":{\"anchor\":<anchor>,\"from\":...},\"reason\":...}` judge or remove an annotation, named by its anchor and `from` (omitted when it has none)."
                 }
             },
             "required": ["records"]
@@ -905,7 +905,7 @@ query_tool_surface! {
     Query::FfiExports => Query::FfiExports, "ffi_exports";
     Query::IndirectTargets { .. } => Query::IndirectTargets { at: String::new(), heuristics: false }, "indirect_targets";
     Query::ResolutionCandidates => Query::ResolutionCandidates, "resolution_candidates";
-    Query::Guards { .. } => Query::Guards { anchor: GuardAnchor::Local { function: String::new(), name: String::new() }, at: None, from: None, emit_module: None }, "guards";
+    Query::Guards { .. } => Query::Guards { anchor: GuardAnchor::Local { function: String::new(), name: String::new() }, at: None, declared_at: None, from: None, emit_module: None }, "guards";
 }
 
 /// The `name` argument four of the thirteen tools take, identically. Spelled
@@ -1104,7 +1104,7 @@ fn query_tool(query: &Query) -> Value {
         }),
         Query::Guards { .. } => json!({
             "name": name,
-            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`; a local reused for several values is refused with the lines that use it, a name several variables share, such as a shadowed local, is refused with the line each is declared at, though a variable of an inlined callee does not count, and `at` beside it, a `file:line`, traces the value it holds at that use; a use at a line is a read of the value the local holds there, possibly through another variable that holds the same value inside the local's scope). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `affine` gives the anchored value as `scale * guarded + offset` when constant arithmetic links them (`scale` and `offset` are decimal strings of integers that may exceed 64 bits), and `verified` true means the bound soundly carries to the value, while false is a lead, not a bound, whose `caveat` says why (not affine, a guard on a value computed from it -- a clamp made of a comparison, a branch or select clamp rather than an intrinsic one, lists that comparison separately --, no branch edge shows the comparison held at the use, wraps, or could not be mapped, or a load that may not read back the store it was followed to: the nearest one before it in its block, with nothing between that writes memory, is read back); a comparison is verified only through its branch's edge into the use, one every path to the use crosses (a loop's backedge into the block it enters is fine), and its `predicate` is the one that holds on that edge, which may negate the source condition (past `if (x > 16) return;`, `ule 16`), so a verified comparison's predicate holds at the use, while one with no deciding edge keeps its predicate as written; a `return` anchor, or a `local` without `at`, sits before the comparisons that test the value, so they are leads there: for their bound, anchor at the later use, `at` that use for a local or an argument anchor on the call that consumes a returned value; for a clamp, mask, modulo or saturation, `verified` does not mean it runs on every path, so an unconditional bound is `verified` with `relation` `dominates` or `defines`; `relation` `on_path` runs on some path to the use but not every one. The numeric cap lives in `bound`: a `verified` guard with no `bound` is capped by a runtime value, the guard's operand, which is a sound relation, not a numeric limit; to reach a number, anchor on that operand and trace it. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped, or a load may not read back the store it was followed to, and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
+            "description": "The comparisons, clamps, masks and moduli that constrain a value: a call argument (`at` with `operand`), a call result (`at` with `return`), or a named local (`function` with `local`; a local reused for several values is refused with the lines that use it, a name several variables share, such as a shadowed local, is refused with the line each is declared at unless `declared_at` names the line one of them is declared on, though a variable of an inlined callee does not count, and `at` beside it, a `file:line`, traces the value it holds at that use; a use at a line is a read of the value the local holds there, possibly through another variable that holds the same value inside the local's scope). Evidence, not a verdict: no guard found is an empty list, not \"unbounded\". The trace stays in the anchor's function: each guard's `depth` is 0 on the value itself or a widening of it (a bound holds across zext or sext when the guard's signedness matches the cast's) and N for a value N steps up the chain it is computed from, a truncation counting as a step, which is not by itself a bound on the value; `affine` gives the anchored value as `scale * guarded + offset` when constant arithmetic links them (`scale` and `offset` are decimal strings of integers that may exceed 64 bits), and `verified` true means the bound soundly carries to the value, while false is a lead, not a bound, whose `caveat` says why (not affine, a guard on a value computed from it -- a clamp made of a comparison, a branch or select clamp rather than an intrinsic one, lists that comparison separately --, no branch edge shows the comparison held at the use, wraps, or could not be mapped, or a load that may not read back the store it was followed to: the nearest one before it in its block, with nothing between that writes memory, is read back); a comparison is verified only through its branch's edge into the use, one every path to the use crosses (a loop's backedge into the block it enters is fine), and its `predicate` is the one that holds on that edge, which may negate the source condition (past `if (x > 16) return;`, `ule 16`), so a verified comparison's predicate holds at the use, while one with no deciding edge keeps its predicate as written; a `return` anchor, or a `local` without `at`, sits before the comparisons that test the value, so they are leads there: for their bound, anchor at the later use, `at` that use for a local or an argument anchor on the call that consumes a returned value; for a clamp, mask, modulo or saturation, `verified` does not mean it runs on every path, so an unconditional bound is `verified` with `relation` `dominates` or `defines`; `relation` `on_path` runs on some path to the use but not every one. The numeric cap lives in `bound`: a `verified` guard with no `bound` is capped by a runtime value, the guard's operand, which is a sound relation, not a numeric limit; to reach a number, anchor on that operand and trace it. Where the value enters or leaves the function, `crossings` name the call to ask `guards` about next. `uncertainty.value_trace_lost` means the trace stopped, or a load may not read back the store it was followed to, and the list is partial. Reads the anchor's module through `opt` from `llvm_bindir`, so it needs a catalog loaded by `load_catalog`, not `inventory`.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1113,6 +1113,7 @@ fn query_tool(query: &Query) -> Value {
                     "return": { "type": "boolean", "description": "With `at`: trace the call's result instead of an argument" },
                     "function": { "type": "string", "description": "With `local`: the function that holds the variable" },
                     "local": { "type": "string", "description": "With `function`: the source variable to trace. With `at`: read at that use" },
+                    "declared_at": { "type": "string", "description": "With `local`: the `file:line` the variable is declared on, which picks one of several variables sharing its name, such as a shadowed local; `at` beside it then picks that variable's value at a use. A line no variable of the name is declared on, or one several are, as a macro can declare them, is an error; never a call site id." },
                     "from": { "type": "string", "description": "Bound the crossings into a parameter to the callers on a path from this function, which must name exactly one definition. The trace still stays in the anchor's function: guards between `from` and it are not examined." },
                     "emit_module": { "type": "string", "description": "Write the promoted slice a scoped re-read would use (from `from` to the anchor's function, else the function and its callers) to this .bc file, relative to the server's working directory; the answer gains `emitted`. Needs a catalog loaded by `load_catalog`." }
                 },
@@ -1191,12 +1192,17 @@ fn tool_call_outcome(registry: &mut Registry, params: &Value) -> Outcome {
         } => {
             let anchor = guard_parts(&arguments).and_then(|parts| {
                 let anchor = anchor_from_parts(session, &parts, AnchorSurface::Tool)?;
-                Ok((anchor, parts.use_site().map(str::to_string)))
+                Ok((
+                    anchor,
+                    parts.use_site().map(str::to_string),
+                    parts.declared_at,
+                ))
             });
             match anchor {
-                Ok((anchor, at)) => Query::Guards {
+                Ok((anchor, at, declared_at)) => Query::Guards {
                     anchor,
                     at,
+                    declared_at,
                     from,
                     emit_module,
                 },
@@ -1308,6 +1314,7 @@ fn guard_parts(arguments: &Value) -> Result<AnchorParts, String> {
         ret,
         function: text("function")?,
         local: text("local")?,
+        declared_at: text("declared_at")?,
     })
 }
 
@@ -1407,6 +1414,7 @@ fn query_from_call(name: &str, arguments: &Value) -> Result<Query, String> {
                     name: String::new(),
                 },
                 at: None,
+                declared_at: None,
                 from: optional_string(arguments, "from")?,
                 emit_module: None,
             })
@@ -1495,6 +1503,7 @@ mod tests {
             "return",
             "function",
             "local",
+            "declared_at",
             "from",
             "emit_module",
         ] {
@@ -1528,6 +1537,23 @@ mod tests {
             (
                 json!({ "at": "{\"block_index\": 0}", "function": "f", "local": "x" }),
                 "call site id",
+            ),
+            (
+                json!({ "at": "t.c:4", "operand": 0, "declared_at": "t.c:3" }),
+                "a declaration line picks one variable of a local",
+            ),
+            (
+                json!({ "function": "f", "declared_at": "t.c:3" }),
+                "`function` needs `local`",
+            ),
+            (json!({ "declared_at": "t.c:3" }), "name a value"),
+            (
+                json!({ "function": "f", "local": "x", "declared_at": "{\"block_index\": 0}" }),
+                "`declared_at`",
+            ),
+            (
+                json!({ "function": "f", "local": "x", "declared_at": 3 }),
+                "`declared_at`",
             ),
         ] {
             let text = tool_error(&mut registry, "guards", arguments);
@@ -1600,6 +1626,49 @@ mod tests {
             json!({ "function": "g", "local": "cur", "at": line(99) }),
         );
         assert!(text.contains("no use of `cur`"), "{text}");
+    }
+
+    /// `declared_at` with `local` picks one of the variables a name shares
+    /// by the line it is declared on, as `--declared-at` does on the CLI.
+    #[test]
+    fn a_guards_call_names_a_shadowed_local_by_its_declaration_line() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = crate::testing::compiled_session(
+            scratch.path(),
+            "t.c",
+            "extern void sink(unsigned);\nvoid g(unsigned a, unsigned b) {\n  unsigned x = a;\n  if (x > 64) return;\n  {\n    unsigned x = b;\n    if (x > 16) return;\n    sink(x);\n  }\n  sink(x);\n}\n",
+            &["-O0", "-g"],
+        );
+        let mut registry = Registry::with_sessions(vec![("first", session)]);
+        let line = |n: u32| format!("{}:{n}", scratch.path().join("t.c").display());
+        let text = tool_error(
+            &mut registry,
+            "guards",
+            json!({ "function": "g", "local": "x" }),
+        );
+        assert!(
+            text.contains("`x` names 2 variables") && text.contains("where it is declared"),
+            "{text}"
+        );
+        for (declared, at, bound) in [(6, 8, "16"), (3, 10, "64")] {
+            let payload = answer(
+                &mut registry,
+                "guards",
+                json!({ "function": "g", "local": "x", "declared_at": line(declared), "at": line(at) }),
+            );
+            let bounds: Vec<&Value> = payload["results"]["guards"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|guard| &guard["bound"])
+                .collect();
+            assert_eq!(bounds, [&json!(bound)], "{payload}");
+            assert_eq!(
+                payload["query"]["declared_at"],
+                json!(line(declared)),
+                "{payload}"
+            );
+        }
     }
 
     #[test]
