@@ -326,6 +326,9 @@ pub(crate) struct DbgValue {
     /// The file the variable is declared in, as the debug info spells it,
     /// and its line there: 0 when the debug info records none.
     pub(crate) declared_file: String,
+    /// The directory `declared_file` is recorded relative to; `None` when
+    /// the debug info records none.
+    pub(crate) declared_directory: Option<String>,
     pub(crate) declared_line: u32,
     /// The lexical scope the variable is declared in, `None` when the debug
     /// info places it nowhere this reader numbers.

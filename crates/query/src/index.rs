@@ -13,6 +13,7 @@
 //! a hypothesis about an unbounded site, never proof.
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
 };
@@ -186,6 +187,61 @@ pub struct SliceEdge {
     pub from: FunctionId,
     pub to: FunctionId,
     pub step: PathStep,
+}
+
+/// A file a query names, matched against the files the debug info records.
+pub(crate) struct NamedFile {
+    as_written: PathBuf,
+    /// `as_written` made absolute against the working directory; `None` when that fails.
+    absolute: Option<PathBuf>,
+    /// The recorded directories, by module id and then recorded file, of
+    /// every recorded location that resolves to the same file as `absolute`.
+    /// Keyed so a lookup is constant-time: `at` asks once per spelling.
+    learned: HashMap<String, HashMap<PathBuf, HashSet<Option<PathBuf>>>>,
+    /// `same_file` answers by resolved path. Where a path cannot be resolved
+    /// it answers only for the identical spelling, never by a failed check.
+    same: RefCell<HashMap<PathBuf, bool>>,
+}
+
+impl NamedFile {
+    /// Whether a location or declaration recorded in `module_id` as `file`
+    /// (relative to `directory`, when recorded) is this file.
+    ///
+    /// A spelling learned from the facts matches only with the directory it
+    /// was recorded under, so two files one module spells alike are never
+    /// confused. A file no fact records is still named through the directory
+    /// it records. A relative file with no recorded directory is never
+    /// guessed at.
+    pub(crate) fn names(&self, module_id: &str, file: &Path, directory: Option<&Path>) -> bool {
+        file == self.as_written
+            || self
+                .learned
+                .get(module_id)
+                .and_then(|files| files.get(file))
+                .is_some_and(|recorded| {
+                    recorded
+                        .iter()
+                        .any(|recorded| recorded.as_deref() == directory)
+                })
+            || directory.is_some_and(|directory| self.resolves_here(&directory.join(file)))
+    }
+
+    /// Whether the recorded path `resolved` is this file, as the disk
+    /// resolves both: one check per path, since each touches the disk. Only
+    /// an absolute path is compared, and where either cannot be resolved
+    /// [`same_file`] matches only the identical spelling, so a catalog moved
+    /// after capture never matches by a check that failed.
+    fn resolves_here(&self, resolved: &Path) -> bool {
+        let Some(absolute) = &self.absolute else {
+            return false;
+        };
+        resolved.is_absolute()
+            && *self
+                .same
+                .borrow_mut()
+                .entry(resolved.to_path_buf())
+                .or_insert_with(|| same_file(resolved, absolute))
+    }
 }
 
 /// Indexes over one program's captured facts, joined with resolved symbol
@@ -499,24 +555,45 @@ impl Session {
     }
 
     /// Functions whose recorded source mapping includes `file:line`, with
-    /// `file` matched as [`Self::spellings_of`] describes, in function order.
+    /// `file` matched as [`NamedFile::names`] decides, in function order.
     /// Not public API: internal plumbing for the `at` query, called by
     /// `crate::run`.
     pub(crate) fn functions_at(&self, file: &Path, line: u32) -> Vec<FunctionId> {
+        let named = self.named_file(file);
+        // A mapped line records its file without a directory. A spelling
+        // the module records under several directories is claimed only when
+        // the matcher names every one: which of them the line is in is
+        // unknown. A directory that only mapped lines use, with no function,
+        // call or use fact recorded under it, is unseen here, so the spelling
+        // is still claimed under the directories the facts record; closing
+        // that needs directories in `mapped_lines`, a facts-cache change.
+        let mut directories: HashMap<(&str, &Path), HashSet<Option<&Path>>> = HashMap::new();
+        for (module_id, location) in self.recorded_locations() {
+            directories
+                .entry((module_id, location.file.as_path()))
+                .or_default()
+                .insert(location.directory.as_deref());
+        }
         let mapped = |spelling: &Path| self.by_file_line.get(&(spelling.to_path_buf(), line));
         let mut found: BTreeSet<usize> = mapped(file)
             .into_iter()
             .flatten()
             .map(|id| self.function_index[id])
             .collect();
-        for (module_id, spelling) in self.spellings_of(file) {
-            found.extend(
-                mapped(spelling)
+        for ((module_id, spelling), recorded) in directories {
+            if spelling != file
+                && recorded
                     .into_iter()
-                    .flatten()
-                    .filter(|id| id.module_id == module_id)
-                    .map(|id| self.function_index[id]),
-            );
+                    .all(|directory| named.names(module_id, spelling, directory))
+            {
+                found.extend(
+                    mapped(spelling)
+                        .into_iter()
+                        .flatten()
+                        .filter(|id| id.module_id == module_id)
+                        .map(|id| self.function_index[id]),
+                );
+            }
         }
         found
             .into_iter()
@@ -524,18 +601,9 @@ impl Session {
             .collect()
     }
 
-    /// Every other spelling, per module, under which the debug info recorded
-    /// the file `file` names. The spelling as written always matches; this
-    /// adds the file named another way -- relative to the working directory,
-    /// absolute, or through a symlink the compiler resolved in the file but
-    /// not in its recorded directory. Only a location that resolves to an
-    /// absolute path is compared, so a relative file with no recorded
-    /// directory is never guessed at.
-    pub(crate) fn spellings_of(&self, file: &Path) -> HashSet<(&str, &Path)> {
-        let mut spellings = HashSet::new();
-        let Ok(named) = std::path::absolute(file) else {
-            return spellings;
-        };
+    /// Every location a function, call or use fact records, with the module
+    /// it is recorded in.
+    fn recorded_locations(&self) -> impl Iterator<Item = (&str, &SourceLocation)> {
         let functions = self
             .facts
             .functions
@@ -549,22 +617,38 @@ impl Session {
         let uses = self.facts.uses.iter().filter_map(|use_fact| {
             Some((use_fact.in_function.as_ref()?, use_fact.location.as_ref()))
         });
-        // One comparison per file, not per location: each touches the disk.
-        let mut same: HashMap<PathBuf, bool> = HashMap::new();
-        for (id, location) in functions.chain(sites).chain(uses) {
-            let Some(location) = location else {
-                continue;
-            };
-            let resolved = location.resolved_path();
-            if resolved.is_absolute()
-                && *same
-                    .entry(resolved)
-                    .or_insert_with_key(|resolved| same_file(resolved, &named))
-            {
-                spellings.insert((id.module_id.as_str(), location.file.as_path()));
+        functions
+            .chain(sites)
+            .chain(uses)
+            .filter_map(|(id, location)| Some((id.module_id.as_str(), location?)))
+    }
+
+    /// The matcher for `file` as a query names it: the spelling as written,
+    /// and each `(module, file, directory)` the facts record for the same
+    /// file -- named relative to the working directory, absolute, or through
+    /// a symlink the compiler resolved in the file but not in its recorded
+    /// directory.
+    pub(crate) fn named_file(&self, file: &Path) -> NamedFile {
+        let absolute = std::path::absolute(file).ok();
+        let named = NamedFile {
+            as_written: file.to_path_buf(),
+            absolute,
+            learned: HashMap::new(),
+            same: RefCell::new(HashMap::new()),
+        };
+        let mut learned: HashMap<String, HashMap<PathBuf, HashSet<Option<PathBuf>>>> =
+            HashMap::new();
+        for (module_id, location) in self.recorded_locations() {
+            if named.resolves_here(&location.resolved_path()) {
+                learned
+                    .entry(module_id.to_string())
+                    .or_default()
+                    .entry(location.file.clone())
+                    .or_default()
+                    .insert(location.directory.clone());
             }
         }
-        spellings
+        NamedFile { learned, ..named }
     }
 
     /// The heuristic address-taken inventory, verbatim. Never consulted by
@@ -642,22 +726,22 @@ impl Session {
     }
 
     /// Call sites recorded at `file:line`, in any function, with `file`
-    /// matched as [`Self::spellings_of`] describes. Not public API: internal
+    /// matched as [`NamedFile::names`] decides. Not public API: internal
     /// plumbing for `at`, `indirect-targets` and every `--at` site, which key
     /// off a source location rather than a symbol name.
     pub(crate) fn call_sites_at(&self, file: &Path, line: u32) -> Vec<&CallSiteFact> {
-        let spellings = self.spellings_of(file);
+        let named = self.named_file(file);
         self.facts
             .call_sites
             .iter()
             .filter(|site| {
                 site.location.as_ref().is_some_and(|location| {
                     location.line == line
-                        && (location.file == *file
-                            || spellings.contains(&(
-                                site.id.function.module_id.as_str(),
-                                location.file.as_path(),
-                            )))
+                        && named.names(
+                            &site.id.function.module_id,
+                            &location.file,
+                            location.directory.as_deref(),
+                        )
                 })
             })
             .collect()
@@ -1293,6 +1377,127 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].symbol, "only");
         assert!(session.functions_at(Path::new("t.c"), 99).is_empty());
+    }
+
+    /// `file:line` recorded as `file` relative to `directory`.
+    fn recorded_in(directory: &Path, file: &str, line: u32) -> Option<SourceLocation> {
+        Some(SourceLocation {
+            directory: Some(directory.to_path_buf()),
+            ..source_location(file, line)
+        })
+    }
+
+    /// Writes `file` under a new directory `name` in `scratch`.
+    fn header_in(scratch: &tempfile::TempDir, name: &str, file: &str) -> PathBuf {
+        let directory = scratch.path().join(name);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join(file), "").unwrap();
+        directory
+    }
+
+    /// Two headers one module spells alike, `a.h`, in different
+    /// directories: the spelling learned for one names only that one.
+    #[test]
+    fn a_learned_spelling_matches_only_with_its_recorded_directory() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (one, two) = (
+            header_in(&scratch, "dir1", "a.h"),
+            header_in(&scratch, "dir2", "a.h"),
+        );
+        let caller = function("m", "caller", true, Linkage::External);
+        let sites = vec![
+            indirect_call(&caller, 0, recorded_in(&one, "a.h", 3), None),
+            indirect_call(&caller, 1, recorded_in(&two, "a.h", 3), None),
+        ];
+        let session = Session::new(facts(vec![caller], sites), Vec::new());
+
+        let found: Vec<u32> = session
+            .call_sites_at(&one.join("a.h"), 3)
+            .iter()
+            .map(|site| site.id.instruction_index)
+            .collect();
+        assert_eq!(found, [0], "only the site in dir1/a.h");
+    }
+
+    /// A mapped line records its file without a directory: through a
+    /// spelling its module records under one directory it is claimed, but
+    /// not through one the module records under two.
+    #[test]
+    fn a_mapped_line_is_claimed_only_through_an_unambiguous_spelling() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (one, two) = (
+            header_in(&scratch, "dir1", "a.h"),
+            header_in(&scratch, "dir2", "a.h"),
+        );
+        let mut mapped = function("m", "mapped", true, Linkage::Internal);
+        mapped.mapped_lines = [(PathBuf::from("a.h"), 3)].into();
+        let mut first = function("m", "first", true, Linkage::Internal);
+        first.location = recorded_in(&one, "a.h", 1);
+        let mut second = function("m", "second", true, Linkage::Internal);
+        second.location = recorded_in(&two, "a.h", 1);
+        let at = |functions: Vec<FunctionFact>| {
+            Session::new(facts(functions, Vec::new()), Vec::new()).functions_at(&one.join("a.h"), 3)
+        };
+
+        let found = at(vec![mapped.clone(), first.clone()]);
+        assert_eq!(symbols_of(&found), ["mapped"]);
+        assert!(at(vec![mapped, first, second]).is_empty());
+    }
+
+    /// A file no fact records is still named through a directory a
+    /// declaration records, by any path to it.
+    #[test]
+    fn a_recorded_directory_names_a_file_no_fact_spells() {
+        let scratch = tempfile::tempdir().unwrap();
+        let real = header_in(&scratch, "real", "h.h");
+        let other = header_in(&scratch, "other", "h.h");
+        let link = scratch.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let session = Session::new(facts(Vec::new(), Vec::new()), Vec::new());
+
+        let named = session.named_file(&link.join("h.h"));
+        assert!(named.names("m", Path::new("h.h"), Some(&real)));
+        assert!(!named.names("m", Path::new("h.h"), Some(&other)));
+        assert!(
+            !named.names("m", Path::new("h.h"), None),
+            "a relative file with no directory is never guessed at"
+        );
+    }
+
+    /// A catalog moved after capture: its recorded directory is gone, so a
+    /// file matches only as spelled, never by a disk check that failed.
+    #[test]
+    fn a_recorded_directory_missing_from_disk_matches_only_by_spelling() {
+        let scratch = tempfile::tempdir().unwrap();
+        let real = header_in(&scratch, "real", "h.h");
+        let moved = scratch.path().join("moved");
+        let caller = function("m", "caller", true, Linkage::External);
+        let sites = vec![indirect_call(
+            &caller,
+            0,
+            recorded_in(&moved, "h.h", 2),
+            None,
+        )];
+        let session = Session::new(facts(vec![caller], sites), Vec::new());
+
+        let named = session.named_file(&real.join("h.h"));
+        assert!(!named.names("m", Path::new("h.h"), Some(&moved)));
+        assert!(session.call_sites_at(&real.join("h.h"), 2).is_empty());
+        let gone = session.named_file(&scratch.path().join("gone/h.h"));
+        assert!(!gone.names("m", Path::new("h.h"), Some(&moved)));
+        assert!(
+            session
+                .named_file(&moved.join("h.h"))
+                .names("m", Path::new("h.h"), Some(&moved)),
+            "the exact recorded path still names the file"
+        );
+
+        assert!(
+            session
+                .named_file(Path::new("h.h"))
+                .names("m", Path::new("h.h"), Some(&moved))
+        );
+        assert_eq!(session.call_sites_at(Path::new("h.h"), 2).len(), 1);
     }
 
     #[test]

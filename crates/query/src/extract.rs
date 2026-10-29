@@ -3176,11 +3176,15 @@ unsafe fn read_bindings(
                 let id = *numbers.variables.entry(variable).or_insert(next);
                 let scope = numbers.scope(context, LLVMDIVariableGetScope(variable), scopes);
                 let file = LLVMDIVariableGetFile(variable);
-                let declared_file = if file.is_null() {
-                    String::new()
+                let (declared_file, declared_directory) = if file.is_null() {
+                    (String::new(), None)
                 } else {
                     let mut length = 0;
-                    owned(LLVMDIFileGetFilename(file, &mut length), length as usize)
+                    let name = owned(LLVMDIFileGetFilename(file, &mut length), length as usize);
+                    let mut length = 0;
+                    let directory =
+                        owned(LLVMDIFileGetDirectory(file, &mut length), length as usize);
+                    (name, (!directory.is_empty()).then_some(directory))
                 };
                 let direct = kind != LLVMDbgRecordKind::LLVMDbgRecordDeclare
                     && is_empty_expression(context, LLVMDbgVariableRecordGetExpression(record));
@@ -3193,6 +3197,7 @@ unsafe fn read_bindings(
                     name,
                     variable: id,
                     declared_file,
+                    declared_directory,
                     declared_line: LLVMDIVariableGetLine(variable),
                     scope,
                     value,
