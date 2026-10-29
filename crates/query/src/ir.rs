@@ -40,6 +40,11 @@ pub(crate) struct FunctionIr {
     /// location. Scopes are numbered per module, like
     /// [`DbgValue::variable`]: grouping keys only, never written out.
     pub(crate) scopes: Vec<Option<ScopeId>>,
+    /// For a value inlined from a callee, by [`ValueId`], the scope of the
+    /// outermost frame of its `inlinedAt` chain: where in this function the
+    /// call it was inlined from lies, numbered like [`Self::scopes`]. `None`
+    /// for a value that was not inlined, or whose frame has no scope.
+    pub(crate) frame_scopes: Vec<Option<ScopeId>>,
     /// The scope each of this function's scopes is nested in, for every
     /// scope its values and variables lie in and those enclosing them. A
     /// scope with no entry is outermost: a subprogram, or one whose parent
@@ -56,6 +61,20 @@ pub(crate) struct FunctionIr {
 pub(crate) type ScopeId = u32;
 
 impl FunctionIr {
+    /// Where value `id` lies in this function, as a use of its locals is
+    /// placed: its location and scope, or for a value inlined from a callee,
+    /// those of the outermost `inlinedAt` frame, the call in this function
+    /// it came from. A frame with no scope recorded has `None`, so it lies
+    /// within no scope.
+    pub(crate) fn placed(&self, id: ValueId) -> (Option<&SourceLocation>, Option<ScopeId>) {
+        let id = id as usize;
+        let location = self.values.get(id).and_then(|node| node.location.as_ref());
+        match location.and_then(|location| location.inlined_at.last()) {
+            Some(frame) => (Some(frame), self.frame_scopes.get(id).copied().flatten()),
+            None => (location, self.scopes.get(id).copied().flatten()),
+        }
+    }
+
     /// Whether a variable declared in `scope` may be this function's own
     /// rather than one of a function inlined into it. Only a scope chain
     /// known to end at a subprogram other than the function's own rules it
