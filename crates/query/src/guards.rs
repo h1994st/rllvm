@@ -16,6 +16,7 @@ use rllvm_core::{config::LlvmBindir, error::Error};
 
 use crate::bind::collapse_odr_duplicates;
 use crate::extract::read_module_ir;
+use crate::index::NamedFile;
 use crate::ir::{
     BinaryOp, CallIr, CastOp, DbgValue, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand,
     ValueId, ValueNode, int_predicate,
@@ -2461,7 +2462,11 @@ fn resolve_local(
             .iter()
             .copied()
             .filter(|variable| {
-                declared_at.declares(&variable.declared_file, variable.declared_line)
+                declared_at.declares(
+                    &variable.declared_file,
+                    variable.declared_directory.as_deref(),
+                    variable.declared_line,
+                )
             })
             .collect();
         match picked.len() {
@@ -2732,11 +2737,13 @@ fn more_than_one(
 }
 
 /// A `file:line` naming the uses of a local, or the line a variable is
-/// declared on, with each spelling of the file the anchor's module recorded.
+/// declared on, in the anchor's module, its file matched as a call site's is.
 struct UseSite {
     /// As written, for errors.
     spelled: String,
-    files: HashSet<std::path::PathBuf>,
+    /// The anchor's module, the only one its file is matched in.
+    module_id: String,
+    file: NamedFile,
     line: u32,
 }
 
@@ -2744,35 +2751,29 @@ impl UseSite {
     /// `at` in the module `module_id`, matched as `at` matches a call site.
     fn new(session: &Session, module_id: &str, at: &str) -> Result<UseSite, Error> {
         let (file, line) = crate::parse_location(at.trim())?;
-        let mut files: HashSet<std::path::PathBuf> = session
-            .spellings_of(&file)
-            .into_iter()
-            .filter(|(module, _)| *module == module_id)
-            .map(|(_, spelling)| spelling.to_path_buf())
-            .collect();
-        files.insert(file);
         Ok(UseSite {
             spelled: at.trim().to_string(),
-            files,
+            module_id: module_id.to_string(),
+            file: session.named_file(&file),
             line,
         })
     }
 
     fn holds(&self, location: &SourceLocation) -> bool {
-        self.names(&location.file, location.line)
+        self.names(&location.file, location.directory.as_deref(), location.line)
     }
 
-    /// Whether a variable declared on `line` of `file`, as its debug info
-    /// spells them, is declared here. A declaration with no recorded file
-    /// or line is declared nowhere.
-    fn declares(&self, file: &str, line: u32) -> bool {
-        !file.is_empty() && line != 0 && self.names(Path::new(file), line)
+    /// Whether a variable declared on `line` of `file`, under `directory`,
+    /// as its debug info records them, is declared here. A declaration with
+    /// no recorded file or line is declared nowhere.
+    fn declares(&self, file: &str, directory: Option<&str>, line: u32) -> bool {
+        !file.is_empty() && line != 0 && self.names(Path::new(file), directory.map(Path::new), line)
     }
 
-    /// Whether `line` of `file`, spelled as the module records it, is this
-    /// line.
-    fn names(&self, file: &Path, line: u32) -> bool {
-        line == self.line && self.files.contains(file)
+    /// Whether `line` of `file`, recorded in the anchor's module relative
+    /// to `directory`, is this line.
+    fn names(&self, file: &Path, directory: Option<&Path>, line: u32) -> bool {
+        line == self.line && self.file.names(&self.module_id, file, directory)
     }
 }
 
@@ -3064,7 +3065,7 @@ mod tests {
             BinaryOp, BlockIr, INT_PREDICATES, OpcodeIr, Operand, ScalarKind, TypeTag, ValueNode,
         },
         slice::promote_anchor_module,
-        testing::{compiled_session, module_session, stale_debug_info_module},
+        testing::{compiled_session, facts, module_session, stale_debug_info_module},
     };
 
     /// Every coefficient an `i128` holds, the extremes and negatives
@@ -3892,6 +3893,39 @@ void f(unsigned a, unsigned b) {
         assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[1]);
     }
 
+    /// The inner `x` is declared in `decl.h`, included into the block; no
+    /// function, call or use is recorded in that header.
+    const INCLUDED_DECLARATION_SOURCE: &str = "extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned x = a;
+  sink(x);
+  {
+#include \"decl.h\"
+    sink(x);
+  }
+}
+";
+
+    /// A header the debug info spells relative to the compilation
+    /// directory, with nothing in it but a declaration, is still named by
+    /// its absolute path: through the directory the declaration records.
+    #[test]
+    fn a_declaration_in_a_header_no_fact_spells_is_named_by_its_path() {
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(scratch.path().join("decl.h"), "unsigned x = b;\n").unwrap();
+        let relative = format!("-fdebug-compilation-dir={}", scratch.path().display());
+        let (session, ir) = promoted(
+            &scratch,
+            INCLUDED_DECLARATION_SOURCE,
+            &["-O0", "-g", &relative],
+            "g",
+        );
+        let declared = format!("{}:1", scratch.path().join("decl.h").display());
+        let resolved =
+            resolve_anchor_at_use(&ir, &session, &local("g", "x"), None, Some(&declared)).unwrap();
+        assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[1]);
+    }
+
     /// A line no variable of the name is declared on is refused naming the
     /// lines each one is, never answered with one of them.
     #[test]
@@ -4048,16 +4082,18 @@ void f(unsigned a, unsigned b) {
     /// line can name.
     #[test]
     fn a_declaration_with_no_recorded_line_is_never_matched() {
+        let session = Session::new(facts(Vec::new(), Vec::new()), Vec::new());
         let site = |line| UseSite {
             spelled: format!("t.c:{line}"),
-            files: HashSet::from([std::path::PathBuf::from("t.c")]),
+            module_id: "m".into(),
+            file: session.named_file(Path::new("t.c")),
             line,
         };
-        assert!(site(4).declares("t.c", 4));
-        assert!(!site(4).declares("t.c", 5));
-        assert!(!site(4).declares("u.c", 4));
-        assert!(!site(4).declares("", 4));
-        assert!(!site(0).declares("t.c", 0));
+        assert!(site(4).declares("t.c", None, 4));
+        assert!(!site(4).declares("t.c", None, 5));
+        assert!(!site(4).declares("u.c", None, 4));
+        assert!(!site(4).declares("", None, 4));
+        assert!(!site(0).declares("t.c", None, 0));
     }
 
     /// After its block ends `cur` does not exist: a read of the value it
