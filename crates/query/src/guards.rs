@@ -18,8 +18,8 @@ use crate::bind::collapse_odr_duplicates;
 use crate::extract::read_module_ir;
 use crate::index::NamedFile;
 use crate::ir::{
-    BinaryOp, CallIr, CastOp, DbgValue, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr, Operand,
-    ValueId, ValueNode, int_predicate,
+    BinaryOp, CallIr, CastOp, ConstVal, DbgValue, FunctionIr, GuardOpRaw, ModuleIr, OpcodeIr,
+    Operand, ValueId, ValueNode, int_predicate,
 };
 use crate::overlay::{bare, function_label, site_label};
 use crate::slice::{EmittedModule, check_opt_llvm, emit_module, promote, promote_anchor_module};
@@ -361,6 +361,12 @@ pub struct GuardSite {
     /// Absent when it is not a constant affine function of it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub affine: Option<Affine>,
+    /// The helper whose call makes the guard, by its mangled symbol: a
+    /// trivial `min` or `max` function, read as the clamp it computes on
+    /// the call's arguments. Absent for a guard the instruction itself
+    /// makes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
 }
 
 /// Which way a trace crossed a call boundary.
@@ -627,6 +633,7 @@ pub fn guards_at_use(
                 scope: scope.as_ref(),
                 doms: doms.unwrap_or_else(|| dominators(body)),
                 links: RefCell::default(),
+                helpers: helper_clamps(&ir, session, &function.module_id),
             };
             let at = match used_at {
                 Some(at) => at,
@@ -831,6 +838,9 @@ struct Trace<'a> {
     doms: Doms,
     /// Each load's [`Trace::link`], found once.
     links: RefCell<HashMap<ValueId, Option<Link>>>,
+    /// The trivial clamp helpers of `body`'s module, by symbol: a call to one
+    /// is read as the clamp it computes.
+    helpers: HashMap<String, HelperClamp>,
 }
 
 /// What a backward walk over a value's definitions found.
@@ -1193,6 +1203,14 @@ impl Trace<'_> {
                     } else if let Some(raw) = &node.guard {
                         walk.defining.insert(id, defining(raw, node, &call.args));
                         follow(&call.args);
+                    } else if let Some((symbol, raw, operands)) = self.helper_call(call) {
+                        // The clamp the helper computes on the call's
+                        // arguments, as an intrinsic clamp over them: the
+                        // summary accounts for the whole result.
+                        let mut site = defining(&raw, node, &operands);
+                        site.via = Some(symbol.to_string());
+                        walk.defining.insert(id, site);
+                        follow(&operands);
                     } else {
                         match &call.callee {
                             Some(callee) if callee.symbol.starts_with(INTRINSIC_PREFIX) => {
@@ -1357,6 +1375,25 @@ impl Trace<'_> {
                     surfaced(raw, side == 1, node.location.clone(), GuardRelation::OnPath),
                 );
                 downstream_guards.insert(id);
+            } else if let Some((symbol, raw, mapped)) =
+                node.call.as_ref().and_then(|call| self.helper_call(call))
+            {
+                // Only an argument the helper chooses between is clamped: one
+                // it ignores is never a lead.
+                let Some(side) = mapped.iter().position(
+                    |operand| matches!(operand, Operand::Value(used) if downstream.contains(used)),
+                ) else {
+                    continue;
+                };
+                let mut site = surfaced(
+                    &raw,
+                    side == 1,
+                    node.location.clone(),
+                    GuardRelation::OnPath,
+                );
+                site.via = Some(symbol.to_string());
+                sites.insert(id, site);
+                downstream_guards.insert(id);
             }
         }
         for (id, node) in self.body.values.iter().enumerate() {
@@ -1474,10 +1511,44 @@ impl Trace<'_> {
             })
     }
 
+    /// The call `call` to a trivial clamp helper of this module, read as the
+    /// clamp it computes: the helper's symbol, the clamp, and the two values
+    /// it chooses between, the call's arguments for the helper's parameters.
+    /// Its bound is the helper's own constant, or else whichever of those
+    /// arguments is a constant. `None` for any other call, and for one that
+    /// does not pass every parameter the helper chooses between.
+    fn helper_call(&self, call: &CallIr) -> Option<(&str, GuardOpRaw, Vec<Operand>)> {
+        let (symbol, helper) = self.helpers.get_key_value(&call.callee.as_ref()?.symbol)?;
+        let operands = helper
+            .chosen
+            .iter()
+            .map(|chosen| match chosen {
+                Chosen::Param(index) => call.args.get(*index).cloned(),
+                Chosen::Const(constant) => Some(Operand::Const(constant.clone())),
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let raw = GuardOpRaw {
+            bound: helper.raw.bound.clone().or_else(|| {
+                operands.iter().find_map(|operand| match operand {
+                    Operand::Const(constant) => Some(constant.value.clone()),
+                    _ => None,
+                })
+            }),
+            ..helper.raw.clone()
+        };
+        Some((symbol, raw, operands))
+    }
+
     /// The width in bits of the integer the guard at `id` operates on: its
-    /// operation's, or, for a `phi` read as a clamp, its constant's.
+    /// operation's, for a call to a clamp helper the helper's return width,
+    /// or, for a `phi` read as a clamp, its constant's.
     fn guard_width(&self, id: ValueId) -> Option<u32> {
         let node = self.node(id);
+        if node.guard.is_none()
+            && let Some((_, raw, _)) = node.call.as_ref().and_then(|call| self.helper_call(call))
+        {
+            return raw.bits;
+        }
         node.guard.as_ref().map_or_else(
             || {
                 node.operands.iter().find_map(|operand| match operand {
@@ -1947,6 +2018,7 @@ impl Trace<'_> {
             verified: true,
             caveat: None,
             affine: Some(Affine::IDENTITY),
+            via: None,
         };
         Some((site, compare))
     }
@@ -2007,6 +2079,138 @@ impl Trace<'_> {
     }
 }
 
+/// What a trivial helper returns: the clamp its body makes between two of
+/// its parameters, or a parameter and a constant.
+#[derive(Clone, Debug)]
+struct HelperClamp {
+    /// A clamp: `umin`, `smin`, `umax` or `smax`, its bound the helper's
+    /// own constant if it has one, at the width of the helper's return.
+    raw: GuardOpRaw,
+    /// The two values the clamp chooses between.
+    chosen: [Chosen; 2],
+}
+
+/// A value a [`HelperClamp`] chooses: one of the helper's parameters, by
+/// position, or an integer constant at its return width.
+#[derive(Clone, Debug)]
+enum Chosen {
+    Param(usize),
+    Const(ConstVal),
+}
+
+/// What a trivial clamp helper's body is made of besides its one `ret`:
+/// comparisons and the choice between their operands. Anything else -- a
+/// call, a memory access, a cast, arithmetic -- may compute something the
+/// summary does not say, so the helper is not read.
+const HELPER_OPCODES: [OpcodeIr; 4] = [
+    OpcodeIr::ICmp,
+    OpcodeIr::Select,
+    OpcodeIr::Phi,
+    OpcodeIr::Br,
+];
+
+/// The linkages under which a call in the module runs the body the module
+/// holds: a `static` function, or one ODR entity whose copies are the same
+/// function. An external definition may be replaced at link or load time,
+/// and a `weak` one by design.
+const HELPER_LINKAGES: [Linkage; 2] = [Linkage::Internal, Linkage::Odr];
+
+/// The trivial clamp helpers `ir`, catalog module `module`'s promoted IR,
+/// defines, by symbol, each with the clamp it computes.
+fn helper_clamps(ir: &ModuleIr, session: &Session, module: &str) -> HashMap<String, HelperClamp> {
+    ir.functions
+        .iter()
+        .filter_map(|body| {
+            let id = FunctionId {
+                module_id: module.to_string(),
+                symbol: body.id.symbol.clone(),
+            };
+            let fact = session.function(&id)?;
+            if !fact.is_definition || !HELPER_LINKAGES.contains(&fact.linkage) {
+                return None;
+            }
+            Some((id.symbol.clone(), helper_clamp(session, body, &id)?))
+        })
+        .collect()
+}
+
+/// What `body`, the function `function`, returns when it is a trivial
+/// clamp: besides one `ret`, only [`HELPER_OPCODES`], and its result a
+/// `select` or the `-O0` `phi` idiom choosing between the two values it
+/// compares, each a parameter or an integer constant at the result's width.
+fn helper_clamp(
+    session: &Session,
+    body: &FunctionIr,
+    function: &FunctionId,
+) -> Option<HelperClamp> {
+    let mut returned = None;
+    for &id in body.blocks.iter().flat_map(|block| &block.instrs) {
+        let node = &body.values[id as usize];
+        match node.opcode {
+            OpcodeIr::Ret if returned.is_none() => returned = Some(node.operands.first()?),
+            opcode if HELPER_OPCODES.contains(&opcode) => {}
+            _ => return None,
+        }
+    }
+    let Some(Operand::Value(result)) = returned else {
+        return None;
+    };
+    let node = &body.values[*result as usize];
+    let (predicate, compare, arms) = match node.opcode {
+        OpcodeIr::Select => {
+            let raw = node
+                .guard
+                .as_ref()
+                .filter(|raw| raw.kind == GuardKind::Clamp)?;
+            let Some(Operand::Value(compare)) = node.operands.first() else {
+                return None;
+            };
+            (raw.predicate.clone()?, *compare, node.operands.get(1..)?)
+        }
+        OpcodeIr::Phi => {
+            let trace = Trace {
+                session,
+                body,
+                function,
+                scope: None,
+                doms: dominators(body),
+                links: RefCell::default(),
+                helpers: HashMap::new(),
+            };
+            let (site, compare) = trace.phi_clamp(node)?;
+            (site.predicate?, compare, node.operands.as_slice())
+        }
+        _ => return None,
+    };
+    let bits = body.values[compare as usize].guard.as_ref()?.bits?;
+    let chosen = |arm: &Operand| match arm {
+        Operand::Value(value) => body
+            .params
+            .iter()
+            .position(|param| param == value)
+            .map(Chosen::Param),
+        Operand::Const(constant) if constant.bits == Some(bits) => {
+            Some(Chosen::Const(constant.clone()))
+        }
+        _ => None,
+    };
+    let [a, b] = arms else { return None };
+    let chosen = [chosen(a)?, chosen(b)?];
+    let bound = chosen.iter().find_map(|chosen| match chosen {
+        Chosen::Const(constant) => Some(constant.value.clone()),
+        Chosen::Param(_) => None,
+    });
+    Some(HelperClamp {
+        raw: GuardOpRaw {
+            kind: GuardKind::Clamp,
+            predicate: Some(predicate),
+            bound,
+            bits: Some(bits),
+        },
+        chosen,
+    })
+}
+
 /// The guard `raw` makes as one that produces the traced value, read from
 /// its first operand among `operands` that is a value.
 fn defining(raw: &GuardOpRaw, node: &ValueNode, operands: &[Operand]) -> GuardSite {
@@ -2049,6 +2253,7 @@ fn surfaced(
         verified: true,
         caveat: None,
         affine: Some(Affine::IDENTITY),
+        via: None,
     }
 }
 
@@ -5496,6 +5701,253 @@ void f(unsigned len) { sink(__builtin_elementwise_sub_sat(16u, len)); }
         );
     }
 
+    /// Typed `min`/`max` helpers, which stay calls at `-O0`. Each `sink`
+    /// is on its own line.
+    const HELPER_SOURCE: &str = "static inline unsigned long min_ul(unsigned long a, unsigned long b) { return a < b ? a : b; }
+static inline unsigned long max_ul(unsigned long a, unsigned long b) { return a < b ? b : a; }
+static inline unsigned long cap(unsigned long a) { return a < 64 ? a : 64; }
+extern void sink(unsigned long);
+void f(unsigned long n) { sink(min_ul(n, 1024)); }
+void g(unsigned long n) { sink(max_ul(n, 16)); }
+void h(unsigned long a, unsigned long b) { sink(min_ul(a, b)); }
+void k(void) { sink(min_ul(3, 7)); }
+void m(unsigned long a, unsigned long b) { sink(min_ul(min_ul(a, 8), b)); }
+void p(unsigned long n) { sink(cap(n)); }
+static inline unsigned long pick(unsigned long a, unsigned long b, unsigned long unused) { return a < b ? a : b; }
+void q(unsigned long n) { sink(n); sink(min_ul(n, 32)); }
+void r(unsigned long n, unsigned long x) { sink(n); sink(pick(x, 32, n)); }
+";
+
+    /// A guard as (op, predicate, bound, relation, verified, via).
+    type HelperSite<'a> = (
+        GuardKind,
+        Option<&'a str>,
+        Option<&'a str>,
+        GuardRelation,
+        bool,
+        Option<&'a str>,
+    );
+
+    /// Each guard as a [`HelperSite`].
+    fn helper_sites(result: &GuardsResult) -> Vec<HelperSite<'_>> {
+        result
+            .guards
+            .iter()
+            .map(|guard| {
+                (
+                    guard.op,
+                    guard.predicate.as_deref(),
+                    guard.bound.as_deref(),
+                    guard.relation,
+                    guard.verified,
+                    guard.via.as_deref(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_trivial_min_or_max_helper_is_read_as_the_clamp_it_computes() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, HELPER_SOURCE, &["-O0", "-g"]);
+        let clamp = |predicate, bound, via| {
+            (
+                GuardKind::Clamp,
+                Some(predicate),
+                bound,
+                GuardRelation::Defines,
+                true,
+                Some(via),
+            )
+        };
+        for (function, expected, line) in [
+            ("f", clamp("umin", Some("1024"), "min_ul"), 5),
+            ("g", clamp("umax", Some("16"), "max_ul"), 6),
+            // Neither argument is constant: a clamp with no bound.
+            ("h", clamp("umin", None, "min_ul"), 7),
+            // Both are: the walk follows neither, and the clamp still holds.
+            ("k", clamp("umin", Some("3"), "min_ul"), 8),
+            // The helper's own constant is the bound.
+            ("p", clamp("umin", Some("64"), "cap"), 10),
+        ] {
+            let r = guards(&session, &sink_argument(&session, function, 0), None).unwrap();
+            assert_eq!(helper_sites(&r), [expected], "{function}: {r:?}");
+            assert_eq!(r.guards[0].affine, Some(Affine::IDENTITY), "{function}");
+            assert!(
+                r.guards[0]
+                    .location
+                    .as_ref()
+                    .is_some_and(|at| at.line == line),
+                "{function}: the call's location: {r:?}"
+            );
+            // The summary accounts for the whole result: no crossing out of
+            // the helper.
+            assert!(r.crossings.is_empty(), "{function}: {r:?}");
+            assert!(r.lost.is_none(), "{function}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn each_call_to_a_helper_on_one_line_is_its_own_clamp() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, HELPER_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "m", 0), None).unwrap();
+        let mut bounds: Vec<_> = r
+            .guards
+            .iter()
+            .map(|guard| {
+                assert_eq!(guard.op, GuardKind::Clamp, "{r:?}");
+                assert_eq!(guard.predicate.as_deref(), Some("umin"), "{r:?}");
+                assert_eq!(guard.via.as_deref(), Some("min_ul"), "{r:?}");
+                (guard.depth, guard.bound.as_deref())
+            })
+            .collect();
+        bounds.sort();
+        assert_eq!(bounds, [(0, None), (1, Some("8"))], "{r:?}");
+        assert!(r.crossings.is_empty(), "{r:?}");
+    }
+
+    /// A helper returning a `select` clamp, and one returning a `select`
+    /// over a value it computes. Clang emits the `phi` idiom at `-O0` and
+    /// an intrinsic once optimizing, so these are written as IR.
+    const SELECT_HELPER_IR: &str = r#"
+declare void @sink(i32)
+
+define internal i32 @larger(i32 %a, i32 %b) {
+  %c = icmp sgt i32 %a, %b
+  %m = select i1 %c, i32 %a, i32 %b
+  ret i32 %m
+}
+
+define internal i32 @doubled(i32 %a, i32 %b) {
+  %t = select i1 true, i32 %a, i32 %b
+  %c = icmp sgt i32 %t, %b
+  %m = select i1 %c, i32 %t, i32 %b
+  ret i32 %m
+}
+
+define void @f(i32 %n) {
+  %r = call i32 @larger(i32 %n, i32 -5)
+  call void @sink(i32 %r)
+  ret void
+}
+
+define void @g(i32 %n) {
+  %r = call i32 @doubled(i32 %n, i32 -5)
+  call void @sink(i32 %r)
+  ret void
+}
+"#;
+
+    #[test]
+    fn a_helper_returning_a_select_clamp_is_read_as_it() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.ll",
+            SELECT_HELPER_IR,
+            &["-Wno-override-module"],
+        );
+        let r = affine_ir_guards(&session, "f", "sink");
+        assert_eq!(
+            helper_sites(&r),
+            [(
+                GuardKind::Clamp,
+                Some("smax"),
+                Some("-5"),
+                GuardRelation::Defines,
+                true,
+                Some("larger")
+            )],
+            "{r:?}"
+        );
+        assert!(r.crossings.is_empty(), "{r:?}");
+        // The `select` chooses a value the helper computes, not a parameter.
+        let r = affine_ir_guards(&session, "g", "sink");
+        assert!(r.guards.is_empty(), "{r:?}");
+        assert_eq!(
+            crossings(&r),
+            [("g", CrossingDir::From, "doubled", "return")]
+        );
+    }
+
+    /// A helper clamp run on the anchored value after its use bounds its own
+    /// result, as a downstream intrinsic clamp does: a lead, never verified.
+    /// An argument the helper does not choose between is not clamped at all.
+    #[test]
+    fn a_downstream_helper_clamp_is_a_lead_only_on_a_chosen_argument() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, HELPER_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &sink_argument(&session, "q", 0), None).unwrap();
+        assert_eq!(
+            helper_sites(&r),
+            [(
+                GuardKind::Clamp,
+                Some("umin"),
+                Some("32"),
+                GuardRelation::OnPath,
+                false,
+                Some("min_ul")
+            )],
+            "{r:?}"
+        );
+        assert_eq!(
+            r.guards[0].caveat.as_deref(),
+            Some("the guard bounds a value computed from the anchored one"),
+            "{r:?}"
+        );
+        let r = guards(&session, &sink_argument(&session, "r", 0), None).unwrap();
+        assert!(r.guards.is_empty(), "{r:?}");
+    }
+
+    /// Helpers that are not a trivial clamp between parameters and
+    /// constants, or whose body a call may not bind to.
+    const UNSUMMARIZED_SOURCE: &str = "extern void sink(unsigned long);
+unsigned long seen;
+static inline unsigned long calls(unsigned long a, unsigned long b) { sink(a); return a < b ? a : b; }
+static inline unsigned long stores(unsigned long a, unsigned long b) { seen = a; return a < b ? a : b; }
+static inline unsigned long computes(unsigned long a, unsigned long b) { unsigned long t = a * 2; return t < b ? t : b; }
+static inline unsigned long nested(unsigned long a, unsigned long b) { unsigned long t = a < b ? a : b; return t < 8 ? t : 8; }
+__attribute__((weak)) unsigned long weak_min(unsigned long a, unsigned long b) { return a < b ? a : b; }
+static inline unsigned long range(unsigned long x, unsigned long lo, unsigned long hi) { return x < lo ? lo : x > hi ? hi : x; }
+unsigned long extern_min(unsigned long a, unsigned long b) { return a < b ? a : b; }
+static inline unsigned narrows(unsigned long a, unsigned b) { return (unsigned)a < b ? (unsigned)a : b; }
+void fc(unsigned long n) { sink(calls(n, 1024)); }
+void fs(unsigned long n) { sink(stores(n, 1024)); }
+void fl(unsigned long n) { sink(computes(n, 1024)); }
+void fn(unsigned long n) { sink(nested(n, 1024)); }
+void fw(unsigned long n) { sink(weak_min(n, 1024)); }
+void fr(unsigned long n) { sink(range(n, 1, 1024)); }
+void fe(unsigned long n) { sink(extern_min(n, 1024)); }
+void fx(unsigned long n) { sink(narrows(n, 1024)); }
+";
+
+    #[test]
+    fn a_helper_that_is_not_a_trivial_clamp_is_a_crossing() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, UNSUMMARIZED_SOURCE, &["-O0", "-g"]);
+        // Every case is checked before any fails, so a failure names them all.
+        let summarized: Vec<String> = [
+            ("fc", "calls"),
+            ("fs", "stores"),
+            ("fl", "computes"),
+            ("fn", "nested"),
+            ("fw", "weak_min"),
+            ("fr", "range"),
+            ("fe", "extern_min"),
+            ("fx", "narrows"),
+        ]
+        .into_iter()
+        .filter_map(|(function, helper)| {
+            let r = guards(&session, &sink_argument(&session, function, 0), None).unwrap();
+            let crossed = crossings(&r) == [(function, CrossingDir::From, helper, "return")];
+            (!crossed || r.guards.iter().any(|guard| guard.via.is_some()))
+                .then(|| format!("{function}: {r:?}"))
+        })
+        .collect();
+        assert!(summarized.is_empty(), "{summarized:#?}");
+    }
+
     /// The lifetime markers `mem2reg` deletes share the calls' location;
     /// counting them would map the `sink` call onto another.
     #[test]
@@ -6372,6 +6824,7 @@ out:
             verified: true,
             caveat: None,
             affine: Some(affine),
+            via: None,
         }
     }
 
@@ -6857,6 +7310,7 @@ define void @f(ptr %s, i32 %n) {
             scope: None,
             doms: dominators(body),
             links: RefCell::default(),
+            helpers: HashMap::new(),
         }
     }
 

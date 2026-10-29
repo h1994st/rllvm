@@ -11,7 +11,9 @@ twice, to the nearer one. In `reuse.c`, `fill` reuses the local `cur` for two
 values; `--at` traces the one it holds at each use. `drain` shadows `cur`;
 `--declared-at` picks a variable by the line it is declared on. In `clamp.c`,
 `peek` clamps `len` into `n`; a guard list on `len` there, or in `copy`, also
-gives the comparison the clamp is made of.
+gives the comparison the clamp is made of. `trim` clamps through a
+`static inline` `min_size` helper, which `-O0` keeps out of line; `guards`
+reads the call as the clamp it computes.
 
 ## Requirements
 
@@ -32,7 +34,7 @@ verdict, an annotated `reach` that keeps its path, the verified bound on
 `refill`'s two stores, a reused local traced at each of its uses, a shadowed
 local picked by its declaration line, and the comparison a downstream clamp is
 made of: verified on its branch's edge into the call in `peek`, a lead in
-`copy`.
+`copy`, and the clamp a call to `min_size` computes in `trim`.
 
 ## What it does
 
@@ -110,6 +112,21 @@ Traced from `len` in `copy`, `copy`'s own clamp comes back unverified, and its
 `compare ult 64` is a lead, its caveat "no branch edge shows the comparison
 held at the use": the ternary's arms join before `n` is used, so no edge says
 which side holds at `len`.
+
+## A min helper
+
+```bash
+rllvm-query --catalog build/catalog.json guards --at clamp.c:37 --operand 2
+```
+
+`trim` hands `put` `n = min_size(len, CAP)`. At `-O0` the `static inline` helper
+stays a call, but its body only compares its two parameters and returns one, so
+the call is read as the clamp it computes: `clamp umin 64` at `clamp.c:36`,
+defining the value, `verified`, with `via min_size` naming the helper (in
+`--json`, `via` holds its mangled symbol, and `symbols` its reading). No
+crossing out of `min_size` is listed. A helper that is `extern` or `weak`,
+defined in another module, or that casts, loads, stores or calls is a crossing,
+as any other call is.
 
 ## A reused local
 
@@ -197,8 +214,9 @@ be annotated.
   on the call that consumes a returned value.
 - The trace stays in the anchor's function. Where the value enters through a
   parameter or leaves a call, `crossings` name the call to ask `guards` about
-  next. `--from F` keeps only callers on a path from `F`, which must name one
-  function, and examines nothing between them.
+  next; a call to a trivial `min` or `max` helper is read as its clamp
+  instead. `--from F` keeps only callers on a path from `F`, which must name
+  one function, and examines nothing between them.
 - A load is followed to the store it reads back: a non-volatile store of the
   same type to the same address, the same pointer or a `getelementptr` alike,
   that runs before it. The nearest one in the load's block overwrites any

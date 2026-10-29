@@ -241,10 +241,14 @@ overwrites any earlier one, with nothing between that writes memory. A call,
 another store or any other operation between (an `atomicrmw`, a `cmpxchg`, a
 volatile load), or stores only in other blocks, make each guard reached
 through it a lead, and the trace is reported lost there.
-A clamp inside a helper the build keeps out of line, such as a small `min`
-function at `-O0`, is not traced into: its return is listed under `crossings`
-and no guard is reported for it. `-Og` inlines such helpers, so capture there
-when bounds matter more than a faithful call graph.
+A call to a trivial `min` or `max` helper the build keeps out of line, as
+`-O0` does, is read as the clamp it computes when the helper is defined in the
+anchor's module, `static` or C++ `inline`, and only compares two of its
+parameters, or one and a constant, to return one of them. `via` names the
+helper by its mangled symbol, which the `symbols` table reads. Any other call,
+such as to an `extern` or `weak` helper or one that casts, loads or calls, is
+listed under `crossings` with no guard. `-Og` inlines such helpers, so capture
+there when their bounds matter more than a faithful call graph.
 It is evidence, never a verdict: an empty list does not mean unbounded. See the
 [value guards example](examples/value-guards/).
 

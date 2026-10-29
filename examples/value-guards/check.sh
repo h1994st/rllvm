@@ -208,4 +208,16 @@ joined=$(query guards --function copy --local len --json |
 [ "$joined" = "[('compare', False, 'no branch edge shows the comparison held at the use'), ('clamp', False, 'the guard bounds a value computed from the anchored one')]" ] ||
     fail "guards --local len reported $joined, expected an unverified compare with no deciding edge and an unverified downstream clamp"
 
-echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, a clamp followed through a struct field and its nearest store, a reused local traced at each use, a shadowed local picked by its declaration line, and the comparison a downstream clamp is made of"
+# 19. trim hands put n = min_size(len, CAP), a static inline helper -O0 keeps
+#     out of line. It only compares its parameters and returns one, so the
+#     call on line 36 is read as the clamp it computes, named by via: umin 64,
+#     verified, and no crossing out of the helper.
+text=$(query guards --at clamp.c:37 --operand 2)
+defines "$text" 'clamp\.c:36  clamp umin 64 \(defines, on the anchor\) via min_size' \
+    "the call to min_size was not read as its clamp: $text"
+helped=$(query guards --at clamp.c:37 --operand 2 --json |
+    field '([(g["op"], g["predicate"], g["bound"], g["verified"], g.get("via")) for g in a["results"]["guards"]], a["results"]["crossings"])')
+[ "$helped" = "([('clamp', 'umin', '64', True, 'min_size')], [])" ] ||
+    fail "guards on n = min_size(len, CAP) reported $helped, expected one verified umin 64 via min_size and no crossing"
+
+echo "ok: guards reports the clamp that defines the length handed to put, nothing for an unconstrained value, a recorded verdict, an annotated reach that keeps its path, a verified bound carried to left + 1, a clamp followed through a struct field and its nearest store, a reused local traced at each use, a shadowed local picked by its declaration line, the comparison a downstream clamp is made of, and a min helper read as its clamp"

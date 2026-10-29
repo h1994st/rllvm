@@ -989,7 +989,7 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
         QueryResults::Guards(result) => {
             for guard in &result.guards {
                 out.push_str(&format!(
-                    "{}  {}{}{} ({}, {}{}){}\n",
+                    "{}  {}{}{} ({}, {}{}){}{}\n",
                     location(guard.location.as_ref(), ctx),
                     serde_name(&guard.op),
                     guard
@@ -1006,6 +1006,10 @@ fn render_results(result: &QueryResult, ctx: Ctx, out: &mut String) {
                             ", {}",
                             guard_affine(affine)
                         )),
+                    guard.via.as_ref().map_or(String::new(), |via| format!(
+                        " via {}",
+                        name(symbols, via, ctx)
+                    )),
                     guard_caveat(guard, ctx)
                 ));
             }
@@ -2572,6 +2576,7 @@ mod tests {
             verified: true,
             caveat: None,
             affine: Some(crate::Affine::IDENTITY),
+            via: None,
         }
     }
 
@@ -2722,5 +2727,26 @@ mod tests {
             "a bound read signed, for want of a width, stays as the IR spells it"
         );
         assert_eq!(lines[4], "crossing into b parameter 0  via a call in a");
+    }
+
+    #[test]
+    fn a_guard_from_a_helper_names_it_and_serializes_via() {
+        let mut site = guard(
+            GuardKind::Clamp,
+            Some("umin"),
+            "1024",
+            crate::GuardRelation::Defines,
+            0,
+        );
+        let json = serde_json::to_value(&site).unwrap();
+        assert!(json.get("via").is_none(), "no helper, no field: {json}");
+        site.via = Some("min_ul".into());
+        let json = serde_json::to_value(&site).unwrap();
+        assert_eq!(json["via"], serde_json::json!("min_ul"));
+        let text = render(&guards_answer(vec![site]), TextMode::Full, Color::Never);
+        assert_eq!(
+            text.lines().next(),
+            Some("<no location>  clamp umin 1024 (defines, on the anchor) via min_ul")
+        );
     }
 }
