@@ -2626,8 +2626,9 @@ impl DebugNumbers {
             }
             at = parent;
         }
-        if let Some(root) = outermost(id, |scope| self.parents.get(&scope).copied())
-            && self.subprograms.contains(&root)
+        if let Some(root) = outermost(id, self.parents.len(), |scope| {
+            self.parents.get(&scope).copied()
+        }) && self.subprograms.contains(&root)
         {
             function.subprograms.insert(root);
         }
@@ -2637,11 +2638,16 @@ impl DebugNumbers {
 
 /// The outermost scope `scope` is nested in, following `parent` up. `None`
 /// when the chain loops, as a malformed module's may: such a chain is placed
-/// nowhere, so nothing is taken to lie in it or outside its function.
-fn outermost(scope: ScopeId, parent: impl Fn(ScopeId) -> Option<ScopeId>) -> Option<ScopeId> {
-    let mut seen = HashSet::new();
+/// nowhere, so nothing is taken to lie in it or outside its function. An
+/// acyclic chain has at most `links` steps, so one longer than that has come
+/// round again.
+fn outermost(
+    scope: ScopeId,
+    links: usize,
+    parent: impl Fn(ScopeId) -> Option<ScopeId>,
+) -> Option<ScopeId> {
     let mut at = scope;
-    while seen.insert(at) {
+    for _ in 0..=links {
         match parent(at) {
             Some(up) => at = up,
             None => return Some(at),
@@ -3251,13 +3257,22 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let parents = HashMap::from([(1, 2), (2, 1), (3, 1), (4, 5)]);
-            let root = |scope| outermost(scope, |at| parents.get(&at).copied());
+            let root = |scope| outermost(scope, parents.len(), |at| parents.get(&at).copied());
             let _ = sender.send([root(3), root(1), root(4), root(5)]);
         });
         let roots = receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the walk up a cyclic chain must end");
         assert_eq!(roots, [None, None, Some(5), Some(5)]);
+    }
+
+    #[test]
+    fn an_acyclic_chain_as_long_as_the_links_reaches_its_root() {
+        let parents: HashMap<ScopeId, ScopeId> = (1..=5).map(|scope| (scope, scope + 1)).collect();
+        assert_eq!(
+            outermost(1, parents.len(), |at| parents.get(&at).copied()),
+            Some(6)
+        );
     }
 
     #[test]
