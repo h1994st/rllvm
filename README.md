@@ -209,9 +209,10 @@ though a variable of an inlined callee does not count.
 line, refusing a line none or several are declared on, and `--at FILE:LINE`
 traces the value the local holds at that use. A use at a line is a read of the
 value the local holds there, possibly through another variable that holds the
-same value inside the local's scope. An overlay `annotate` anchor carries no
-use-site or declaration line, so a reused or shadowed local cannot be
-annotated.
+same value inside the local's scope; a read inside code inlined from a callee
+is placed at the line the function calls it on. An overlay `annotate` anchor
+carries no use-site or declaration line, so a reused or shadowed local cannot
+be annotated.
 Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
 relation to the value is a constant one. Its `scale` and `offset` are decimal
 strings, since they may exceed 64 bits. `verified` means its bound soundly

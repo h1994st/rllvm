@@ -533,16 +533,11 @@ unsafe fn location_of(value: LLVMValueRef) -> Option<SourceLocation> {
     // guard that makes the instruction-only accessor below legal.
     if !unsafe { LLVMIsAInstruction(value) }.is_null() {
         // SAFETY: reached only for an instruction, as this accessor requires.
-        let mut metadata = unsafe { LLVMInstructionGetDebugLoc(value) };
-        while !metadata.is_null() {
-            // SAFETY: `metadata` is a live `DILocation` from this module.
-            let outer = unsafe { LLVMDILocationGetInlinedAt(metadata) };
-            if outer.is_null() {
-                break;
-            }
-            // SAFETY: `outer` is the live `DILocation` of the calling frame.
+        let metadata = unsafe { LLVMInstructionGetDebugLoc(value) };
+        // SAFETY: `metadata` is null or the instruction's live `DILocation`.
+        for outer in unsafe { inlining_frames(metadata) } {
+            // SAFETY: `outer` is the live `DILocation` of a calling frame.
             inlined_at.push(unsafe { location_of_metadata(outer) });
-            metadata = outer;
         }
     }
 
@@ -557,6 +552,25 @@ unsafe fn location_of(value: LLVMValueRef) -> Option<SourceLocation> {
             inlined_at,
         )
     })
+}
+
+/// The `inlinedAt` chain above `location`, innermost first: empty when it
+/// was not inlined, and when `location` is null.
+///
+/// # Safety
+/// `location` must be null or a valid `DILocation` metadata reference.
+unsafe fn inlining_frames(mut location: LLVMMetadataRef) -> Vec<LLVMMetadataRef> {
+    let mut frames = Vec::new();
+    while !location.is_null() {
+        // SAFETY: `location` is a live `DILocation` from this module.
+        let outer = unsafe { LLVMDILocationGetInlinedAt(location) };
+        if outer.is_null() {
+            break;
+        }
+        frames.push(outer);
+        location = outer;
+    }
+    frames
 }
 
 /// One inlining frame, resolved through its own scope so it carries its own
@@ -2711,12 +2725,14 @@ unsafe fn read_function_ir(
         let mut values = Vec::with_capacity(handles.len());
         let mut dbg_values = Vec::new();
         let mut scopes = Vec::with_capacity(handles.len());
+        let mut frame_scopes = Vec::with_capacity(handles.len());
         let mut function_scopes = FunctionScopes::default();
         let subprogram = numbers.scope(context, LLVMGetSubprogram(function), &mut function_scopes);
         for (id, &(handle, block)) in handles.iter().enumerate() {
             let id = id as ValueId;
             if id < param_count {
                 scopes.push(None);
+                frame_scopes.push(None);
                 values.push(ValueNode {
                     block,
                     opcode: OpcodeIr::Param,
@@ -2743,6 +2759,14 @@ unsafe fn read_function_ir(
                     &mut function_scopes,
                 )
             });
+            // Where in this function the call it was inlined from lies: the
+            // scope of the outermost `inlinedAt` frame.
+            frame_scopes.push(match inlining_frames(location).last() {
+                Some(&frame) => {
+                    numbers.scope(context, LLVMDILocationGetScope(frame), &mut function_scopes)
+                }
+                None => None,
+            });
             read_bindings(
                 context,
                 handle,
@@ -2764,6 +2788,7 @@ unsafe fn read_function_ir(
             values,
             dbg_values,
             scopes,
+            frame_scopes,
             scope_parents: function_scopes.links,
             subprogram,
             subprograms: function_scopes.subprograms,

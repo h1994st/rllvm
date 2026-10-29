@@ -2610,9 +2610,8 @@ fn resolve_local_at(
         .iter()
         .copied()
         .filter(|&(instr, _)| {
-            body.values[instr as usize]
-                .location
-                .as_ref()
+            body.placed(instr)
+                .0
                 .is_some_and(|location| at.holds(location))
         })
         .collect();
@@ -2631,9 +2630,9 @@ fn resolve_local_at(
     let mut reaching: Vec<&Operand> = Vec::new();
     for (id, node) in body.values.iter().enumerate() {
         if !matches!(node.opcode, OpcodeIr::Param | OpcodeIr::Phi)
-            && node
-                .location
-                .as_ref()
+            && body
+                .placed(id as ValueId)
+                .0
                 .is_some_and(|location| at.holds(location))
             && let Some(binding) = held[id]
             && !reaching.contains(&binding)
@@ -2783,8 +2782,9 @@ impl UseSite {
 /// instruction takes effect from that instruction on. `None` where no
 /// binding reaches, and outside the variable's scope, where it does not
 /// exist whatever value it last held: only a value whose scope is the
-/// variable's or nested in it holds anything. An untraceable binding is kept
-/// as `Operand::Other`.
+/// variable's or nested in it holds anything, a value inlined from a callee
+/// placed by the call it came from, as [`FunctionIr::placed`] places it. An
+/// untraceable binding is kept as `Operand::Other`.
 fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, variable: u32) -> Vec<Option<&'a Operand>> {
     let mut position = vec![0; body.values.len()];
     for block in &body.blocks {
@@ -2828,7 +2828,7 @@ fn held_bindings<'a>(body: &'a FunctionIr, doms: &Doms, variable: u32) -> Vec<Op
         .and_then(|binding| binding.scope);
     (0..body.values.len())
         .map(|id| {
-            let scope = body.scopes.get(id).copied().flatten();
+            let (_, scope) = body.placed(id as ValueId);
             held(id).filter(|_| body.within(scope, declared))
         })
         .collect()
@@ -2858,11 +2858,12 @@ fn local_uses<'a>(body: &'a FunctionIr, doms: &Doms, variable: u32) -> Vec<(Valu
         .collect()
 }
 
-/// The `file:line` of each of `uses`, once each, in order.
+/// The `file:line` of each of `uses`, once each, in order: a use inlined
+/// from a callee on the line of the call it came from.
 fn use_lines<T>(body: &FunctionIr, uses: &[(ValueId, T)]) -> Vec<String> {
     let lines: BTreeSet<(String, u32)> = uses
         .iter()
-        .filter_map(|&(instr, _)| body.values[instr as usize].location.as_ref())
+        .filter_map(|&(instr, _)| body.placed(instr).0)
         .filter(|location| location.line != 0)
         .map(|location| (location.file.display().to_string(), location.line))
         .collect();
@@ -3065,7 +3066,9 @@ mod tests {
             BinaryOp, BlockIr, INT_PREDICATES, OpcodeIr, Operand, ScalarKind, TypeTag, ValueNode,
         },
         slice::promote_anchor_module,
-        testing::{compiled_session, facts, module_session, stale_debug_info_module},
+        testing::{
+            compiled_session, facts, module_session, source_location, stale_debug_info_module,
+        },
     };
 
     /// Every coefficient an `i128` holds, the extremes and negatives
@@ -3113,6 +3116,7 @@ mod tests {
             values: Vec::new(),
             dbg_values: Vec::new(),
             scopes: Vec::new(),
+            frame_scopes: Vec::new(),
             scope_parents: HashMap::new(),
             subprogram: None,
             subprograms: HashSet::new(),
@@ -3360,6 +3364,66 @@ void g(unsigned a) {
 void g(unsigned a, unsigned b, int c) {
   unsigned cur = a;
   if (c) cur = b;
+  sink(cur);
+}
+";
+
+    /// Line 8 reads `cur` only inside the inlined `pick`, whose compare
+    /// carries `pick`'s line and scope with line 8 as its caller frame.
+    const INLINED_READ_SOURCE: &str =
+        "static inline __attribute__((always_inline)) unsigned pick(unsigned v) {
+  return v > 9 ? 9 : v;
+}
+extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned cur = a;
+  if (cur > 40) return;
+  sink(pick(cur));
+  cur = b;
+  sink(cur);
+}
+";
+
+    /// Line 10 calls `pick` after `cur`'s block has closed: the inlined
+    /// compare reads the value `cur` last held, but outside its scope.
+    const INLINED_READ_OUTSIDE_SCOPE_SOURCE: &str =
+        "static inline __attribute__((always_inline)) unsigned pick(unsigned v) {
+  return v > 9 ? 9 : v;
+}
+extern void sink(unsigned);
+void g(unsigned a) {
+  {
+    unsigned cur = a;
+    sink(cur);
+  }
+  sink(pick(a));
+}
+";
+
+    /// Line 7 reads `cur` directly while it holds `a`, then inside the
+    /// inlined `pick` once it holds `b`.
+    const INLINED_REBINDING_SOURCE: &str =
+        "static inline __attribute__((always_inline)) unsigned pick(unsigned v) {
+  return v > 9 ? 9 : v;
+}
+extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned cur = a;
+  sink(cur); cur = b; sink(pick(cur));
+}
+";
+
+    /// Line 7 reads `cur` directly and inside the inlined `pick`, holding
+    /// `a` at both.
+    const INLINED_AND_DIRECT_READ_SOURCE: &str =
+        "static inline __attribute__((always_inline)) unsigned pick(unsigned v) {
+  return v > 9 ? 9 : v;
+}
+extern void sink(unsigned);
+void g(unsigned a, unsigned b) {
+  unsigned cur = a;
+  sink(cur + pick(cur));
+  cur = b;
   sink(cur);
 }
 ";
@@ -3651,6 +3715,108 @@ void f(unsigned a, unsigned b) {
             error.contains("`cur`") && error.contains("more than one of its values"),
             "{error}"
         );
+    }
+
+    /// The inlined compare is `g`'s read of `cur` at line 8, the line `g`
+    /// calls `pick` on: it traces the value checked before the call.
+    #[test]
+    fn an_inlined_read_is_a_use_at_its_callers_line() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, INLINED_READ_SOURCE, &["-O0", "-g"]);
+        let result = guards_at_use(
+            &session,
+            &local("g", "cur"),
+            Some(&line_of(&scratch, 8)),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            result
+                .guards
+                .iter()
+                .any(|guard| guard.op == GuardKind::Compare
+                    && guard.predicate.as_deref() == Some("ule")
+                    && guard.bound.as_deref() == Some("40")
+                    && guard.relation == GuardRelation::Dominates
+                    && guard.verified),
+            "{result:?}"
+        );
+        assert!(result.lost.is_none(), "{result:?}");
+    }
+
+    #[test]
+    fn an_inlined_read_outside_the_locals_scope_is_no_use() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(
+            &scratch,
+            INLINED_READ_OUTSIDE_SCOPE_SOURCE,
+            &["-O0", "-g"],
+            "g",
+        );
+        let at = line_of(&scratch, 10);
+        let error = resolve_anchor_at_use(&ir, &session, &local("g", "cur"), Some(&at), None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("no use of `cur` at {at} in g [m]")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_refusal_lists_an_inlined_reads_caller_line() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = session(&scratch, INLINED_READ_SOURCE, &["-O0", "-g"]);
+        let r = guards(&session, &local("g", "cur"), None).unwrap();
+        let lost = r.lost.as_deref().unwrap_or_default();
+        assert!(lost.contains("bound to more than one value"), "{lost}");
+        assert!(lost.contains("t.c:8") && lost.contains("t.c:10"), "{lost}");
+        assert!(
+            !lost.contains("t.c:2"),
+            "the callee's line is not g's: {lost}"
+        );
+    }
+
+    /// The direct read holds `a`, the inlined one `b`: the line is refused
+    /// rather than resolved to either.
+    #[test]
+    fn a_line_reading_two_values_one_inlined_is_refused() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(&scratch, INLINED_REBINDING_SOURCE, &["-O0", "-g"], "g");
+        let error = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &local("g", "cur"),
+            Some(&line_of(&scratch, 7)),
+            None,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("`cur`") && error.contains("more than one of its values"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_direct_and_an_inlined_read_of_one_value_resolve_once() {
+        let scratch = tempfile::tempdir().unwrap();
+        let (session, ir) = promoted(
+            &scratch,
+            INLINED_AND_DIRECT_READ_SOURCE,
+            &["-O0", "-g"],
+            "g",
+        );
+        let resolved = resolve_anchor_at_use(
+            &ir,
+            &session,
+            &local("g", "cur"),
+            Some(&line_of(&scratch, 7)),
+            None,
+        )
+        .unwrap();
+        assert_eq!(node(&ir, &resolved, "g").0, defined(&ir, "g").params[0]);
     }
 
     /// The constant read counts toward the line's values: the traceable
@@ -6390,6 +6556,41 @@ out:
             });
         }
         body
+    }
+
+    /// A value inlined from a callee is placed by its outermost frame, the
+    /// call in this function. A frame with no scope recorded lies in none,
+    /// so the local holds nothing there, whatever the value's own scope.
+    #[test]
+    fn an_inlined_value_whose_frame_has_no_scope_is_no_use() {
+        let mut body = diamond_of_instructions();
+        let declared = Some(7);
+        let caller = source_location("t.c", 8);
+        let mut inlined = source_location("t.c", 2);
+        inlined.inlined_at.push(caller.clone());
+        for id in [3, 5] {
+            body.values[id].location = Some(inlined.clone());
+        }
+        body.scopes = vec![declared; 6];
+        body.frame_scopes = vec![None, None, None, declared, None, None];
+        body.dbg_values.push(DbgValue {
+            name: "cur".into(),
+            variable: 0,
+            declared_file: "t.c".into(),
+            declared_directory: None,
+            declared_line: 6,
+            scope: declared,
+            value: Operand::Value(0),
+            at: 0,
+        });
+
+        assert_eq!(body.placed(3), (Some(&caller), declared));
+        assert_eq!(body.placed(5), (Some(&caller), None));
+        assert_eq!(body.placed(1), (None, declared), "not inlined");
+        let held = held_bindings(&body, &dominators(&body), 0);
+        assert_eq!(held[3], Some(&Operand::Value(0)));
+        assert_eq!(held[5], None, "no frame scope, no use");
+        assert_eq!(held[1], Some(&Operand::Value(0)));
     }
 
     /// Uses on both arms share the branch above them: a guard running only
