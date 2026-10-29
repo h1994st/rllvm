@@ -1001,6 +1001,7 @@ impl QueryResults {
                     }
                     None => {}
                 }
+                into.extend(result.guards.iter().filter_map(|guard| guard.via.clone()));
                 for crossing in &result.crossings {
                     collect_function(&crossing.site.function, into);
                     collect_function(&crossing.function, into);
@@ -1777,6 +1778,55 @@ mod tests {
         let lost = answer.uncertainty.value_trace_lost.as_deref();
         assert!(lost.is_some_and(|l| l.contains("ptrtoint")), "{lost:?}");
         assert_eq!(answer.uncertainty.agent_path_steps, 0);
+    }
+
+    /// A C++ `inline` helper is one ODR definition: its call is read as the
+    /// clamp it computes, `via` its mangled symbol, whose reading the
+    /// envelope's `symbols` table carries.
+    #[test]
+    fn a_helper_clamp_names_its_helper_in_the_symbols_table() {
+        let scratch = tempfile::tempdir().unwrap();
+        let session = compiled_session(
+            scratch.path(),
+            "t.cpp",
+            "namespace n { inline unsigned long lo(unsigned long a, unsigned long b) { return a < b ? a : b; } }\nextern \"C\" void sink(unsigned long);\nextern \"C\" void f(unsigned long x) { sink(n::lo(x, 32)); }\n",
+            &["-O0", "-g"],
+        );
+        let site = session
+            .call_sites()
+            .iter()
+            .find(|site| {
+                site.id.function.symbol == "f"
+                    && matches!(&site.target, CallTarget::Direct { callee } if callee.symbol == "sink")
+            })
+            .unwrap()
+            .id
+            .clone();
+        let query = Query::Guards {
+            anchor: GuardAnchor::Argument { site, operand: 0 },
+            at: None,
+            declared_at: None,
+            from: None,
+            emit_module: None,
+        };
+        let answer = run(&session, &query).unwrap();
+        let QueryResults::Guards(result) = &answer.results else {
+            panic!("expected a guards answer, got {:?}", answer.results);
+        };
+        let [guard] = result.guards.as_slice() else {
+            panic!("expected one guard, got {result:?}");
+        };
+        assert_eq!(guard.predicate.as_deref(), Some("umin"), "{result:?}");
+        assert_eq!(guard.bound.as_deref(), Some("32"), "{result:?}");
+        assert!(guard.verified, "{result:?}");
+        let via = guard.via.as_deref().expect("the helper is named");
+        assert_eq!(via, "_ZN1n2loEmm");
+        assert_eq!(
+            answer.symbols.get(via).map(String::as_str),
+            Some("n::lo(unsigned long, unsigned long)"),
+            "{:?}",
+            answer.symbols
+        );
     }
 
     #[test]

@@ -29,3 +29,10 @@ void peek(char *dst, const char *src, size_t len) {
     }
     put(dst, src, n);
 }
+
+static inline size_t min_size(size_t a, size_t b) { return a < b ? a : b; }
+
+void trim(char *dst, const char *src, size_t len) {
+    size_t n = min_size(len, CAP);
+    put(dst, src, n);
+}
