@@ -6,6 +6,7 @@
 //! trace found nothing constraining the value, not that the value is
 //! unbounded.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
@@ -582,14 +583,27 @@ pub fn guards_at_use(
             .collect(),
         ..GuardsResult::default()
     };
-    match resolve_anchor_at_use(&ir, session, anchor, at, declared_at)? {
+    let mut doms = None;
+    let resolved = resolve_picking(
+        &ir,
+        session,
+        anchor,
+        at,
+        declared_at,
+        PICK_BY_DECLARATION,
+        &mut doms,
+    )?;
+    match resolved {
         Resolved::Ambiguous {
             function: index,
             variable,
             values,
         } => {
             let body = &ir.functions[index];
-            let uses = use_lines(body, &local_uses(body, &dominators(body), variable));
+            let uses = use_lines(
+                body,
+                &local_uses(body, &doms.unwrap_or_else(|| dominators(body)), variable),
+            );
             lost.push(format!(
                 "{}, so none is traced{}",
                 bound_to_several(anchor, &function, values.len()),
@@ -610,7 +624,8 @@ pub fn guards_at_use(
                 body,
                 function: &function,
                 scope: scope.as_ref(),
-                doms: dominators(body),
+                doms: doms.unwrap_or_else(|| dominators(body)),
+                links: RefCell::default(),
             };
             let at = match used_at {
                 Some(at) => at,
@@ -813,6 +828,8 @@ struct Trace<'a> {
     /// parameter may cross from.
     scope: Option<&'a HashSet<FunctionId>>,
     doms: Doms,
+    /// Each load's [`Trace::link`], found once.
+    links: RefCell<HashMap<ValueId, Option<Link>>>,
 }
 
 /// What a backward walk over a value's definitions found.
@@ -1112,6 +1129,7 @@ fn unproven_upstream(
 }
 
 /// The stores a load reads back, which [`Trace::link`] finds.
+#[derive(Clone)]
 struct Link {
     /// The values they write.
     stored: Vec<Operand>,
@@ -1693,6 +1711,16 @@ impl Trace<'_> {
     /// the block, nothing is proven: the one store elsewhere, or the
     /// several, are followed with `causes` saying why.
     fn link(&self, id: ValueId) -> Option<Link> {
+        if let Some(known) = self.links.borrow().get(&id) {
+            return known.clone();
+        }
+        let computed = self.compute_link(id);
+        self.links.borrow_mut().insert(id, computed.clone());
+        computed
+    }
+
+    /// [`Trace::link`], worked out.
+    fn compute_link(&self, id: ValueId) -> Option<Link> {
         let load = self.node(id);
         if load.opcode != OpcodeIr::Load || load.volatile {
             return None;
@@ -2148,12 +2176,22 @@ pub(crate) fn resolve_anchor(
     session: &Session,
     anchor: &GuardAnchor,
 ) -> Result<Resolved, Error> {
-    resolve_picking(ir, session, anchor, None, None, SHADOWED_UNANNOTATABLE)
+    resolve_picking(
+        ir,
+        session,
+        anchor,
+        None,
+        None,
+        SHADOWED_UNANNOTATABLE,
+        &mut None,
+    )
 }
 
 /// [`resolve_anchor`] as `guards` reads it, with a local read at the use on
 /// `at`, a `file:line`, and the variable declared on `declared_at`, another,
-/// picked among those sharing its name.
+/// picked among those sharing its name. `guards_at_use` resolves through
+/// `resolve_picking` itself, to keep the dominators this computes.
+#[cfg(test)]
 pub(crate) fn resolve_anchor_at_use(
     ir: &ModuleIr,
     session: &Session,
@@ -2161,7 +2199,15 @@ pub(crate) fn resolve_anchor_at_use(
     at: Option<&str>,
     declared_at: Option<&str>,
 ) -> Result<Resolved, Error> {
-    resolve_picking(ir, session, anchor, at, declared_at, PICK_BY_DECLARATION)
+    resolve_picking(
+        ir,
+        session,
+        anchor,
+        at,
+        declared_at,
+        PICK_BY_DECLARATION,
+        &mut None,
+    )
 }
 
 /// What the refusal of a name several variables share ends with for
@@ -2174,7 +2220,8 @@ const SHADOWED_UNANNOTATABLE: &str = "a shadowed local cannot be annotated";
 /// The value `anchor` names, picked by `at` and `declared_at` as
 /// [`resolve_anchor_at_use`] says. `shared` ends the refusal of a name
 /// several variables share: how the caller's surface picks one, or why it
-/// cannot.
+/// cannot. A pick by `at` computes the dominators of the function it reads and
+/// leaves them in `doms`, for the caller's own use of that function.
 fn resolve_picking(
     ir: &ModuleIr,
     session: &Session,
@@ -2182,6 +2229,7 @@ fn resolve_picking(
     at: Option<&str>,
     declared_at: Option<&str>,
     shared: &str,
+    doms: &mut Option<Doms>,
 ) -> Result<Resolved, Error> {
     let id = anchor_function(session, anchor)?;
     if !matches!(anchor, GuardAnchor::Local { .. }) {
@@ -2268,9 +2316,12 @@ fn resolve_picking(
                 &id,
                 function,
                 name,
-                at.as_ref(),
-                declared_at.as_ref(),
+                LocalPick {
+                    at: at.as_ref(),
+                    declared_at: declared_at.as_ref(),
+                },
                 shared,
+                doms,
             )
         }
     }
@@ -2367,6 +2418,14 @@ fn own_bindings<'a>(body: &'a FunctionIr, name: &'a str) -> impl Iterator<Item =
         .filter(move |binding| binding.name == name && body.may_own(binding.scope))
 }
 
+/// The lines that pick one of a local's values or variables.
+struct LocalPick<'a> {
+    /// The use whose value is traced.
+    at: Option<&'a UseSite>,
+    /// The line the variable is declared on.
+    declared_at: Option<&'a UseSite>,
+}
+
 /// The value the source variable `name` is bound to in `body`, which is
 /// `ir.functions[function]` and the catalog's `id`. Bindings to one value are one value however
 /// often they recur; bindings to several are reported, never chosen
@@ -2381,9 +2440,9 @@ fn resolve_local(
     id: &FunctionId,
     function: usize,
     name: &str,
-    at: Option<&UseSite>,
-    declared_at: Option<&UseSite>,
+    LocalPick { at, declared_at }: LocalPick,
     shared: &str,
+    doms: &mut Option<Doms>,
 ) -> Result<Resolved, Error> {
     let mut variables: Vec<&DbgValue> = Vec::new();
     for binding in own_bindings(body, name) {
@@ -2484,7 +2543,16 @@ fn resolve_local(
             }))
         }
         (_, _, Some(at)) => {
-            resolve_local_at(body, &label, function, name, variables[0].variable, at)
+            let doms = doms.insert(dominators(body));
+            resolve_local_at(
+                body,
+                doms,
+                &label,
+                function,
+                name,
+                variables[0].variable,
+                at,
+            )
         }
         (1, &[value], None) => Ok(Resolved::One {
             function,
@@ -2525,14 +2593,14 @@ fn declarations(variables: &[&DbgValue]) -> String {
 /// at the uses on `at`. `variable` is the one variable the name matches.
 fn resolve_local_at(
     body: &FunctionIr,
+    doms: &Doms,
     label: &str,
     function: usize,
     name: &str,
     variable: u32,
     at: &UseSite,
 ) -> Result<Resolved, Error> {
-    let doms = dominators(body);
-    let uses = local_uses(body, &doms, variable);
+    let uses = local_uses(body, doms, variable);
     let here: Vec<(ValueId, &Operand)> = uses
         .iter()
         .copied()
@@ -2554,7 +2622,7 @@ fn resolve_local_at(
     // A binding no operand identifies a read of counts too, when it reaches
     // any instruction on the line beside another binding: it may be what one
     // of the line's reads reads.
-    let held = held_bindings(body, &doms, variable);
+    let held = held_bindings(body, doms, variable);
     let mut reaching: Vec<&Operand> = Vec::new();
     for (id, node) in body.values.iter().enumerate() {
         if !matches!(node.opcode, OpcodeIr::Param | OpcodeIr::Phi)
@@ -2593,7 +2661,7 @@ fn resolve_local_at(
             Ok(Resolved::One {
                 function,
                 value,
-                used_at: Some(shared_point(body, &doms, &instrs)),
+                used_at: Some(shared_point(body, doms, &instrs)),
             })
         }
         (values, constants) => Err(more_than_one(name, label, at, values, constants, false)),
@@ -6551,6 +6619,7 @@ define void @f(ptr %s, i32 %n) {
             function,
             scope: None,
             doms: dominators(body),
+            links: RefCell::default(),
         }
     }
 
