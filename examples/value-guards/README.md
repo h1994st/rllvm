@@ -126,7 +126,8 @@ defining the value, `verified`, with `via min_size` naming the helper (in
 `--json`, `via` holds its mangled symbol, and `symbols` its reading). No
 crossing out of `min_size` is listed. A helper that is `extern` or `weak`,
 defined in another module, or that casts, loads, stores or calls is a crossing,
-as any other call is.
+as any other call is. `-Og` inlines such helpers, so capture there when their
+bounds matter more than a faithful call graph.
 
 ## A reused local
 
@@ -145,7 +146,8 @@ Named alone, `cur` traces nothing: `value_trace_lost` says it is bound to more
 than one value and lists the lines that use it. `--at` names one of those
 lines and traces the value `cur` holds there. A use at a line is a read of the
 value the local holds there, possibly through another variable that holds the
-same value inside the local's scope. Traced at line 13, it finds
+same value inside the local's scope; a read inside code inlined from a callee
+counts at the line that calls it. Traced at line 13, it finds
 `compare ule 32` (line 11); traced at line 17, `compare ule 8` (line 15); each
 dominates its use, reached past its `return`. A line with no use of `cur` is an
 error listing the lines that have one, and a line reading two of its values is
@@ -175,61 +177,60 @@ be annotated.
 
 ## Reading a guard
 
-- `relation`: the guard `defines` the value; `dominates` its use, running
-  first on every path whichever way it branches (for a verified comparison,
-  `predicate` says which way); or is only `on_path` to it.
-- `depth` 0 is the value itself, or a value it only widens: a bound holds
-  across `zext` or `sext` when the guard's signedness matches the cast's.
-  Depth N is N steps up the chain the value is computed from, a truncation
-  counting as a step, and is not by itself a bound on the value.
-- `affine` is that chain as `anchored = scale * guarded + offset` when it is
-  constant `add`, `sub`, `mul` and `shl` alone, or a matching widening
-  (`{1, 0}`). `verified` is `true` when the relation is affine and every value
-  the guard admits maps onto the anchored value without wrapping at its width.
-  Otherwise the guard is an unverified lead, and `caveat` says why. A clamp
-  that runs on the value and is used later bounds its own result, not the
-  value, so it is unverified too. When it is made of a comparison (a branch
-  or `select` clamp, not an intrinsic `umin`), that comparison is listed on
-  its own, since it bounds the value, and is verified only on its branch's
-  edge into the use.
-- For a clamp, mask, modulo or saturation, `verified` does not say it runs on
-  every path; `relation` does. Its bound holds unconditionally only when it is
-  `verified` and `dominates` or `defines` the value.
-- The numeric cap is `bound`. A `verified` guard without one, such as a clamp
-  to another variable, is capped by a runtime value, the guard's operand: a
-  sound relation, not a numeric limit. To reach a number, anchor on that
-  operand and trace it.
-- A comparison's `predicate` is the side that holds on its branch's edge into
-  the anchor, so it may negate the source condition: past
-  `if (left > MAX) return;` it is `ule MAX`. A verified comparison's predicate
-  holds at the use. With no such edge (a path reaches the use without crossing
-  it, though a loop's backedge into the block it enters is fine, or the
-  comparison only feeds a `select` or `zext`), it keeps the predicate as
-  written and is unverified, its caveat "no branch edge shows the comparison
-  held at the use". With no constant bound, nothing is known to carry, and a
-  guard upstream of arithmetic is unverified.
-- A `--return` anchor, or a `--local` without `--at`, sits before the
-  comparisons that test the value, so they are leads there. For their bound,
-  anchor at the later use: `--at` that use for a local, or an argument anchor
-  on the call that consumes a returned value.
-- The trace stays in the anchor's function. Where the value enters through a
-  parameter or leaves a call, `crossings` name the call to ask `guards` about
-  next; a call to a trivial `min` or `max` helper is read as its clamp
-  instead. `--from F` keeps only callers on a path from `F`, which must name
-  one function, and examines nothing between them.
-- A load is followed to the store it reads back: a non-volatile store of the
-  same type to the same address, the same pointer or a `getelementptr` alike,
-  that runs before it. The nearest one in the load's block overwrites any
-  earlier one: with only operations that write no memory between them, the
-  load is the stored value. A call, another store or any other operation
-  between (an `atomicrmw`, a `cmpxchg`, a volatile load), never skipped to
-  reach an earlier store, or stores only in other blocks still lead on, but
-  every guard reached that way is unverified, its caveat saying which, and
+Each guard in the answer carries these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `op`, `predicate` | What the guard is: `compare ult`, `clamp umin`, `saturate uadd.sat`, `mask`, `modulo urem`, ... |
+| `bound` | The numeric limit, when there is one. Without it, the limit is another value, the guard's operand: trace that operand to reach a number. |
+| `relation` | Where the guard runs: it `defines` the value, `dominates` its use (runs first on every path), or is only `on_path` to it. |
+| `depth` | 0 is the value itself, or a widening of it when the guard's signedness matches the cast. N is N steps up the computation, a truncation counting as one, and is not by itself a bound on the value. |
+| `affine` | How the anchored value follows from the guarded one, `anchored = scale * guarded + offset`, for constant `add`, `sub`, `mul` and `shl`. |
+| `verified` | `true` when the bound carries to the value. It holds on every path only when `relation` is `dominates` or `defines`; `on_path` holds only where the guard runs. |
+| `caveat` | Why a guard is not verified. |
+| `via` | The helper a clamp was read from. |
+
+### When a guard is verified
+
+- A comparison is verified when the use can only be reached through one side
+  of a branch on it. Its `predicate` is that side, so it may be the negation of
+  the source: past `if (left > MAX) return;` it is `ule MAX`. A loop's backedge
+  into that side is fine. A comparison with no such branch keeps its predicate
+  as written and is a lead.
+- A clamp, mask, modulo or saturation is verified when its bound carries to the
+  value. It holds on every path only when it also `dominates` or `defines` it.
+- Arithmetic between the guard and the value must be affine, and no value the
+  guard admits may wrap; otherwise the guard is a lead. A guard with no
+  constant bound never carries through arithmetic.
+- A clamp applied to the value later bounds its own result, not the value, so it
+  is a lead. When that clamp is built from a comparison (a branch or `select`,
+  not an intrinsic `umin`), the comparison is listed on its own, since it does
+  bound the value.
+
+### Where to anchor
+
+- Anchor at the use. A `--return`, or a `--local` without `--at`, comes before
+  the checks on the value, so they are only leads there: `--at` the later use
+  of a local, or anchor on the call that consumes a returned value.
+- The trace stays in the anchor's function. `crossings` name the call where the
+  value enters or leaves; ask `guards` about it next. A call to a trivial `min`
+  or `max` helper is read as its clamp instead.
+- `--from F` keeps only callers on a path from `F`, which must name one
+  function; nothing between them is examined.
+
+### Loads and lost traces
+
+- A load is followed to the store it reads back: one of the same type, to the
+  same address (the same pointer, or a `getelementptr` alike), that runs before
+  it. The nearest such store in the load's block wins when nothing between
+  them writes memory.
+- If something between them might (a call, another store, an `atomicrmw`, a
+  `cmpxchg`, a volatile load), or the stores are only in other blocks, the
+  guards reached through the load are leads, their `caveat` says why, and
   `uncertainty.value_trace_lost` says the field may hold something else.
-- Where the trace cannot follow the value (a load with no such store, or a
-  volatile or atomic one, a pointer round trip, inline assembly, an
-  intrinsic it does not read through), `uncertainty.value_trace_lost` says
-  where, and the list is partial.
+- `uncertainty.value_trace_lost` says where the trace stopped: a load with no
+  such store, a volatile or atomic access, a pointer round trip, inline
+  assembly, or an intrinsic it does not read through. The list is then partial.
 - Over MCP, `guards` needs a program loaded with `load_catalog`.
 
 ## Recording a verdict
