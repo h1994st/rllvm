@@ -126,7 +126,8 @@ defining the value, `verified`, with `via min_size` naming the helper (in
 `--json`, `via` holds its mangled symbol, and `symbols` its reading). No
 crossing out of `min_size` is listed. A helper that is `extern` or `weak`,
 defined in another module, or that casts, loads, stores or calls is a crossing,
-as any other call is.
+as any other call is. `-Og` inlines such helpers, so capture there when their
+bounds matter more than a faithful call graph.
 
 ## A reused local
 
@@ -145,7 +146,8 @@ Named alone, `cur` traces nothing: `value_trace_lost` says it is bound to more
 than one value and lists the lines that use it. `--at` names one of those
 lines and traces the value `cur` holds there. A use at a line is a read of the
 value the local holds there, possibly through another variable that holds the
-same value inside the local's scope. Traced at line 13, it finds
+same value inside the local's scope; a read inside code inlined from a callee
+counts at the line that calls it. Traced at line 13, it finds
 `compare ule 32` (line 11); traced at line 17, `compare ule 8` (line 15); each
 dominates its use, reached past its `return`. A line with no use of `cur` is an
 error listing the lines that have one, and a line reading two of its values is

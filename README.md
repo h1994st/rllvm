@@ -198,59 +198,20 @@ also hold `annotate` verdicts on whether a value is feasible, which `reach` and
 
 ### Value guards
 
-`guards` lists the comparisons, clamps, masks and moduli that constrain a
-call's argument (`--at FILE:LINE --operand N`), its result (`--return`) or a
-`-g` local (`--function F --local NAME`), with each guard's bound and source
-line; `--from F` keeps only callers on a path from `F`. A local reused for
-several values is refused with the lines that use it; a name several variables
-share, such as a shadowed local, is refused with the line each is declared at,
-though a variable of an inlined callee does not count.
-`--declared-at FILE:LINE` beside `--local` picks the variable declared on that
-line, refusing a line none or several are declared on, and `--at FILE:LINE`
-traces the value the local holds at that use. A use at a line is a read of the
-value the local holds there, possibly through another variable that holds the
-same value inside the local's scope; a read inside code inlined from a callee
-is placed at the line the function calls it on. An overlay `annotate` anchor
-carries no use-site or declaration line, so a reused or shadowed local cannot
-be annotated.
-Each guard gives `affine`, `anchored = scale * guarded + offset`, when its
-relation to the value is a constant one. Its `scale` and `offset` are decimal
-strings, since they may exceed 64 bits. `verified` means its bound soundly
-carries to the value; otherwise it is a lead whose `caveat` says why: the
-relation is not affine, the guard bounds a value computed from it, no branch
-edge shows a comparison held at the use, the bound wraps, or it cannot be
-mapped. A comparison is verified only through its branch's edge into the use,
-one every path to the use crosses (a loop's backedge into the block it enters
-is fine), and gives the predicate that holds on that edge, which may negate the
-source condition: past `if (x > 16) return;` it is `ule 16`. A verified
-comparison's predicate holds at the use; one with no deciding edge keeps its
-predicate as written. A `--return` anchor, or a `--local` without `--at`, sits
-before the comparisons that test the value, so they are leads there: for their
-bound, anchor at the later use, `--at` that use for a local or an argument
-anchor on the call that consumes a returned value. A clamp computed from the
-value bounds its own result, so when it is made of a comparison (a branch or
-`select` clamp, not an intrinsic `umin`), that comparison is listed too. For a
-clamp, mask, modulo or saturation, `verified` does not say it runs on every
-path, `relation` does: an unconditional bound is `verified` and `dominates` or
-`defines`, while one `on_path` is conditional. The numeric cap is `bound`: a
-`verified` guard without one is capped by a runtime value, the guard's operand,
-which is a sound relation but not a numeric limit; to reach a number, anchor on
-that operand and trace it.
-A load is followed to the nearest store before it in its block, which
-overwrites any earlier one, with nothing between that writes memory. A call,
-another store or any other operation between (an `atomicrmw`, a `cmpxchg`, a
-volatile load), or stores only in other blocks, make each guard reached
-through it a lead, and the trace is reported lost there.
-A call to a trivial `min` or `max` helper the build keeps out of line, as
-`-O0` does, is read as the clamp it computes when the helper is defined in the
-anchor's module, `static` or C++ `inline`, and only compares two of its
-parameters, or one and a constant, to return one of them. `via` names the
-helper by its mangled symbol, which the `symbols` table reads. Any other call,
-such as to an `extern` or `weak` helper or one that casts, loads or calls, is
-listed under `crossings` with no guard. `-Og` inlines such helpers, so capture
-there when their bounds matter more than a faithful call graph.
-It is evidence, never a verdict: an empty list does not mean unbounded. See the
-[value guards example](examples/value-guards/).
+`guards` lists the checks that bound a value (comparisons, clamps, masks and
+moduli), each with its bound and source line. Name the value by a call's
+argument or result, or by a local in a `-g` build:
+
+```bash
+rllvm-query --catalog catalog.json guards --at clamp.c:14 --operand 2
+rllvm-query --catalog catalog.json guards --function copy --local n
+```
+
+A `verified` guard's bound carries to the value: on every path when its
+`relation` is `dominates` or `defines`, only where it runs when `on_path`. Any
+other guard is a lead, and its `caveat` says why. An empty list does not mean
+the value is unbounded. See the [value guards example](examples/value-guards/)
+for reading the answer.
 
 ### MCP server
 
