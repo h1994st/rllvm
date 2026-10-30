@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.11.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.10.0...rllvm-query-v0.11.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* pick a shadowed local by its declaration line ([#361](https://github.com/h1994st/rllvm/issues/361))
+
+### Features
+
+* pick a shadowed local by its declaration line ([#361](https://github.com/h1994st/rllvm/issues/361)) ([a52784f](https://github.com/h1994st/rllvm/commit/a52784f588819e0785a021e728f6f681718b92fe))
+* place an inlined read at its caller's line ([#366](https://github.com/h1994st/rllvm/issues/366)) ([ec311cc](https://github.com/h1994st/rllvm/commit/ec311ccbd67f291499e507aeffd1bb16150a58f1))
+* read a trivial min or max helper as its clamp ([#367](https://github.com/h1994st/rllvm/issues/367)) ([9ba837f](https://github.com/h1994st/rllvm/commit/9ba837fe77d5bd3594537a8ee648870e063f366b))
+
+
+### Bug Fixes
+
+* carry the recorded directory into file matching ([#365](https://github.com/h1994st/rllvm/issues/365)) ([d242d81](https://github.com/h1994st/rllvm/commit/d242d8119dd823cfddd129c7d5a81efe8c8e48b4))
+
 ## [0.10.0](https://github.com/h1994st/rllvm/compare/rllvm-query-v0.9.0...rllvm-query-v0.10.0) (2026-10-25)
 
 
